@@ -10,6 +10,67 @@ HDMI_HSTX), `build-name`. "CMakeLists" below usually means one of these.
 `GMX_IN_FLASH` / `PROFROM_IN_FLASH` / `PLUS3DIV_IN_FLASH` are GONE (2026-09-30):
 every ROM set is always in flash; notes below that call them an escape hatch are history.
 
+## ZX Spectrum Next (arch A_NEXT, 2026-08-03, NOT hw-confirmed yet)
+
+Ported from the pico-next donor branch (`~/github/pico-next`,
+`claude/zx-next-emulator-plan-fn2go6`); reference emulator for semantics:
+`~/github/zesarux/src/machines/tbblue.c`. All Next code lives in
+`src/speccy/machines/Next/` (moved there by the 2026-10-07 rebase onto main). Plan:
+`~/.claude/plans/spectrum-next-in-pico-speccy.md`. Four commits, in order:
+
+- **8×8K slots (was 4×16K)** — `ramCurrent/ramContended/bank_dirty/bank_access`
+  are 8-wide (slot = `addr>>13`, mask `0x1FFF`); legacy 16K paging goes through
+  `MemESP::plug16()` (pointer+contention pair) / `plugPtr16()` (pointer-only —
+  recoverPage0, TR-DOS automap, Profi SCO, debugger: sites that historically
+  never touched contention). Descriptor machinery (`plugged_in[4]`,
+  `acc_bank[4]`, sync/materialize/promoteBank) stays 16K-grained. THREE traps
+  vs the donor version: (1) `romPeek` looks up ROM overlays by the pair BASE
+  pointer (`ramCurrent[0]`) — slot 1 holds base+0x2000 and would miss the
+  registry; (2) accessor banks null BOTH slots (`plugPtr16(b, nullptr)`), a
+  naive `p+0x2000` would make slot1 = (uint8_t*)0x2000; (3) both slots of a
+  pair share one dirty/access hook. Tape flashload walks 8K slots.
+- **Machine**: gate = RP2350 + butter ≥2MB (`p_showNext`, MachineSwitch,
+  setup() fallback to 128K). MMU `nextRamPtr[224]`: banks 0-7 = static SRAM
+  `ram[0..7]`, banks 8-111 + 72K ROM region carved from butter bottom-up in
+  `MemESP::buildNextRam()`, capped by `Buffer::pageBudgetButter()` and
+  accounted via `butter_pages` so DivMMC/GS/arena compose on top. Next slots
+  detach pool dirty hooks (`applyMMU` → dirty_sink). Legacy 7FFD (+3 decode)/
+  DFFD/1FFD/0x8E implemented ON TOP of the MMU in NextReg. NextZXOS ROMs from
+  SD (`/roms/next/enNextZX.rom` 64K + `enNxtmmc.rom` 8K → after RAM pages,
+  write-protected via `next_rom_mask` — the "ROM" is writable PSRAM); MMC ROM
+  replaces esxdos in the divMMC automap; 128K ROM pair = fallback. Crossing
+  the Next boundary ALWAYS hard-reboots (MachineSwitch) — the layout is decided
+  once in setup(). Murmuzavr stays off via the existing non-Pentagon clamp;
+  contention/floating-bus off; persist snapshots gated off.
+- **Z80N** in `decodeED()` under `Z80Ops::isNext` (NOPs elsewhere). NEXTREG
+  opcodes → `NextReg::write`. Line IRQ (0x22/0x23) in `isActiveINT`; while
+  armed, CPU::loop skips the exec_nocheck/FlushOnHalt fast paths. zxnDMA #6B
+  always on in Next mode. Turbo = nextreg 0x07 → `ESPectrum::multiplicator`
+  (28 MHz NOT real-time at 504 MHz host — accepted best-effort). 60Hz via
+  nextreg 0x05 bit2 → 228×262 frame.
+- **Video** (`src/speccy/machines/Next/NextVideo.*`, NEXTVID): scanline renderer — VIDEO::Draw
+  swaps to `NEXTVID::Tick` in Next mode, EndFrame short-circuits. Layers:
+  ULA/ULANext/LoRes → tilemap → Layer2 (256×192 row-major, 320×256
+  column-major) → 128 sprites (scale/rotate/mirror, 4/8bpp, collision) → L2
+  palette-priority pass; copper with line-granular WAIT. RGB333 → nearest
+  CLUT G3R3B2 (indices 17-219 only; ~203 colours — accepted "Next Lite"
+  ceiling, like ≤360px: no 640×256×4bpp, tilemap-80 drawn half-res). Sprite/
+  copper/palette state = ONE ~25KB heap block allocated at first
+  NEXTVID::Reset — do NOT make these static arrays again, that cost 29KB BSS
+  on every legacy build. F8 stats rows skipped by the renderer.
+- **Sound**: chip2 = third AY, heap at Next boot; 0xFFFD control 111LRxCC
+  (select + `ay_next_pan`, applied in the frame mixer); TurboSubsys forced on
+  under Next. DAC ports 0F/1F/4F/5F/DF/FB/B3 → stereo Covox (A/B left, C/D
+  right), CovoxSubsys requested when arch==A_NEXT.
+- **.NEX loader** (`src/speccy/machines/Next/FileNEX.cpp`): V1.0-1.3, palette + L2/ULA loading screens,
+  112 banks; from another machine → save as `Config::ram_file` + reboot
+  (setup() skips the pref_arch override when a boot snapshot is pending).
+- **Not done yet** (gap list in the plan file): relative/unified sprites
+  (anchors only), ULA scroll 0x26/0x27, LoRes radastan 4bpp, horizontal copper
+  WAIT, peripheral regs 0x06/0x08/0x09 as working bits, interrupt ctl 0xC0+,
+  DS1307 i2c shim on 0x103B/0x113B (reads 0xFF now — NextZXOS clock dead),
+  Next-UART 0x133B→ZiFi bridge, zxnDMA prescaler mode, .SNX.
+
 **Scope (rebrand, 2026-07-25):** RP2350 only — RP2040 support, the ZERO and
 MURM*_P1 board targets, and the Spanish UI (all `*_ES` strings, `Config::lang`,
 the Language menu) were removed. Firmware names are `<board>-speccy-...`
