@@ -1117,6 +1117,8 @@ void ESPectrum::setup() {
       // are not allocated; Murmuzavr stays clamped to 64 above.
       if (MemESP::buildNextRam()) {
         bool roms = MemESP::loadNextRoms();
+        Debug::log("setup: Next RAM carved, ROMs %s",
+                   roms ? "loaded from SD" : "not found - 128K fallback ROM");
         Debug::log2SD("setup: Next RAM carved, ROMs %s",
                       roms ? "loaded from SD" : "not found - 128K fallback ROM");
       } else {

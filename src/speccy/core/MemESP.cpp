@@ -933,25 +933,48 @@ bool MemESP::buildNextRam() {
     return true;
 }
 
+// Read a file into butter PSRAM through a small SRAM bounce: the SD driver
+// may DMA into the destination, which bypasses the XIP cache — a direct
+// f_read into the cached alias leaves stale cache lines and the Z80 then
+// executes garbage (hw: black screen on the first NextZXOS ROM boot).
+// CPU memcpy through the cached alias is coherent by construction.
+static bool readFileToButter(const char* path, uint8_t* dst, size_t len) {
+    FIL* f = fopen2(path, FA_READ);
+    if (!f) return false;
+    static uint8_t bounce[2048];
+    size_t got = 0;
+    bool ok = true;
+    while (got < len) {
+        UINT chunk = (len - got) > sizeof(bounce) ? sizeof(bounce) : (UINT)(len - got);
+        UINT br = 0;
+        if (f_read(f, bounce, chunk, &br) != FR_OK || br != chunk) { ok = false; break; }
+        memcpy(dst + got, bounce, chunk);
+        got += chunk;
+    }
+    fclose2(f);
+    return ok;
+}
+
 // Load the real Next ROMs from SD (optional — the 128K ROM pair remains the
 // fallback). Called from setup() after buildNextRam() with the SD mounted.
+// Two locations: /roms/next/ (pico-speccy convention) and /machines/next/
+// (the official specnext.com distro layout, so the distro can be copied to
+// the card as-is).
 bool MemESP::loadNextRoms() {
     if (!nextRamReady) return false;
     uint8_t* romRegion = nextRamPtr[NEXT_PAGES - 1] + 0x2000; // after RAM pages
-    FIL* f = fopen2("/roms/next/enNextZX.rom", FA_READ);
-    if (f) {
-        UINT br = 0;
-        bool ok = f_read(f, romRegion, 0x10000, &br) == FR_OK && br == 0x10000;
-        fclose2(f);
-        if (ok) nextRomBase = romRegion;
-    }
-    f = fopen2("/roms/next/enNxtmmc.rom", FA_READ);
-    if (f) {
-        UINT br = 0;
-        bool ok = f_read(f, romRegion + 0x10000, 0x2000, &br) == FR_OK && br == 0x2000;
-        fclose2(f);
-        if (ok) nextDivRomBase = romRegion + 0x10000;
-    }
+    static const char* zxPaths[]  = { "/roms/next/enNextZX.rom",
+                                      "/machines/next/enNextZX.rom" };
+    static const char* mmcPaths[] = { "/roms/next/enNxtmmc.rom",
+                                      "/machines/next/enNxtmmc.rom" };
+    for (int i = 0; i < 2 && !nextRomBase; i++)
+        if (readFileToButter(zxPaths[i], romRegion, 0x10000))
+            nextRomBase = romRegion;
+    for (int i = 0; i < 2 && !nextDivRomBase; i++)
+        if (readFileToButter(mmcPaths[i], romRegion + 0x10000, 0x2000))
+            nextDivRomBase = romRegion + 0x10000;
+    Debug::log("Next ROMs: enNextZX %s, enNxtmmc %s",
+               nextRomBase ? "OK" : "missing", nextDivRomBase ? "OK" : "missing");
     return nextRomBase != nullptr;
 }
 

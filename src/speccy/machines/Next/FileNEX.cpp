@@ -19,6 +19,7 @@ banks stored in order 5,2,0,1,3,4,6,7,8...111.
 #include "fs/FileUtils.h"
 #include "speccy/z80/z80.h"
 #include "app/Debug.h"
+#include <string.h>
 
 using namespace std;
 
@@ -31,11 +32,24 @@ static bool skipBytes(FIL* f, FSIZE_t len) {
     return f_lseek(f, f_tell(f) + len) == FR_OK;
 }
 
+// Read one 8K page. Banks 8+ live in butter PSRAM: the SD driver may DMA
+// into the destination, bypassing the XIP cache — go through an SRAM bounce
+// so the CPU write path keeps the cache coherent (banks 0-7 are plain SRAM
+// and could read directly, but one path keeps this simple).
+static bool readPage(FIL* f, uint8_t* dst) {
+    static uint8_t bounce[2048];
+    for (int off = 0; off < 0x2000; off += sizeof(bounce)) {
+        if (!readExact(f, bounce, sizeof(bounce))) return false;
+        memcpy(dst + off, bounce, sizeof(bounce));
+    }
+    return true;
+}
+
 // Read one 16K bank into Next RAM (two 8K pages)
 static bool readBank(FIL* f, unsigned bank) {
     if (bank >= MemESP::NEXT_PAGES / 2) return false;
-    if (!readExact(f, MemESP::nextRamPtr[bank * 2], 0x2000)) return false;
-    return readExact(f, MemESP::nextRamPtr[bank * 2 + 1], 0x2000);
+    if (!readPage(f, MemESP::nextRamPtr[bank * 2])) return false;
+    return readPage(f, MemESP::nextRamPtr[bank * 2 + 1]);
 }
 
 bool FileNEX::load(const string& nex_fn) {
