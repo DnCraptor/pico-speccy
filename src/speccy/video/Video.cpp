@@ -2096,9 +2096,16 @@ void VIDEO::applyPalette() {
     Debug::log2SD("applyPalette: spectrum_rgb888[0]=0x%06X [1]=0x%06X [7]=0x%06X [15]=0x%06X",
         spectrum_rgb888[0], spectrum_rgb888[1], spectrum_rgb888[7], spectrum_rgb888[15]);
 
-    // G3R3B2 entries (0-239) — apply matrix transform
-    for (int i = 0; i < 240; i++)
-        graphics_set_palette(i, paletteFinal(grb_to_rgb888(i)));
+    // G3R3B2 entries (0-239) — apply matrix transform. NOT on Next: NEXTVID
+    // maps its RGB333 palettes into the cube and expects it linear — the ZX
+    // colour-preference matrix (even default Pulsar) tints the whole screen
+    // (hw: yellow 128K menu in Next mode). The CRT filter is display-level and
+    // still applies.
+    for (int i = 0; i < 240; i++) {
+        uint32_t c = grb_to_rgb888(i);
+        c = (Config::arch != A_NEXT) ? paletteFinal(c) : crtTransform(c);
+        graphics_set_palette(i, c);
+    }
     // Override indices 0-15 with Spectrum colors (already rebuilt with correct brightness)
     for (int i = 0; i < 16; i++) {
         uint32_t color = paletteFinal(spectrum_rgb888[i]);
@@ -5317,9 +5324,10 @@ void VIDEO::Reset() {
         graphics_set_dither(false);
         // NEXTVID's palette LUTs map into the plain G3R3B2 cube at 17-219;
         // Gigascreen (17-127) and the dither table (64-127) may have
-        // repurposed those CLUT slots — restore the cube.
+        // repurposed those CLUT slots — restore the cube, LINEAR (no palette
+        // matrix: Next owns its colours via the RGB333 palettes).
         for (int i = 17; i < 220; i++)
-            graphics_set_palette(i, paletteTransform(grb_to_rgb888(i)));
+            graphics_set_palette(i, grb_to_rgb888(i));
         NEXTVID::Reset();
         Draw = &NEXTVID::Tick;
         Draw_Opcode = &NEXTVID::Tick_Opcode;
