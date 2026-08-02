@@ -96,7 +96,9 @@ bool AySound::ts_fm_enabled = false;
 AySound chip0(0);
 // chip1 lives in heap; managed by TurboSubsys (see Subsystem.cpp).
 AySound* chip1 = nullptr;
-AySound* chips[2] = { &chip0, nullptr };
+AySound* chip2 = nullptr;
+AySound* chips[3] = { &chip0, nullptr, nullptr };
+uint8_t ay_next_pan[3] = { 3, 3, 3 };
 
 /* sound chip volume envelops (will calculated by gen_env()) */
 // static int bEnvGenInit = 0;

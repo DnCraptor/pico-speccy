@@ -3277,6 +3277,27 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
         ioContentionLate(false);
         return;
       }
+      // Next DACs (Covox/SpecDrum/Soundrive ports): A/B = left, C/D = right,
+      // routed through the stereo Covox channel
+      if (a8 == 0x0F || a8 == 0x1F || a8 == 0x4F || a8 == 0x5F ||
+          a8 == 0xDF || a8 == 0xFB || a8 == 0xB3) {
+        static uint8_t nextDac[4];
+        switch (a8) {
+          case 0x0F: nextDac[0] = data; break;              // A (left)
+          case 0x1F: nextDac[1] = data; break;              // B (left)
+          case 0x4F: nextDac[2] = data; break;              // C (right)
+          case 0x5F: nextDac[3] = data; break;              // D (right)
+          case 0xB3: nextDac[0] = nextDac[3] = data; break; // stereo pair A/D
+          default:                                          // SpecDrum/Covox mono
+            nextDac[0] = nextDac[1] = nextDac[2] = nextDac[3] = data;
+            break;
+        }
+        ESPectrum::lastCovoxVal  = (uint8_t)((nextDac[0] + nextDac[1]) >> 1);
+        ESPectrum::lastCovoxValR = (uint8_t)((nextDac[2] + nextDac[3]) >> 1);
+        ESPectrum::CovoxGetSample();
+        ioContentionLate(false);
+        return;
+      }
       // Sprite upload ports decode the low byte only
       if (a8 == 0x57) {
         NEXTVID::spriteAttrWrite(data);
@@ -3518,6 +3539,17 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     }
     // AY
     // ========================================================================
+    // TurboSound Next: 0xFFFD control byte 111LRxCC — chip select + panning
+    if (Z80Ops::isNext && ESPectrum::AY_emu && address == 0xFFFD &&
+        (data & 0xE0) == 0xE0) {
+      uint8_t cc = data & 0x03;
+      if (cc) {
+        AySound::selected_chip = 3 - cc; // 0xFF/0xFE/0xFD -> AY1/AY2/AY3
+        ay_next_pan[AySound::selected_chip] = (data >> 5) & 0x03;
+      }
+      ioContentionLate(MemESP::ramContended[rambank]);
+      return;
+    }
     if ((ESPectrum::AY_emu) && (Config::turbosound || Config::tsfm) && address == 0xFFFD) {
       // NedoPC way: chip latched by the DATA written to #FFFD. The full family
       // is #F8..#FF, not just #FF/#FE — TurboSound FM is 2 × YM2203 (an AY plus

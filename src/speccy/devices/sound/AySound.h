@@ -238,6 +238,10 @@ private:
 extern AySound chip0;
 // chip1 is heap-allocated by TurboSubsys when Config::turbosound != 0; nullptr otherwise.
 extern AySound* chip1;
-extern AySound* chips[2];
+// chip2 (TurboSound Next third AY) is heap-allocated at Next boot; nullptr otherwise.
+extern AySound* chip2;
+extern AySound* chips[3];
+// TurboSound Next per-chip panning (bit1 = left, bit0 = right)
+extern uint8_t ay_next_pan[3];
 
 #endif // AySound_h

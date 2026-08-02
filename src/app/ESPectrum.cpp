@@ -1461,8 +1461,10 @@ void ESPectrum::setup() {
                 (int)Config::tape_player, (int)Config::turbosound, (int)Config::covox,
                 (int)Config::SAA1099, (int)Config::midi,
                 (unsigned)getFreeHeap());
-  TurboSubsys::request(!Config::tape_player && Config::twoAyChips());
-  CovoxSubsys::request(Config::covox != 0 || Config::soundriveEnabled());
+  TurboSubsys::request(!Config::tape_player &&
+                       (Config::twoAyChips() || Config::arch == A_NEXT));
+  CovoxSubsys::request(Config::covox != 0 || Config::soundriveEnabled() ||
+                       Config::arch == A_NEXT);   // Next DAC ports
   PitSubsys::request(Z80Ops::isByte);
   SaaSubsys::request(!Config::tape_player && Config::SAA1099);
   TsfmSubsys::request(!Config::tape_player && Config::tsfm != 0);
@@ -2012,8 +2014,10 @@ void ESPectrum::reset(uint8_t romInUse) {
 
   // Reconfigure optional subsystems against current Config and apply
   // synchronously here (we're outside the main loop's frame boundary).
-  TurboSubsys::request(!Config::tape_player && Config::twoAyChips());
-  CovoxSubsys::request(Config::covox != 0 || Config::soundriveEnabled());
+  TurboSubsys::request(!Config::tape_player &&
+                       (Config::twoAyChips() || Config::arch == A_NEXT));
+  CovoxSubsys::request(Config::covox != 0 || Config::soundriveEnabled() ||
+                       Config::arch == A_NEXT);   // Next DAC ports
   PitSubsys::request(Z80Ops::isByte);
   SaaSubsys::request(!Config::tape_player && Config::SAA1099);
   TsfmSubsys::request(!Config::tape_player && Config::tsfm != 0);
@@ -2038,6 +2042,19 @@ void ESPectrum::reset(uint8_t romInUse) {
     chip1->set_sound_format(Audio_freq, 1, 8);
     chip1->set_stereo(AYEMU_MONO, NULL);
     chip1->reset();
+  }
+  // TurboSound Next third AY: allocated at Next boot only (the Next
+  // boundary reboots, so no teardown path is needed)
+  if (Config::arch == A_NEXT && !chip2) {
+    chip2 = new (std::nothrow) AySound(2);
+    chips[2] = chip2;
+  }
+  if (chip2) {
+    chip2->init();
+    chip2->set_sound_format(Audio_freq, 1, 8);
+    chip2->set_stereo(AYEMU_MONO, NULL);
+    chip2->reset();
+    ay_next_pan[0] = ay_next_pan[1] = ay_next_pan[2] = 3;
   }
 
   // Reset the TurboSound FM halves. The sample rate can have changed with the
@@ -3134,6 +3151,8 @@ __not_in_flash("audio") void ESPectrum::AYGetSample() {
         // chip1 only present when TurboSubsys::enabled
     if (Config::twoAyChips() && chip1)
             chip1->gen_sound(audbufpos - audbufcntAY, audbufcntAY);
+    if (Z80Ops::isNext && chip2)
+            chip2->gen_sound(audbufpos - audbufcntAY, audbufcntAY);
     // FM shares the AY counter deliberately: both are caught up by the same
     // register-write hook, so one position keeps the two halves of a YM2203 in
     // step with no second counter to get out of sync.
@@ -3785,8 +3804,9 @@ void ESPectrum::loop() {
             if (fddSndEnabled) FDDGenSound();
         }
         if (AY_emu && faudbufcntAY < samplesPerFrame) {
-            if(Config::twoAyChips() || AySound::selected_chip == 0) chip0.gen_sound(samplesPerFrame - faudbufcntAY , faudbufcntAY);
-            if((Config::twoAyChips() || AySound::selected_chip == 1) && chip1) chip1->gen_sound(samplesPerFrame - faudbufcntAY , faudbufcntAY);
+            if(Config::twoAyChips() || Z80Ops::isNext || AySound::selected_chip == 0) chip0.gen_sound(samplesPerFrame - faudbufcntAY , faudbufcntAY);
+            if((Config::twoAyChips() || Z80Ops::isNext || AySound::selected_chip == 1) && chip1) chip1->gen_sound(samplesPerFrame - faudbufcntAY , faudbufcntAY);
+            if(Z80Ops::isNext && chip2) chip2->gen_sound(samplesPerFrame - faudbufcntAY , faudbufcntAY);
             FMGenSound(samplesPerFrame - faudbufcntAY, faudbufcntAY);
         }
         if (OplSubsys::enabled && audioBufferOPL_L && faudbufcntOPL < samplesPerFrame)
@@ -3836,6 +3856,16 @@ void ESPectrum::loop() {
         bool mix_opll = OpllSubsys::enabled && audioBufferOPLL && s_opllOutQuiet < 2048;
         bool mix_sn  = SnSubsys::enabled && audioBufferSN;
         bool mix_cms = CmsSubsys::enabled && cmsChip[0] && cmsChip[1];
+        // TurboSound Next: all three AYs mix, each with its own pan bits
+        bool mix_chip2 = AY_emu && Z80Ops::isNext && chip2;
+        bool p0L = true, p0R = true, p1L = true, p1R = true;
+        bool p2L = ay_next_pan[2] & 2, p2R = ay_next_pan[2] & 1;
+        if (Z80Ops::isNext) {
+          mix_chip0 = AY_emu;
+          mix_chip1 = AY_emu && chip1;
+          p0L = ay_next_pan[0] & 2; p0R = ay_next_pan[0] & 1;
+          p1L = ay_next_pan[1] & 2; p1R = ay_next_pan[1] & 1;
+        }
         bool mix_covox = CovoxSubsys::enabled && audioBufferCovoxL;
         bool mix_saa = SaaSubsys::enabled && saaChip;
         bool mix_midi = MidiSubsys::enabled && Midi::enabled == 4 && audioBufferMIDI_L && audioBufferMIDI_R;
@@ -3859,12 +3889,16 @@ void ESPectrum::loop() {
             beeper_R += audioBufferCovoxR[i];
           }
           if (mix_chip0) {
-            beeper_L += chip0.SamplebufAY_L[i];
-            beeper_R += chip0.SamplebufAY_R[i];
+            if (p0L) beeper_L += chip0.SamplebufAY_L[i];
+            if (p0R) beeper_R += chip0.SamplebufAY_R[i];
           }
           if (mix_chip1) {
-            beeper_L += chip1->SamplebufAY_L[i];
-            beeper_R += chip1->SamplebufAY_R[i];
+            if (p1L) beeper_L += chip1->SamplebufAY_L[i];
+            if (p1R) beeper_R += chip1->SamplebufAY_R[i];
+          }
+          if (mix_chip2) {
+            if (p2L) beeper_L += chip2->SamplebufAY_L[i];
+            if (p2R) beeper_R += chip2->SamplebufAY_R[i];
           }
           if (mix_saa) {
             beeper_L += saaChip->SamplebufSAA_L[i];
