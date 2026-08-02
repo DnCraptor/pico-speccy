@@ -2110,8 +2110,10 @@ void VIDEO::applyPalette() {
 
     Debug::log2SD("applyPalette: done, 240+16+1 entries written");
 
-    // Re-apply GigaScreen blend palette if active
-    if (gigascreenArmed())
+    // Re-apply GigaScreen blend palette if active. Never on Next: NEXTVID's
+    // colours live in the plain G3R3B2 cube at 17-219, and the blend LUT
+    // overwrites 17-136 (the "yellow unreadable screen" failure).
+    if (gigascreenArmed() && Config::arch != A_NEXT)
         initGigascreenBlendLUT();
     // The TS-Conf 256-slot remap owns most of the hardware palette; everything
     // above just rewrote it, so its slot shadow is stale — write every assigned
@@ -4796,7 +4798,7 @@ void VIDEO::Init() {
     // BEFORE the heap fragments. A boot straight into a whole-line mode (Profi
     // DS80, a TS-Conf romset that opens in TEXT) hands it back at the first
     // EndFrame — gigascreenModeGate() — and takes it again on the way out.
-    if (sharedFB_main && Config::gigascreen_enabled) {
+    if (sharedFB_main && Config::gigascreen_enabled && Config::arch != A_NEXT) {
         GsSubsys::request(true);
         GsSubsys::apply();
     }
