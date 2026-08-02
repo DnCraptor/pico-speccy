@@ -4911,6 +4911,18 @@ void VIDEO::Reset() {
         Draw_OSD169 = MainScreen;
         Draw_OSD43 = BottomBorder;
         DrawBorder = TopBorder_Blank;
+    } else if (Config::arch == A_NEXT) {
+        // Next runs 128K ULA timing; the Byte-romset variants never apply here
+        tStatesPerLine = TSTATES_PER_LINE_128;
+        tStatesScreen = TS_SCREEN_128;
+        tStatesBorder = isFullBorder ? (isFullBorder240 ? TS_BORDER_360x240_128 : TS_BORDER_360x288_128)
+                      : TS_BORDER_320x240_128;
+        VsyncFinetune[0] = 0;
+        VsyncFinetune[1] = 0;
+
+        Draw_OSD169 = MainScreen;
+        Draw_OSD43 = BottomBorder;
+        DrawBorder = TopBorder_Blank;
     } else if (Config::arch == A_PENT || Config::arch == A_P512 || Config::arch == A_P1024 ||
                Config::isEvoPentRaster()) {    // (ZX Evolution BaseConf / ScorpEvo: the Pentagon raster)
         tStatesPerLine = TSTATES_PER_LINE_PENTAGON;
@@ -5300,6 +5312,12 @@ void VIDEO::Reset() {
         // Next mode: scanline renderer replaces the beam-chasing pipeline.
         // Placed last so nothing below re-points the Draw handlers.
         gigascreen_enabled = false;
+        graphics_set_dither(false);
+        // NEXTVID's palette LUTs map into the plain G3R3B2 cube at 17-219;
+        // Gigascreen (17-127) and the dither table (64-127) may have
+        // repurposed those CLUT slots — restore the cube.
+        for (int i = 17; i < 220; i++)
+            graphics_set_palette(i, paletteTransform(grb_to_rgb888(i)));
         NEXTVID::Reset();
         Draw = &NEXTVID::Tick;
         Draw_Opcode = &NEXTVID::Tick_Opcode;

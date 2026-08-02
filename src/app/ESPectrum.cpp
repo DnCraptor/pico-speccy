@@ -1051,6 +1051,12 @@ void ESPectrum::setup() {
     Config::romSet = R_128K;
     Config::romSet128 = R_128K;
   }
+  // On real Next the divMMC is part of the machine — NextZXOS cannot boot
+  // without the automap. Default it on for the session (mode 1: MMC image,
+  // Config::esxdos_hdf_image[0] or /esxdos.mmc); DivMMC::init self-disables
+  // gracefully when no image is present.
+  if (Config::arch == A_NEXT && Config::esxdos == 0)
+    Config::esxdos = 1;
 
   //=======================================================================================
   // INIT PS/2 KEYBOARD
