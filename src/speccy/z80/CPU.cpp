@@ -56,6 +56,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/machines/TsConf/TsFastMem.h"
 #include "app/CodeOverlay.h" // TS_OVL_CODE (CPU::tsFrameLoop)
 #include "speccy/core/Rzx.h"
+#include "speccy/machines/Next/NextReg.h"
 #if PERF_TRACE && PERF_HIST
 // TS-Conf guest-memory access histogram by PHYSICAL page (the page each CPU
 // bank is mapped to), fetch + peek8 + poke8. Tells which pages a title hammers,
@@ -124,9 +125,11 @@ bool Z80Ops::isTc2068 = false;
 // case has to keep the A8=0 qualifier because the SAA1099 shares the #FF family
 // there (0x00FF data / 0x01FF address).
 bool g_timex_machine = false;
+bool Z80Ops::isNext = false;
 
 void CPU::updateStatesInFrame() {
     Z80Ops::isALF = (Config::arch == A_ALF);
+    Z80Ops::isNext = (Config::arch == A_NEXT);
     // Early/Late ULA timing: Early=latetiming=0, Late=latetiming=1.
     // IntEnd += latetiming shifts the INT window 1T later for Late.
     // isActiveINT adds latetiming to tstates so that Late fires 1T later,
@@ -192,6 +195,11 @@ void CPU::updateStatesInFrame() {
             IntStart = INT_START_PENTAGON;
             IntEnd = INT_END_PENTAGON;
         }
+    } else if (Config::arch == A_NEXT) {
+        // Next runs 128K frame timing (the VGA-timing set of real TBBlue)
+        statesInFrame = TSTATES_PER_FRAME_128;
+        IntStart = INT_START128;
+        IntEnd = INT_END128 + CPU::latetiming;
     } else { // if (Config::arch == A_PENT) - by default
         statesInFrame = TSTATES_PER_FRAME_PENTAGON;
         IntStart = INT_START_PENTAGON;
@@ -252,6 +260,7 @@ void CPU::reset() {
     if (!Z80Ops::isAtm) g_atm_ro = 0;
     Z80Ops::isTc2068 = Config::isTc2068();
     g_timex_machine  = Config::isTimex();
+    Z80Ops::isNext = (Config::arch == A_NEXT);
     Z80Ops::isP3 = Config::isPlus3();
     if (Z80Ops::isP3) {
         Z80Ops::isByte = false;
@@ -364,6 +373,17 @@ void CPU::reset() {
                           : Config::isEvoBase() ? MICROS_PER_FRAME_PENTAGON
                           : atmFrame316(Config::romSetAtm) ? MICROS_PER_FRAME_SCORPION_GR
                                                            : MICROS_PER_FRAME_48;
+    } else if (Config::arch == A_NEXT) {
+        // Next: no floating bus, no contention, 128K frame timing
+        Ports::getFloatBusData = &Ports::getFloatBusDataNext;
+        Z80Ops::isByte = false;
+        Z80Ops::is48 = false;
+        Z80Ops::is128 = false;
+        Z80Ops::isPentagon = false;
+        Z80Ops::is512 = false;
+        Z80Ops::is1024 = false;
+        Z80Ops::isProfi = false;
+        ESPectrum::target = MICROS_PER_FRAME_128;
     } else if (Config::arch == A_TSCONF) {
         // TS-Conf: Pentagon raster (224 T/line, 71680 T/frame), uncontended.
         Z80Ops::isByte = false;
@@ -703,7 +723,7 @@ IRAM_ATTR void CPU::loop() {
 
     while (tstates < IntEnd) {
         Z80::execute();
-        if (Config::dma_mode) Z80DMA::handleDMA();
+        if (Config::dma_mode || Z80Ops::isNext) Z80DMA::handleDMA();
         if (ZiFi::cdcNicActive && tstates >= zifi_pump_due) {
             zifi_pump_due = tstates + 3500;
             ZiFi::cdcPump();
@@ -712,6 +732,11 @@ IRAM_ATTR void CPU::loop() {
     }
     BREAKPOINTS
     bool halted = Z80::isHalted();
+    if (Z80Ops::isNext && NextReg::lineIrqEnabled) {
+        // Line IRQ can fire mid-frame: skip the exec_nocheck/FlushOnHalt fast
+        // paths and let the INT-checking tail loop run the whole frame
+        halted = false;
+    } else
     if (!halted) {
         stFrame = statesInFrame - IntEnd;
         Z80::exec_nocheck();
@@ -722,7 +747,7 @@ IRAM_ATTR void CPU::loop() {
     BREAKPOINTS
     while (tstates < statesInFrame) {
         Z80::execute();
-        if (Config::dma_mode) Z80DMA::handleDMA();
+        if (Config::dma_mode || Z80Ops::isNext) Z80DMA::handleDMA();
         if (ZiFi::cdcNicActive && tstates >= zifi_pump_due) {
             zifi_pump_due = tstates + 3500;
             ZiFi::cdcPump();
@@ -1562,6 +1587,25 @@ IRAM_ATTR bool Z80Ops::isActiveINT(void) {
     // the Late INT via straddle — this is the correct hardware behaviour.
     int32_t tmp = (int32_t)CPU::tstates + CPU::latetiming;
     if (tmp >= (int32_t)CPU::statesInFrame) tmp -= CPU::statesInFrame;
+    if (Z80Ops::isNext) {
+        // Frame (ULA) interrupt, unless masked via nextreg 0x22 bit 2
+        if (!NextReg::ulaIrqDisabled &&
+            (tmp >= CPU::IntStart) && (tmp < CPU::IntEnd))
+            return true;
+        // Line interrupt (nextreg 0x22/0x23): asserted for ~32 base T-states
+        // at the start of the programmed raster line
+        if (NextReg::lineIrqEnabled) {
+            uint8_t m = ESPectrum::multiplicator;
+            uint32_t lines = (CPU::statesInFrame >> m) / VIDEO::tStatesPerLine;
+            // reg 0x23 counts line 0 as the first pixel line; the frame
+            // tstate origin is 63 border/sync lines earlier (128K timing)
+            uint32_t startTs = (((NextReg::lineIrqLine + 63) % lines) * VIDEO::tStatesPerLine) << m;
+            uint32_t endTs = startTs + (32u << m);
+            if ((uint32_t)tmp >= startTs && (uint32_t)tmp < endTs)
+                return true;
+        }
+        return false;
+    }
     return (tmp >= CPU::IntStart) && (tmp < CPU::IntEnd);
 }
 

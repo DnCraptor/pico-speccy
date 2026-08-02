@@ -527,6 +527,12 @@ private:
     static void inx(int d);
     static void otx(int d);
 
+    // Z80N (ZX Spectrum Next) block transfer helpers
+    static void ldix(void);
+    static void lddx(void);
+    static void ldws(void);
+    static void ldpirx(void);
+
     static void SetAbortedINxR_OTxRFlags();
 
     // BIT n,r

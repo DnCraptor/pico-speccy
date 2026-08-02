@@ -107,6 +107,8 @@ bool LoadSnapshot(const string& filename, ArchIdx force_arch, RomsetIdx force_ro
         res = FileSNA::load(filename, force_arch, force_romset);
     } else if (FileUtils::hasZ80extension(filename)) {
         res = FileZ80::load(filename);
+    } else if (FileUtils::hasNEXextension(filename)) {
+        res = FileNEX::load(filename);
     } else if (FileUtils::hasPextension(filename)) {
         res = FileP::load(filename);
     } else if (FileUtils::hasSPGextension(filename)) {

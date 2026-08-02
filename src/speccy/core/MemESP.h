@@ -339,6 +339,8 @@ public:
     inline static void plugPtr16(uint8_t s16, uint8_t* p) {
         ramCurrent[s16 * 2] = p;
         ramCurrent[s16 * 2 + 1] = p ? p + 0x2000 : nullptr;
+        // legacy paging took over slots 0/1 — drop the Next ROM write protect
+        if (s16 == 0) next_rom_mask = 0;
     }
     inline static void plug16(uint8_t s16, uint8_t* p, bool contended) {
         plugPtr16(s16, p);
@@ -430,6 +432,33 @@ public:
         if (slot < 8 && ramCurrent[slot] == nullptr) promoteBank(slot >> 1);
     }
 
+    // ===== ZX Spectrum Next MMU (8K pages, nextreg 0x50-0x57) =====
+    // 224 pages = 1.75 MB. Banks 0-7 (classic 128K) stay in static SRAM via
+    // ram[0..7]; banks 8-111 are carved from butter PSRAM at boot
+    // (buildNextRam), accounted through butter_pages so DivMMC/GS/arena
+    // compose on top exactly like Murmuzavr pages would.
+    static constexpr int NEXT_PAGES = 224;
+    static uint8_t* nextRamPtr[NEXT_PAGES];
+    static uint8_t  mmu[8];        // current MMU mapping; 0xFF = ROM (slots 0/1)
+    static bool     nextRamReady;  // buildNextRam() completed
+
+    static bool buildNextRam();    // carve Next RAM out of butter PSRAM
+    static void applyMMU(uint8_t slot, uint8_t page);
+    static void resetNextMapping();// apply power-on MMU defaults
+
+    // Layer 2 write-through window (port 0x123B): writes to 0x0000-0x3FFF
+    // land in Layer 2 RAM while reads still see the mapped ROM
+    static uint8_t* wrOverlay[2];
+    static bool wr_overlay_active;
+
+    // Next ROMs loaded from SD into butter PSRAM (enNextZX.rom, 4x16K +
+    // enNxtmmc.rom, 8K). PSRAM is writable, so ROM-mapped slots 0/1 are
+    // write-protected via next_rom_mask in writebyte().
+    static uint8_t* nextRomBase;     // 64K NextZXOS ROM set (null = 128K fallback)
+    static uint8_t* nextDivRomBase;  // 8K Next MMC ROM (null = esxdos fallback)
+    static uint8_t  next_rom_mask;   // bit N: slot N (0/1) has ROM mapped
+    static bool loadNextRoms();      // load ROM files from SD (after buildNextRam)
+
     static uint8_t* page0_lo;      // 0x0000-0x1FFF when DivMMC/MB02 mapped
     static uint8_t* page0_hi;      // 0x2000-0x3FFF when DivMMC/MB02 mapped
     static bool divmmc_mapped;     // DivMMC/MB02 memory currently visible at page 0
@@ -512,6 +541,10 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
     if (__builtin_expect(Config::numMemWriteBP != 0, 0))
         checkMemWriteBP(addr);
     uint8_t slot = addr >> 13;
+    if (slot <= 1 && wr_overlay_active) { // Next Layer 2 write window (port 0x123B)
+        wrOverlay[slot][addr & 0x1fff] = data;
+        return;
+    }
     if (slot <= 1 && ramCurrent[0] == g_alfWindow) return; // ALF lazy cart: page 0 is ROM
     if (slot <= 1 && divmmc_mapped) {
         if (slot == 0) {
@@ -535,6 +568,9 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
         }
         return;
     }
+    // Next ROM lives in writable PSRAM — enforce read-only (after DivMMC:
+    // an automapped page 0 must stay writable per the rules above)
+    if (slot <= 1 && (next_rom_mask & (1 << slot))) return;
     uint8_t* p = ramCurrent[slot];
     // Accessor-mode bank: write goes straight to the SPI backing store
     // (must be checked before the ROM filter — nullptr < 0x11000000).

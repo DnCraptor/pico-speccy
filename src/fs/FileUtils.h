@@ -168,6 +168,7 @@ public:
     // static string getSortedFileList(string fileDir);
     static bool hasSNAextension(const string& filename);
     static bool hasZ80extension(const string& filename);
+    static bool hasNEXextension(const string& filename);
     static bool hasPextension(const string& filename);
     static bool hasSPGextension(const string& filename);
     static bool hasPSSextension(const string& filename);   // pico-speccy snapshot

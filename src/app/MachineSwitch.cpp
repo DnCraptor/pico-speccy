@@ -57,6 +57,14 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
     // below (budget gate, slot sync, mutual exclusions, reboot boundary) sees Profi.
     arch = archCanon(arch);
     if (arch == A_ALF) { commitAlf(); return true; }
+    const ArchIdx prevArch = Config::arch;
+
+    // Entering Next requires the butter PSRAM carve-out (also enforced by the
+    // menu predicate and again in setup()).
+    if (arch == A_NEXT && prevArch != A_NEXT && butter_psram_size() < (2u << 20)) {
+        OSD::osdCenteredMsg("Spectrum Next needs 2MB+ PSRAM", LEVEL_WARN, 2000);
+        return false;
+    }
 
     // Leaving ALF for another machine. loadAlfCart() pinned
     // pref_arch="ALF" so the cart machine survives the flash-reboot; that
@@ -356,6 +364,14 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
         // layout is currently in effect, so reboot whenever that
         // disagrees with the desired arch.  Config is already
         // saved above, so setup() re-backs pages for the new arch.
+        // Next boundary: the RAM layout differs both ways — entering Next
+        // needs setup()'s buildNextRam carve-out, leaving it needs the legacy
+        // extended-page strip that a Next boot never allocated. Config is
+        // already saved above, so setup() lays out memory for the new arch.
+        if ((Config::arch == A_NEXT) != (prevArch == A_NEXT)) {
+            OSD::esp_hard_reset();
+            return true;
+        }
         bool profiSramLayout =
             (MemESP::ram[56].memType() == mem_type_t::POINTER);
         if (butter_psram_size() == 0

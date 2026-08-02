@@ -846,6 +846,17 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         else                        Atm::bindRoms(romSet, gb_rom_atm2_pages, 4);
         break;
     }
+    case A_NEXT: {
+        // ZX Spectrum Next. The real NextZXOS ROM set is loaded from SD into
+        // butter PSRAM later in setup() (MemESP::loadNextRoms); the 128K ROM
+        // pair here is the fallback (enough for .NEX/.SNA + esxDOS).
+        romSet = R_NEXT;
+        // Sinclair 128K ROM0 = the Pentagon ROM0 base + its 101-byte overlay.
+        MemESP::rom[0].assign_rom(gb_rom_0_pentagon_128k);
+        MemESP::registerOverlay(gb_rom_0_pentagon_128k, gb_overlay_pentagon_sinclair_128k_0);
+        MemESP::rom[1].assign_rom(gb_rom_1_sinclair_128k);
+        break;
+    }
     default: { // Pentagon / P512 / P1024
         romSet = (newRomSet == R_NONE) ? R_PENT : newRomSet;
         // Keep the slot of the ACTUAL arch (P512/P1024 used to spill into romSetPent,

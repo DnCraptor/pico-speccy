@@ -666,6 +666,12 @@ static const Option opt_tsconf_clk[] = {
     { "7 MHz",   1 },
     { "14 MHz",  2 },
 };
+// Spectrum Next: needs the 1.75MB RAM carve-out in butter PSRAM (setup()'s
+// buildNextRam), so the row is only offered where that can succeed.
+static bool p_showNext() { return butter_psram_size() >= (2u << 20); }
+static const Option opt_mach_next[] = {
+    { TXT_ROM_NEXT,       NM_MACH(A_NEXT, R_NEXT) },
+};
 
 // ZX Evolution BaseConf raster — the AVR's MODES_RASTER (Scroll Lock on the real board,
 // kept in its NVRAM), video_sync_v.v / zclock.v: the frame, the INT position and, in
@@ -761,6 +767,7 @@ static const Node kMachine[] = {
     NM_SUB  (NM_IND TXT_MACH_EVO_OPTS, kEvoBase, p_evoBaseActive),
     NM_RADIO(TXT_MACH_ALF,   SET_MACHINE, opt_mach_alf,   nullptr),
     NM_RADIO(TXT_MACH_OTHER, SET_MACHINE, opt_mach_other, p_extRam),
+    NM_RADIO(TXT_MACH_NEXT,  SET_MACHINE, opt_mach_next,  p_showNext),
     // Not a machine, but it lives with them by request: the built-in game — the
     // one "machine" that needs neither ROM nor SD card. Also reachable by
     // holding S during the boot R/M probe window.

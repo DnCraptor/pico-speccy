@@ -29,7 +29,8 @@
     X(A_SCORP,      "Scorpion") \
     X(A_ALF,        "ALF")      \
     X(A_TSCONF,     "TSconf")   \
-    X(A_ATM,        "ATM")
+    X(A_ATM,        "ATM")      \
+    X(A_NEXT,       "Next")
 
 // Third column = the human label. The second column is an on-disk spelling that
 // must never change (NVS, .esp sidecars); the third is what a user reads, kept
@@ -80,7 +81,8 @@
     X(R_ATM3,           "ATM3",             "ATM-Turbo 3 (xBIOS 1.37 + test)") \
     X(R_ATM3_107,       "ATM3v107",         "ATM-Turbo 3 (BIOS 1.07.13EC)") \
     X(R_EVO_BASE,       "EvoBase",          "BaseConf (EVO Reset Service)") \
-    X(R_SCORP_EVO,      "ScorpEvo",         "ScorpEvo (ZX-Evo, ProfROM 4.44)")
+    X(R_SCORP_EVO,      "ScorpEvo",         "ScorpEvo (ZX-Evo, ProfROM 4.44)")  \
+    X(R_NEXT,           "Next",             "NextZXOS")
 
 #define NM_X_IDX(id, str) id,
 #define NM_XR_IDX(id, str, ui) id,
@@ -148,6 +150,7 @@ inline RomsetIdx defaultRomsetFor(ArchIdx a) {
         case A_ALF:     return R_ALF1;
         case A_TSCONF:  return R_TSCONF;
         case A_ATM:     return R_ATM2;
+        case A_NEXT:    return R_NEXT;
         default:        return R_PENT;   // Pentagon / P512 / P1024
     }
 }

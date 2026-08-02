@@ -106,6 +106,7 @@ extern "C" volatile uint32_t hdmi_au_late_write_ct;
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/machines/Timex.h"
 #include "speccy/machines/EvoBase.h"
+#include "speccy/machines/Next/NextReg.h"
 #include "CodeOverlay.h"
 #include "speccy/devices/gs/NgsSd.h"
 #include "speccy/devices/gs/NgsMp3.h"
@@ -937,6 +938,8 @@ void ESPectrum::setup() {
           Config::romSet = Config::pref_romSetAtm;
         else
           Config::romSet = Config::romSetAtm;
+      } else if (Config::arch == A_NEXT) {
+        Config::romSet = R_NEXT;
       } else {
         if (Config::pref_romSetPent != R_LAST)
           Config::romSet = Config::pref_romSetPent;
@@ -1039,6 +1042,16 @@ void ESPectrum::setup() {
       butter_psram_size() > 0)
     MEM_PG_CNT = 128;
 
+  // Spectrum Next needs its 1.75MB RAM (plus the 72K ROM region) in butter
+  // PSRAM. The ROMs assigned for A_NEXT are the 128K pair, so the fallback
+  // only has to relabel the machine.
+  if (Config::arch == A_NEXT && butter_psram_size() < (2u << 20)) {
+    Debug::log2SD("setup: Next requires 2MB+ butter PSRAM, falling back to 128K");
+    Config::arch = A_128K;
+    Config::romSet = R_128K;
+    Config::romSet128 = R_128K;
+  }
+
   //=======================================================================================
   // INIT PS/2 KEYBOARD
   //=======================================================================================
@@ -1092,6 +1105,23 @@ void ESPectrum::setup() {
     MemESP::ram[2].assign_ram(MemESP::ram[2].direct(), 2, false);
     MemESP::ram[3].assign_ram(MemESP::ram[3].direct(), 3, false);
     Debug::log("setup: ext_ram: pages 0-7 done, freeHeap=%u", getFreeHeap());
+    if (Config::arch == A_NEXT) {
+      // Next mode: 8K page table over static SRAM (banks 0-7) + butter PSRAM
+      // carve-out (banks 8-111 + the 72K ROM region). Legacy extended pages
+      // are not allocated; Murmuzavr stays clamped to 64 above.
+      if (MemESP::buildNextRam()) {
+        bool roms = MemESP::loadNextRoms();
+        Debug::log2SD("setup: Next RAM carved, ROMs %s",
+                      roms ? "loaded from SD" : "not found - 128K fallback ROM");
+      } else {
+        Debug::log2SD("setup: Next RAM carve failed, falling back to 128K");
+        Config::arch = A_128K;
+        Config::romSet = R_128K;
+        Config::romSet128 = R_128K;
+        for (size_t i = 8; i < (MEM_PG_CNT + 2); ++i)
+          assign_ram(i);
+      }
+    } else
     for (size_t i = 8; i < (MEM_PG_CNT + 2); ++i) {
       assign_ram(i);
     }
@@ -1192,6 +1222,11 @@ void ESPectrum::setup() {
   MemESP::plug16(2, MemESP::ram[2].sync(2), false);
   MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3), false);
 
+  if (Config::arch == A_NEXT && MemESP::nextRamReady) {
+    NextReg::reset(true);
+    MemESP::resetNextMapping();
+  }
+
   // Pre-load STS 7.5 into RAM bank 7 at offset 0x1B00 (= 0xDB00 - 0xC000)
   // Gluk ROM writes 0x47 to port 0x7FFD selecting bank 7 for page 3, then
   // installs its service monitor there. We pre-populate it so STS is ready.
@@ -1211,6 +1246,12 @@ void ESPectrum::setup() {
   Debug::log2SD("setup: DivMMC::init begin, freeHeap=%u", (unsigned)getFreeHeap());
   DivMMC::init();
   Debug::log2SD("setup: DivMMC::init done, freeHeap=%u", (unsigned)getFreeHeap());
+  // On Next with the real MMC ROM available, the divMMC automap runs
+  // NextZXOS's own ROM instead of esxdos
+  if (Config::arch == A_NEXT && MemESP::nextDivRomBase) {
+    DivMMC::esxdos_rom = MemESP::nextDivRomBase;
+    DivMMC::rom_loaded = true;
+  }
   // IDE/HDD (NEMO/PROFI schemes) — independent of DivMMC.
   IDE::init();
   // MC146818 RTC (Pentagon/Profi Mr Gluk TimeKeeper) — set register defaults.
@@ -1798,6 +1839,11 @@ void ESPectrum::reset(uint8_t romInUse) {
                    Config::arch == A_SCORP || Config::arch == A_ATM));
   MemESP::plug16(2, MemESP::ram[2].sync(2), false);
   MemESP::plug16(3, MemESP::ram[0].sync(3), false);
+
+  if (Config::arch == A_NEXT && MemESP::nextRamReady) {
+    NextReg::reset(false);
+    MemESP::resetNextMapping();
+  }
 
   // Re-load STS 7.5 into RAM bank 7 at offset 0x1B00 (= 0xDB00 - 0xC000)
   if (Config::romSet == R_PENT_GLUK || Config::romSet == R_128K_BY_GLUK) {

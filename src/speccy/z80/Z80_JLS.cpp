@@ -45,9 +45,10 @@
 #include "speccy/machines/Timex.h"   // g_timex_mmu + Timex::rd/read8 (TC2068 SCLD window, exec_nocheck fetch)
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/core/Rzx.h"     // Rzx::mode / onIn: RZX playback substitutes every IN
+#include "speccy/machines/Next/NextReg.h"
 
 
-// #include "Snapshot.h"
+// #include "speccy/core/Snapshot.h"
 
 // #pragma GCC optimize("O3")
 
@@ -701,6 +702,62 @@ void Z80::push(uint16_t word) {
 // LDI
 
 // LDD
+
+// Z80N LDIX: LDI without flags; write to (DE) is inhibited when (HL) == A
+IRAM_ATTR void Z80::ldix(void) {
+
+    uint8_t work8 = Z80Ops::peek8(REG_HL);
+
+    if (work8 != regA)
+        Z80Ops::poke8(REG_DE, work8);
+    else
+        Z80Ops::addressOnBus(REG_DE, 3); // write cycle still occupies the bus
+
+    Z80Ops::addressOnBus(REG_DE, 2);
+    REG_HL++;
+    REG_DE++;
+    REG_BC--;
+}
+
+// Z80N LDDX: like LDIX but HL decrements (DE still increments)
+IRAM_ATTR void Z80::lddx(void) {
+
+    uint8_t work8 = Z80Ops::peek8(REG_HL);
+
+    if (work8 != regA)
+        Z80Ops::poke8(REG_DE, work8);
+    else
+        Z80Ops::addressOnBus(REG_DE, 3);
+
+    Z80Ops::addressOnBus(REG_DE, 2);
+    REG_HL--;
+    REG_DE++;
+    REG_BC--;
+}
+
+// Z80N LDWS: (DE) = (HL); L++; D++ (flags as INC D)
+IRAM_ATTR void Z80::ldws(void) {
+
+    uint8_t work8 = Z80Ops::peek8(REG_HL);
+    Z80Ops::poke8(REG_DE, work8);
+    REG_L++;
+    inc8(REG_D);
+}
+
+// Z80N LDPIRX: pattern fill — source is (HL & 0xFFF8) | (E & 7), HL unchanged
+IRAM_ATTR void Z80::ldpirx(void) {
+
+    uint8_t work8 = Z80Ops::peek8((REG_HL & 0xFFF8) | (REG_E & 0x07));
+
+    if (work8 != regA)
+        Z80Ops::poke8(REG_DE, work8);
+    else
+        Z80Ops::addressOnBus(REG_DE, 3);
+
+    Z80Ops::addressOnBus(REG_DE, 2);
+    REG_DE++;
+    REG_BC--;
+}
 
 // CPI
 
@@ -3182,6 +3239,247 @@ void Z80::decodeDDFDCB(uint16_t address) {
 
 void Z80::decodeED(void) {
     switch (opCode) {
+        // ===== Z80N (ZX Spectrum Next) extended opcodes =====
+        // On non-Next machines these remain 8T NOPs (as unhandled ED opcodes).
+        case 0x23:
+        { /* SWAPNIB */
+            if (!Z80Ops::isNext) break;
+            regA = (regA << 4) | (regA >> 4);
+            break;
+        }
+        case 0x24:
+        { /* MIRROR A */
+            if (!Z80Ops::isNext) break;
+            uint8_t v = regA;
+            v = ((v & 0xF0) >> 4) | ((v & 0x0F) << 4);
+            v = ((v & 0xCC) >> 2) | ((v & 0x33) << 2);
+            v = ((v & 0xAA) >> 1) | ((v & 0x55) << 1);
+            regA = v;
+            break;
+        }
+        case 0x27:
+        { /* TEST n */
+            if (!Z80Ops::isNext) break;
+            uint8_t value = Z80Ops::peek8(REG_PC);
+            REG_PC++;
+            carryFlag = false;
+            sz5h3pnFlags = sz53pn_addTable[regA & value] | HALFCARRY_MASK;
+            flagQ = true;
+            break;
+        }
+        case 0x28:
+        { /* BSLA DE,B */
+            if (!Z80Ops::isNext) break;
+            uint8_t sh = REG_B & 0x1F;
+            REG_DE = (sh > 15) ? 0 : (uint16_t)(REG_DE << sh);
+            break;
+        }
+        case 0x29:
+        { /* BSRA DE,B */
+            if (!Z80Ops::isNext) break;
+            uint8_t sh = REG_B & 0x1F;
+            if (sh > 15) sh = 15;
+            REG_DE = (uint16_t)(((int16_t)REG_DE) >> sh);
+            break;
+        }
+        case 0x2A:
+        { /* BSRL DE,B */
+            if (!Z80Ops::isNext) break;
+            uint8_t sh = REG_B & 0x1F;
+            REG_DE = (sh > 15) ? 0 : (uint16_t)(REG_DE >> sh);
+            break;
+        }
+        case 0x2B:
+        { /* BSRF DE,B */
+            if (!Z80Ops::isNext) break;
+            uint8_t sh = REG_B & 0x1F;
+            REG_DE = (sh > 15) ? 0xFFFF : (uint16_t)~((uint16_t)(~REG_DE) >> sh);
+            break;
+        }
+        case 0x2C:
+        { /* BRLC DE,B */
+            if (!Z80Ops::isNext) break;
+            uint8_t sh = REG_B & 0x0F;
+            REG_DE = (uint16_t)((REG_DE << sh) | (REG_DE >> (16 - sh)));
+            break;
+        }
+        case 0x30:
+        { /* MUL D,E */
+            if (!Z80Ops::isNext) break;
+            REG_DE = (uint16_t)(REG_D * REG_E);
+            break;
+        }
+        case 0x31:
+        { /* ADD HL,A */
+            if (!Z80Ops::isNext) break;
+            REG_HL += regA;
+            break;
+        }
+        case 0x32:
+        { /* ADD DE,A */
+            if (!Z80Ops::isNext) break;
+            REG_DE += regA;
+            break;
+        }
+        case 0x33:
+        { /* ADD BC,A */
+            if (!Z80Ops::isNext) break;
+            REG_BC += regA;
+            break;
+        }
+        case 0x34:
+        { /* ADD HL,nn */
+            if (!Z80Ops::isNext) break;
+            uint16_t nn = Z80Ops::peek8(REG_PC);
+            REG_PC++;
+            nn |= Z80Ops::peek8(REG_PC) << 8;
+            REG_PC++;
+            Z80Ops::addressOnBus(getPairIR().word, 2);
+            REG_HL += nn;
+            break;
+        }
+        case 0x35:
+        { /* ADD DE,nn */
+            if (!Z80Ops::isNext) break;
+            uint16_t nn = Z80Ops::peek8(REG_PC);
+            REG_PC++;
+            nn |= Z80Ops::peek8(REG_PC) << 8;
+            REG_PC++;
+            Z80Ops::addressOnBus(getPairIR().word, 2);
+            REG_DE += nn;
+            break;
+        }
+        case 0x36:
+        { /* ADD BC,nn */
+            if (!Z80Ops::isNext) break;
+            uint16_t nn = Z80Ops::peek8(REG_PC);
+            REG_PC++;
+            nn |= Z80Ops::peek8(REG_PC) << 8;
+            REG_PC++;
+            Z80Ops::addressOnBus(getPairIR().word, 2);
+            REG_BC += nn;
+            break;
+        }
+        case 0x8A:
+        { /* PUSH nn — immediate is big-endian (high byte first) */
+            if (!Z80Ops::isNext) break;
+            uint16_t nn = Z80Ops::peek8(REG_PC) << 8;
+            REG_PC++;
+            nn |= Z80Ops::peek8(REG_PC);
+            REG_PC++;
+            Z80Ops::addressOnBus(getPairIR().word, 3);
+            push(nn);
+            break;
+        }
+        case 0x90:
+        { /* OUTINB — like OUTI but B unchanged, no flags */
+            if (!Z80Ops::isNext) break;
+            Z80Ops::addressOnBus(getPairIR().word, 1);
+            uint8_t work8 = Z80Ops::peek8(REG_HL);
+            Ports::output(REG_BC, work8);
+            REG_HL++;
+            break;
+        }
+        case 0x91:
+        { /* NEXTREG reg,val */
+            if (!Z80Ops::isNext) break;
+            uint8_t r = Z80Ops::peek8(REG_PC);
+            REG_PC++;
+            uint8_t v = Z80Ops::peek8(REG_PC);
+            REG_PC++;
+            Z80Ops::addressOnBus(getPairIR().word, 6);
+            NextReg::write(r, v);
+            break;
+        }
+        case 0x92:
+        { /* NEXTREG reg,A */
+            if (!Z80Ops::isNext) break;
+            uint8_t r = Z80Ops::peek8(REG_PC);
+            REG_PC++;
+            Z80Ops::addressOnBus(getPairIR().word, 6);
+            NextReg::write(r, regA);
+            break;
+        }
+        case 0x93:
+        { /* PIXELDN — advance HL one line down in ULA screen layout */
+            if (!Z80Ops::isNext) break;
+            if ((REG_HL & 0x0700) != 0x0700)
+                REG_HL += 0x0100;
+            else if ((REG_HL & 0x00E0) != 0x00E0)
+                REG_HL = (REG_HL & 0xF8FF) + 0x0020;
+            else
+                REG_HL = (REG_HL & 0xF81F) + 0x0800;
+            break;
+        }
+        case 0x94:
+        { /* PIXELAD — HL = ULA address of pixel (D=y, E=x) */
+            if (!Z80Ops::isNext) break;
+            REG_HL = 0x4000 | ((REG_D & 0xC0) << 5) | ((REG_D & 0x07) << 8)
+                            | ((REG_D & 0x38) << 2) | (REG_E >> 3);
+            break;
+        }
+        case 0x95:
+        { /* SETAE — A = pixel mask for x-coordinate in E */
+            if (!Z80Ops::isNext) break;
+            regA = 0x80 >> (REG_E & 0x07);
+            break;
+        }
+        case 0x98:
+        { /* JP (C) — jump within current 16K bank via port read */
+            if (!Z80Ops::isNext) break;
+            uint8_t in8 = Ports::input(REG_BC);
+            Z80Ops::addressOnBus(getPairIR().word, 1);
+            REG_PC = (REG_PC & 0xC000) | ((uint16_t)in8 << 6);
+            break;
+        }
+        case 0xA4:
+        { /* LDIX */
+            if (!Z80Ops::isNext) break;
+            ldix();
+            break;
+        }
+        case 0xA5:
+        { /* LDWS */
+            if (!Z80Ops::isNext) break;
+            ldws();
+            break;
+        }
+        case 0xAC:
+        { /* LDDX */
+            if (!Z80Ops::isNext) break;
+            lddx();
+            break;
+        }
+        case 0xB4:
+        { /* LDIRX */
+            if (!Z80Ops::isNext) break;
+            ldix();
+            if (REG_BC != 0) {
+                REG_PC = REG_PC - 2;
+                Z80Ops::addressOnBus(REG_DE - 1, 5);
+            }
+            break;
+        }
+        case 0xB7:
+        { /* LDPIRX */
+            if (!Z80Ops::isNext) break;
+            ldpirx();
+            if (REG_BC != 0) {
+                REG_PC = REG_PC - 2;
+                Z80Ops::addressOnBus(REG_DE - 1, 5);
+            }
+            break;
+        }
+        case 0xBC:
+        { /* LDDRX */
+            if (!Z80Ops::isNext) break;
+            lddx();
+            if (REG_BC != 0) {
+                REG_PC = REG_PC - 2;
+                Z80Ops::addressOnBus(REG_DE - 1, 5);
+            }
+            break;
+        }
         // IN r,(C) / OUT (C),r — one body per direction for the eight registers
         // (2026-09-22; was 16 cases). r = 6 is the undocumented IN (C) (flags only,
         // nothing stored) and OUT (C),0 (an NMOS Z80 puts 0x00 on the bus).

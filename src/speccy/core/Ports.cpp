@@ -80,6 +80,7 @@ extern "C" const uint32_t profi_default_palette16[16];
 #include "speccy/devices/storage/Nvram24.h"
 #include "speccy/devices/disk/MB02.h"
 #include "speccy/machines/Plus3/Plus3Fdc.h"
+#include "speccy/machines/Next/NextReg.h"
 #include "hardware/gpio.h"
 #include "drivers/sdcard/sdcard.h"
 #include "speccy/machines/Atm.h"
@@ -572,6 +573,7 @@ IRAM_ATTR uint8_t Ports::getFloatBusDataScorp() {
 }
 
 IRAM_ATTR uint8_t Ports::getFloatBusDataNone() { return 0xFF; }
+IRAM_ATTR uint8_t Ports::getFloatBusDataNext() { return 0xFF; }
 
 IRAM_ATTR uint8_t Ports::getFloatBusData128() {
 
@@ -1303,6 +1305,12 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     }
 #endif
     if (ia && bitRead(p8, 7) == 0) Alf::portRead(p8);   // #1D/#1F: cart RAM on/off
+    // ZX Next register access ports
+    if (Z80Ops::isNext) {
+      if (address == 0x243B) return NextReg::selected;
+      if (address == 0x253B) return NextReg::read(NextReg::selected);
+      if (address == 0x123B) return NextReg::port123B;
+    }
     // ULA+ data port read
     if (Config::ulaplus && address == 0xFF3B) {
       LED::touchR(LED::ULAPLUS);
@@ -1355,7 +1363,9 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       return VIDEO::timex_port_ff;
     }
     // Z80 DMA / zxnDMA port read: listen on both 0x0B and 0x6B
-    if (Config::dma_mode && ((address & 0xFF) == 0x0B || (address & 0xFF) == 0x6B)) {
+    // (Next always has zxnDMA on 0x6B)
+    if ((Config::dma_mode && ((address & 0xFF) == 0x0B || (address & 0xFF) == 0x6B)) ||
+        (Z80Ops::isNext && (address & 0xFF) == 0x6B)) {
       LED::touchR(LED::DMA);
       ioContentionLate(MemESP::ramContended[rambank]);
       return Z80DMA::readPort();
@@ -1948,7 +1958,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       // #7DFD at boot (0x809E), which this loose decode matched — 0xFF from the bus
       // paged RAM 7 in, set the 48 lock and flipped the screen to page 7 behind the
       // memory manager's back (hw 2026-09-26: menu drawn in pages 5/1, junk shown).
-      if ((!Z80Ops::is48) && (!Z80Ops::isP3) && !Z80Ops::isScorpion && !Z80Ops::isAtm &&
+      if ((!Z80Ops::is48) && (!Z80Ops::isP3) && !Z80Ops::isScorpion && !Z80Ops::isAtm && !Z80Ops::isNext &&
           ((address & 0x8002) == 0) &&
           (!Z80Ops::isALF || (address & 0x0080))) { // ALF: #7FFD reflect, A7=1 only
         LED::touchR(LED::RAM);
@@ -3236,6 +3246,34 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     }
     VIDEO::Draw(3, !(Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion || Z80Ops::isTsconf || (Z80Ops::isAtm && !g_evo_contend))); // I/O Contention (Late)
   } else {
+    // ZX Next register access + legacy paging extension ports
+    if (Z80Ops::isNext) {
+      if (address == 0x243B) {
+        NextReg::selected = data;
+        ioContentionLate(false);
+        return;
+      }
+      if (address == 0x253B) {
+        NextReg::write(NextReg::selected, data);
+        ioContentionLate(false);
+        return;
+      }
+      if (address == 0x123B) { // Layer 2 access port
+        NextReg::writeLayer2Port(data);
+        ioContentionLate(false);
+        return;
+      }
+      if (address == 0xDFFD) {
+        NextReg::writeDFFD(data);
+        ioContentionLate(false);
+        return;
+      }
+      if ((address & 0xF002) == 0x1000) { // 0x1FFD (+3 paging)
+        NextReg::write1FFD(data);
+        ioContentionLate(false);
+        return;
+      }
+    }
     // ULA+ ports (odd addresses: 0xBF3B register select, 0xFF3B data)
     if (Config::ulaplus) {
       if (address == 0xBF3B) {
@@ -3358,7 +3396,9 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
       }
     }
     // Z80 DMA / zxnDMA port write: listen on both 0x0B and 0x6B
-    if (Config::dma_mode && (a8 == 0x0B || a8 == 0x6B)) {
+    // (Next always has zxnDMA on 0x6B)
+    if ((Config::dma_mode && (a8 == 0x0B || a8 == 0x6B)) ||
+        (Z80Ops::isNext && a8 == 0x6B)) {
       LED::touchW(LED::DMA);
       Z80DMA::writePort(data);
       ioContentionLate(MemESP::ramContended[rambank]);
@@ -3928,6 +3968,13 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
   // device probe at 0x6FAA/0x6FDE (`LD A,B / OUT (0x88),A`) drives #0188 and
   // does just that. That is honest Pentagon behaviour, not a bug here; see
   // the extracker-7ffd-loose-decode note before "fixing" it with A14.
+  if (Z80Ops::isNext) {
+    // Next decodes 0x7FFD +2A/+3-style (A15=0, A14=1, A1=0) and implements
+    // it on top of the MMU
+    if ((address & 0xC002) == 0x4000)
+      NextReg::write7FFD(data);
+    return;
+  }
   // TS-Conf #7FFD: LCK128-dependent paging into Page3, SCR into VPage —
   // its own handler; the generic bankLatch/videoLatch machinery below must
   // not run (TS-Conf banks are Page0..3, not the 128K latches).

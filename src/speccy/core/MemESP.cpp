@@ -879,3 +879,111 @@ void MemESP::dbgPoke(uint16_t addr, uint8_t data) {
     writebyte(addr, data);           // ROM filter, dirty flags, accessor banks
     Config::numMemWriteBP = saved;
 }
+
+// ===== ZX Spectrum Next MMU =====
+
+#include "app/Buffer.h"
+#include "fs/FileUtils.h"
+
+uint8_t* MemESP::nextRamPtr[MemESP::NEXT_PAGES];
+uint8_t  MemESP::mmu[8];
+bool     MemESP::nextRamReady = false;
+uint8_t* MemESP::wrOverlay[2] = { nullptr, nullptr };
+bool     MemESP::wr_overlay_active = false;
+uint8_t* MemESP::nextRomBase = nullptr;
+uint8_t* MemESP::nextDivRomBase = nullptr;
+uint8_t  MemESP::next_rom_mask = 0;
+
+// Unmapped MMU pages read 0xFF (open bus). Lives in flash (.rodata), so the
+// XIP-address write guard in writebyte() blocks writes to it automatically.
+struct OpenBusPage {
+    uint8_t b[0x2000];
+    constexpr OpenBusPage() : b() {
+        for (unsigned i = 0; i < sizeof(b); i++) b[i] = 0xFF;
+    }
+};
+static constexpr OpenBusPage open_bus_page;
+
+// Carve the Next RAM page table. Banks 0-7 (pages 0-15) point into the
+// static SRAM Z80 pages so VIDEO::grmem and the ULA renderer keep working;
+// banks 8-111 (pages 16-223) plus the 72K ROM region (64K NextZXOS set + 8K
+// MMC ROM) take 1736K of butter PSRAM, accounted through butter_pages so the
+// DivMMC allocator / GS / Buffer arena compose on top. The cap is
+// Buffer::pageBudgetButter() — the same authority that bounds Murmuzavr
+// pages — so the carve can never eat DivMMC's banks, GS sample RAM or the
+// minimum arena.
+bool MemESP::buildNextRam() {
+    size_t romExtra = 9 * 0x2000;
+    size_t needed = (size_t)(NEXT_PAGES - 16) * 0x2000 + romExtra;
+    size_t used = (size_t)butter_pages * MEM_PG_SZ;
+    if (Buffer::pageBudgetButter() < used + needed) return false;
+    for (int b = 0; b < 8; b++) {
+        nextRamPtr[b * 2]     = ram[b].direct();
+        nextRamPtr[b * 2 + 1] = ram[b].direct() + 0x2000;
+    }
+    uint8_t* base = (uint8_t*)PSRAM_DATA + used;
+    for (int pg = 16; pg < NEXT_PAGES; pg++)
+        nextRamPtr[pg] = base + (size_t)(pg - 16) * 0x2000;
+    // ROM region sits after the RAM pages; pointers stay null until the ROM
+    // files actually load
+    nextRomBase = nullptr;
+    nextDivRomBase = nullptr;
+    butter_pages += (NEXT_PAGES - 16 + 9 + 1) / 2; // account in 16K units
+    nextRamReady = true;
+    return true;
+}
+
+// Load the real Next ROMs from SD (optional — the 128K ROM pair remains the
+// fallback). Called from setup() after buildNextRam() with the SD mounted.
+bool MemESP::loadNextRoms() {
+    if (!nextRamReady) return false;
+    uint8_t* romRegion = nextRamPtr[NEXT_PAGES - 1] + 0x2000; // after RAM pages
+    FIL* f = fopen2("/roms/next/enNextZX.rom", FA_READ);
+    if (f) {
+        UINT br = 0;
+        bool ok = f_read(f, romRegion, 0x10000, &br) == FR_OK && br == 0x10000;
+        fclose2(f);
+        if (ok) nextRomBase = romRegion;
+    }
+    f = fopen2("/roms/next/enNxtmmc.rom", FA_READ);
+    if (f) {
+        UINT br = 0;
+        bool ok = f_read(f, romRegion + 0x10000, 0x2000, &br) == FR_OK && br == 0x2000;
+        fclose2(f);
+        if (ok) nextDivRomBase = romRegion + 0x10000;
+    }
+    return nextRomBase != nullptr;
+}
+
+void MemESP::applyMMU(uint8_t slot, uint8_t page) {
+    slot &= 7;
+    mmu[slot] = page;
+    uint8_t* p;
+    if (page == 0xFF && slot <= 1) {
+        if (nextRomBase)
+            p = nextRomBase + (uint32_t)(romInUse & 3) * 0x4000 + slot * 0x2000;
+        else
+            p = rom[romInUse & 1].direct() + slot * 0x2000;
+        next_rom_mask |= (1 << slot);
+    } else {
+        next_rom_mask &= ~(1 << slot);
+        if (page < NEXT_PAGES && nextRamPtr[page])
+            p = nextRamPtr[page];
+        else
+            p = (uint8_t*)open_bus_page.b;
+    }
+    ramCurrent[slot] = p;
+    ramContended[slot] = false; // Next has no contention
+    // Next pages are direct pointers (SRAM or butter XIP) — no pool
+    // write-back tracking, so the write hooks must not touch a stale
+    // pool page's flags through this slot.
+    mem_desc_t::bank_dirty[slot] = &mem_desc_t::dirty_sink;
+#if MEM_ACCESS_TRACE
+    mem_desc_t::bank_access[slot] = &mem_desc_t::access_sink;
+#endif
+}
+
+void MemESP::resetNextMapping() {
+    static const uint8_t def[8] = { 0xFF, 0xFF, 10, 11, 4, 5, 0, 1 };
+    for (int i = 0; i < 8; i++) applyMMU(i, def[i]);
+}

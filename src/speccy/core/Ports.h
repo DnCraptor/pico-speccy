@@ -64,6 +64,7 @@ public:
     // +2A/+3: the ULA does not put the screen byte on an unattached port — reads
     // return idle bus. Fuse models this as spectrum_unattached_port_none.
     static uint8_t getFloatBusDataNone();
+    static uint8_t getFloatBusDataNext();
 
     static void FDDStep(bool force);
     static void dmaOutput(uint16_t address, uint8_t data);

@@ -88,4 +88,11 @@ public:
     static bool load(const string& spg_fn);
 };
 
+// ZX Spectrum Next executable (.NEX)
+class FileNEX
+{
+public:
+    static bool load(const string& nex_fn);
+};
+
 #endif
