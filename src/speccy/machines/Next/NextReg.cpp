@@ -10,6 +10,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "app/ESPectrum.h"
 #include "speccy/video/Video.h"
 #include "app/Debug.h"
+#include "NextVideo.h"
 
 #pragma GCC optimize("O3")
 
@@ -64,11 +65,19 @@ uint16_t NextReg::activeLine() {
     return (uint16_t)((line + lines - paperStart) % lines);
 }
 
+static void applyRomSelect();
+static void applyBankC000();
+
 void NextReg::write(uint8_t r, uint8_t v) {
     reg[r] = v;
     switch (r) {
         case 0x02: // Reset: bit1 = hard, bit0 = soft — latched only for now
             break;
+        case 0x05: { // Peripheral 1: bit 2 = 50/60 Hz
+            ESPectrum::target = (v & 0x04) ? 17067 : MICROS_PER_FRAME_128;
+            CPU::updateStatesInFrame();
+            break;
+        }
         case 0x07: { // CPU speed: 0=3.5, 1=7, 2=14, 3=28 MHz
             uint8_t m = v & 0x03;
             if (ESPectrum::multiplicator != m) {
@@ -77,9 +86,6 @@ void NextReg::write(uint8_t r, uint8_t v) {
             }
             break;
         }
-        case 0x12: case 0x13: // Layer 2 RAM page / shadow page
-            updateLayer2Window();
-            break;
         case 0x22: // Line interrupt control
             ulaIrqDisabled = v & 0x04;
             lineIrqEnabled = v & 0x02;
@@ -88,13 +94,52 @@ void NextReg::write(uint8_t r, uint8_t v) {
         case 0x23: // Line interrupt value LSB
             lineIrqLine = (lineIrqLine & 0x100) | v;
             break;
+        case 0x12: case 0x13: // Layer 2 active/shadow bank
+            updateLayer2Window();
+            break;
+        case 0x18: case 0x19: case 0x1A: case 0x1B: // clip windows
+            NEXTVID::clipWrite(r - 0x18, v);
+            break;
+        case 0x1C: // clip window index reset
+            NEXTVID::clipIndexReset(v);
+            break;
+        case 0x34: // sprite slot select mirror
+            NEXTVID::spriteSlotSelect(v);
+            break;
+        case 0x35: case 0x36: case 0x37: case 0x38: case 0x39:
+            NEXTVID::spriteAttrDirect(r - 0x35, v);
+            break;
+        case 0x40: NEXTVID::palIndex(v);   break;
+        case 0x41: NEXTVID::palValue8(v);  break;
+        case 0x43: NEXTVID::palControl(v); break;
+        case 0x44: NEXTVID::palValue9(v);  break;
         case 0x50: case 0x51: case 0x52: case 0x53:
         case 0x54: case 0x55: case 0x56: case 0x57:
             MemESP::applyMMU(r - 0x50, v);
             break;
+        case 0x60: NEXTVID::copperDataWrite(v);   break;
+        case 0x61: NEXTVID::copperIndexLo(v);     break;
+        case 0x62: NEXTVID::copperControl(v);     break;
+        case 0x63: NEXTVID::copperData16Write(v); break;
+        case 0x8E: { // Spectrum memory mapping (atomic 0x7FFD/0x1FFD write)
+            // bit 3 = apply bank bits 7:4 to 0xC000; bit 2 = paging mode
+            // (0 normal / 1 +3 all-RAM); bits 1:0 = ROM select or all-RAM map
+            if (v & 0x08) {
+                port7FFD = (port7FFD & ~0x07) | ((v >> 4) & 0x07);
+                portDFFD = (portDFFD & ~0x0F) | ((v >> 7) & 0x01);
+                applyBankC000();
+            }
+            if (v & 0x04) {
+                write1FFD(0x01 | ((v & 0x03) << 1)); // all-RAM map
+            } else {
+                MemESP::romLatch = v & 0x01;
+                write1FFD((v & 0x02) << 1);          // normal, ROM high bit
+            }
+            break;
+        }
         default:
             // Remaining registers are latched; video/sprite/palette consumers
-            // read NextReg::reg[] directly as they are implemented (Phase 3).
+            // read NextReg::reg[] directly as they are implemented.
             break;
     }
 }
@@ -115,7 +160,7 @@ uint8_t NextReg::read(uint8_t r) {
     }
 }
 
-// ===== Layer 2 access port 0x123B =====
+// ===== Layer 2 access port (0x123B) =====
 
 void NextReg::writeLayer2Port(uint8_t v) {
     port123B = v;
@@ -197,3 +242,5 @@ void NextReg::write1FFD(uint8_t v) {
         applyBankC000();
     }
 }
+
+

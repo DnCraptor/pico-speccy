@@ -196,8 +196,10 @@ void CPU::updateStatesInFrame() {
             IntEnd = INT_END_PENTAGON;
         }
     } else if (Config::arch == A_NEXT) {
-        // Next runs 128K frame timing (the VGA-timing set of real TBBlue)
-        statesInFrame = TSTATES_PER_FRAME_128;
+        // Next runs 128K frame timing (the VGA-timing set of real TBBlue);
+        // nextreg 0x05 bit 2 selects 60Hz: 262 lines of 228 T-states
+        statesInFrame = (NextReg::reg[0x05] & 0x04) ? 228 * 262
+                                                    : TSTATES_PER_FRAME_128;
         IntStart = INT_START128;
         IntEnd = INT_END128 + CPU::latetiming;
     } else { // if (Config::arch == A_PENT) - by default

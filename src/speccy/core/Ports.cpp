@@ -81,6 +81,7 @@ extern "C" const uint32_t profi_default_palette16[16];
 #include "speccy/devices/disk/MB02.h"
 #include "speccy/machines/Plus3/Plus3Fdc.h"
 #include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextVideo.h"
 #include "hardware/gpio.h"
 #include "drivers/sdcard/sdcard.h"
 #include "speccy/machines/Atm.h"
@@ -1310,6 +1311,9 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       if (address == 0x243B) return NextReg::selected;
       if (address == 0x253B) return NextReg::read(NextReg::selected);
       if (address == 0x123B) return NextReg::port123B;
+      if (address == 0x303B) return NEXTVID::spriteFlagsRead();
+      // I2C bus (RTC) — no device attached: lines read idle-high
+      if (address == 0x103B || address == 0x113B) return 0xFF;
     }
     // ULA+ data port read
     if (Config::ulaplus && address == 0xFF3B) {
@@ -3260,6 +3264,27 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
       }
       if (address == 0x123B) { // Layer 2 access port
         NextReg::writeLayer2Port(data);
+        ioContentionLate(false);
+        return;
+      }
+      if (address == 0x303B) {
+        NEXTVID::spriteSlotSelect(data);
+        ioContentionLate(false);
+        return;
+      }
+      // I2C bus (RTC) — writes ignored, no device attached
+      if (address == 0x103B || address == 0x113B) {
+        ioContentionLate(false);
+        return;
+      }
+      // Sprite upload ports decode the low byte only
+      if (a8 == 0x57) {
+        NEXTVID::spriteAttrWrite(data);
+        ioContentionLate(false);
+        return;
+      }
+      if (a8 == 0x5B) {
+        NEXTVID::spritePatternWrite(data);
         ioContentionLate(false);
         return;
       }

@@ -74,6 +74,7 @@ static void ftTraceTick();   // defined in the VDAC2 glue section below
 #include "drivers/psram/psram_spi.h"
 #include "speccy/core/Ports.h"
 #include "speccy/devices/Z80DMA.h"
+#include "speccy/machines/Next/NextVideo.h"
 #include "hardware/xip_cache.h"
 #include "speccy/machines/Atm.h"
 #include "speccy/machines/Pentagon.h"
@@ -5294,6 +5295,17 @@ void VIDEO::Reset() {
             }
         }
     }
+
+    if (Z80Ops::isNext) {
+        // Next mode: scanline renderer replaces the beam-chasing pipeline.
+        // Placed last so nothing below re-points the Draw handlers.
+        gigascreen_enabled = false;
+        NEXTVID::Reset();
+        Draw = &NEXTVID::Tick;
+        Draw_Opcode = &NEXTVID::Tick_Opcode;
+        Draw_OSD169 = &NEXTVID::Tick;
+        DrawBorder = &NEXTVID::DrawBorderNop;
+    }
 }
 
 extern size_t getFreeHeap(void);
@@ -8290,6 +8302,12 @@ IRAM_ATTR void VIDEO::EndFrame() {
     // never waits (it stops the moment the FIFO is full), and 60 x 32 bytes per
     // PERF window comfortably carries the ~600 bytes those lines write.
     Debug::pumpUart();
+
+    if (Z80Ops::isNext) {
+        NEXTVID::EndFrame();
+        framecnt++;
+        return;
+    }
 
     linedraw_cnt = lin_end;
 
