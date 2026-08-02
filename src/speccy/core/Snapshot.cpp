@@ -291,8 +291,8 @@ bool FileSNA::load(const string& sna_fn, ArchIdx force_arch, RomsetIdx force_rom
         }
 
         MemESP::recoverPage0();
-        MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
-        MemESP::ramContended[3] = (Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isScorpion) ? false : (MemESP::bankLatch & 0x01 ? true: false);
+        MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3),
+                       (Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isScorpion) ? false : (MemESP::bankLatch & 0x01));
 
         VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
 
@@ -954,12 +954,12 @@ bool FileZ80::load(const string& z80_fn) {
             }
 
             if (z80_plus3) {
-                // plus3Remap owns all four slots and both contention rules on a +3.
+                // plus3Remap owns all four banks and both contention rules on a +3.
                 MemESP::plus3Remap(Ports::port1FFD);
             } else {
                 MemESP::recoverPage0();
-                MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
-                MemESP::ramContended[3] = (Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isScorpion) ? false : (MemESP::bankLatch & 0x01 ? true: false);
+                MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3),
+                               (Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isScorpion) ? false : (MemESP::bankLatch & 0x01));
             }
 
             VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
@@ -1155,8 +1155,7 @@ void FileZ80::loader48() {
     MemESP::ram[2].cleanup();
 
     MemESP::recoverPage0();
-    MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
-    MemESP::ramContended[3] = false;
+    MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3), false);
 
     VIDEO::grmem = MemESP::ram[5].direct();
 
@@ -1292,8 +1291,7 @@ void FileZ80::loaderTc2068() {
     MemESP::ram[2].cleanup();
 
     MemESP::recoverPage0();
-    MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
-    MemESP::ramContended[3] = false;
+    MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3), false);
 
     VIDEO::grmem = MemESP::ram[5].direct();
 
@@ -1441,7 +1439,7 @@ void FileZ80::loader128() {
     // correct ROM after recoverPage0() at the end of this function.
     if (Config::arch == A_PROFI) {
         MemESP::romInUse = 2;
-        MemESP::ramCurrent[0] = MemESP::rom[2].direct();
+        MemESP::plugPtr16(0, MemESP::rom[2].direct());
     }
 
     z80_array += dataOffset;
@@ -1528,8 +1526,8 @@ void FileZ80::loader128() {
     MemESP::ram[6].cleanup();
     
     MemESP::recoverPage0();
-    MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
-    MemESP::ramContended[3] = (Z80Ops::isPentagon || Z80Ops::isProfi) ? false : (MemESP::bankLatch & 0x01 ? true: false);
+    MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3),
+                   (Z80Ops::isPentagon || Z80Ops::isProfi) ? false : (MemESP::bankLatch & 0x01));
 
     VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
 
@@ -1561,9 +1559,9 @@ bool FileP::load(const string& p_fn) {
     FileZ80::loader128();
 
     uint16_t address = 16393;
-    uint8_t page = address >> 14;
-    MemESP::ensureResident(page); // accessor bank → real frame before raw fread
-    fread(&MemESP::ramCurrent[page][address & 0x3fff], p_size, 1, *file);
+    uint8_t slot = (address >> 13) & ~1; // even slot = 16K page base
+    MemESP::ensureResident(slot); // accessor bank → real frame before raw fread
+    fread(&MemESP::ramCurrent[slot][address & 0x3fff], p_size, 1, *file);
 
     fclose2(file);
 

@@ -5078,10 +5078,10 @@ c:
                     // Pages: cycle value left — affects code view (ROM/bank switch)
                     if (pagesCursorRow == 0) { // PAGE0: ROM
                         if (MemESP::romInUse > 0) MemESP::romInUse--;
-                        MemESP::ramCurrent[0] = MemESP::rom[MemESP::romInUse].direct();
+                        MemESP::plugPtr16(0, MemESP::rom[MemESP::romInUse].direct());
                     } else if (pagesCursorRow == 1) { // PAGE3: RAM bank
                         MemESP::bankLatch = (MemESP::bankLatch - 1) & 7;
-                        MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3); // slot 3, not bankLatch
+                        MemESP::plugPtr16(3, MemESP::ram[MemESP::bankLatch].sync(3)); // bank 3, not bankLatch
                     } else if (pagesCursorRow == 2) { // VIDEO
                         MemESP::videoLatch = MemESP::videoLatch ? 0 : 1;
                     } else if (pagesCursorRow == 3) { // PAGING LOCK
@@ -5101,10 +5101,10 @@ c:
                     // Pages: cycle value right — affects code view (ROM/bank switch)
                     if (pagesCursorRow == 0) {
                         if (MemESP::romInUse < 3) MemESP::romInUse++;
-                        MemESP::ramCurrent[0] = MemESP::rom[MemESP::romInUse].direct();
+                        MemESP::plugPtr16(0, MemESP::rom[MemESP::romInUse].direct());
                     } else if (pagesCursorRow == 1) {
                         MemESP::bankLatch = (MemESP::bankLatch + 1) & 7;
-                        MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3); // slot 3, not bankLatch
+                        MemESP::plugPtr16(3, MemESP::ram[MemESP::bankLatch].sync(3)); // bank 3, not bankLatch
                     } else if (pagesCursorRow == 2) {
                         MemESP::videoLatch = MemESP::videoLatch ? 0 : 1;
                     } else if (pagesCursorRow == 3) {

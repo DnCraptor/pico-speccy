@@ -31,7 +31,7 @@ void cmd(uint8_t c, uint8_t trk, uint8_t sec, uint8_t drv) {
     // work page mapped at window 2: #BFD8..#BFDB = per-drive motor countdown
     // (0 / #FF = motor off -> a ~103 ms spin-up delay before the next sector),
     // #BFDC = flags (bit 4 motor on, bit 7 ...).
-    const uint8_t* w2 = MemESP::ramCurrent[2];
+    const uint8_t* w2 = MemESP::ramCurrent[4];   // 16K window 2 base (8K slot 4)
     Debug::log("[FDC] +%luT (%lums) cmd=%02X tr=%u sec=%u drv=%u pc=%04X dos=%d mt=%02X%02X%02X%02X fl=%02X sp=%04X",
                (unsigned long)dt, (unsigned long)(dt / 3500u), c, trk, sec, drv,
                Z80::getRegPC(), (int)ESPectrum::trdos,
@@ -58,7 +58,7 @@ static void watch(const char* where) {
     char b[80]; int bp = 0;
     for (int i = 0; i < 24; i++) bp += snprintf(b + bp, sizeof b - bp, "%02X", q[i]);
     Debug::log("[FDCW] %s pc=%04X w2=%s C8:%s", where, Z80::getRegPC(),
-               MemESP::ramCurrent[2] == MemESP::ram[0xFB].direct() ? "FB" : "--", b);
+               MemESP::ramCurrent[4] == MemESP::ram[0xFB].direct() ? "FB" : "--", b);
 }
 void frame() { watch("frm"); }
 

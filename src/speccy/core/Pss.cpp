@@ -841,8 +841,7 @@ bool load(const string& path) {
         if (Z80Ops::isALF) Alf::snapRestore(haveAlf ? alfSel : (MemESP::romInUse & 0x3F), alfBit);
         if (!Z80Ops::is48) {
             if (Z80Ops::is1024) Pentagon::eff7Video(Ports::portEFF7);
-            MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
-            MemESP::ramContended[3] = Z80Ops::isPentagon ? false : (MemESP::bankLatch & 1) != 0;
+            MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3), Z80Ops::isPentagon ? false : (MemESP::bankLatch & 1) != 0);
         }
     }
     if (!Z80Ops::is48 && !Z80Ops::isProfi && !Z80Ops::isAtm && !Z80Ops::isTsconf)   // they set their own (DS80 4/6, ATM remap, VPage)

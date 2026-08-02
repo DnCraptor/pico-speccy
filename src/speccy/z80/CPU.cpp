@@ -794,7 +794,7 @@ IRAM_ATTR void CPU::haltAdvanceTo(uint32_t stEnd) {
 
 IRAM_ATTR void CPU::FlushOnHaltTo(uint32_t stEnd) {
 
-    uint8_t page = Z80::getRegPC() >> 14;
+    uint8_t page = Z80::getRegPC() >> 13;
     if (MemESP::ramContended[page]) {
 
         while (tstates < stEnd ) {
@@ -960,7 +960,7 @@ static __attribute__((noinline)) void atmPgTableReadTrace(uint16_t address) {
     static uint16_t n = 0;
     if (n >= 120) return;
     n++;
-    const uint8_t* pg = MemESP::ramCurrent[3];
+    const uint8_t* pg = MemESP::ramCurrent[6];   // 16K window 3 base (8K slot 6)
     Debug::log("[ATMRD] rd %04X=%02X pc=%04X page=%p 7ffd=%02X F7w3=%03X/%03X", address,
                pg[address & 0x3FFF], Z80::getRegPC(), (const void*)pg, Atm::p7ffd,
                Atm::pF7[3], Atm::pF7[7]);
@@ -992,7 +992,7 @@ static void atmPgTableWriteTrace(uint16_t address, uint8_t value) {
     if (n >= 200) return;
     n++;
     Debug::log("[ATMPT] wr %04X=%02X pc=%04X page=%p 7ffd=%02X", address, value, Z80::getRegPC(),
-               (const void*)MemESP::ramCurrent[address >> 14], Atm::p7ffd);
+               (const void*)MemESP::ramCurrent[(address >> 14) << 1], Atm::p7ffd);
 }
 #endif
 static inline void gsDmaPoke8(uint16_t address, uint8_t value) {
@@ -1006,13 +1006,13 @@ static inline void gsDmaPoke8(uint16_t address, uint8_t value) {
             const uint16_t hl = Z80::getRegHL();
             for (int d = 0x43; d <= 0x46; d++) {
                 const uint16_t src = (uint16_t)(hl - d);
-                const uint8_t* p = MemESP::ramCurrent[src >> 14] + (src & 0x3FFF);
+                const uint8_t* p = MemESP::ramCurrent[src >> 13] + (src & 0x1FFF);
                 if (p[0] == 0x3E && p[2] == 0xD3 && p[3] == 0xFD) { s_tpl = p;
                     Debug::log("[ATMTPL] template at %04X phys=%p (hl=%04X)", src, (const void*)p, hl); break; }
             }
         }
         if (s_tpl) {
-            const uint8_t* ph = MemESP::ramCurrent[address >> 14] + (address & 0x3FFF);
+            const uint8_t* ph = MemESP::ramCurrent[address >> 13] + (address & 0x1FFF);
             if (ph >= s_tpl && ph < s_tpl + 16) {
                 static uint16_t n = 0;
                 if (n < 80) { n++;
@@ -1026,7 +1026,7 @@ static inline void gsDmaPoke8(uint16_t address, uint8_t value) {
             static uint16_t n = 0;
             if (n < 80) { n++;
                 Debug::log("[ATMK] wr %04X=%02X pc=%04X page=%p 7ffd=%02X", address, value,
-                           Z80::getRegPC(), (const void*)MemESP::ramCurrent[address >> 14], Atm::p7ffd); }
+                           Z80::getRegPC(), (const void*)MemESP::ramCurrent[(address >> 14) << 1], Atm::p7ffd); }
         }
     }
 #endif
@@ -1062,14 +1062,14 @@ static inline void gsDmaPoke8(uint16_t address, uint8_t value) {
 static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_generic(uint16_t address);
 static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_tick(uint16_t address) {
     VIDEO::tsDrawTick();
-    return MemESP::ramCurrent[address >> 14][address & 0x3FFF];
+    return MemESP::ramCurrent[address >> 13][address & 0x1FFF];
 }
 // TS-Conf DRAM model live (g_ts_memcyc: 14 MHz wait states and/or a running DMA
 // the access steals a cycle from) — a tail call, so peek8 itself stays a leaf.
 static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_dram(uint16_t address) {   // a cache MISS (tsMemNoDram was false)
     CPU::tstates += 3 + TsConf::cpuMemMiss(address, false);
     if (CPU::tstates >= VIDEO::ts_line_t) VIDEO::tsDrawTick();
-    return MemESP::ramCurrent[address >> 14][address & 0x3FFF];
+    return MemESP::ramCurrent[address >> 13][address & 0x1FFF];
 }
 IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
     TS_PAGE_HIT(address);
@@ -1081,12 +1081,12 @@ IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
         if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(address)) return peek8_dram(address);
         CPU::tstates += 3;
         if (__builtin_expect(CPU::tstates >= VIDEO::ts_line_t, 0)) return peek8_tick(address);
-        return MemESP::ramCurrent[address >> 14][address & 0x3FFF];
+        return MemESP::ramCurrent[address >> 13][address & 0x1FFF];
     }
     return peek8_generic(address);
 }
 static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_generic(uint16_t address) {
-    VIDEO::Draw(3, MemESP::ramContended[address >> 14]);
+    VIDEO::Draw(3, MemESP::ramContended[address >> 13]);
     if (__builtin_expect(g_ts_memcyc != 0, 0)) {              // TS-Conf DRAM model (TsConf.cpp)
         const uint32_t w = TsConf::cpuMemRead(address, false);
         if (w) VIDEO::Draw(w, false);
@@ -1118,7 +1118,7 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
 #if DEBUG
     dbg_last_pc = pc;
 #endif
-    uint8_t pg = pc >> 14;
+    uint8_t pg = pc >> 13;
     // Scorpion Yellow-PCB even-M1 (see the g_scorp_even_m1 note in CPU.h): an M1
     // cycle fetching from 0x4000+ that would start on an odd T-state gets one
     // wait T first. Draw(1) so the renderer accounts the extra tact too.
@@ -1137,19 +1137,19 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
     }
     if (DivMMC::enabled) {
         DivMMC::preOpcFetch(pc);
-        pg = pc >> 14; // re-read in case instant map changed it
+        pg = pc >> 13; // re-read in case instant map changed it
         uint8_t opCode;
-        if (pg == 0 && MemESP::divmmc_mapped) {
-            opCode = (pc < 0x2000) ? MemESP::page0_lo[pc] : MemESP::page0_hi[pc & 0x1FFF];
+        if (pg <= 1 && MemESP::divmmc_mapped) {
+            opCode = (pg == 0) ? MemESP::page0_lo[pc] : MemESP::page0_hi[pc & 0x1FFF];
         } else {
-            opCode = MemESP::romPeek(pg, MemESP::ramCurrent[pg], pc & 0x3fff);
+            opCode = MemESP::romPeek(pg, MemESP::ramCurrent[pg], pc);
         }
         DivMMC::postOpcFetch();
         return opCode;
     }
     // MB-02+: page0 mapped but DivMMC not active — check divmmc_mapped for fetch
-    if (pg == 0 && MemESP::divmmc_mapped) {
-        return (pc < 0x2000) ? MemESP::page0_lo[pc] : MemESP::page0_hi[pc & 0x1FFF];
+    if (pg <= 1 && MemESP::divmmc_mapped) {
+        return (pg == 0) ? MemESP::page0_lo[pc] : MemESP::page0_hi[pc & 0x1FFF];
     }
     // Timex SCLD: unlike the NeoGS ZX-DMA window this one MUST be hooked on the
     // fetch path — a DOCK cartridge and the EX-ROM are code, and running them is
@@ -1158,7 +1158,7 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
     if (__builtin_expect(g_timex_mmu != 0, 0) && Timex::rd[pc >> 13])
         return timexPeek8(pc);
     TS_PAGE_HIT(pc);
-    return MemESP::romPeek(pg, MemESP::ramCurrent[pg], pc & 0x3fff);
+    return MemESP::romPeek(pg, MemESP::ramCurrent[pg], pc);
 }
 
 // // Write byte to RAM
@@ -1229,11 +1229,11 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
 
 // Write byte to RAM
 static inline void tsPoke8Store(uint16_t address, uint8_t value) {
-    const uint8_t pg = address >> 14;
+    const uint8_t pg = address >> 13;
     uint8_t* p = MemESP::ramCurrent[pg];
     if ((uintptr_t)p < 0x11000000u) return;       // TS-BIOS ROM window (flash pointer)
     *mem_desc_t::bank_dirty[pg] = true;
-    p[address & 0x3FFF] = value;
+    p[address & 0x1FFF] = value;
 }
 static IRAM_ATTR __attribute__((noinline)) void poke8_generic(uint16_t address, uint8_t value);
 static IRAM_ATTR __attribute__((noinline)) void poke8_tick(uint16_t address, uint8_t value) {
@@ -1274,7 +1274,7 @@ IRAM_ATTR void Z80Ops::poke8(uint16_t address, uint8_t value) {
     return poke8_generic(address, value);
 }
 static IRAM_ATTR __attribute__((noinline)) void poke8_generic(uint16_t address, uint8_t value) {
-    VIDEO::Draw(3, MemESP::ramContended[address >> 14]);
+    VIDEO::Draw(3, MemESP::ramContended[address >> 13]);
     if (__builtin_expect(g_ts_memcyc != 0, 0)) TsConf::cpuMemWrite(address);   // TS-Conf DRAM model
     gsDmaPoke8(address, value);
 }
@@ -1282,8 +1282,8 @@ static IRAM_ATTR __attribute__((noinline)) void poke8_generic(uint16_t address, 
 // Read word from RAM
 static inline uint16_t tsPeek16Load(uint16_t address) {   // lsb first, like the generic path
     const uint16_t a1 = address + 1;
-    const uint8_t lsb = MemESP::ramCurrent[address >> 14][address & 0x3FFF];
-    const uint8_t msb = MemESP::ramCurrent[a1 >> 14][a1 & 0x3FFF];
+    const uint8_t lsb = MemESP::ramCurrent[address >> 13][address & 0x1FFF];
+    const uint8_t msb = MemESP::ramCurrent[a1 >> 13][a1 & 0x1FFF];
     return (uint16_t)((msb << 8) | lsb);
 }
 static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_generic(uint16_t address);
@@ -1312,9 +1312,9 @@ IRAM_ATTR uint16_t Z80Ops::peek16(uint16_t address) {
 }
 static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_generic(uint16_t address) {
 
-    uint8_t page = address >> 14;
+    uint8_t page = address >> 13;
 
-    if (page == ((address + 1) >> 14)) {    // Check if address is between two different pages
+    if (page == ((address + 1) >> 13)) {    // Check if address is between two different pages
 
         if (MemESP::ramContended[page]) {
             VIDEO::Draw(3, true);
@@ -1390,10 +1390,10 @@ IRAM_ATTR void Z80Ops::poke16(uint16_t address, RegisterPair word) {
     return poke16_generic(address, word);
 }
 static IRAM_ATTR __attribute__((noinline)) void poke16_generic(uint16_t address, RegisterPair word) {
-    uint8_t page = address >> 14;
-    uint16_t page_addr = address & 0x3fff;
+    uint8_t page = address >> 13;
+    uint16_t page_addr = address & 0x1fff;
 
-    if (page_addr < 0x3fff) {    // Check if address is between two different pages
+    if (page_addr < 0x1fff) {    // Check if address is between two different pages
         if (MemESP::ramContended[page]) {
             VIDEO::Draw(3, true);
             VIDEO::Draw(3, true);
@@ -1526,7 +1526,7 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_generic(uint16_t address,
 /* Put an address on bus lasting 'tstates' cycles */
 IRAM_ATTR void Z80Ops::addressOnBus(uint16_t address, int32_t wstates) {
     if (g_ts_fastmem) { tsFastTick((uint32_t)wstates); return; }   // TsFastMem.h: no contention on TS-Conf
-    if (MemESP::ramContended[address >> 14]) {
+    if (MemESP::ramContended[address >> 13]) {
         for (int idx = 0; idx < wstates; idx++)
             VIDEO::Draw(1, true);
     } else

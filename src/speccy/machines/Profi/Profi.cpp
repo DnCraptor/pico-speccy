@@ -116,23 +116,23 @@ void Profi::writeDFFD(uint8_t data) {
       MemESP::recoverPage0();
     // SCR (bit6): bank2 → page6 (else page2)
     uint8_t bank2_page = bitRead(data, 6) ? 6 : 2;
-    MemESP::ramCurrent[2] = MemESP::ram[bank2_page].sync(2);
+    MemESP::plugPtr16(2, MemESP::ram[bank2_page].sync(2));
     // Re-apply bankLatch with new extended group offset
     uint32_t page = (MemESP::bankLatch & 0x7) + ((data & 0x7) << 3);
     uint32_t pages = ram_pages + butter_pages + psram_pages + swap_pages;
     if (page < pages) {
       MemESP::bankLatch = page;
-      MemESP::ramContended[3] = false;
+      MemESP::ramContended[6] = MemESP::ramContended[7] = false;
     }
     // SCO (bit3): per ZXMAK2 UpdateMapping —
     //   sco=0: MapRead4000 = RAM[5];       MapReadC000 = RAM[ramPage]  ← std 128K
     //   sco=1: MapRead4000 = RAM[ramPage];  MapReadC000 = RAM[7]       ← Profi extended
     if (bitRead(data, 3)) {
-      MemESP::ramCurrent[1] = MemESP::ram[MemESP::bankLatch].sync(1);
-      MemESP::ramCurrent[3] = MemESP::ram[7].sync(3);
+      MemESP::plugPtr16(1, MemESP::ram[MemESP::bankLatch].sync(1));
+      MemESP::plugPtr16(3, MemESP::ram[7].sync(3));
     } else {
-      MemESP::ramCurrent[1] = MemESP::ram[5].direct();
-      MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
+      MemESP::plugPtr16(1, MemESP::ram[5].direct());
+      MemESP::plugPtr16(3, MemESP::ram[MemESP::bankLatch].sync(3));
     }
 #if PROFI_PORT_TRACE
     // Log when a DS80 video page (4/6/56/58) is mapped into the Z80 address space.
@@ -446,7 +446,7 @@ bool Profi::extWrite(uint16_t address, uint8_t data) {
         ESPectrum::trdos = true;
         if (!MemESP::page0ram) {
           MemESP::romInUse = MemESP::romLatch ? 1 : 0; // f(DOS,ROM14)
-          MemESP::ramCurrent[0] = MemESP::rom[MemESP::romInUse].direct();
+          MemESP::plugPtr16(0, MemESP::rom[MemESP::romInUse].direct());
         }
       }
       return true;

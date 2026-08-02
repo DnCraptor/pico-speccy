@@ -54,8 +54,7 @@ void Scorpion::kay1FFDWrite(uint8_t data) {
   uint32_t page = Scorpion::c000Page(MemESP::bankLatch & 0x07);
   if (page != MemESP::bankLatch) {
     MemESP::bankLatch = page;
-    MemESP::ramContended[3] = false;
-    MemESP::ramCurrent[3] = MemESP::ram[page].sync(3);
+    MemESP::plug16(3, MemESP::ram[page].sync(3), false);
   }
   MemESP::page0ram = data & 0x01;
   Ports::kayTurboUpdate();
@@ -91,8 +90,7 @@ void Scorpion::write1FFD(uint16_t address, uint8_t data) {
   uint32_t page = Scorpion::c000Page(MemESP::bankLatch & 0x07);
   if (page != MemESP::bankLatch) {
     MemESP::bankLatch = page;
-    MemESP::ramContended[3] = false;
-    MemESP::ramCurrent[3] = MemESP::ram[page].sync(3);
+    MemESP::plug16(3, MemESP::ram[page].sync(3), false);
   }
   MemESP::page0ram = data & 0x01;
   Ports::scorpionRomUpdate();   // D1 service / GMX D2 DOS / TR-DOS / romLatch + recoverPage0
@@ -155,14 +153,12 @@ void Scorpion::snapRemap() {
   uint32_t c000 = MemESP::bankLatch;
   if (c000 >= pages) c000 = MemESP::bankLatch & 7;
   MemESP::bankLatch = c000;
-  MemESP::ramCurrent[3] = MemESP::ram[c000].sync(3);
-  MemESP::ramContended[3] = false;
+  MemESP::plug16(3, MemESP::ram[c000].sync(3), false);
   if (g_scorp_gmx) {
     // #78FD pages the 0x8000 window (page = value ^ 2); 0 after a reset = page 2.
     uint32_t pg = Ports::gmxPort78FD ^ 2;
     if (pg >= pages) pg = 2;
-    MemESP::ramCurrent[2] = MemESP::ram[pg].sync(2);
-    MemESP::ramContended[2] = false;
+    MemESP::plug16(2, MemESP::ram[pg].sync(2), false);
     const uint8_t mult = (Ports::gmxPort7EFD & 0x80) ? 1 : 0;   // #7EFD D7 = 7 MHz
     if (mult != ESPectrum::multiplicator) {
       ESPectrum::multiplicator = mult;

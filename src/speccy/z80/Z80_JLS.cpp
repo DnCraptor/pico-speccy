@@ -54,12 +54,12 @@
 uint8_t page;
 
 #define PEEK8(result,address) \
- page = address >> 14; \
+ page = address >> 13; \
  VIDEO::Draw(3,MemESP::ramContended[page]); \
- if (page == 0 && MemESP::divmmc_mapped) \
-     result = ((address) < 0x2000) ? MemESP::page0_lo[address] : MemESP::page0_hi[(address) & 0x1FFF]; \
+ if (page <= 1 && MemESP::divmmc_mapped) \
+     result = (page == 0) ? MemESP::page0_lo[address] : MemESP::page0_hi[(address) & 0x1FFF]; \
  else \
-     result = MemESP::romPeek(page, MemESP::ramCurrent[page], (address) & 0x3fff);
+     result = MemESP::romPeek(page, MemESP::ramCurrent[page], address);
 
 // miembros estáticos
 
@@ -839,8 +839,8 @@ IRAM_ATTR void Z80::check_trdos() {
         MemESP::romInUse = nmiDos_savedRomInUse;
         ESPectrum::trdos = nmiDos_savedTrdos;
         if (ESPectrum::trdos) {
-            MemESP::ramCurrent[0] = MemESP::rom[Config::arch == A_SCORP
-                ? ((g_scorp_banked ? (Ports::gmxPlane << 2) : 0) | 3) : 4].direct();
+            MemESP::plugPtr16(0, MemESP::rom[Config::arch == A_SCORP
+                ? ((g_scorp_banked ? (Ports::gmxPlane << 2) : 0) | 3) : 4].direct());
         } else {
             MemESP::recoverPage0();
         }
@@ -913,7 +913,7 @@ IRAM_ATTR void Z80::check_trdos() {
                              (unsigned)MemESP::romInUse, (unsigned)dosBank);
 #endif
                     MemESP::romInUse = dosBank;
-                    MemESP::ramCurrent[0] = MemESP::rom[dosBank].direct();
+                    MemESP::plugPtr16(0, MemESP::rom[dosBank].direct());
                     ESPectrum::trdos = true;
                     if (g_scorp_banked) Ports::gmxTapRecheck();
                 } else if (Config::arch == A_PROFI) {
@@ -1086,7 +1086,7 @@ void Z80::interrupt(void) {
     if (Z80Ops::isAtm && REG_PC >= 0x0909 && REG_PC < 0x0951 && s_nest_logged < 20) {
         s_nest_logged++;
         Debug::log("[ATMEI] INT taken at pc=%04X sp=%04X w0=%p w1=%p", REG_PC, REG_SP,
-                   (const void*)MemESP::ramCurrent[0], (const void*)MemESP::ramCurrent[1]);
+                   (const void*)MemESP::ramCurrent[0], (const void*)MemESP::ramCurrent[2]);
         for (int j = 0; j < 8; j++) {
             const uint8_t k = (uint8_t)(s_ei_i - 8 + j) & 7;
             Debug::log("[ATMEI]   EI#%d pc=%04X w0=%p w1=%p", j, s_ei_pc[k], s_ei_w0[k], s_ei_w1[k]);
@@ -1122,7 +1122,7 @@ void Z80::interrupt(void) {
         // for the General Sound to answer its detect command 0x23).
         if (REG_PC == 0x0038 && !Z80Ops::is48 && MemESP::romInUse == 0 &&
             !MemESP::page0ram && !MemESP::newSRAM) {
-            const uint8_t* p5 = MemESP::ramCurrent[1];
+            const uint8_t* p5 = MemESP::ramCurrent[2];   // 8K slot at 0x4000 (page 5)
             if (p5 && p5[0x1B00] == 0x00) {
                 static bool warned = false;
                 if (!warned) {
@@ -1237,7 +1237,7 @@ Z80_COLD void Z80::doNMIDOS(void) {
     uint8_t nmiDosBank = (Config::arch == A_SCORP)
                              ? (uint8_t)((g_scorp_banked ? (Ports::gmxPlane << 2) : 0) | 3) : 4;
     MemESP::romInUse = nmiDosBank;
-    MemESP::ramCurrent[0] = MemESP::rom[nmiDosBank].direct();
+    MemESP::plugPtr16(0, MemESP::rom[nmiDosBank].direct());
     ESPectrum::trdos = true; // Protect ROM from 7FFD changes
     if (g_scorp_banked) Ports::gmxTapRecheck(); // re-arm tap + re-register the bank overlay
 
@@ -1365,11 +1365,11 @@ IRAM_ATTR void Z80::exec_nocheck() {
 #if NEO8_TRAP
         Debug::neo8TrapStep(REG_PC, REG_SP, REG_IX, REG_IY);
 #endif
-        uint8_t pg = REG_PCh >> 6;
+        uint8_t pg = REG_PCh >> 5;
         if (g_ts_fastmem) {                   // TsFastMem.h: TS-Conf, plain POINTER banks, counter video
             tsFastTick(4);
             if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(REG_PC)) tsFastTick(TsConf::cpuMemMiss(REG_PC, true));   // DRAM model: a cache miss
-            opCode = MemESP::ramCurrent[pg][REG_PC & 0x3fff];
+            opCode = MemESP::ramCurrent[pg][REG_PC & 0x1fff];
         } else {
         VIDEO::Draw_Opcode(MemESP::ramContended[pg]);
         if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(REG_PC)) {   // TS-Conf DRAM model (TsConf.cpp)
@@ -1379,14 +1379,14 @@ IRAM_ATTR void Z80::exec_nocheck() {
         if (DivMMC::enabled) {
             DivMMC::preOpcFetch(REG_PC);
             // Fetch opcode from currently mapped memory
-            pg = REG_PCh >> 6; // re-read in case 0x3Dxx instant map changed it
-            if (pg == 0 && MemESP::divmmc_mapped) {
-                opCode = (REG_PC < 0x2000) ? MemESP::page0_lo[REG_PC] : MemESP::page0_hi[REG_PC & 0x1FFF];
+            pg = REG_PCh >> 5; // re-read in case 0x3Dxx instant map changed it
+            if (pg <= 1 && MemESP::divmmc_mapped) {
+                opCode = (pg == 0) ? MemESP::page0_lo[REG_PC] : MemESP::page0_hi[REG_PC & 0x1FFF];
             } else {
-                opCode = MemESP::romPeek(pg, MemESP::ramCurrent[pg], REG_PC & 0x3fff);
+                opCode = MemESP::romPeek(pg, MemESP::ramCurrent[pg], REG_PC);
             }
             DivMMC::postOpcFetch();
-        } else if (pg == 0 && MemESP::divmmc_mapped) {
+        } else if (pg <= 1 && MemESP::divmmc_mapped) {
             opCode = (REG_PC < 0x2000) ? MemESP::page0_lo[REG_PC] : MemESP::page0_hi[REG_PC & 0x1FFF];
         } else if (__builtin_expect(g_timex_mmu != 0, 0) && Timex::rd[REG_PC >> 13]) {
             // Timex TC2068 SCLD window (Timex.h). This fetch is a SECOND copy of
@@ -1399,7 +1399,7 @@ IRAM_ATTR void Z80::exec_nocheck() {
             // and then fell apart on its own with no input.
             opCode = Timex::read8(REG_PC);
         } else
-        opCode = MemESP::romPeek(pg, MemESP::ramCurrent[pg], REG_PC & 0x3fff);
+        opCode = MemESP::romPeek(pg, MemESP::ramCurrent[pg], REG_PC);
         }
 
         regR++;
@@ -1409,7 +1409,7 @@ IRAM_ATTR void Z80::exec_nocheck() {
         if (Z80Ops::isTsconf) {
             extern uint32_t ts_page_hist[257];
             const uintptr_t bp = (uintptr_t)MemESP::ramCurrent[pg];
-            ts_page_hist[(bp >= 0x10000000u && bp < 0x11000000u) ? 256 : TsConf::r.page[pg]]++;
+            ts_page_hist[(bp >= 0x10000000u && bp < 0x11000000u) ? 256 : TsConf::r.page[pg >> 1]]++;
         }
 #endif
 
@@ -2456,7 +2456,7 @@ void Z80::decodeOpcodefb() /* EI */
         const uint8_t k = s_ei_i++ & 7;
         s_ei_pc[k] = (uint16_t)(REG_PC - 1);
         s_ei_w0[k] = MemESP::ramCurrent[0];
-        s_ei_w1[k] = MemESP::ramCurrent[1];
+        s_ei_w1[k] = MemESP::ramCurrent[2];
     }
 #endif
     ffIFF1 = ffIFF2 = true;
@@ -2673,8 +2673,8 @@ void Z80::decodeRST() {    /* RST p */
             const uint16_t at = (uint16_t)(REG_PC - 1);
             Debug::log("[ATMRST] RST38 at %04X sp=%04X [sp]=%04X w=%p %p %p %p", at, REG_SP,
                        Z80Ops::peek16(REG_SP),
-                       (const void*)MemESP::ramCurrent[0], (const void*)MemESP::ramCurrent[1],
-                       (const void*)MemESP::ramCurrent[2], (const void*)MemESP::ramCurrent[3]);
+                       (const void*)MemESP::ramCurrent[0], (const void*)MemESP::ramCurrent[2],
+                       (const void*)MemESP::ramCurrent[4], (const void*)MemESP::ramCurrent[6]);
             if (n <= 2) {
                 const uint8_t* w0 = MemESP::ramCurrent[0];
                 Debug::log("[ATMRST]   w0[40..57]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",

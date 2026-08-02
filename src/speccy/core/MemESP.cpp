@@ -48,14 +48,18 @@ visit https://zxespectrum.speccy.org/contacto
 std::list<mem_desc_t> mem_desc_t::pages;
 uint8_t* mem_desc_t::plugged_in[4] = { 0, 0, 0, 0 };
 bool  mem_desc_t::dirty_sink = false;
-bool* mem_desc_t::bank_dirty[4] = {
+bool* mem_desc_t::bank_dirty[8] = {
+    &mem_desc_t::dirty_sink, &mem_desc_t::dirty_sink,
+    &mem_desc_t::dirty_sink, &mem_desc_t::dirty_sink,
     &mem_desc_t::dirty_sink, &mem_desc_t::dirty_sink,
     &mem_desc_t::dirty_sink, &mem_desc_t::dirty_sink,
 };
 mem_desc_t mem_desc_t::acc_bank[4];
 #if MEM_ACCESS_TRACE
 uint32_t  mem_desc_t::access_sink = 0;
-uint32_t* mem_desc_t::bank_access[4] = {
+uint32_t* mem_desc_t::bank_access[8] = {
+    &mem_desc_t::access_sink, &mem_desc_t::access_sink,
+    &mem_desc_t::access_sink, &mem_desc_t::access_sink,
     &mem_desc_t::access_sink, &mem_desc_t::access_sink,
     &mem_desc_t::access_sink, &mem_desc_t::access_sink,
 };
@@ -119,7 +123,7 @@ void MemESP::accessorWrite(uint8_t bank, uint16_t off, uint8_t v) {
 void MemESP::promoteBank(uint8_t bank) {
     mem_spi_promo++;
     g_promoPending &= (uint8_t)~(1u << bank);
-    ramCurrent[bank] = mem_desc_t::acc_bank[bank].materialize(bank);
+    plugPtr16(bank, mem_desc_t::acc_bank[bank].materialize(bank));
 }
 
 void MemESP::promoFrameReset(uint8_t inlineBudget) {
@@ -134,7 +138,7 @@ void MemESP::idleService(uint64_t deadline_us) {
         g_promoPending &= (uint8_t)~(1u << bank);
         // Re-validate: the slot may have been re-synced (or promoted via the
         // inline budget) since the request was queued.
-        if (ramCurrent[bank] != nullptr) continue;
+        if (ramCurrent[bank * 2] != nullptr) continue;
         if (!mem_desc_t::acc_bank[bank].acc_hot()) continue;
         uint64_t t0 = time_us_64();
         promoteBank(bank);
@@ -263,9 +267,9 @@ void* mem_desc_t::mem_desc_int_t::operator new(size_t sz) {
 
 void mem_desc_t::reset(void) {
     memset(vram_pg_valid, 0, sizeof(vram_pg_valid));
-    for (int i = 0; i < 4; ++i) bank_dirty[i] = &dirty_sink;
+    for (int i = 0; i < 8; ++i) bank_dirty[i] = &dirty_sink;
 #if MEM_ACCESS_TRACE
-    for (int i = 0; i < 4; ++i) bank_access[i] = &access_sink;
+    for (int i = 0; i < 8; ++i) bank_access[i] = &access_sink;
 #endif
     pages.clear();
     s_swapFresh = true;     // recreate the swap file on its first use (see swapF)
@@ -714,8 +718,8 @@ mem_desc_t* MemESP::ram = temp;
 bool MemESP::newSRAM = false;
 int ram_pages = 2, butter_pages = 0, psram_pages = 0, swap_pages = 0;
 
-uint8_t* MemESP::ramCurrent[4];
-bool MemESP::ramContended[4];
+uint8_t* MemESP::ramCurrent[8];
+bool MemESP::ramContended[8];
 
 uint8_t MemESP::notMore128 = 0;
 uint32_t MemESP::page0ram = 0;
@@ -735,23 +739,17 @@ void MemESP::plus3Remap(uint8_t p1ffd) {
         const uint8_t* m = plus3SpecialPages(p1ffd);
         p3special = 1;
         page0ram  = 1;          // for outside observers (debugger, snapshots)
-        for (uint8_t i = 0; i < 4; i++) {
-            ramCurrent[i]   = ram[m[i]].sync(i);
-            ramContended[i] = plus3PageContended(m[i]);
-        }
+        for (uint8_t i = 0; i < 4; i++)
+            plug16(i, ram[m[i]].sync(i), plus3PageContended(m[i]));
     } else {
         const uint8_t bank = bankLatch & 0x07;
         p3special = 0;
         page0ram  = 0;
-        romInUse        = plus3RomIndex(p1ffd, romLatch);
-        ramCurrent[0]   = rom[romInUse].direct();
-        ramContended[0] = false;
-        ramCurrent[1]   = ram[5].sync(1);
-        ramContended[1] = plus3PageContended(5);
-        ramCurrent[2]   = ram[2].sync(2);
-        ramContended[2] = plus3PageContended(2);
-        ramCurrent[3]   = ram[bank].sync(3);
-        ramContended[3] = plus3PageContended(bank);
+        romInUse = plus3RomIndex(p1ffd, romLatch);
+        plug16(0, rom[romInUse].direct(), false);
+        plug16(1, ram[5].sync(1),   plus3PageContended(5));
+        plug16(2, ram[2].sync(2),   plus3PageContended(2));
+        plug16(3, ram[bank].sync(3), plus3PageContended(bank));
     }
 }
 
@@ -865,10 +863,10 @@ bool* MemESP::mb02_page_dirty = nullptr; // set by MB02::applyMapping (SRAM page
 uint8_t MemESP::dbgPeek(uint16_t addr) {
     if (__builtin_expect(g_timex_mmu != 0, 0) && Timex::rd[addr >> 13])
         return Timex::read8(addr);
-    uint8_t page = addr >> 14;
-    if (page == 0 && divmmc_mapped)
-        return (addr < 0x2000) ? page0_lo[addr] : page0_hi[addr & 0x1FFF];
-    return romPeek(page, ramCurrent[page], addr & 0x3fff);
+    uint8_t slot = addr >> 13;
+    if (slot <= 1 && divmmc_mapped)
+        return (slot == 0) ? page0_lo[addr] : page0_hi[addr & 0x1FFF];
+    return romPeek(slot, ramCurrent[slot], addr);
 }
 
 void MemESP::dbgPoke(uint16_t addr, uint8_t data) {

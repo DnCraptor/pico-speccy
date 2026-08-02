@@ -135,8 +135,8 @@ void snapLoad(const uint8_t* in, uint32_t n) {
 void contendApply() {
     g_evo_contend = evo && (Config::isEvo48Raster() || Config::isEvo128Raster()) &&
                     ESPectrum::multiplicator == 0;
-    MemESP::ramContended[1] = g_evo_contend;
-    MemESP::ramContended[3] = g_evo_contend && Config::isEvo128Raster() && (p7ffd & 1);
+    MemESP::ramContended[2] = MemESP::ramContended[3] = g_evo_contend;
+    MemESP::ramContended[6] = MemESP::ramContended[7] = g_evo_contend && Config::isEvo128Raster() && (p7ffd & 1);
 }
 
 // Scroll Lock = the AVR's raster switch (avr/baseconf zx.c: case 0x7E cycles the
@@ -290,7 +290,7 @@ static bool portWriteImpl(uint16_t address, uint8_t data) {
         static uint16_t n = 0;
         if (n < 300) { n++;
             const uint16_t sp = Z80::getRegSP();
-            auto rd = [](uint16_t a) -> uint8_t { return MemESP::ramCurrent[a >> 14][a & 0x3FFF]; };
+            auto rd = [](uint16_t a) -> uint8_t { return MemESP::ramCurrent[a >> 13][a & 0x1FFF]; };
             Debug::log("[BF] pc=%04X %02X->%02X sp=%04X ret=%02X%02X %02X%02X 7ffd=%02X eff7=%02X w2=%03X/%03X%s", Z80::getRegPC(), pBF, data, sp,
                        rd((uint16_t)(sp + 1)), rd(sp), rd((uint16_t)(sp + 3)), rd((uint16_t)(sp + 2)),
                        p7ffd, pEFF7, pF7[2], pF7[6],

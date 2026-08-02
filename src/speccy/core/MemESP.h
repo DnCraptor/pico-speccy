@@ -116,18 +116,20 @@ class mem_desc_t {
     static std::list<mem_desc_t> pages; // a pool of assigned pages
     static uint8_t* plugged_in[4]; // pointers are plugged to 64k space (do not revoke 'em)
 public:
-    // Per-CPU-bank dirty hooks: writebyte() does `*bank_dirty[page] = true` on
-    // every RAM write; sync(bank) re-points the slot at the plugged page's
-    // dirty flag (ROM slots point at dirty_sink).  A false positive (stale
-    // pointer marking an unrelated page) only costs a redundant write-back;
-    // pool pages are only ever plugged via sync(), so no dirty write is missed.
-    static bool* bank_dirty[4];
+    // Per-CPU-slot dirty hooks: writebyte() does `*bank_dirty[slot] = true` on
+    // every RAM write; sync(bank) re-points BOTH 8K slots of the 16K bank at
+    // the plugged page's dirty flag (ROM slots point at dirty_sink).  A false
+    // positive (stale pointer marking an unrelated page) only costs a redundant
+    // write-back; pool pages are only ever plugged via sync(), so no dirty
+    // write is missed.  8 entries = 8K slot granularity (Next MMU); a legacy
+    // 16K bank owns the slot pair 2b/2b+1, both pointing at the same flag.
+    static bool* bank_dirty[8];
     static bool  dirty_sink;
-    static inline void mark_bank_dirty(uint8_t bank) { if (bank < 4) *bank_dirty[bank] = true; }
+    static inline void mark_bank_dirty(uint8_t slot) { if (slot < 8) *bank_dirty[slot] = true; }
 #if MEM_ACCESS_TRACE
     // Same pointer-per-slot scheme for the access counters (feasibility study
     // for the accessor-mode bank window — see [ACC] log in Video.cpp).
-    static uint32_t* bank_access[4];
+    static uint32_t* bank_access[8];
     static uint32_t  access_sink;
 #endif
     // Accessor-mode bank window: sync() of an SPI-backed non-resident page
@@ -223,9 +225,13 @@ public:
         uint8_t* res = _int->p;
         if (bank < 4) {
             plugged_in[bank] = res;
-            bank_dirty[bank] = _int->is_rom ? &dirty_sink : &_int->dirty;
+            bool* d = _int->is_rom ? &dirty_sink : &_int->dirty;
+            bank_dirty[bank * 2] = d;
+            bank_dirty[bank * 2 + 1] = d;
 #if MEM_ACCESS_TRACE
-            bank_access[bank] = _int->is_rom ? &access_sink : &_int->acc;
+            uint32_t* a = _int->is_rom ? &access_sink : &_int->acc;
+            bank_access[bank * 2] = a;
+            bank_access[bank * 2 + 1] = a;
 #endif
         }
         return res;
@@ -241,7 +247,9 @@ public:
              vram_butter(_int->vram_off()))) {
             acc_bank[bank] = *this;
             plugged_in[bank] = 0;
-            bank_dirty[bank] = &dirty_sink;   // accessor writes go straight to backing
+            // accessor writes go straight to backing
+            bank_dirty[bank * 2] = &dirty_sink;
+            bank_dirty[bank * 2 + 1] = &dirty_sink;
             return nullptr;
         }
         return materialize(bank);
@@ -320,8 +328,23 @@ public:
 
     static bool newSRAM;
 
-    static uint8_t* ramCurrent[4];
-    static bool ramContended[4];
+    // 8 slots of 8K each (Next MMU granularity); legacy 16K pages occupy
+    // slot pairs via plug16()/plugPtr16(). Hot paths index by addr >> 13.
+    static uint8_t* ramCurrent[8];
+    static bool ramContended[8];
+
+    // Plug a 16K block into 16K bank s16 (0..3) — both 8K slots at once.
+    // A nullptr block (accessor-mode bank from sync()) keeps BOTH slots null:
+    // readbyte/writebyte/romPeek detect the null slot and serve per-byte.
+    inline static void plugPtr16(uint8_t s16, uint8_t* p) {
+        ramCurrent[s16 * 2] = p;
+        ramCurrent[s16 * 2 + 1] = p ? p + 0x2000 : nullptr;
+    }
+    inline static void plug16(uint8_t s16, uint8_t* p, bool contended) {
+        plugPtr16(s16, p);
+        ramContended[s16 * 2] = contended;
+        ramContended[s16 * 2 + 1] = contended;
+    }
 
     static uint8_t notMore128;
     static uint32_t page0ram;
@@ -366,20 +389,25 @@ public:
             if (overlayBase[i] == p) return overlayPtr[i];
         return nullptr;
     }
-    // Read byte `off` (0..0x3FFF) from page `page` whose bank pointer is `p`,
-    // applying any registered page-0 ROM overlay. Use at EVERY ROM read fast path
-    // (readbyte, fetchOpcode, the Z80 core's inline fetch) so overlays are consistent.
-    static inline uint8_t romPeek(uint8_t page, uint8_t* p, uint16_t off) {
-        if (__builtin_expect(overlayCount != 0, 0) && page == 0) {
+    // Read the byte at Z80 address `addr` through slot pointer `p`, applying
+    // any registered page-0 ROM overlay. Use at EVERY ROM read fast path
+    // (readbyte, fetchOpcode, the Z80 core's inline fetch) so overlays are
+    // consistent. `slot` = addr >> 13, `p` = ramCurrent[slot], `addr` is the
+    // FULL Z80 address (masking is internal).
+    // The overlay registry is keyed by the 16K base pointer, so the page-0
+    // lookup uses ramCurrent[0] (slot 1 holds base+0x2000, which would miss).
+    static inline uint8_t romPeek(uint8_t slot, uint8_t* p, uint16_t addr) {
+        if (__builtin_expect(overlayCount != 0, 0) && slot <= 1) {
             for (uint8_t i = 0; i < overlayCount; i++)
-                if (overlayBase[i] == p) {
+                if (overlayBase[i] == ramCurrent[0]) {
                     const uint8_t* f = overlayFlat[i];
-                    return f ? f[off] : rom_overlay_byte(overlayPtr[i], p, off);
+                    return f ? f[addr & 0x3fff]
+                             : rom_overlay_byte(overlayPtr[i], ramCurrent[0], addr & 0x3fff);
                 }
         }
         // Accessor-mode bank (sync() deferred the 16KB load): serve per-byte.
-        if (__builtin_expect(p == nullptr, 0)) return accessorRead(page, off);
-        return p[off];
+        if (__builtin_expect(p == nullptr, 0)) return accessorRead(slot >> 1, addr & 0x3fff);
+        return p[addr & 0x1fff];
     }
 
     // Accessor-mode bank window (cold paths, MemESP.cpp): per-byte SPI access
@@ -395,10 +423,11 @@ public:
     // scheduling change.  promoFrameReset() is called once per frame.
     static void promoFrameReset(uint8_t inlineBudget);
     static void idleService(uint64_t deadline_us);
-    // For code that needs a raw ramCurrent[page] pointer (tape flashload,
+    // For code that needs a raw ramCurrent[slot] pointer (tape flashload,
     // debugger poke): force an accessor-mode bank into a real SRAM frame.
-    static inline void ensureResident(uint8_t page) {
-        if (page < 4 && ramCurrent[page] == nullptr) promoteBank(page);
+    // Takes an 8K slot index; the promotion works on the owning 16K bank.
+    static inline void ensureResident(uint8_t slot) {
+        if (slot < 8 && ramCurrent[slot] == nullptr) promoteBank(slot >> 1);
     }
 
     static uint8_t* page0_lo;      // 0x0000-0x1FFF when DivMMC/MB02 mapped
@@ -436,8 +465,9 @@ public:
 
     inline static void recoverPage0() {
         if (__builtin_expect(p3special != 0, 0)) return;   // +3 all-RAM: plus3Remap owns page 0
-        MemESP::ramCurrent[0] = MemESP::newSRAM ? MemESP::ram[MEM_PG_CNT + MemESP::romLatch].sync(0) :
-                               (MemESP::page0ram ? MemESP::ram[0].sync(0) : MemESP::rom[MemESP::romInUse].direct());
+        // Pointer-only, like the pre-8K code: page-0 contention never changes.
+        MemESP::plugPtr16(0, MemESP::newSRAM ? MemESP::ram[MEM_PG_CNT + MemESP::romLatch].sync(0) :
+                             (MemESP::page0ram ? MemESP::ram[0].sync(0) : MemESP::rom[MemESP::romInUse].direct()));
     }
 };
 
@@ -461,16 +491,16 @@ inline int MemESP::getByteContention(uint16_t addr) {
 inline uint8_t MemESP::readbyte(uint16_t addr) {
     if (__builtin_expect(Config::numMemReadBP != 0, 0))
         checkMemReadBP(addr);
-    uint8_t page = addr >> 14;
-    if (page == 0 && divmmc_mapped) {
-        return (addr < 0x2000) ? page0_lo[addr] : page0_hi[addr & 0x1FFF];
+    uint8_t slot = addr >> 13;
+    if (slot <= 1 && divmmc_mapped) {
+        return (slot == 0) ? page0_lo[addr] : page0_hi[addr & 0x1FFF];
     }
 #if MEM_ACCESS_TRACE
     // Count only RAM accesses (flash ROM at 0x10xxxxxx is plugged via direct()
     // without sync(), so its slot pointer would be stale — the guard filters it).
-    if (ramCurrent[page] >= (uint8_t*)0x11000000) *mem_desc_t::bank_access[page] += 1;
+    if (ramCurrent[slot] >= (uint8_t*)0x11000000) *mem_desc_t::bank_access[slot] += 1;
 #endif
-    return romPeek(page, ramCurrent[page], addr & 0x3fff);
+    return romPeek(slot, ramCurrent[slot], addr);
 }
 
 inline uint16_t MemESP::readword(uint16_t addr) {
@@ -481,10 +511,10 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
 {
     if (__builtin_expect(Config::numMemWriteBP != 0, 0))
         checkMemWriteBP(addr);
-    uint8_t page = addr >> 14;
-    if (page == 0 && ramCurrent[0] == g_alfWindow) return; // ALF lazy cart: page 0 is ROM
-    if (page == 0 && divmmc_mapped) {
-        if (addr < 0x2000) {
+    uint8_t slot = addr >> 13;
+    if (slot <= 1 && ramCurrent[0] == g_alfWindow) return; // ALF lazy cart: page 0 is ROM
+    if (slot <= 1 && divmmc_mapped) {
+        if (slot == 0) {
             // 0x0000-0x1FFF: writable only when MAPRAM (RAM bank)
             // In PSRAM mode: page0_lo >= 0x11000000 means PSRAM bank
             // In swap mode: divmmc_lo_dirty != null means heap bank (MAPRAM)
@@ -505,17 +535,17 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
         }
         return;
     }
-    uint8_t* p = ramCurrent[page];
+    uint8_t* p = ramCurrent[slot];
     // Accessor-mode bank: write goes straight to the SPI backing store
     // (must be checked before the ROM filter — nullptr < 0x11000000).
     if (__builtin_expect(p == nullptr, 0)) {
-        accessorWrite(page, addr & 0x3fff, data);
+        accessorWrite(slot >> 1, addr & 0x3fff, data);
         return;
     }
     if (p < (uint8_t*)0x11000000) return;
-    *mem_desc_t::bank_dirty[page] = true;
+    *mem_desc_t::bank_dirty[slot] = true;
 #if MEM_ACCESS_TRACE
-    *mem_desc_t::bank_access[page] += 1;
+    *mem_desc_t::bank_access[slot] += 1;
 #endif
     // NOTE: the Profi CP/M BOOTFDD has 0x801A = 0xC9, which the BIOS reads via
     // `LD A,(0x801A); AND A; JR NZ` to select the floppy boot path (A≠0).
@@ -530,10 +560,11 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
         extern uint8_t* ds80_dbg_clrmem;
         extern uint8_t* ds80_dbg_grmem;
         extern int      ds80_dbg_wr_cnt;
-        if ((ds80_dbg_clrmem && p == ds80_dbg_clrmem) ||
-            (ds80_dbg_grmem  && p == ds80_dbg_grmem)) {
+        uint8_t* p16 = ramCurrent[slot & ~1]; // dbg pointers are 16K page bases
+        if ((ds80_dbg_clrmem && p16 == ds80_dbg_clrmem) ||
+            (ds80_dbg_grmem  && p16 == ds80_dbg_grmem)) {
             if (ds80_dbg_wr_cnt < 30) {
-                bool is_clr = (ds80_dbg_clrmem && p == ds80_dbg_clrmem);
+                bool is_clr = (ds80_dbg_clrmem && p16 == ds80_dbg_clrmem);
                 // _ds80_dbg_get_pc() is defined in Ports.cpp (which includes z80.h).
                 extern uint16_t _ds80_dbg_get_pc(void);
                 Debug::log("[WR→DISPLAY_%s] a=%04X d=%02X PC=%04X #%d",
@@ -543,7 +574,7 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
         }
     }
 #endif
-    p[addr & 0x3fff] = data;
+    p[addr & 0x1fff] = data;
 }
 
 inline void MemESP::writeword(uint16_t addr, uint16_t data) {

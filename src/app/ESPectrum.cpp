@@ -1184,10 +1184,13 @@ void ESPectrum::setup() {
   MemESP::newSRAM = false;
   Debug::log("[setup] arch=%s romInUse=%d", archToStr(Config::arch), MemESP::romInUse);
 
-  MemESP::ramCurrent[0] = MemESP::rom[MemESP::romInUse].direct();
-  MemESP::ramCurrent[1] = MemESP::ram[5].direct();
-  MemESP::ramCurrent[2] = MemESP::ram[2].sync(2);
-  MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
+  MemESP::plug16(0, MemESP::rom[MemESP::romInUse].direct(), false);
+  MemESP::plug16(1, MemESP::ram[5].direct(),
+                 !(Config::arch == A_P1024 || Config::arch == A_P512 ||
+                   Config::arch == A_PENT || Config::arch == A_PROFI ||
+                   Config::arch == A_SCORP || Config::arch == A_ATM));
+  MemESP::plug16(2, MemESP::ram[2].sync(2), false);
+  MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3), false);
 
   // Pre-load STS 7.5 into RAM bank 7 at offset 0x1B00 (= 0xDB00 - 0xC000)
   // Gluk ROM writes 0x47 to port 0x7FFD selecting bank 7 for page 3, then
@@ -1197,15 +1200,6 @@ void ESPectrum::setup() {
       uint8_t* page3 = MemESP::ram[7].direct();
       if (page3) memcpy(page3 + 0x1B00, gb_rom_sts75, sizeof(gb_rom_sts75));
   }
-
-  MemESP::ramContended[0] = false;
-  MemESP::ramContended[1] = Config::arch == A_P1024 || Config::arch == A_P512 ||
-                                    Config::arch == A_PENT || Config::arch == A_PROFI ||
-                                    Config::arch == A_SCORP || Config::arch == A_ATM
-                                ? false
-                                : true;
-  MemESP::ramContended[2] = false;
-  MemESP::ramContended[3] = false;
 
   // if (Config::arch == A_48K) MemESP::pagingLock = 1; else MemESP::pagingLock
   // = 0;
@@ -1797,25 +1791,19 @@ void ESPectrum::reset(uint8_t romInUse) {
     CPU::updateStatesInFrame();
   }
 
-  MemESP::ramCurrent[0] = MemESP::rom[romInUse].direct();
-  MemESP::ramCurrent[1] = MemESP::ram[5].direct();
-  MemESP::ramCurrent[2] = MemESP::ram[2].sync(2);
-  MemESP::ramCurrent[3] = MemESP::ram[0].sync(3);
+  MemESP::plug16(0, MemESP::rom[romInUse].direct(), false);
+  MemESP::plug16(1, MemESP::ram[5].direct(),
+                 !(Config::arch == A_P1024 || Config::arch == A_P512 ||
+                   Config::arch == A_PENT || Config::arch == A_PROFI ||
+                   Config::arch == A_SCORP || Config::arch == A_ATM));
+  MemESP::plug16(2, MemESP::ram[2].sync(2), false);
+  MemESP::plug16(3, MemESP::ram[0].sync(3), false);
 
   // Re-load STS 7.5 into RAM bank 7 at offset 0x1B00 (= 0xDB00 - 0xC000)
   if (Config::romSet == R_PENT_GLUK || Config::romSet == R_128K_BY_GLUK) {
       uint8_t* page3 = MemESP::ram[7].direct();
       if (page3) memcpy(page3 + 0x1B00, gb_rom_sts75, sizeof(gb_rom_sts75));
   }
-
-  MemESP::ramContended[0] = false;
-  MemESP::ramContended[1] = Config::arch == A_P1024 || Config::arch == A_P512 ||
-                                    Config::arch == A_PENT || Config::arch == A_PROFI ||
-                                    Config::arch == A_SCORP || Config::arch == A_ATM
-                                ? false
-                                : true;
-  MemESP::ramContended[2] = false;
-  MemESP::ramContended[3] = false;
 
   MemESP::pagingLock = Config::arch == A_48K ? 1 : 0;
 

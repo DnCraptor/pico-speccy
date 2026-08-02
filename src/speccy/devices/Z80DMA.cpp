@@ -520,7 +520,7 @@ static IRAM_ATTR void captureAttrAfterTransfer(uint16_t dest_start) {
     if (!Z80DMA::dma_attr_shadow) return; // alloc failed or DMA mode off
     uint16_t off = dest_start & 0x3FFF;
     if (off < 0x1800 || off > 0x1AFF) return;
-    const uint8_t* page = MemESP::ramCurrent[dest_start >> 14];
+    const uint8_t* page = MemESP::ramCurrent[(dest_start >> 14) << 1];   // 16K page base = its even 8K slot
     if (!page) return;
 
     uint8_t charrow = (off - 0x1800) >> 5;

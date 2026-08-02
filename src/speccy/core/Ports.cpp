@@ -961,7 +961,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
 #endif
   if (Config::numPortReadBP > 0 && Config::hasBreakPoint(address, Config::BP_PORT_READ))
     CPU::portBasedBP = true;
-  uint8_t rambank = address >> 14;
+  uint8_t rambank = address >> 13;
   p_states = CPU::tstates;
 
 #if FDD_PORT_TRACE
@@ -1970,8 +1970,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
           }
           if (MemESP::bankLatch != page) {
             MemESP::bankLatch = page;
-            MemESP::ramCurrent[3] = MemESP::ram[page].sync(3);
-            MemESP::ramContended[3] = page & 0x01 ? true : false;
+            MemESP::plug16(3, MemESP::ram[page].sync(3), page & 0x01);
           }
           if (MemESP::videoLatch != bitRead(data, 3)) {
             MemESP::videoLatch = bitRead(data, 3);
@@ -2240,7 +2239,7 @@ void Ports::scorpionRomUpdate() {
   if (g_scorp_gmx && (port1FFD & 0x04)) {
     MemESP::romInUse = (gmxPlane << 2) | 3;
     ESPectrum::trdos = true;   // Beta on; check_trdos holds DOS while D2 is set
-    MemESP::ramCurrent[0] = MemESP::rom[MemESP::romInUse].direct();
+    MemESP::plugPtr16(0, MemESP::rom[MemESP::romInUse].direct());
     gmxTapUpdate();
 #if GMX_TRACE
     if (MemESP::romInUse != gmxt_prev)
@@ -2359,8 +2358,7 @@ bool Ports::gmxPortWrite(uint16_t address, uint8_t data) {
       uint32_t pg = gmxPort78FD ^ 2;
       uint32_t pages = ram_pages + butter_pages + psram_pages + swap_pages;
       if (pg >= pages) pg = 2;
-      MemESP::ramCurrent[2] = MemESP::ram[pg].sync(2);
-      MemESP::ramContended[2] = false;
+      MemESP::plug16(2, MemESP::ram[pg].sync(2), false);
       LED::touchW(LED::RAM);
       return true;
     }
@@ -2415,8 +2413,7 @@ bool Ports::gmxPortWrite(uint16_t address, uint8_t data) {
       // 3 extra RAM-page bits for the 0xC000 window ((dffd&7)<<4 → 2 MB)
       portDFFDgmx = data & 0x07;
       MemESP::bankLatch = Scorpion::c000Page(MemESP::bankLatch & 0x07);
-      MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
-      MemESP::ramContended[3] = false;
+      MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3), false);
       LED::touchW(LED::RAM);
       return true;
     default: return false;
@@ -2834,7 +2831,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
 #endif
   if (Config::numPortWriteBP > 0 && Config::hasBreakPoint(address, Config::BP_PORT_WRITE))
     CPU::portBasedBP = true;
-  uint8_t rambank = address >> 14;
+  uint8_t rambank = address >> 13;
 #if FDD_PORT_TRACE
   // Unconditional probe — see the matching read-side comment in Ports::input.
   if (PROFI) {
@@ -3003,9 +3000,8 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
         uint32_t pages = ram_pages + butter_pages + psram_pages + swap_pages;
         if (page < pages) { // W/A: protection of incorrect page selection logic
           MemESP::bankLatch = page;
-          MemESP::ramCurrent[3] = MemESP::ram[page].sync(3);
-          MemESP::ramContended[3] =
-              (Z80Ops::isPentagon || PROFI) ? false : (page & 0x01 ? true : false);
+          MemESP::plug16(3, MemESP::ram[page].sync(3),
+              (Z80Ops::isPentagon || PROFI) ? false : (page & 0x01));
         }
       }
     }
@@ -3660,8 +3656,8 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
         uint16_t sp = Z80::getRegSP();
         uint16_t found_addr = 0;
         for (int i = 0; i < 256 && sp < 0xFF00; i++, sp += 2) {
-          uint16_t lo = MemESP::romPeek(sp >> 14, MemESP::ramCurrent[sp >> 14], (sp) & 0x3FFF);
-          uint16_t hi = MemESP::romPeek((sp+1) >> 14, MemESP::ramCurrent[(sp+1) >> 14], (sp+1) & 0x3FFF);
+          uint16_t lo = MemESP::romPeek(sp >> 13, MemESP::ramCurrent[sp >> 13], sp);
+          uint16_t hi = MemESP::romPeek((sp+1) >> 13, MemESP::ramCurrent[(sp+1) >> 13], sp+1);
           uint16_t frame = lo | (hi << 8);
           if (frame != 0x40DE) {
             found_addr = frame;
@@ -4020,15 +4016,15 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
       }
       if (MemESP::bankLatch != page) {
         MemESP::bankLatch = page;
-        MemESP::ramContended[3] =
+        MemESP::ramContended[6] = MemESP::ramContended[7] =
             (Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion) ? false : (page & 0x01 ? true : false);
       }
       // Profi SCO (DFFD bit3): bank1=ramPage (full 0..63), bank3=page7; else bank3=ramPage
       if (PROFI && (portDFFD & 0x08)) {
-        MemESP::ramCurrent[1] = MemESP::ram[MemESP::bankLatch].sync(1);
-        MemESP::ramCurrent[3] = MemESP::ram[7].sync(3);
+        MemESP::plugPtr16(1, MemESP::ram[MemESP::bankLatch].sync(1));
+        MemESP::plugPtr16(3, MemESP::ram[7].sync(3));
       } else {
-        MemESP::ramCurrent[3] = MemESP::ram[MemESP::bankLatch].sync(3);
+        MemESP::plugPtr16(3, MemESP::ram[MemESP::bankLatch].sync(3));
       }
 #if PROFI_PORT_TRACE
       if (PROFI && (portDFFD & 0x80)) {

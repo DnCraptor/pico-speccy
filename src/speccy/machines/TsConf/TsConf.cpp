@@ -410,9 +410,11 @@ void TsConf::refreshGrmem() {
 void TsConf::setBanks() {
     const uint32_t mask = MEM_PG_CNT - 1;
 
-    MemESP::ramCurrent[1] = MemESP::ram[r.page[1] & mask].sync(1);
-    MemESP::ramCurrent[2] = MemESP::ram[r.page[2] & mask].sync(2);
-    MemESP::ramCurrent[3] = MemESP::ram[r.page[3] & mask].sync(3);
+    // 16K windows plugged as 8K slot pairs (Next MMU): plugPtr16 keeps the
+    // pointer-only semantics this code always had — TS-Conf has no contention.
+    MemESP::plugPtr16(1, MemESP::ram[r.page[1] & mask].sync(1));
+    MemESP::plugPtr16(2, MemESP::ram[r.page[2] & mask].sync(2));
+    MemESP::plugPtr16(3, MemESP::ram[r.page[3] & mask].sync(3));
     s_bank_phys[1] = (uint8_t)(r.page[1] & mask); s_bank_phys[2] = (uint8_t)(r.page[2] & mask); s_bank_phys[3] = (uint8_t)(r.page[3] & mask);
 
     // Window 0: reference memory.cpp set_banks() MM_TSL. In mapped mode the
@@ -436,11 +438,11 @@ void TsConf::setBanks() {
     if (r.w0_ram() || vdosLive) {
         // RAM at #0000 (or the VDOS page). The W0_WE write protect is applied
         // by the CPU write funnel through g_tsconf_wr, not here.
-        MemESP::ramCurrent[0] = MemESP::ram[p0 & mask].sync(0);
+        MemESP::plugPtr16(0, MemESP::ram[p0 & mask].sync(0));
     } else {
         // ROM at #0000 — a flash pointer; MemESP::writebyte drops writes to
         // anything below the butter window, so ROM is naturally read-only.
-        MemESP::ramCurrent[0] = (uint8_t*)romPtr(p0);
+        MemESP::plugPtr16(0, (uint8_t*)romPtr(p0));
     }
 
     // Keep the shared latches coherent for the OSD/debugger and the
@@ -450,8 +452,7 @@ void TsConf::setBanks() {
     MemESP::videoLatch = (r.p7ffd >> 3) & 1;
     MemESP::romLatch = (r.p7ffd >> 4) & 1;
     MemESP::romInUse = 0;
-    MemESP::ramContended[0] = MemESP::ramContended[1] = false;
-    MemESP::ramContended[2] = MemESP::ramContended[3] = false;
+    for (uint8_t i = 0; i < 8; i++) MemESP::ramContended[i] = false;
 
     tsUpdateWrGate();   // W0_RAM / W0_WE live in memconf
     tsTagBaseRecalc();  // DRAM model: window pages / ROM in window 0

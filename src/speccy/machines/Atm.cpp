@@ -184,13 +184,14 @@ static inline void mapRom(int w, uint8_t page) {
     const uint8_t n = romPageCount();
     const uint8_t* p = s_rom[page % n];
     if (!p) p = kFF;
-    MemESP::ramCurrent[w] = (uint8_t*)p;
-    mem_desc_t::bank_dirty[w] = &mem_desc_t::dirty_sink;
+    MemESP::plugPtr16(w, (uint8_t*)p);
+    mem_desc_t::bank_dirty[w * 2] = &mem_desc_t::dirty_sink;
+    mem_desc_t::bank_dirty[w * 2 + 1] = &mem_desc_t::dirty_sink;
     s_ro |= (uint8_t)(1u << w);
 }
 
 static inline void mapRam(int w, uint32_t page) {
-    MemESP::ramCurrent[w] = MemESP::ram[page & (MEM_PG_CNT - 1)].sync(w);
+    MemESP::plugPtr16(w, MemESP::ram[page & (MEM_PG_CNT - 1)].sync(w));
 }
 
 void remap() {
@@ -268,7 +269,7 @@ void remap() {
     // ZX-Evo: #7FFD D5 locks the port in the 128K mode only (zports.v block7ffd =
     // p7ffd[5] & block1m); in the Pentagon-1024 mode D5 is a page bit.
     MemESP::pagingLock = (evo && EvoBase::mode1M()) ? 0 : ((p7ffd >> 5) & 1);
-    for (int w = 0; w < 4; w++) MemESP::ramContended[w] = false;
+    for (int w = 0; w < 8; w++) MemESP::ramContended[w] = false;
     EvoBase::contendApply();   // BaseConf 48K/128K raster: #4000 (+#C000 odd page); clears the flag elsewhere
     VIDEO::grmem = MemESP::ram[MemESP::videoLatch ? 7 : 5].direct();
 }
@@ -673,14 +674,14 @@ bool portWrite(uint16_t address, uint8_t data) {
             if (::g_atm_trace_armed && (pc == 0x0055 || pc == 0x004F || pc == 0x0049) && n < 60) {
                 n++;
                 const uint16_t sp = Z80::getRegSP();
-                auto rd = [](uint16_t a) -> uint8_t { return MemESP::ramCurrent[a >> 14][a & 0x3FFF]; };
+                auto rd = [](uint16_t a) -> uint8_t { return MemESP::ramCurrent[a >> 13][a & 0x1FFF]; };
                 const uint8_t* z = MemESP::ramCurrent[0];
                 Debug::log("[ATMINIT]   w0[00..0F]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
                            z[0],z[1],z[2],z[3],z[4],z[5],z[6],z[7],z[8],z[9],z[10],z[11],z[12],z[13],z[14],z[15]);
                 Debug::log("[ATMINIT] %04X=%02X pc=%04X sp=%04X ret=%02X%02X w=%p %p %p %p",
                            address, data, pc, sp, rd((uint16_t)(sp + 7)), rd((uint16_t)(sp + 6)),
-                           (void*)MemESP::ramCurrent[0], (void*)MemESP::ramCurrent[1],
-                           (void*)MemESP::ramCurrent[2], (void*)MemESP::ramCurrent[3]);
+                           (void*)MemESP::ramCurrent[0], (void*)MemESP::ramCurrent[2],
+                           (void*)MemESP::ramCurrent[4], (void*)MemESP::ramCurrent[6]);
             }
         }
 #endif

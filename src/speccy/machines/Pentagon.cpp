@@ -167,7 +167,7 @@ bool Pentagon::col16FastMemOk() {
       if (p && MemESP::overlayFor(p)) return false;
     }
   }
-  for (int pg = 0; pg < 4; pg++)
+  for (int pg = 0; pg < 8; pg++)
     if (MemESP::ramContended[pg]) return false;   // never on a Pentagon; cheap insurance
   return true;
 }

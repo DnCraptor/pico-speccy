@@ -152,7 +152,7 @@ public:
     // clock (there is no user turbo on a ZX-Evo); fromGuest=true shows the
     // same top-border toast as the Turbo hotkey when the effective clock moves.
     static void applyZclk(bool fromGuest = false);
-    static void setBanks();      // recompute MemESP::ramCurrent[0..3]
+    static void setBanks();      // recompute MemESP::ramCurrent[] (4 x 16K windows)
     // Cold-boot window 0 onto one page of the BIOS set (0 TS-BIOS, 1 TR-DOS,
     // 2 the 128/Gluk service ROM, 3 48 BASIC) — the Reset-to menu's per-page
     // entries. Called right after ESPectrum::reset(), i.e. after TsConf::reset()
