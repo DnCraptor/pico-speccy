@@ -889,6 +889,11 @@ IRAM_ATTR void Z80::check_trdos() {
             check_trdos_atm();
         return;
     }
+    // Next has no Betadisk/TR-DOS: the 0x3Dxx window belongs to the divMMC
+    // automap there, and rom[4] is never assigned (hw: the NMI-DOS restore
+    // below ran on a stale flag and plugged a garbage rom[4] over the MMU —
+    // the NextZXOS loader then CALLed into an empty ROM2 region and wedged).
+    if (Z80Ops::isNext) return;
 
     // Detect NMI-DOS handler return: exact PC and SP match after planted RET at 0x5C00
     if (nmiDosInProgress && REG_PC == nmiDos_savedPC && REG_SP == nmiDos_savedSP) {
@@ -1275,6 +1280,7 @@ Z80_COLD void Z80::doNMI(void) {
 Z80_COLD void Z80::doNMIDOS(void) {
 
     activeNMIDOS = false;
+    if (Z80Ops::isNext) return;   // no TR-DOS Magic Button on Next
     lastFlagQ = false;
 
     // ATM-Turbo: the magic-button DOS entry maps rom[] banks over window 0, which on

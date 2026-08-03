@@ -5,6 +5,8 @@
 
 
 #include "fatfs/ff.h"
+#include "speccy/machines/Next/NextReg.h"
+#include "speccy/core/MemESP.h"
 
 #define DIVMMC_ROM_SIZE  0x2000   // 8KB ESXDOS ROM
 #define DIVMMC_BANK_SIZE 0x2000   // 8KB per bank
@@ -217,6 +219,55 @@ inline void DivMMC::preOpcFetch(uint16_t pc) {
     if (__builtin_expect(pc >= 0x4000, 1)) return;
     trap_after = false;
     unmap_after = false;
+
+    // ZX Spectrum Next: the entry points are PROGRAMMABLE via nextreg
+    // 0xB8-0xBB (NextZXOS reconfigures them right after its RAM check:
+    // B8=0x82 B9=0x00 BB=0xF2 — no trap fires outside ROM3, so the OS ROMs
+    // can use RST 8/RST 0x28 internally). The fixed esxdos set below would
+    // hijack those RSTs into the MMC ROM — hw: boot flew into an empty
+    // bank 7 and NOP-looped.
+    if (Config::arch == A_NEXT) {
+        const uint8_t* nr = NextReg::reg;
+        // Cold boot: on real hardware the FPGA bootrom overlays $0000-$3FFF,
+        // so the reset fetch at $0000 does NOT automap — enNextZX's reset
+        // entry must run from the machine ROM (zx_go's divmmc.go documents
+        // this; our earlier always-trap stole the boot into enNxtmmc, which
+        // just bailed out through $1FF8). Arm the $0000 trap only after the
+        // CPU has moved past the reset vector once.
+        extern bool g_next_automap_armed;
+        if (!g_next_automap_armed) {
+            if (pc != 0x0000) g_next_automap_armed = true;
+        }
+        if (!automap) {
+            // "ROM3" = the 48K BASIC ROM: 3 of the 4-ROM NextZXOS set,
+            // 1 of the two-ROM 128K fallback pair.
+            bool rom3 = (MemESP::next_rom_mask & 1) &&
+                        (MemESP::romInUse & 3) == (MemESP::nextRomBase ? 3 : 1);
+            if (pc <= 0x0038 && (pc & 7) == 0) {
+                uint8_t bit = (uint8_t)(1u << (pc >> 3));
+                if (pc == 0x0000 && !g_next_automap_armed) bit = 0;
+                if (bit && (nr[0xB8] & bit) && ((nr[0xB9] & bit) || rom3)) {
+                    trap_after = true;
+                }
+            } else if (rom3) {
+                if ((pc == 0x04C6 && (nr[0xBB] & 0x04)) ||
+                    (pc == 0x0562 && (nr[0xBB] & 0x08)) ||
+                    (pc == 0x04D7 && (nr[0xBB] & 0x10)) ||
+                    (pc == 0x056A && (nr[0xBB] & 0x20))) {
+                    trap_after = true;
+                } else if ((pc & 0xFF00) == 0x3D00 && (nr[0xBB] & 0x80)) {
+                    automap = true;
+                    if (!conmem) applyMapping();
+                }
+            }
+            // 0x0066 (bits 0/1) is fetch+BUTTON — no NMI button emulated here
+        }
+        if (automap && pc >= DIVMMC_OFF_START && pc <= DIVMMC_OFF_END &&
+            (nr[0xBB] & 0x40)) {
+            unmap_after = true;
+        }
+        return;
+    }
 
     // Entry points: map AFTER fetch, only if automap is currently OFF
     if (!automap) {

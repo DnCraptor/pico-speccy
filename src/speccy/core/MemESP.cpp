@@ -893,6 +893,10 @@ bool     MemESP::wr_overlay_active = false;
 uint8_t* MemESP::nextRomBase = nullptr;
 uint8_t* MemESP::nextDivRomBase = nullptr;
 uint8_t  MemESP::next_rom_mask = 0;
+uint8_t* MemESP::altRomBase = nullptr;
+bool     MemESP::altrom_rd = false;
+bool     MemESP::altrom_wr = false;
+uint8_t  MemESP::altrom_sel = 0;
 
 // Unmapped MMU pages read 0xFF (open bus). Lives in flash (.rodata), so the
 // XIP-address write guard in writebyte() blocks writes to it automatically.
@@ -913,7 +917,7 @@ static constexpr OpenBusPage open_bus_page;
 // pages — so the carve can never eat DivMMC's banks, GS sample RAM or the
 // minimum arena.
 bool MemESP::buildNextRam() {
-    size_t romExtra = 9 * 0x2000;
+    size_t romExtra = 13 * 0x2000;   // 64K ROM set + 8K MMC + 32K Alt-ROM
     size_t needed = (size_t)(NEXT_PAGES - 16) * 0x2000 + romExtra;
     size_t used = (size_t)butter_pages * MEM_PG_SZ;
     if (Buffer::pageBudgetButter() < used + needed) return false;
@@ -925,10 +929,13 @@ bool MemESP::buildNextRam() {
     for (int pg = 16; pg < NEXT_PAGES; pg++)
         nextRamPtr[pg] = base + (size_t)(pg - 16) * 0x2000;
     // ROM region sits after the RAM pages; pointers stay null until the ROM
-    // files actually load
+    // files actually load. Alt-ROM banks live right after the MMC ROM.
     nextRomBase = nullptr;
     nextDivRomBase = nullptr;
-    butter_pages += (NEXT_PAGES - 16 + 9 + 1) / 2; // account in 16K units
+    altRomBase = base + (size_t)(NEXT_PAGES - 16) * 0x2000 + 9 * 0x2000;
+    altrom_rd = altrom_wr = false;
+    altrom_sel = 0;
+    butter_pages += (NEXT_PAGES - 16 + 13 + 1) / 2; // account in 16K units
     nextRamReady = true;
     return true;
 }
@@ -983,7 +990,9 @@ void MemESP::applyMMU(uint8_t slot, uint8_t page) {
     mmu[slot] = page;
     uint8_t* p;
     if (page == 0xFF && slot <= 1) {
-        if (nextRomBase)
+        if (altrom_rd && altRomBase)
+            p = altRomBase + (uint32_t)altrom_sel * 0x4000 + slot * 0x2000;
+        else if (nextRomBase)
             p = nextRomBase + (uint32_t)(romInUse & 3) * 0x4000 + slot * 0x2000;
         else
             p = rom[romInUse & 1].direct() + slot * 0x2000;

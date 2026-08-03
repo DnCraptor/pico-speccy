@@ -11,6 +11,8 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "speccy/video/Video.h"
 #include "app/Debug.h"
 #include "NextVideo.h"
+#include "app/Debug.h"
+#include "speccy/z80/z80.h"
 
 #pragma GCC optimize("O3")
 
@@ -22,6 +24,7 @@ uint8_t NextReg::portDFFD = 0;
 uint8_t NextReg::port1FFD = 0;
 uint8_t NextReg::port123B = 0;
 
+uint8_t  NextReg::resetPending = 0;
 bool     NextReg::lineIrqEnabled = false;
 bool     NextReg::ulaIrqDisabled = false;
 uint16_t NextReg::lineIrqLine = 0;
@@ -45,8 +48,26 @@ void NextReg::reset(bool hard) {
     reg[0x54] = 4;    reg[0x55] = 5;
     reg[0x56] = 0;    reg[0x57] = 1;
     reg[0x07] = 0;    // 3.5 MHz
+    // Reset defaults pinned to the FPGA VHDL (zx_go VHDL_CONFORMANCE.md)
+    reg[0x05] = 0x01; // periph1: 50Hz
+    reg[0x06] = 0xA0; // periph2: hotkeys enabled
+    reg[0x08] = 0x10; // periph3: AY enabled
+    reg[0x12] = 0x08; // Layer 2 bank
+    reg[0x13] = 0x0B; // Layer 2 shadow bank
+    reg[0x42] = 0x07; // ULANext attribute format
+    reg[0x6E] = 0x2C; // tilemap map base
+    reg[0x6F] = 0x0C; // tilemap tiles base
+    // divMMC programmable entry points (esxdos-compatible defaults):
+    // 0xB8 = RST-trap mask (0x00/0x08/0x38), 0xB9 = "always" mask (0x0000
+    // stays always-on), 0xBB = 0066/04C6/0562/3Dxx/off-region set
+    reg[0x02] = 0x01; // read-back: bit0 = "last reset was soft" (VHDL default)
+    reg[0xB8] = 0x83;
+    reg[0xB9] = 0x01;
+    reg[0xBA] = 0x00;
+    reg[0xBB] = 0xCD;
+    Debug::log("NextReg: programmable divMMC traps armed (B8=83 B9=01 BB=CD)");
     reg[0x14] = 0xE3; // global transparency colour
-    reg[0x4A] = 0x00; // fallback colour
+    reg[0x4A] = 0xE3; // fallback colour (VHDL reset value)
     reg[0x4B] = 0xE3; // sprite transparency index
     reg[0x4C] = 0x0F; // tilemap transparency index
 }
@@ -71,7 +92,13 @@ static void applyBankC000();
 void NextReg::write(uint8_t r, uint8_t v) {
     reg[r] = v;
     switch (r) {
-        case 0x02: // Reset: bit1 = hard, bit0 = soft — latched only for now
+        case 0x02: // Reset request: bit1 = hard, bit0 = soft. NextZXOS uses a
+                   // soft reset to restart into the freshly configured state
+                   // at the end of each boot stage — latching only left the
+                   // boot in an endless crash-restart loop (hw: white flash
+                   // blinking). Deferred to the frame boundary.
+            if (v & 0x02) resetPending = 2;
+            else if (v & 0x01) resetPending = 1;
             break;
         case 0x05: { // Peripheral 1: bit 2 = 50/60 Hz
             ESPectrum::target = (v & 0x04) ? 17067 : MICROS_PER_FRAME_128;
@@ -80,9 +107,19 @@ void NextReg::write(uint8_t r, uint8_t v) {
         }
         case 0x07: { // CPU speed: 0=3.5, 1=7, 2=14, 3=28 MHz
             uint8_t m = v & 0x03;
-            if (ESPectrum::multiplicator != m) {
+            uint8_t old = ESPectrum::multiplicator;
+            if (old != m) {
+                // The switch happens MID-FRAME: everything measured in
+                // T-states (tstates, statesInFrame, the NEXTVID line
+                // boundary) must move to the new clock domain together, or
+                // the end-of-frame `tstates -= statesInFrame` underflows and
+                // the INT window is never hit again (hw: NextZXOS set 28MHz
+                // and froze on the next HALT with tstates = 0xFFFFFFFF).
                 ESPectrum::multiplicator = m;
+                if (m > old) CPU::tstates <<= (m - old);
+                else         CPU::tstates >>= (old - m);
                 CPU::updateStatesInFrame();
+                NEXTVID::onClockChange();
             }
             break;
         }
@@ -97,6 +134,17 @@ void NextReg::write(uint8_t r, uint8_t v) {
         case 0x12: case 0x13: // Layer 2 active/shadow bank
             updateLayer2Window();
             break;
+        case 0x69: { // Display Control 1: bit7 = Layer 2 enable (read by the
+                     // renderer), bit6 = ULA shadow display — the same latch
+                     // as port 7FFD bit 3 (hw: NextZXOS drew its boot screen
+                     // into bank 7 via this and we kept showing blank bank 5)
+            uint8_t vl = (v >> 6) & 1;
+            if (MemESP::videoLatch != vl) {
+                MemESP::videoLatch = vl;
+                VIDEO::grmem = vl ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
+            }
+            break;
+        }
         case 0x18: case 0x19: case 0x1A: case 0x1B: // clip windows
             NEXTVID::clipWrite(r - 0x18, v);
             break;
@@ -117,6 +165,16 @@ void NextReg::write(uint8_t r, uint8_t v) {
         case 0x54: case 0x55: case 0x56: case 0x57:
             MemESP::applyMMU(r - 0x50, v);
             break;
+        case 0x8C: { // Alt-ROM: bit7 enable, bit6 write-only, bit5 lock ROM1,
+                     // bit4 lock ROM0; bits 3:0 staged (promoted on soft reset)
+            MemESP::altrom_rd = (v & 0x80) && !(v & 0x40);
+            MemESP::altrom_wr = (v & 0x80) && (v & 0x40);
+            MemESP::altrom_sel = (v & 0x20) ? 1 :
+                                 (v & 0x10) ? 0 : (MemESP::romInUse & 1);
+            if (MemESP::mmu[0] == 0xFF) MemESP::applyMMU(0, 0xFF);
+            if (MemESP::mmu[1] == 0xFF) MemESP::applyMMU(1, 0xFF);
+            break;
+        }
         case 0x60: NEXTVID::copperDataWrite(v);   break;
         case 0x61: NEXTVID::copperIndexLo(v);     break;
         case 0x62: NEXTVID::copperControl(v);     break;
@@ -148,9 +206,26 @@ uint8_t NextReg::read(uint8_t r) {
     switch (r) {
         case 0x00: return 10;    // machine ID: ZX Spectrum Next
         case 0x01: return 0x32;  // core major.minor = 3.2
-        case 0x0E: return 0x00;  // core sub-minor
+        case 0x0E: return 0x03;  // core sub-minor: report 3.02.03 — the
+                                  // current NextZXOS distro gates boot on
+                                  // >= 3.02.03 (hw: 3.02.00 failed the check
+                                  // at ROM PC=0E13 → 1.4s restart loop);
+                                  // same stable version zx_go settled on
         case 0x07: // bits 5:4 = actual speed, 1:0 = programmed
             return ((reg[0x07] & 3) << 4) | (reg[0x07] & 3);
+        case 0x18: case 0x19: case 0x1A: case 0x1B: {
+            // Read returns the CURRENT coordinate (index not advanced) —
+            // zxnext.vhd read mux 5947-5975 via zx_go's conformance notes
+            uint8_t w = r - 0x18;
+            return NEXTVID::clip[w][NEXTVID::clipIdx[w] & 3];
+        }
+        case 0x1C: // packed clip indices read-back
+            return (uint8_t)((NEXTVID::clipIdx[3] & 3) << 6) |
+                   (uint8_t)((NEXTVID::clipIdx[2] & 3) << 4) |
+                   (uint8_t)((NEXTVID::clipIdx[1] & 3) << 2) |
+                   (uint8_t)(NEXTVID::clipIdx[0] & 3);
+        case 0x41: return NEXTVID::palRead8();
+        case 0x44: return NEXTVID::palRead9();
         case 0x1E: return (activeLine() >> 8) & 0x01;
         case 0x1F: return activeLine() & 0xFF;
         case 0x50: case 0x51: case 0x52: case 0x53:
@@ -190,6 +265,16 @@ static void applyRomSelect() {
     // otherwise clamp to the two-ROM 128K fallback.
     uint8_t romsel = (MemESP::romLatch & 0x01) | ((NextReg::port1FFD >> 1) & 0x02);
     MemESP::romInUse = MemESP::nextRomBase ? romsel : (romsel & 0x01);
+    // Alt-ROM half tracks the LIVE ROM select when no lock bit is set —
+    // NextZXOS writes 0x8C once (e.g. 0xC0 write-redirect), then pages
+    // ROM0/ROM3 via 7FFD to choose which half it is rewriting. A sel frozen
+    // at 0x8C-write time put both halves' data into one bank (hw: boot died
+    // in a RET-chain reading garbage Alt-ROM at 0x0003/0x0068).
+    {
+        uint8_t a = NextReg::reg[0x8C];
+        MemESP::altrom_sel = (a & 0x20) ? 1 : (a & 0x10) ? 0
+                                             : (MemESP::romInUse & 1);
+    }
     if (MemESP::mmu[0] == 0xFF) MemESP::applyMMU(0, 0xFF);
     if (MemESP::mmu[1] == 0xFF) MemESP::applyMMU(1, 0xFF);
 }
@@ -212,6 +297,7 @@ void NextReg::write7FFD(uint8_t v) {
         MemESP::videoLatch = vl;
         VIDEO::grmem = vl ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
     }
+    reg[0x69] = (uint8_t)((reg[0x69] & ~0x40) | (vl << 6));
     MemESP::romLatch = (v >> 4) & 1;
     if (!(port1FFD & 0x01)) applyRomSelect();
     if (v & 0x20) MemESP::pagingLock = 1;
@@ -223,23 +309,35 @@ void NextReg::writeDFFD(uint8_t v) {
 }
 
 void NextReg::write1FFD(uint8_t v) {
+    uint8_t prev = port1FFD;
     port1FFD = v;
     if (v & 0x01) {
-        // +3 special all-RAM configurations
+        // +3 special all-RAM configurations: an overlay on top of the MMU —
+        // the MMU registers themselves are NOT modified (hw: routing this
+        // through applyMMU corrupted mmu[] and the exit path then force-reset
+        // slots 2-5 to the 128K default, yanking the OS's own mapping out
+        // from under it on every NEXTREG 0x8E ROM-swap trampoline — restart
+        // loop right after the loader's first cross-ROM call).
         static const uint8_t maps[4][4] = {
             { 0, 1, 2, 3 }, { 4, 5, 6, 7 }, { 4, 5, 6, 3 }, { 4, 7, 6, 3 }
         };
         const uint8_t* m = maps[(v >> 1) & 3];
         for (int s = 0; s < 4; s++) {
-            MemESP::applyMMU(s * 2,     m[s] * 2);
-            MemESP::applyMMU(s * 2 + 1, m[s] * 2 + 1);
+            uint8_t page = (uint8_t)(m[s] * 2);
+            uint8_t* p0 = (page < MemESP::NEXT_PAGES) ? MemESP::nextRamPtr[page] : nullptr;
+            uint8_t* p1 = (page + 1 < MemESP::NEXT_PAGES) ? MemESP::nextRamPtr[page + 1] : nullptr;
+            if (p0) { MemESP::ramCurrent[s * 2] = p0; MemESP::ramContended[s * 2] = false; }
+            if (p1) { MemESP::ramCurrent[s * 2 + 1] = p1; MemESP::ramContended[s * 2 + 1] = false; }
         }
+        MemESP::next_rom_mask = 0;   // all-RAM: page 0 is writable RAM
     } else {
-        // Leaving all-RAM mode: restore the normal 128K layout
+        if (prev & 0x01) {
+            // Leaving all-RAM: restore EXACTLY what the MMU registers say
+            for (int s = 0; s < 8; s++)
+                MemESP::applyMMU(s, MemESP::mmu[s]);
+        }
+        // Normal mode: 1FFD only contributes the ROM select high bit
         applyRomSelect();
-        MemESP::applyMMU(2, 10); MemESP::applyMMU(3, 11);
-        MemESP::applyMMU(4, 4);  MemESP::applyMMU(5, 5);
-        applyBankC000();
     }
 }
 

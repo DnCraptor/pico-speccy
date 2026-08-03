@@ -1,5 +1,6 @@
 #include "DivMMC.h"
 #include "app/Buffer.h"
+#include "speccy/z80/z80.h"
 
 
 #include <cstring>
@@ -88,6 +89,9 @@ static void zcTraceWrite(uint32_t sector, int res, const uint8_t* buf) {
 // Static member definitions
 bool DivMMC::enabled = false;
 bool DivMMC::automap = false;
+// Next cold-boot: $0000 automap stays disarmed until the CPU leaves the
+// reset vector (the FPGA bootrom overlay does this on real hardware)
+bool g_next_automap_armed = false;
 bool DivMMC::trap_after = false;
 bool DivMMC::unmap_after = false;
 bool DivMMC::conmem = false;
@@ -472,7 +476,17 @@ void DivMMC::init() {
         }
     }
 
-    Debug::log("%s: ESXDOS ROM initialized (built-in)", mode_name);
+    // Next: the divMMC automap must run NextZXOS's own MMC ROM instead of
+    // the built-in esxdos — re-applied HERE (not in setup) so a runtime
+    // re-init (menu hard reset re-runs DivMMC::init) cannot clobber it back
+    // to the built-in image (hw: hard reset booted esxDOS, then looped).
+    if (Config::arch == A_NEXT && MemESP::nextDivRomBase) {
+        esxdos_rom = MemESP::nextDivRomBase;
+        rom_loaded = true;
+        Debug::log("%s: Next MMC ROM (enNxtmmc) active", mode_name);
+    } else {
+        Debug::log("%s: ESXDOS ROM initialized (built-in)", mode_name);
+    }
     reset();
 }
 
@@ -512,11 +526,26 @@ void DivMMC::reopenFiles() {
 
 void DivMMC::reset() {
     automap = false;
+    g_next_automap_armed = false;   // Next: $0000 trap re-arms after reset vector
     trap_after = false;
     unmap_after = false;
     conmem = false;
     mapram = false;
     bank = 0;
+    if (Config::arch == A_NEXT && use_psram && bank_ptr[0]) {
+        // POWER-ON divMMC RAM reads $00 on real hardware (zx_go measured it
+        // against the FPGA); butter banks are raw PSRAM garbage, so clear
+        // them — but ONLY ONCE per power-on: NextZXOS keeps its boot-stage
+        // state and esxDOS structures in divMMC RAM across the nextreg 0x02
+        // soft resets it uses between boot stages (hw: clearing on every
+        // reset made each stage restart cold — endless white-flash loop).
+        static bool cleared_once = false;
+        if (!cleared_once) {
+            cleared_once = true;
+            for (int i = 0; i < DIVMMC_NUM_BANKS; i++)
+                if (bank_ptr[i]) memset(bank_ptr[i], 0, DIVMMC_BANK_SIZE);
+        }
+    }
 
     // Reset SD protocol state
     mmc_last_command = 0;
@@ -572,7 +601,16 @@ void DivMMC::applyMapping() {
         }
     } else {
         MemESP::divmmc_mapped = false;
-        MemESP::recoverPage0();
+        if (Config::arch == A_NEXT && MemESP::nextRamReady) {
+            // Next: page 0 belongs to the MMU — recoverPage0() would plug the
+            // legacy 128K fallback ROM over slots 0/1 and drop next_rom_mask
+            // (hw: after the first automap OFF the machine booted the
+            // fallback ROM instead of enNextZX). Re-apply the MMU mapping.
+            MemESP::applyMMU(0, MemESP::mmu[0]);
+            MemESP::applyMMU(1, MemESP::mmu[1]);
+        } else {
+            MemESP::recoverPage0();
+        }
         hi_slot = -1;
         lo_slot = -1;
         MemESP::divmmc_hi_dirty = nullptr;
@@ -964,14 +1002,6 @@ void DivMMC::loadSector(uint32_t sector) {
             snprintf(line, sizeof(line), "ZC rd sec=%lu res=%d",
                      (unsigned long)sector, (int)r);
             zcTraceFold(line);
-        }
-#else
-        // Bring-up trace: the first reads (+ early errors) show whether the
-        // guest talks to the card at all and whether transfers succeed
-        static uint8_t rd_trace = 0;
-        if (rd_trace < 12 || (r != RES_OK && rd_trace < 24)) {
-            rd_trace++;
-            Debug::log("ZC/DivSD rd sec=%lu res=%d", (unsigned long)sector, (int)r);
         }
 #endif
         if (r != RES_OK) memset(mmc_sector_buf, 0xFF, 512);

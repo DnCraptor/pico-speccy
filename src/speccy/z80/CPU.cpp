@@ -821,6 +821,18 @@ IRAM_ATTR void CPU::haltAdvanceTo(uint32_t stEnd) {
 
 IRAM_ATTR void CPU::FlushOnHaltTo(uint32_t stEnd) {
 
+    if (Z80Ops::isNext) {
+        // NEXTVID renders by scanline and never re-points VIDEO::Draw, so the
+        // legacy "flush until Draw == Blank" below spins forever (hw: core0
+        // stuck here on NextZXOS's first HALT, tstates looping the 32-bit
+        // ring, R/PC frozen). Tick the scanline renderer in 4T steps instead.
+        while (tstates < stEnd) {
+            VIDEO::Draw_Opcode(false);
+            Z80::incRegR(1);
+        }
+        return;
+    }
+
     uint8_t page = Z80::getRegPC() >> 13;
     if (MemESP::ramContended[page]) {
 

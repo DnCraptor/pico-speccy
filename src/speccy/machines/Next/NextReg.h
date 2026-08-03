@@ -33,6 +33,9 @@ public:
     static uint16_t lineIrqLine;
 
     static void reset(bool hard);
+    // nextreg 0x02 write latches a reset request; ESPectrum::loop performs
+    // it at the next frame boundary (0 = none, 1 = soft, 2 = hard)
+    static uint8_t resetPending;
     static void write(uint8_t r, uint8_t v);
     static uint8_t read(uint8_t r);
 

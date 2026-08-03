@@ -107,6 +107,7 @@ extern "C" volatile uint32_t hdmi_au_late_write_ct;
 #include "speccy/machines/Timex.h"
 #include "speccy/machines/EvoBase.h"
 #include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextVideo.h"
 #include "CodeOverlay.h"
 #include "speccy/devices/gs/NgsSd.h"
 #include "speccy/devices/gs/NgsMp3.h"
@@ -1254,12 +1255,6 @@ void ESPectrum::setup() {
   Debug::log2SD("setup: DivMMC::init begin, freeHeap=%u", (unsigned)getFreeHeap());
   DivMMC::init();
   Debug::log2SD("setup: DivMMC::init done, freeHeap=%u", (unsigned)getFreeHeap());
-  // On Next with the real MMC ROM available, the divMMC automap runs
-  // NextZXOS's own ROM instead of esxdos
-  if (Config::arch == A_NEXT && MemESP::nextDivRomBase) {
-    DivMMC::esxdos_rom = MemESP::nextDivRomBase;
-    DivMMC::rom_loaded = true;
-  }
   // IDE/HDD (NEMO/PROFI schemes) — independent of DivMMC.
   IDE::init();
   // MC146818 RTC (Pentagon/Profi Mr Gluk TimeKeeper) — set register defaults.
@@ -1346,7 +1341,6 @@ void ESPectrum::setup() {
   Debug::log("setup: VIDEO::Init done, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: VIDEO::Init done, freeHeap=%u", getFreeHeap());
   VIDEO::Reset();
-  Debug::log("setup: VIDEO::Reset done");
   Debug::log2SD("setup: VIDEO::Reset done");
 
   Debug::log("setup: AUDIO section begin, freeHeap=%u", getFreeHeap());
@@ -1851,8 +1845,20 @@ void ESPectrum::reset(uint8_t romInUse) {
   MemESP::plug16(3, MemESP::ram[0].sync(3), false);
 
   if (Config::arch == A_NEXT && MemESP::nextRamReady) {
+    // Reset boots ROM0: romInUse survived the machine reset (hw: after a
+    // NextZXOS soft reset the machine came up in ROM2, whose entry code
+    // immediately requested another reset — 630ms restart loop)
+    MemESP::romInUse = 0;
+    MemESP::romLatch = 0;
     NextReg::reset(false);
     MemESP::resetNextMapping();
+    // divMMC restarts with the machine: automap off, $0000 boot trap
+    // disarmed until the CPU leaves the reset vector (divMMC RAM survives —
+    // NextZXOS keeps boot-stage state there across its soft resets)
+    DivMMC::reset();
+    // reg 0x07 resets to 3.5MHz — keep the live clock in step (CPU::reset
+    // below re-derives the frame timings from this)
+    multiplicator = 0;
   }
 
   // Re-load STS 7.5 into RAM bank 7 at offset 0x1B00 (= 0xDB00 - 0xC000)
@@ -3598,6 +3604,51 @@ void ESPectrum::loop() {
     beeperSampleAccum = 0;
     beeperTstatesInSample = 0;
 
+    if (Z80Ops::isNext && NextReg::resetPending) {
+      // nextreg 0x02 (Reset). The WHOLE POINT of resetting through this
+      // register is that NextReg state, RAM, the MMU and the divMMC pager
+      // all SURVIVE (zx_go's VHDL notes) — our earlier full machine reset
+      // wiped them and every boot stage restarted cold, forever. Model:
+      // CPU reset + ROM select back to 0 + sticky reason + Alt-ROM staged
+      // nibble promote + divMMC unmap. A hard request still does the full
+      // machine reset.
+      uint8_t rp = NextReg::resetPending;
+      NextReg::resetPending = 0;
+      Debug::log("NextReg: 0x02 %s reset request (PC was %04X)",
+                 rp == 2 ? "hard" : "soft", Z80::getRegPC());
+      if (rp == 2) {
+        NextReg::reset(true);
+        ESPectrum::reset();
+      } else {
+        NextReg::reg[0x02] = 0x01;   // sticky: last reset was soft
+        // Alt-ROM staged nibble 3:0 -> active 7:4 (zxnext.vhd reset promote)
+        uint8_t a = (uint8_t)((NextReg::reg[0x8C] & 0x0F) << 4) |
+                    (NextReg::reg[0x8C] & 0x0F);
+        NextReg::write(0x8C, a);
+        // ROM select back to bank 0; upper MMU slots survive as-is
+        MemESP::romInUse = 0;
+        MemESP::romLatch = 0;
+        NextReg::port7FFD = 0;
+        NextReg::portDFFD = 0;
+        NextReg::port1FFD = 0;
+        NextReg::port123B = 0;
+        MemESP::wr_overlay_active = false;
+        MemESP::applyMMU(0, 0xFF);
+        MemESP::applyMMU(1, 0xFF);
+        // divMMC: overlay off, SPI CS deasserted; pager banks/state survive
+        DivMMC::automap = false;
+        DivMMC::applyMapping();
+        // speed back to 3.5MHz (VHDL soft-reset default for nextreg 0x07)
+        NextReg::reg[0x07] = 0;
+        if (multiplicator) {
+          CPU::tstates >>= multiplicator;
+          multiplicator = 0;
+          CPU::updateStatesInFrame();
+          NEXTVID::onClockChange();
+        }
+        Z80::reset();
+      }
+    }
     CPU::loop();
 
     if (profi_spi_boot) {

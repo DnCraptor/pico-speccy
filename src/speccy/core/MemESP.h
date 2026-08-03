@@ -459,6 +459,14 @@ public:
     static uint8_t  next_rom_mask;   // bit N: slot N (0/1) has ROM mapped
     static bool loadNextRoms();      // load ROM files from SD (after buildNextRam)
 
+    // Alt-ROM (nextreg 0x8C): two hidden 16K RAM banks that can replace the
+    // machine ROM for reads or capture its writes (NextZXOS patches itself
+    // through this). 32K carved right after the ROM region.
+    static uint8_t* altRomBase;      // 2 x 16K (bank 0 = 128k-style, 1 = 48k-style)
+    static bool altrom_rd;           // reads of slots 0/1 come from alt-rom
+    static bool altrom_wr;           // writes to slots 0/1 go into alt-rom
+    static uint8_t altrom_sel;       // which 16K alt bank is active (0/1)
+
     static uint8_t* page0_lo;      // 0x0000-0x1FFF when DivMMC/MB02 mapped
     static uint8_t* page0_hi;      // 0x2000-0x3FFF when DivMMC/MB02 mapped
     static bool divmmc_mapped;     // DivMMC/MB02 memory currently visible at page 0
@@ -569,8 +577,14 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
         return;
     }
     // Next ROM lives in writable PSRAM — enforce read-only (after DivMMC:
-    // an automapped page 0 must stay writable per the rules above)
-    if (slot <= 1 && (next_rom_mask & (1 << slot))) return;
+    // an automapped page 0 must stay writable per the rules above).
+    // Alt-ROM write-redirect captures these writes instead (nextreg 0x8C
+    // bit 6 — NextZXOS patches its ROMs through this).
+    if (slot <= 1 && (next_rom_mask & (1 << slot))) {
+        if (altrom_wr && altRomBase)
+            altRomBase[(uint32_t)altrom_sel * 0x4000 + ((uint32_t)slot << 13) + (addr & 0x1fff)] = data;
+        return;
+    }
     uint8_t* p = ramCurrent[slot];
     // Accessor-mode bank: write goes straight to the SPI backing store
     // (must be checked before the ROM filter — nullptr < 0x11000000).
