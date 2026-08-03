@@ -3770,6 +3770,42 @@ const char* mnemED(uint8_t b) {
     return "???";
 }
 
+// Z80N (ZX Spectrum Next) extended ED opcodes — shown only in Next mode.
+// Lowercase n/nn are operand slots for the substitution engine below;
+// ED 91 (NEXTREG r,v) and ED 8A (PUSH nn big-endian) are formatted manually.
+static const char* mnemEDNext(uint8_t b) {
+    switch (b) {
+        case 0x23: return "SWAPNIB";
+        case 0x24: return "MIRROR A";
+        case 0x27: return "TEST n";
+        case 0x28: return "BSLA DE,B";
+        case 0x29: return "BSRA DE,B";
+        case 0x2A: return "BSRL DE,B";
+        case 0x2B: return "BSRF DE,B";
+        case 0x2C: return "BRLC DE,B";
+        case 0x30: return "MUL D,E";
+        case 0x31: return "ADD HL,A";
+        case 0x32: return "ADD DE,A";
+        case 0x33: return "ADD BC,A";
+        case 0x34: return "ADD HL,nn";
+        case 0x35: return "ADD DE,nn";
+        case 0x36: return "ADD BC,nn";
+        case 0x90: return "OUTINB";
+        case 0x92: return "NEXTREG n,A";
+        case 0x93: return "PIXELDN";
+        case 0x94: return "PIXELAD";
+        case 0x95: return "SETAE";
+        case 0x98: return "JP (C)";
+        case 0xA4: return "LDIX";
+        case 0xA5: return "LDWS";
+        case 0xAC: return "LDDX";
+        case 0xB4: return "LDIRX";
+        case 0xB7: return "LDPIRX";
+        case 0xBC: return "LDDRX";
+    }
+    return nullptr;
+}
+
 const char* const mnemCB[256] = {
     "RLC B", // 00
     "RLC C", // 01
@@ -4264,7 +4300,24 @@ static void disasmAt(uint16_t addr, char* out, int maxlen) {
             off = 2;
         }
     } else if (b == 0xED) {
-        m = mnemED(MemESP::dbgPeek(addr + 1));
+        uint8_t b1 = MemESP::dbgPeek(addr + 1);
+        m = mnemED(b1);
+        if (Z80Ops::isNext) {
+            if (b1 == 0x91) {          // NEXTREG reg,val — two byte operands
+                char tmp[16];
+                snprintf(tmp, sizeof(tmp), "NREG %02X,%02X",
+                         MemESP::dbgPeek(addr + 2), MemESP::dbgPeek(addr + 3));
+                m = tmp;
+            } else if (b1 == 0x8A) {   // PUSH nn — immediate is BIG-endian
+                char tmp[12];
+                snprintf(tmp, sizeof(tmp), "PUSH %02X%02X",
+                         MemESP::dbgPeek(addr + 2), MemESP::dbgPeek(addr + 3));
+                m = tmp;
+            } else {
+                const char* nx = mnemEDNext(b1);
+                if (nx) m = nx;
+            }
+        }
         off = 2;
     } else if (b == 0xCB) {
         m = mnemCB[MemESP::dbgPeek(addr + 1)];
@@ -4319,7 +4372,13 @@ static int instrLen(uint16_t addr) {
         return 2;
     }
     if (b == 0xED) {
-        const char* m = mnemED(MemESP::dbgPeek(addr + 1));
+        uint8_t b1 = MemESP::dbgPeek(addr + 1);
+        if (Z80Ops::isNext) {
+            if (b1 == 0x91 || b1 == 0x8A ||
+                b1 == 0x34 || b1 == 0x35 || b1 == 0x36) return 4; // NEXTREG r,v / PUSH nn / ADD rr,nn
+            if (b1 == 0x92 || b1 == 0x27) return 3;               // NEXTREG r,A / TEST n
+        }
+        const char* m = mnemED(b1);
         if (strstr(m, "nn")) return 4;
         return 2;
     }
@@ -4732,6 +4791,20 @@ c:
             mem = mnemCB[bytes[1]];
         } else if (isED) {
             mem = mnemED(bytes[1]);
+            if (Z80Ops::isNext) {
+                if (bytes[1] == 0x91) {          // NEXTREG reg,val
+                    char tmp[16];
+                    snprintf(tmp, sizeof(tmp), "NREG %02X,%02X", bytes[2], bytes[3]);
+                    mem = tmp;
+                } else if (bytes[1] == 0x8A) {   // PUSH nn (big-endian imm)
+                    char tmp[12];
+                    snprintf(tmp, sizeof(tmp), "PUSH %02X%02X", bytes[2], bytes[3]);
+                    mem = tmp;
+                } else {
+                    const char* nx = mnemEDNext(bytes[1]);
+                    if (nx) mem = nx;
+                }
+            }
         } else {
             mem = mnem[bi];
         }
