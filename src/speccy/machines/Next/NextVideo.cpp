@@ -87,20 +87,24 @@ void NEXTVID::buildRemap() {
         int tg = ((i >> 5) & 7) * 255 / 7;
         int tb = (i & 3) * 255 / 3;
         int best = 17;
-        long bestd = 1L << 60;
+        // max d = 255^2 * 10 < 2^32 — plain uint32 arithmetic (a 64-bit
+        // sentinel via `long` was UB on 32-bit ARM: bestd == 0, nothing ever
+        // beat it and the whole remap collapsed to index 17 — hw: solid
+        // crimson screen whatever the OS drew)
+        uint32_t bestd = 0xFFFFFFFFu;
         for (int c = 0; c < 16; c++) {           // ZX colours
             int l = zxlvl[(c >> 3) & 1];
             int cr = (c & 2) ? l : 0, cg = (c & 4) ? l : 0, cb = (c & 1) ? l : 0;
-            long dr = tr - cr, dg = tg - cg, db = tb - cb;
-            long d = dr * dr * 3 + dg * dg * 6 + db * db;
+            int dr = tr - cr, dg = tg - cg, db = tb - cb;
+            uint32_t d = (uint32_t)(dr * dr * 3 + dg * dg * 6 + db * db);
             if (d < bestd) { bestd = d; best = c; }
         }
         for (int j = 17; j < 184; j++) {          // linear cube
             int cr = ((j >> 2) & 7) * 255 / 7;
             int cg = ((j >> 5) & 7) * 255 / 7;
             int cb = (j & 3) * 255 / 3;
-            long dr = tr - cr, dg = tg - cg, db = tb - cb;
-            long d = dr * dr * 3 + dg * dg * 6 + db * db;
+            int dr = tr - cr, dg = tg - cg, db = tb - cb;
+            uint32_t d = (uint32_t)(dr * dr * 3 + dg * dg * 6 + db * db);
             if (d < bestd) { bestd = d; best = j; }
         }
         remap[i] = (uint8_t)best;
@@ -141,6 +145,21 @@ void NEXTVID::defaultPalettes() {
         }
     }
     for (int pal = 0; pal < 8; pal++) rebuildLut(pal);
+}
+
+static inline uint8_t writePalSel_(uint8_t ctrl) { return (ctrl >> 4) & 7; }
+
+uint8_t NEXTVID::palRead8() {
+    // nextreg 0x41 read: bits 8:1 of the current entry (RRRGGGBB)
+    if (!rawPal) return 0;
+    return (uint8_t)(rawPal[writePalSel_(palCtrl)][palIdx] >> 1);
+}
+
+uint8_t NEXTVID::palRead9() {
+    // nextreg 0x44 read: second-byte view — bit7 = L2 priority, bit0 = B lsb
+    if (!rawPal) return 0;
+    uint16_t raw = rawPal[writePalSel_(palCtrl)][palIdx];
+    return (uint8_t)(((raw & 0x8000) ? 0x80 : 0) | (raw & 1));
 }
 
 void NEXTVID::palIndex(uint8_t v) {
@@ -348,6 +367,12 @@ void NEXTVID::Reset() {
     skipFrame = false;
 }
 
+// nextreg 0x07 can switch the CPU clock MID-FRAME; the pending line
+// boundary was computed in the old T-state scale.
+void NEXTVID::onClockChange() {
+    nextLineTstate = (lineIdx + 1) * ((uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator);
+}
+
 IRAM_ATTR void NEXTVID::EndFrame() {
     static uint8_t skipCnt = 0;
     skipFrame = ESPectrum::maxSpeed && (++skipCnt & 63);
@@ -498,6 +523,20 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     // Layer 2 palette-priority pixels sit above everything
     if (l2on && palHasPrio[(palCtrl & 0x04) ? 5 : 1])
         RenderL2Line(fb, row, true);
+
+    // Scanout byte order: the HDMI/VGA ISR reads fb bytes at x^2 (16-bit
+    // halves of each 32-bit word swapped — legacy renderers bake this into
+    // their AluBytes words). NEXTVID renders linearly, so rotate each word
+    // once at the end of the line (hw: NextZXOS text scrambled in 4-pixel
+    // groups while solid areas looked fine).
+    {
+        uint32_t* w = (uint32_t*)fb;
+        int words = ((int)VIDEO::vga.xres + 3) >> 2;
+        for (int k = 0; k < words; k++) {
+            uint32_t v = w[k];
+            w[k] = (v >> 16) | (v << 16);
+        }
+    }
 }
 
 // Layer 2: 256x192x8bpp (row-major) or 320x256x8bpp (column-major, covers

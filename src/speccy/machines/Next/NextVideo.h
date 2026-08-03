@@ -28,6 +28,7 @@ class NEXTVID {
 public:
     static void Reset();       // machine reset: geometry, default palettes
     static void EndFrame();    // frame restart (called from VIDEO::EndFrame)
+    static void onClockChange(); // nextreg 0x07 turbo switch: rescale line boundary
 
     // VIDEO::Draw replacements
     static void Tick(unsigned int statestoadd, bool contended);
@@ -35,6 +36,8 @@ public:
     static void DrawBorderNop();
 
     // nextreg palette interface (regs 0x40/0x41/0x43/0x44)
+    static uint8_t palRead8();
+    static uint8_t palRead9();
     static void palIndex(uint8_t v);
     static void palValue8(uint8_t v);
     static void palValue9(uint8_t v);
