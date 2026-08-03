@@ -5322,11 +5322,12 @@ void VIDEO::Reset() {
         // Placed last so nothing below re-points the Draw handlers.
         gigascreen_enabled = false;
         graphics_set_dither(false);
-        // NEXTVID's palette LUTs map into the plain G3R3B2 cube at 17-219;
+        // NEXTVID's palette LUTs map into the plain G3R3B2 cube at 17-183;
         // Gigascreen (17-127) and the dither table (64-127) may have
         // repurposed those CLUT slots — restore the cube, LINEAR (no palette
-        // matrix: Next owns its colours via the RGB333 palettes).
-        for (int i = 17; i < 220; i++)
+        // matrix: Next owns its colours via the RGB333 palettes). 184+ stays
+        // untouched: HDMI audio data islands / guard bands live there.
+        for (int i = 17; i < 184; i++)
             graphics_set_palette(i, grb_to_rgb888(i));
         NEXTVID::Reset();
         Draw = &NEXTVID::Tick;

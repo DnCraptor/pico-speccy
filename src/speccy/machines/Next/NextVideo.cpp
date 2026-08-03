@@ -68,22 +68,42 @@ static inline uint8_t g3r3b2_of_rgb333(uint16_t v) {
     return (g << 5) | (r << 2) | (b >> 1);
 }
 
-// Nearest allowed CLUT index for the reserved regions. Indices 0-16 hold the
-// Spectrum/OSD colours and 220-255 are used by the scanout (HDMI control
-// words, audio data islands, scanline slot) — pixels must not land there.
+// Nearest usable CLUT index for a G3R3B2 target colour. Usable candidates:
+//  - 17..183: the linear G3R3B2 cube. NOT beyond: on HDMI, 184-199 and
+//    216-239 hold audio data-island / guard-band TMDS symbols (a pixel with
+//    such a value emits CONTROL symbols mid-line — hw: yellow vertical
+//    stripes where bright white (cube 219+) should be) and 200-215 are the
+//    textmode slots; 240+ is sync. Stay below 184 everywhere.
+//  - 0..15: the ZX palette entries — exact black/white/primaries. The cube's
+//    dark corner (indices < 17) is cut off by the OSD range, so without
+//    these, black lands on index 32 = visibly dark GREEN (hw). Their CLUT
+//    values follow the user's ZX palette transform, which for the nominal
+//    ZX points is close enough.
+// Distances are computed in 8-bit RGB with rough luma weights.
 void NEXTVID::buildRemap() {
-    auto allowed = [](int i) { return i >= 17 && i < 220; };
+    static const uint8_t zxlvl[2] = { 205, 255 };
     for (int i = 0; i < 256; i++) {
-        if (allowed(i)) { remap[i] = i; continue; }
-        int g = (i >> 5) & 7, r = (i >> 2) & 7, b = i & 3;
-        int best = 17, bestd = 1 << 30;
-        for (int j = 17; j < 220; j++) {
-            int jg = (j >> 5) & 7, jr = (j >> 2) & 7, jb = j & 3;
-            int dg = g - jg, dr = r - jr, db = b - jb;
-            int d = dg * dg * 9 + dr * dr * 9 + db * db * 16; // roughly perceptual
+        int tr = ((i >> 2) & 7) * 255 / 7;
+        int tg = ((i >> 5) & 7) * 255 / 7;
+        int tb = (i & 3) * 255 / 3;
+        int best = 17;
+        long bestd = 1L << 60;
+        for (int c = 0; c < 16; c++) {           // ZX colours
+            int l = zxlvl[(c >> 3) & 1];
+            int cr = (c & 2) ? l : 0, cg = (c & 4) ? l : 0, cb = (c & 1) ? l : 0;
+            long dr = tr - cr, dg = tg - cg, db = tb - cb;
+            long d = dr * dr * 3 + dg * dg * 6 + db * db;
+            if (d < bestd) { bestd = d; best = c; }
+        }
+        for (int j = 17; j < 184; j++) {          // linear cube
+            int cr = ((j >> 2) & 7) * 255 / 7;
+            int cg = ((j >> 5) & 7) * 255 / 7;
+            int cb = (j & 3) * 255 / 3;
+            long dr = tr - cr, dg = tg - cg, db = tb - cb;
+            long d = dr * dr * 3 + dg * dg * 6 + db * db;
             if (d < bestd) { bestd = d; best = j; }
         }
-        remap[i] = best;
+        remap[i] = (uint8_t)best;
     }
 }
 
