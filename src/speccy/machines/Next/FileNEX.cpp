@@ -97,6 +97,14 @@ bool FileNEX::load(const string& nex_fn) {
     if (!preserveRegs) {
         ESPectrum::reset();
     }
+    // A .NEX runs on a BOOTED machine: the TBBLUE bootrom / config-mode
+    // window must be gone even when the file preserves nextreg state. The
+    // reboot-from-another-machine path (Config::ram_file) lands here right
+    // after setup() armed the bootrom — without this the loaded PC fetches
+    // the boot loader's bytes instead of the program's.
+    MemESP::nextBootRomActive = false;
+    MemESP::nextConfigMode = false;
+    MemESP::applyNextConfigWindow();
 
     // Optional palette block (for Layer2/LoRes screens, unless bit7 set)
     bool hasPalette = (screens & 0x05) && !(screens & 0x80);

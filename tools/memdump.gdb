@@ -78,9 +78,9 @@ if $nslots == 8
   set logging enabled off
 else
   dump binary memory /tmp/picospec_mem0.bin MemESP::ramCurrent[0] (MemESP::ramCurrent[0] + 16384)
-  dump binary memory /tmp/picospec_mem1.bin MemESP::ramCurrent[1] (MemESP::ramCurrent[1] + 16384)
-  dump binary memory /tmp/picospec_mem2.bin MemESP::ramCurrent[2] (MemESP::ramCurrent[2] + 16384)
-  dump binary memory /tmp/picospec_mem3.bin MemESP::ramCurrent[3] (MemESP::ramCurrent[3] + 16384)
+  dump binary memory /tmp/picospec_mem1.bin MemESP::ramCurrent[2] (MemESP::ramCurrent[2] + 16384)
+  dump binary memory /tmp/picospec_mem2.bin MemESP::ramCurrent[4] (MemESP::ramCurrent[4] + 16384)
+  dump binary memory /tmp/picospec_mem3.bin MemESP::ramCurrent[6] (MemESP::ramCurrent[6] + 16384)
 end
 
 # All 8 physical RAM pages (128K) via MemESP::ram[N]._int->p
@@ -338,7 +338,7 @@ if Z80Ops::isAtm
   set logging enabled on
   printf "== ATM-Turbo ==\n"
   printf "atm1=%d aFE=%02X aFB=%02X pFDFD=%02X p7ffd=%02X beta=%d cpm=%d trdos=%d ro=%02X\n", (int)Atm::atm1, (unsigned char)Atm::aFE, (unsigned char)Atm::aFB, (unsigned char)Atm::pFDFD, (unsigned char)Atm::p7ffd, (int)Atm::beta, (int)(Atm::atm1 ? !(Atm::aFE & 0x80) : !(Atm::a77 & 0x200)), (int)ESPectrum::trdos, (unsigned char)g_atm_ro
-  printf "slots=%08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[1], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[3]
+  printf "slots=%08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[4], (unsigned)MemESP::ramCurrent[6]
   printf "p77=%02X a77=%04X pBF=%02X shaden=%d atm3=%d videoLatch=%d gmx_ext_live=%d pend_on=%d pend_off=%d ds80=%d mult=%d\n", (unsigned char)Atm::p77, (unsigned short)Atm::a77, (unsigned char)Atm::pBF, (int)Atm::shaden, (int)Atm::atm3, (int)MemESP::videoLatch, (int)VIDEO::gmx_ext_live, (int)VIDEO::gmx_ext_pending_on, (int)VIDEO::gmx_ext_pending_off, (int)profi_ds80_active, (int)ESPectrum::multiplicator
   printf "pF7=%03X %03X %03X %03X | %03X %03X %03X %03X\n", (unsigned)Atm::pF7[0], (unsigned)Atm::pF7[1], (unsigned)Atm::pF7[2], (unsigned)Atm::pF7[3], (unsigned)Atm::pF7[4], (unsigned)Atm::pF7[5], (unsigned)Atm::pF7[6], (unsigned)Atm::pF7[7]
   printf "pal=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X border=%02X\n", (unsigned char)Atm::pal[0], (unsigned char)Atm::pal[1], (unsigned char)Atm::pal[2], (unsigned char)Atm::pal[3], (unsigned char)Atm::pal[4], (unsigned char)Atm::pal[5], (unsigned char)Atm::pal[6], (unsigned char)Atm::pal[7], (unsigned char)Atm::pal[8], (unsigned char)Atm::pal[9], (unsigned char)Atm::pal[10], (unsigned char)Atm::pal[11], (unsigned char)Atm::pal[12], (unsigned char)Atm::pal[13], (unsigned char)Atm::pal[14], (unsigned char)Atm::pal[15], (unsigned char)VIDEO::borderColor
@@ -347,6 +347,25 @@ if Z80Ops::isAtm
   if Atm::evo
     printf "evo: eff7=%02X fddMask=%X vgSys=%02X inNmi=%d nmiClr=%d inTrdemu=%d fnt=%d\n", (unsigned char)EvoBase::pEFF7, (unsigned char)EvoBase::fddMask, (unsigned char)EvoBase::vgSys, (int)EvoBase::inNmi, (int)EvoBase::nmiClrPending, (int)EvoBase::inTrdemu, (int)g_atm_fnt
   end
+# ── ZX Spectrum Next state (appended LAST — the rule of this file: an
+# unresolved symbol must not lose the main dump). NextReg register file +
+# MMU/paging/divMMC-automap/TBBLUE-window snapshot: a Browser or .tap hang
+# with only the main dump reads as "PC somewhere in ROM"; this names the
+# mapping that put it there. arch enum: 9 == A_NEXT (ArchRom.h X-macro).
+shell rm -f /tmp/picospec_nextregs.bin /tmp/picospec_next.txt
+if Config::arch == 9
+  dump binary memory /tmp/picospec_nextregs.bin NextReg::reg (NextReg::reg + 256)
+  set logging file /tmp/picospec_next.txt
+  set logging overwrite on
+  set logging redirect on
+  set logging enabled on
+  printf "mmu=%02X %02X %02X %02X %02X %02X %02X %02X\n", MemESP::mmu[0], MemESP::mmu[1], MemESP::mmu[2], MemESP::mmu[3], MemESP::mmu[4], MemESP::mmu[5], MemESP::mmu[6], MemESP::mmu[7]
+  printf "romInUse=%d romLatch=%d rom_mask=%02X altrom_rd=%d altrom_wr=%d altrom_sel=%d\n", (int)MemESP::romInUse, (int)MemESP::romLatch, (unsigned char)MemESP::next_rom_mask, (int)MemESP::altrom_rd, (int)MemESP::altrom_wr, (int)MemESP::altrom_sel
+  printf "port7FFD=%02X port1FFD=%02X portDFFD=%02X port123B=%02X portFF=%02X\n", NextReg::port7FFD, NextReg::port1FFD, NextReg::portDFFD, NextReg::port123B, NextReg::portFF
+  printf "bootrom=%d configMode=%d configPage=%02X\n", (int)MemESP::nextBootRomActive, (int)MemESP::nextConfigMode, MemESP::nextConfigPage
+  printf "divmmc: automap=%d conmem=%d mapram=%d bank=%d mapped=%d armed=%d\n", (int)DivMMC::automap, (int)DivMMC::conmem, (int)DivMMC::mapram, (int)DivMMC::bank, (int)MemESP::divmmc_mapped, (int)g_next_automap_armed
+  printf "wr_overlay=%d multiplicator=%d\n", (int)MemESP::wr_overlay_active, (int)ESPectrum::multiplicator
+  printf "slots: %08X %08X %08X %08X %08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[1], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[3], (unsigned)MemESP::ramCurrent[4], (unsigned)MemESP::ramCurrent[5], (unsigned)MemESP::ramCurrent[6], (unsigned)MemESP::ramCurrent[7]
   set logging enabled off
   set logging redirect off
 end

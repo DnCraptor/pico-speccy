@@ -41,6 +41,7 @@ option(OPL_PERF_TRACE "Enable the ~6 s 'OPL: gen us/fr' YMF262 cost line (ESPect
 option(GS_DEBUG_TRACE "Enable General Sound port-IO trace ring + auto-dumps (~50 KB SRAM)" OFF)
 option(NGS_TRACE "Enable NeoGS 1 Hz health line (GS-Z80 PC / SD counters; ~2-4 ms UART stall per line)" OFF)
 option(NGS_SD_TRACE "Also log every guest SD command (NGS_TRACE level 2; thousands of lines per directory scan)" OFF)
+option(NEXT_TRACE "Enable ZX Next 1 Hz health line (MMU/automap/PC/FPS state + nextreg event ring)" ON)
 option(ZC_PORT_TRACE "Enable Z-Controller/DivSD SPI-SD command tracing (CS edges + command frames)" OFF)
 option(RZX_TRACE "RZX playback log: machine/ROM sums at start, a checkpoint per second, paging changes, short/overrun frames — same lines as tools/rzx_replay_sim.c RZX_LOG=1" OFF)
 option(ATM_PAGE_TRACE "ATM-Turbo paging trace only: page-register ring + page-table writes + RST #38 alarm (no SD flood)" OFF)

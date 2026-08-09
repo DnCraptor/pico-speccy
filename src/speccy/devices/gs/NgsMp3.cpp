@@ -2,6 +2,7 @@
 #include "app/Buffer.h"
 #include "NgsSd.h"
 #include "app/Debug.h"
+#include "app/Config.h"
 
 #include "pico.h"
 #include "pico/time.h"

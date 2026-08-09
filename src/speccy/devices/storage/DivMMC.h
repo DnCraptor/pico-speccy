@@ -227,6 +227,11 @@ inline void DivMMC::preOpcFetch(uint16_t pc) {
     // hijack those RSTs into the MMC ROM — hw: boot flew into an empty
     // bank 7 and NOP-looped.
     if (Config::arch == A_NEXT) {
+        // TBBLUE boot chain: while the FPGA bootrom / config-mode window owns
+        // 0x0000-0x3FFF the divMMC automap is out of the picture — boot.bin
+        // and TBBLUE.FW drive the SD ports directly and run at exactly the
+        // low addresses the traps watch.
+        if (MemESP::nextBootRomActive || MemESP::nextConfigMode) return;
         const uint8_t* nr = NextReg::reg;
         // Cold boot: on real hardware the FPGA bootrom overlays $0000-$3FFF,
         // so the reset fetch at $0000 does NOT automap — enNextZX's reset
@@ -298,11 +303,17 @@ inline void DivMMC::postOpcFetch() {
         trap_after = false;
         automap = true;
         if (!conmem) applyMapping();
+#if NEXT_TRACE
+        next_trace_ev('A', 0x01, 0);   // records PC itself
+#endif
     }
     if (unmap_after) {
         unmap_after = false;
         automap = false;
         if (!conmem) applyMapping();
+#if NEXT_TRACE
+        next_trace_ev('A', 0x00, 0);
+#endif
     }
 }
 

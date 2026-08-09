@@ -266,6 +266,24 @@ def main():
                 out.write("cram[%02X]: %s\n" % (i, " ".join(cram[i:i + 16])))
             for i in range(0, len(nv), 16):
                 out.write("nv[%02X]: %s\n" % (0xB0 + i, " ".join(nv[i:i + 16])))
+        # ZX Spectrum Next: NextReg file + paging/divMMC/TBBLUE-window state,
+        # when memdump.gdb ran on a Next machine. A stuck PC in 0x0000-0x3FFF
+        # is unreadable without knowing WHICH of bootrom / config window /
+        # divMMC / Alt-ROM / MMU ROM half owned the slot at dump time.
+        nxt = load_kv("/tmp/picospec_next.txt")
+        if nxt:
+            out.write("=" * 40 + "\n")
+            out.write("ZX Spectrum Next\n")
+            for key, val in nxt.items():
+                out.write(f"{key}={val}\n")
+            regs_bin = "/tmp/picospec_nextregs.bin"
+            if os.path.exists(regs_bin):
+                with open(regs_bin, "rb") as fh:
+                    nr = fh.read()
+                out.write("--- NextReg 00-FF (raw latches; composed "
+                          "read-backs differ: 03/07/1C/1E/1F/41/44/50-57) ---\n")
+                for a in range(0, 0x100, 16):
+                    out.write(hex_line(a, nr))
             out.write("\n")
 
         # ATM memory-mapping latches and WD1793 state. These are needed to tell

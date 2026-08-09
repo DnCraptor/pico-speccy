@@ -844,6 +844,7 @@ void MemESP::materializeOverlays() {
 
 uint8_t* MemESP::page0_lo = nullptr;
 uint8_t* MemESP::page0_hi = nullptr;
+bool MemESP::divmmc_lo_rom = false;
 bool MemESP::divmmc_mapped = false;
 bool* MemESP::divmmc_hi_dirty = nullptr;
 bool* MemESP::divmmc_lo_dirty = nullptr;
@@ -897,6 +898,10 @@ uint8_t* MemESP::altRomBase = nullptr;
 bool     MemESP::altrom_rd = false;
 bool     MemESP::altrom_wr = false;
 uint8_t  MemESP::altrom_sel = 0;
+const uint8_t* MemESP::nextBootRom = nullptr;
+bool     MemESP::nextBootRomActive = false;
+bool     MemESP::nextConfigMode = false;
+uint8_t  MemESP::nextConfigPage = 0;
 
 // Unmapped MMU pages read 0xFF (open bus). Lives in flash (.rodata), so the
 // XIP-address write guard in writebyte() blocks writes to it automatically.
@@ -988,6 +993,9 @@ bool MemESP::loadNextRoms() {
 void MemESP::applyMMU(uint8_t slot, uint8_t page) {
     slot &= 7;
     mmu[slot] = page;
+    // While the TBBLUE bootrom / config-mode window owns slots 0/1 only the
+    // latch updates; applyNextConfigWindow() re-applies mmu[] on window exit.
+    if (slot <= 1 && (nextBootRomActive || nextConfigMode)) return;
     uint8_t* p;
     if (page == 0xFF && slot <= 1) {
         if (altrom_rd && altRomBase)
@@ -1018,4 +1026,92 @@ void MemESP::applyMMU(uint8_t slot, uint8_t page) {
 void MemESP::resetNextMapping() {
     static const uint8_t def[8] = { 0xFF, 0xFF, 10, 11, 4, 5, 0, 1 };
     for (int i = 0; i < 8; i++) applyMMU(i, def[i]);
+}
+
+// ===== TBBLUE boot chain: config-mode window over 0x0000-0x3FFF =====
+
+#include "speccy/devices/storage/DivMMC.h"
+#include "speccy/machines/Next/NextReg.h"
+
+// The 16K backing store the NR 0x04 RAMPAGE page maps to, per the TBBlue
+// firmware's hardware.h layout (pinned by zx_go configModePageBacking):
+//   0x00-0x03  ROM0-3 (the 64K NextZXOS set)
+//   0x04       divMMC ROM (8K, window mirrors it twice)
+//   0x05       Multiface ROM — not present here, unbacked
+//   0x06-0x07  Alt-ROM 0/1
+//   0x08-0x0F  divMMC RAM (128K as 8 x 16K windows over the 8K banks)
+//   0x10-0x7F  RAM banks 0-111
+// Returns null for unbacked pages: reads then fall through to whatever the
+// MMU has mapped and writes drop — same fall-through zx_go implements.
+uint8_t* MemESP::configBackingHalf(uint8_t page, uint8_t half) {
+    if (!nextRamReady) return nullptr;
+    uint8_t* romRegion = nextRamPtr[NEXT_PAGES - 1] + 0x2000;
+    if (page <= 0x03)
+        return romRegion + (uint32_t)page * 0x4000 + (uint32_t)half * 0x2000;
+    if (page == 0x04)
+        return romRegion + 0x10000;              // 8K, both halves mirror it
+    if (page == 0x06 || page == 0x07)
+        return altRomBase ? altRomBase + (uint32_t)(page - 6) * 0x4000
+                                        + (uint32_t)half * 0x2000
+                          : nullptr;
+    if (page >= 0x08 && page <= 0x0F) {
+        int bank = (page - 0x08) * 2 + half;     // divMMC 8K banks
+        return (bank < DIVMMC_NUM_BANKS) ? DivMMC::bank_ptr[bank] : nullptr;
+    }
+    if (page >= 0x10 && page <= 0x7F) {
+        int pg = (page - 0x10) * 2 + half;
+        return (pg < NEXT_PAGES) ? nextRamPtr[pg] : nullptr;
+    }
+    return nullptr;
+}
+
+void MemESP::applyNextConfigWindow() {
+    if (!nextRamReady) return;
+    if (!nextBootRomActive && !nextConfigMode) {
+        // Window off: slots 0/1 back to the MMU, write overlay back to the
+        // Layer 2 window (updateLayer2Window recomputes it from port 0x123B).
+        applyMMU(0, mmu[0]);
+        applyMMU(1, mmu[1]);
+        NextReg::updateLayer2Window();
+        return;
+    }
+    // Reads: bootrom (8K mirrored) wins; otherwise the RAMPAGE backing.
+    if (nextBootRomActive && nextBootRom) {
+        ramCurrent[0] = (uint8_t*)nextBootRom;   // romPeek masks to 8K
+        ramCurrent[1] = (uint8_t*)nextBootRom;
+        next_rom_mask |= 3;
+#if NEXT_TRACE
+        Debug::log("NEXT cfgwin: bootrom plugged, s0=%08X",
+                   (unsigned)(uintptr_t)ramCurrent[0]);
+#endif
+    } else {
+        for (int h = 0; h < 2; h++) {
+            uint8_t* p = configBackingHalf(nextConfigPage, h);
+            if (p) {
+                ramCurrent[h] = p;
+                next_rom_mask |= (uint8_t)(1u << h);
+            }
+            // unbacked: leave the MMU mapping (fall-through, as on zx_go)
+        }
+    }
+    ramContended[0] = ramContended[1] = false;
+    // Writes: while config mode is on they land in the RAMPAGE backing even
+    // when the bootrom read overlay is still up — boot.bin streams the ROM
+    // images through exactly this state (zxnext.vhd:1856 gates reads only;
+    // zx_go's cold-boot NOP-slide was this rule missing).
+    uint8_t* w0 = nextConfigMode ? configBackingHalf(nextConfigPage, 0) : nullptr;
+    uint8_t* w1 = nextConfigMode ? configBackingHalf(nextConfigPage, 1) : nullptr;
+    if (w0 && w1) {
+        // Firmware writing a ROM image is what makes that image "loaded" —
+        // flip the pointers the ROM-select path reads (the direct SD load in
+        // loadNextRoms sets the same pointers to the same region).
+        uint8_t* romRegion = nextRamPtr[NEXT_PAGES - 1] + 0x2000;
+        if (nextConfigPage <= 0x03 && !nextRomBase)    nextRomBase = romRegion;
+        if (nextConfigPage == 0x04 && !nextDivRomBase) nextDivRomBase = romRegion + 0x10000;
+        wrOverlay[0] = w0;
+        wrOverlay[1] = w1;
+        wr_overlay_active = true;
+    } else {
+        wr_overlay_active = false;               // unbacked: writes drop
+    }
 }

@@ -1602,8 +1602,10 @@ IRAM_ATTR bool Z80Ops::isActiveINT(void) {
     int32_t tmp = (int32_t)CPU::tstates + CPU::latetiming;
     if (tmp >= (int32_t)CPU::statesInFrame) tmp -= CPU::statesInFrame;
     if (Z80Ops::isNext) {
-        // Frame (ULA) interrupt, unless masked via nextreg 0x22 bit 2
-        if (!NextReg::ulaIrqDisabled &&
+        // Frame (ULA) interrupt, unless masked via nextreg 0x22 bit 2 or
+        // Timex port 0xFF bit 6 (SCLD interrupt disable — the same gate on
+        // real hardware, zxnext.vhd port_ff_interrupt_disable)
+        if (!NextReg::ulaIrqDisabled && !NextReg::portFFIntDisable &&
             (tmp >= CPU::IntStart) && (tmp < CPU::IntEnd))
             return true;
         // Line interrupt (nextreg 0x22/0x23): asserted for ~32 base T-states

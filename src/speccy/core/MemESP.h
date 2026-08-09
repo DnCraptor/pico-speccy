@@ -467,8 +467,31 @@ public:
     static bool altrom_wr;           // writes to slots 0/1 go into alt-rom
     static uint8_t altrom_sel;       // which 16K alt bank is active (0/1)
 
+    // ===== TBBLUE boot chain (FPGA bootrom + config mode) =====
+    // Real power-on: the FPGA's 8K bootrom is readable (mirrored) over
+    // 0x0000-0x3FFF and config_mode = 1 (zxnext.vhd:1102). The bootrom loads
+    // TBBLUE.FW from SD; the firmware streams the ROM images through the
+    // NR 0x04 RAMPAGE window (writes bypass the bootrom read overlay —
+    // zxnext.vhd:1856 gates READS only), then exits via NR 0x03. Armed only
+    // when TBBLUE.FW is present on the card (see ESPectrum::setup); the
+    // direct enNextZX.rom load remains the fallback boot.
+    static const uint8_t* nextBootRom;  // 8K image (flash) or nullptr = direct boot
+    static bool nextBootRomActive;      // reads of 0x0000-0x3FFF come from bootrom
+    static bool nextConfigMode;         // NR 0x03 config_mode flip-flop
+    static uint8_t nextConfigPage;      // NR 0x04 RAMPAGE latch
+    static void applyNextConfigWindow();
+    static uint8_t* configBackingHalf(uint8_t page, uint8_t half);
+
     static uint8_t* page0_lo;      // 0x0000-0x1FFF when DivMMC/MB02 mapped
     static uint8_t* page0_hi;      // 0x2000-0x3FFF when DivMMC/MB02 mapped
+    static bool divmmc_lo_rom;     // page0_lo is the MMC ROM — drop writes.
+                                   // The old ">= 0x11000000 means RAM bank"
+                                   // heuristic broke on Next, where enNxtmmc
+                                   // itself lives in writable butter: stray
+                                   // guest writes through the CONMEM window
+                                   // scribbled it ("enNxtmmc.rom invalid"
+                                   // after F11, .tap ISR derail — hw
+                                   // 2026-08-09)
     static bool divmmc_mapped;     // DivMMC/MB02 memory currently visible at page 0
     static bool* divmmc_hi_dirty;  // swap mode: points to slot_dirty[] for page0_hi slot
     static bool* divmmc_lo_dirty;  // swap mode: points to slot_dirty[] for page0_lo slot
@@ -556,9 +579,9 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
     if (slot <= 1 && ramCurrent[0] == g_alfWindow) return; // ALF lazy cart: page 0 is ROM
     if (slot <= 1 && divmmc_mapped) {
         if (slot == 0) {
-            // 0x0000-0x1FFF: writable only when MAPRAM (RAM bank)
-            // In PSRAM mode: page0_lo >= 0x11000000 means PSRAM bank
+            // 0x0000-0x1FFF: writable only when MAPRAM (RAM bank) / MB-02 SRAM
             // In swap mode: divmmc_lo_dirty != null means heap bank (MAPRAM)
+            if (divmmc_lo_rom) return;       // MMC ROM half — real hw drops
             if (divmmc_lo_dirty) {
                 page0_lo[addr] = data;
                 *divmmc_lo_dirty = true;

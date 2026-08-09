@@ -1314,6 +1314,10 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       if (address == 0x303B) return NEXTVID::spriteFlagsRead();
       // I2C bus (RTC) — no device attached: lines read idle-high
       if (address == 0x103B || address == 0x113B) return 0xFF;
+      // Timex port 0xFF read-back, gated on nextreg 0x08 bit 2 (with the
+      // gate off the read falls through to the floating-bus path)
+      if ((address & 0xFF) == 0xFF && (NextReg::reg[0x08] & 0x04))
+        return NextReg::portFF;
     }
     // ULA+ data port read
     if (Config::ulaplus && address == 0xFF3B) {
@@ -3447,6 +3451,14 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
         (Z80Ops::isNext && a8 == 0x6B)) {
       LED::touchW(LED::DMA);
       Z80DMA::writePort(data);
+      ioContentionLate(MemESP::ramContended[rambank]);
+      return;
+    }
+    // Next: port 0xFF is the Timex/SCLD register, decoded on the full low
+    // byte. bit6 disables the ULA frame interrupt; bits 5:0 mirror into
+    // nextreg 0x69 (NEXTVID's screen-mode source).
+    if (Z80Ops::isNext && a8 == 0xFF) {
+      NextReg::writePortFF(data);
       ioContentionLate(MemESP::ramContended[rambank]);
       return;
     }

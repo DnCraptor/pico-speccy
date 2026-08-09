@@ -325,6 +325,15 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
             DivMMC::init();   // teardown path frees buffers
             OSD::osdCenteredMsg("DivMMC disabled", LEVEL_WARN, 1500);
         }
+        // Switching into Next: NextZXOS boots from the REAL SD card, so the
+        // divMMC interface must be DivSD (raw card access, esxdos==3). The
+        // .mmc-image mode would point the OS at esxdos.mmc instead of the
+        // card and DivIDE has no SD at all. Persisted by the save below;
+        // the arch boundary hard-reset re-inits DivMMC in the new mode.
+        if (Config::arch == A_NEXT && Config::esxdos != 3) {
+            Config::esxdos = 3;
+            OSD::osdCenteredMsg("DivSD (raw SD) enabled", LEVEL_WARN, 1500);
+        }
         // NOTE: GM.DLS MIDI is NOT auto-disabled on Profi entry anymore.
         // On tight butter-less boards the featureBudgetGate popup offers
         // MIDI as a manual free candidate instead (user decides).

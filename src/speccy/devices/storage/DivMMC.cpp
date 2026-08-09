@@ -1,6 +1,7 @@
 #include "DivMMC.h"
 #include "app/Buffer.h"
 #include "speccy/z80/z80.h"
+#include "pico/time.h"
 
 
 #include <cstring>
@@ -582,8 +583,13 @@ void DivMMC::applyMapping() {
         if (mapram) {
             materialize(3);
             MemESP::page0_lo = bank_ptr[3];
+            MemESP::divmmc_lo_rom = false;   // RAM bank 3 (esxDOS MAPRAM)
         } else {
             MemESP::page0_lo = esxdos_rom;
+            // ROM half: real hardware drops writes here. Load-bearing on
+            // Next, where enNxtmmc lives in WRITABLE butter and the old
+            // pointer-range heuristic let stray guest writes corrupt it.
+            MemESP::divmmc_lo_rom = true;
         }
         materialize(b);
         MemESP::page0_hi = bank_ptr[b];
@@ -991,11 +997,21 @@ uint32_t DivMMC::zc_read_span(const uint8_t*& p) {
 
 void DivMMC::zc_read_consume(uint32_t words) { mmc_read_index += (int)(2 * words); }
 
+// SD stall accounting (read by next_trace_dump): µs spent inside blocking
+// disk_read/disk_write this second, and the op count. The whole emulator
+// stops during these — guest wall-time dilates with them (hw 2026-08-09:
+// "disable welcome" took minutes at fps=4).
+volatile uint32_t g_sd_stall_us = 0;
+volatile uint32_t g_sd_ops = 0;
+
 void DivMMC::loadSector(uint32_t sector) {
     if (divsd_mode) {
         const uint32_t sdT0 = time_us_32();
         DRESULT r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
-        zc_rd_sectors++; zc_rd_us += time_us_32() - sdT0;
+        const uint32_t sdUs = time_us_32() - sdT0;
+        zc_rd_sectors++; zc_rd_us += sdUs;
+        g_sd_stall_us += sdUs;
+        g_sd_ops++;
 #if ZC_PORT_TRACE
         {   // folded: a FAT walk re-reads the same handful of sectors forever
             char line[64];
@@ -1022,7 +1038,10 @@ void DivMMC::loadSector(uint32_t sector) {
 void DivMMC::storeSector(uint32_t sector) {
     raDrop();
     if (divsd_mode) {
+        uint64_t t0 = time_us_64();
         DRESULT r = disk_write(raw_pdrv(), mmc_sector_buf, sector, 1);
+        g_sd_stall_us += (uint32_t)(time_us_64() - t0);
+        g_sd_ops++;
 #if ZC_PORT_TRACE
         zcTraceWrite(sector, (int)r, mmc_sector_buf);
 #else
@@ -1062,6 +1081,8 @@ void DivMMC::mmc_cs(uint8_t value) {
     mmc_wr25_active = false;
     mmc_wr25_idx = -1;
     mmc_wr25_r1 = false;
+    mmc_read_cont = false;
+    mmc_cont_pending = false;
     mmc_wr_resp = -1;
 }
 
@@ -1246,6 +1267,22 @@ uint8_t DivMMC::mmc_read() {
             }
             return 0xFF;
 
+        case 0x4D: { // CMD13 SEND_STATUS — R2 = R1 (0x00) + one status byte
+                     // (0x00 = no errors). TBBLUE.FW verifies EVERY sector
+                     // write with CMD13 and fails the save when the response
+                     // never leaves 0xFF ("Error saving configuration!" with
+                     // the sector already stored — hw 2026-08-09, found by
+                     // disassembling the FW's write-sector routine: CMD24 →
+                     // data token check → busy poll → CMD13, R1 and status
+                     // byte both required to be zero). esxDOS never sends it.
+            static uint8_t r2_idx = 0;
+            if (r2_idx == 0) { r2_idx = 1; return 0xFF; }  // NCR gap
+            if (r2_idx == 1) { r2_idx = 2; return 0x00; }  // R1
+            r2_idx = 0;
+            mmc_last_command = 0;
+            return 0x00;                                    // R2 status byte
+        }
+
         case 0x50: // CMD16 SET_BLOCKLEN — R1=00 (accepted)
             mmc_last_command = 0;
             return 0;
@@ -1350,6 +1387,16 @@ void DivMMC::mmc_write(uint8_t value) {
                      (unsigned)(value & 0x3F), (unsigned)value);
             zcTraceFold(line);
         }
+#else
+        // Write-class commands are rare and diagnosis-critical (the TBBLUE.FW
+        // config-save bug class) — always log the first few, trace flag or not.
+        if (value == 0x58 || value == 0x59 || value == 0x4C || value == 0x4D) {
+            static uint8_t wrcmd_trace = 0;
+            if (wrcmd_trace < 24) {
+                wrcmd_trace++;
+                Debug::log("SD wr-cmd CMD%u", (unsigned)(value & 0x3F));
+            }
+        }
 #endif
         return;
     }
@@ -1431,6 +1478,9 @@ void DivMMC::mmc_write(uint8_t value) {
                     mmc_sector_buf_addr = mmc_read_address;
                 }
                 mmc_read_index = 0;
+#if ZC_PORT_TRACE
+                Debug::log("ZC: CMD17 addr=%lu", (unsigned long)mmc_read_address);
+#endif
             }
             break;
 
@@ -1453,6 +1503,9 @@ void DivMMC::mmc_write(uint8_t value) {
                 mmc_read_index = 0;
                 mmc_read_cont = false;
                 mmc_cont_pending = false;
+#if ZC_PORT_TRACE
+                Debug::log("ZC: CMD18 addr=%lu", (unsigned long)mmc_read_address);
+#endif
             }
             break;
 

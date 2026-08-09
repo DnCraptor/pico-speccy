@@ -108,6 +108,7 @@ extern "C" volatile uint32_t hdmi_au_late_write_ct;
 #include "speccy/machines/EvoBase.h"
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Next/NextVideo.h"
+#include "speccy/core/roms.h"      // gb_rom_tbblue_loader (Next TBBLUE boot chain)
 #include "CodeOverlay.h"
 #include "speccy/devices/gs/NgsSd.h"
 #include "speccy/devices/gs/NgsMp3.h"
@@ -1116,12 +1117,34 @@ void ESPectrum::setup() {
       // Next mode: 8K page table over static SRAM (banks 0-7) + butter PSRAM
       // carve-out (banks 8-111 + the 72K ROM region). Legacy extended pages
       // are not allocated; Murmuzavr stays clamped to 64 above.
+      //
+      // NextZXOS boots from the REAL SD card: force DivSD (raw card, ==3)
+      // over the .mmc-image / DivIDE modes. Boot-time twin of the
+      // MachineSwitch rule — covers configs that never went through the menu.
+      if (Config::esxdos != 3) {
+          Debug::log2SD("setup: Next forces DivSD (esxdos %u -> 3)",
+                        (unsigned)Config::esxdos);
+          Config::esxdos = 3;
+      }
       if (MemESP::buildNextRam()) {
         bool roms = MemESP::loadNextRoms();
         Debug::log("setup: Next RAM carved, ROMs %s",
                    roms ? "loaded from SD" : "not found - 128K fallback ROM");
         Debug::log2SD("setup: Next RAM carved, ROMs %s",
                       roms ? "loaded from SD" : "not found - 128K fallback ROM");
+        // TBBLUE boot chain: with the firmware on the card, power on through
+        // the genuine sequence — embedded 8K FPGA bootrom → TBBLUE.FW →
+        // config.ini → NextZXOS. Needs the divMMC SD ports (Config::esxdos).
+        // Without TBBLUE.FW the direct enNextZX.rom boot above stays in force.
+        if (Config::esxdos) {
+            FILINFO fi;
+            if (f_stat("/TBBLUE.FW", &fi) == FR_OK ||
+                f_stat("/machines/next/TBBLUE.FW", &fi) == FR_OK)
+                MemESP::nextBootRom = gb_rom_tbblue_loader;
+        }
+        Debug::log2SD("setup: Next boot chain: %s",
+                      MemESP::nextBootRom ? "TBBLUE.FW (bootrom armed)"
+                                          : "direct ROM");
       } else {
         Debug::log2SD("setup: Next RAM carve failed, falling back to 128K");
         Config::arch = A_128K;
@@ -3760,6 +3783,22 @@ void ESPectrum::loop() {
 #if HDMI_AUDIO_TRACE
             hdmi_audio_health_dump();
 #endif
+        }
+    }
+#endif
+
+#if NEXT_TRACE
+    // Next 1 Hz health line: machine state + the nextreg/automap event ring.
+    // loop() runs once per emulated frame, so the frame delta doubles as FPS.
+    if (Config::arch == A_NEXT) {
+        static uint64_t next_trace_at = 0;
+        static uint32_t next_trace_frames = 0;
+        next_trace_frames++;
+        uint64_t now_nt = time_us_64();
+        if (now_nt >= next_trace_at) {
+            next_trace_at = now_nt + 1000000ull;
+            next_trace_dump(next_trace_frames);
+            next_trace_frames = 0;
         }
     }
 #endif

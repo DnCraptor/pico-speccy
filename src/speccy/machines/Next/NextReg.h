@@ -56,6 +56,25 @@ public:
 
     // Raster position for reg 0x1E/0x1F reads
     static uint16_t activeLine();
+
+    // Timex/SCLD port 0xFF (Next decodes the full low byte). bit 6 disables
+    // the ULA frame interrupt (zxnext.vhd port_ff_interrupt_disable — zx_go's
+    // conformance matrix flagged it as boot-relevant); bits 5:0 mirror
+    // nextreg 0x69 bits 5:0. Reads are gated on nextreg 0x08 bit 2.
+    static uint8_t portFF;
+    static bool    portFFIntDisable;
+    static void writePortFF(uint8_t v);
 };
+
+#if NEXT_TRACE
+// Diagnostics (CMake -DNEXT_TRACE=ON): 64-entry ring of nextreg / legacy-port
+// writes + divMMC automap transitions, dumped once a second from
+// ESPectrum::loop next to the state line. Same design rules as the NeoGS
+// handshake ring (that session's lesson: an incomplete or oldest-first ring
+// costs more than the bug): newest entries always survive the print budget,
+// flood sources (palette/copper/sprite streams) are counted, not recorded.
+void next_trace_ev(char kind, uint8_t r, uint8_t v);
+void next_trace_dump(uint32_t frames);
+#endif
 
 #endif

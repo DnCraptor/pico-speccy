@@ -28,7 +28,21 @@ void MB02::init() {
 
     // Unmap SRAM/EPROM when disabling
     MemESP::divmmc_mapped = false;
-    MemESP::recoverPage0();
+    if (Config::arch == A_NEXT && MemESP::nextRamReady) {
+        // Next: page 0 belongs to the MMU / TBBLUE config window —
+        // recoverPage0() would plug the legacy fallback ROM over slots 0/1.
+        // Found the hard way (hw 2026-08-09): setup() arms the TBBLUE bootrom
+        // at NextReg::reset(true), then this init (which runs for the DISABLED
+        // state too) silently replaced the plug — cold boot ran the 128K
+        // editor while every flag said "bootrom active"; an F11 reset (which
+        // skips MB02::init) booted the chain fine. Same rule as
+        // DivMMC::applyMapping's Next branch.
+        MemESP::applyMMU(0, MemESP::mmu[0]);
+        MemESP::applyMMU(1, MemESP::mmu[1]);
+        MemESP::applyNextConfigWindow();
+    } else {
+        MemESP::recoverPage0();
+    }
 
     if (!Config::mb02) {
         Config::dma_mode = 0;
@@ -155,6 +169,7 @@ void MB02::applyMapping() {
         MemESP::page0_lo = page0_composite;
         MemESP::page0_hi = rom_ptr ? rom_ptr + 0x2000 : page0_composite;
         MemESP::divmmc_mapped = true;
+        MemESP::divmmc_lo_rom = false;   // heap composite (write gate governs)
         MemESP::divmmc_lo_dirty = nullptr;
         MemESP::divmmc_hi_dirty = nullptr;
         return;
@@ -171,6 +186,7 @@ void MB02::applyMapping() {
         MemESP::page0_lo = p;
         MemESP::page0_hi = p + 0x2000;
         MemESP::divmmc_mapped = true;
+        MemESP::divmmc_lo_rom = false;   // MB-02 SRAM page (write gate governs)
         MemESP::divmmc_lo_dirty = nullptr;
         MemESP::divmmc_hi_dirty = nullptr;
         // The window is a POOL frame: writes through page0 must mark the page

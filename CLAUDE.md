@@ -147,6 +147,90 @@ and a rule ending in `.o` silently matches nothing there (the link then fails).
 Reorganised 2026-09-30; all 17 variants were diffed against the pre-move build:
 RAM identical, no function changed RAM/flash placement.
 
+## ZX Spectrum Next (ветка drew-zx-next, 2026-08-09) — TBBLUE-цепочка hw-confirmed
+
+Machine `A_NEXT` (RP2350 + butter ≥2MB): Z80N, NextReg (`src/NextReg.cpp`),
+8K MMU, NEXTVID scanline renderer, .NEX loader. План/гэп-анализ/тест-план:
+`~/.claude/plans/spectrum-next-in-pico-speccy.md`. Референс конформности —
+**zx_go** (conorarmstrong/zx_go, VHDL_CONFORMANCE.md; их pkg/memory/next.go +
+pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД гаданием).
+
+- **CPU speed cap**: nextreg 0x07 клампится `NEXTREG_MAX_TURBO=2` (14 MHz) —
+  28 MHz пока не real-time; программное значение хранится, read-back отдаёт
+  actual в битах 5:4. Разбор 28 MHz — отложен.
+- **TBBLUE boot chain** (2026-08-09): с `/TBBLUE.FW` на SD бут идёт через
+  вшитый 8K bootrom (`src/roms/next/tbblue_loader.c`, GPLv3, из zx_go) →
+  config mode → NextZXOS; без файла — прямой бут enNextZX.rom (fallback).
+  NR 0x03 — полная VHDL-семантика sub-полей (machine_type только в config mode
+  и только 1..4; `v&7==7` re-enter, прочее non-zero — exit; bootrom гаснет на
+  ПЕРВОЙ записи 0x03; timing под XOR-замком bit3). NR 0x04 RAMPAGE →
+  `MemESP::applyNextConfigWindow()`: чтения слотов 0/1 — bootrom (8K×2) или
+  backing страницы (0-3 ROM, 4 divMMC ROM, 6/7 AltROM, 8-F divMMC RAM,
+  10-7F RAM), записи — ВСЕГДА в backing через wrOverlay (bootrom гейтит только
+  чтение, zxnext.vhd:1856 — у zx_go на этом висел cold boot). Пока окно живо:
+  applyMMU слотов 0/1 только латчит, L2-окно 123B не трогает оверлей, divMMC
+  automap выключен. Hard reset перевзводит bootrom, soft — нет. **.NEX-лоадер
+  принудительно гасит окно** — путь ram_file (ребут с другой машины) грузит
+  .NEX сразу после setup(), где bootrom взведён.
+- **DivSD обязателен на Next** (esxdos=3, реальная карта): форс в
+  MachineSwitch + clamp в setup. .mmc-режим указал бы ОС на esxdos.mmc.
+- **Порт 0xFF** (Timex/SCLD, полный декод lo-байта на Next): bit6 = запрет ULA
+  frame INT (`Z80Ops::isActiveINT`, рядом с NR 0x22 bit2 — гэп из матрицы
+  zx_go), биты 5:0 ↔ NR 0x69 биты 5:0; чтение gated NR 0x08 bit2.
+- **NEXT_TRACE** (CMake, по умолч. ON в текущем кэше): 1 Hz `NEXT:` state-line
+  + `NEXT ev:` кольцо (64) nextreg/легаси-портов/automap с PC. Дизайн — уроки
+  NGS-кольца: новейшие в конце, `..` при усечении, флуд (палитра 0x40/41/44,
+  копер 0x60-63, спрайты 0x34-39) считается, не пишется. memdump
+  (Ctrl+Alt+D → tools/memdump.gdb, секция В КОНЦЕ) дампит NextReg raw + mmu +
+  слоты + окно TBBLUE + divMMC — без него зависание в 0x0000-0x3FFF нечитаемо
+  (пять кандидатов на владельца слота).
+- **divMMC automap на Next**: entry-точки ПРОГРАММИРУЕМЫЕ (NR 0xB8-0xBB);
+  NextZXOS ставит B8=0x82 B9=0x00 BB=0xF2 — т.е. tape-трапы это 0x04D7/0x056A
+  (биты 4/5), НЕ классические 0x0562/0x04C6 (биты 2/3 у него НУЛИ). rom3-gate:
+  трап вне RST-масок только при ROM3 (48K). `$0000`-трап disarmed до выхода из
+  reset-вектора (`g_next_automap_armed`).
+- **TBBLUE boot chain HW-CONFIRMED 2026-08-09**: bootrom → TBBLUE.FW →
+  конфиг-меню → тест видеорежимов (ENTER подтверждает; наш вывод одинаков во
+  всех «режимах», NR 0x11 только латчится) → запись config.ini → ROM-ы через
+  RAMPAGE → NextZXOS. Понадобились: MB02-фикс, CMD18-континуация, токен-
+  фрейминг CMD24, per-block 0x05 у CMD25 и **CMD13 SEND_STATUS** (R2=00 00) —
+  FW верифицирует им КАЖДЫЙ записанный сектор; найден дизассемблированием его
+  write-процедуры (файл+0x5E00=адрес; командный хелпер получает сырой номер и
+  сам делает OR 0x40 — поиск `3E 4D` по бинарнику ложно-отрицателен).
+- **SD-протокол: «esxDOS прощает — TBBLUE.FW нет»** (hw 2026-08-09, оба из
+  бут-цепочки): (1) CMD18 continuation — R1 отдаётся ОДИН раз на команду; наш
+  автопереход между блоками повторял R1=0x00 в 0xFF-паузе перед следующим 0xFE
+  («Error reading TBBLUE.FW data!»); (2) CMD24 — после токена 0x05 карта должна
+  дойти до 0xFF «готово»; вечный 0x05 = таймаут busy-полла у FW («Error saving
+  configuration!» при фактически записанном секторе — в логе `ZC/DivSD wr ...
+  res=0` прямо перед ошибкой). esxDOS поллит «не 0» и оба бага не видел.
+- **MB02::init() бежит в setup даже при выключенном MB-02** и безусловно звал
+  `recoverPage0()` — затирал TBBLUE-plug слотов 0/1 через 30 строк после
+  взведения (холодный бут = чёрный экран/128K editor при boot=1; F11 «чинил»,
+  т.к. MB02::init не бежит). Теперь Next-ветка: applyMMU+applyNextConfigWindow.
+  Поле `s0=`/владелец в NEXT:-строке добавлено ровно этим расследованием —
+  флаги врут, указатель нет.
+- **divMMC ROM в butter обязан быть write-protected** (hw 2026-08-09, «баг
+  №1»): writebyte-путь окна divMMC разрешал запись в page0_lo по эвристике
+  «указатель ≥ 0x11000000 = RAM-банк» (она для MB02/MAPRAM). На классике MMC
+  ROM во флеше и записи падали сами; на Next enNxtmmc живёт в ПИСАБЕЛЬНОМ
+  butter — залётные записи гостя через CONMEM-окно копили порчу: «enNxtmmc.rom
+  invalid» после F11 и зависание .tap на 0x0038 (ISR NextZXOS каждым
+  прерыванием уходит в enNxtmmc через OUT (0xE3),0x80 — порченый ROM =
+  дерейл). Теперь `MemESP::divmmc_lo_rom` ставится в applyMapping/MB02 явно.
+  После порчи вылечивает только перезагрузка MCU (setup перечитает ROM с SD).
+- **Известный баг**: .tap из LFN Browser виснет (.bas/.dsk ок) — подозрение на
+  tape-трапы/rom3-gate; диагностика: NEXT_TRACE + memdump.
+- **gm_bank** ужат 0x260000→0x25C000 (16K прошивке; банк перепровиженится).
+- **Цена ветки: +14 KB статического RAM** (231.9K → 246.2K) — на PICO_DV это
+  съело весь запас кучи у VIDEO::Init: P1024+NeoGS перестал грузиться (OOM-
+  паника), лечится headroom-гейтом Helix-арены (NgsMp3: куча только при
+  getLargestAllocatable ≥ арена+110K, иначе butter). Follow-up: найти и срезать
+  эти 14K (кандидаты: Z80N-таблицы в RAM-резидентном ядре, NEXTVID-статики).
+- **Тест-сьют**: `debug/next-tests/` (gitignored) — MrKWatkins/
+  ZXSpectrumNextTests release (.snx запускаются Browser'ом самого NextZXOS,
+  поддержка .snx в прошивке не нужна) + `!PICO-SPECCY-CHECKLIST.md`.
+
 ## NeoGS (ported from pico-spec drew-sound-neogs, 2026-08-04)
 
 Ported by 3-way merge (base = pico-spec `36081de`); NOT yet hw-tested here.

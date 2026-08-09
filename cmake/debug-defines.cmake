@@ -286,3 +286,10 @@ if (HID_TRACE)
 else ()
     target_compile_definitions(${PROJECT_NAME} PRIVATE HID_TRACE=0)
 endif ()
+
+# ZX Next health line (NextReg.cpp / ESPectrum.cpp / DivMMC.h `#if NEXT_TRACE`).
+if (NEXT_TRACE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NEXT_TRACE=1)
+else ()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NEXT_TRACE=0)
+endif ()

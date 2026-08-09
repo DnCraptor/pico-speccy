@@ -82,6 +82,7 @@ extern "C" const unsigned char gb_rom_4_trdos_custom[];
 // Sinclair 128K base now (roms/pentagon/). Custom Pentagon uses the 128K custom slot.
 extern "C" unsigned char gb_rom_esxdos[];
 extern "C" unsigned char gb_rom_esxide[];
+extern "C" const unsigned char gb_rom_tbblue_loader[]; // Next FPGA bootrom, 8K (GPLv3)
 #include "speccy/roms/profi/romProfi.h"
 #include "speccy/roms/scorpion/romScorpion.h"
 #include "speccy/roms/tsconf/tsconf_roms.h"

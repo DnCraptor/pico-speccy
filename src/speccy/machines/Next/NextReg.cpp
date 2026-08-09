@@ -13,6 +13,11 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "NextVideo.h"
 #include "app/Debug.h"
 #include "speccy/z80/z80.h"
+#include "speccy/devices/storage/DivMMC.h"
+#include <cstdio>
+#include <cstring>
+
+extern "C" const unsigned char gb_rom_tbblue_loader[];  // src/speccy/roms/next/
 
 #pragma GCC optimize("O3")
 
@@ -28,12 +33,146 @@ uint8_t  NextReg::resetPending = 0;
 bool     NextReg::lineIrqEnabled = false;
 bool     NextReg::ulaIrqDisabled = false;
 uint16_t NextReg::lineIrqLine = 0;
+uint8_t  NextReg::portFF = 0;
+bool     NextReg::portFFIntDisable = false;
+
+// NR 0x03 sub-fields (zxnext.vhd:1099-1103 defaults; write rules 5121-5151,
+// read mux 5894 — semantics pinned via zx_go WireMachineType). The flat
+// reg[0x03] byte is not enough: writes update the fields independently and
+// reads RECONSTRUCT the byte — NextZXOS's post-boot `NEXTREG 0x03,0xB0`
+// (bits 2:0 = 000) must leave machine_type intact.
+static uint8_t s_machineType   = 0x03;
+static uint8_t s_machineTiming = 0x03;
+static uint8_t s_userDTLock    = 0;
+static uint8_t s_reg03TopBit   = 1;
+static uint8_t reg03Compose() {
+    return (uint8_t)(((s_reg03TopBit & 1) << 7) | ((s_machineTiming & 7) << 4) |
+                     ((s_userDTLock & 1) << 3) | (s_machineType & 7));
+}
+
+#if NEXT_TRACE
+// --- NEXT_TRACE ring (see NextReg.h for the design rules) ---
+struct NextTraceEnt { char kind; uint8_t reg, val; uint16_t pc; uint16_t rep; };
+static NextTraceEnt s_nt_ring[64];
+static uint32_t s_nt_w = 0;                  // total writes; ring index = w & 63
+static uint32_t s_nt_pal = 0, s_nt_cop = 0, s_nt_spr = 0;   // flood counters
+void next_trace_ev(char kind, uint8_t r, uint8_t v) {
+    // Consecutive duplicates collapse into one entry with a repeat count —
+    // a file loader hammering NR 0x04 with the same page (2600+/s, hw
+    // 2026-08-09) purged the whole ring and hid the one interesting write.
+    if (s_nt_w) {
+        NextTraceEnt& last = s_nt_ring[(s_nt_w - 1) & 63];
+        uint16_t pc = Z80::getRegPC();
+        if (last.kind == kind && last.reg == r && last.val == v &&
+            last.pc == pc && last.rep < 0xFFFF) {
+            last.rep++;
+            return;
+        }
+    }
+    NextTraceEnt& e = s_nt_ring[s_nt_w & 63];
+    e.kind = kind; e.reg = r; e.val = v;
+    e.pc = Z80::getRegPC();
+    e.rep = 1;
+    s_nt_w++;
+}
+void next_trace_dump(uint32_t frames) {
+    extern bool g_next_automap_armed;
+    extern volatile uint32_t g_sd_stall_us, g_sd_ops;   // DivMMC.cpp
+    // Who REALLY owns slot 0 right now — the flags can say "bootrom" while a
+    // missed replug hands the CPU something else entirely (2026-08-09: flags
+    // said boot=1 while the machine visibly ran a machine ROM).
+    const uint8_t* s0 = MemESP::ramCurrent[0];
+    char own = '?';
+    if (s0 == (const uint8_t*)gb_rom_tbblue_loader) own = 'B';       // bootrom
+    else if (MemESP::nextRomBase && s0 >= MemESP::nextRomBase &&
+             s0 < MemESP::nextRomBase + 0x10000) own = 'N';          // enNextZX
+    else if (s0 == MemESP::rom[MemESP::romInUse & 1].direct()) own = 'F'; // 128K fallback
+    else if (s0 >= (const uint8_t*)0x20000000 &&
+             s0 <  (const uint8_t*)0x20082000) own = 'S';            // SRAM page
+    else if (s0 >= (const uint8_t*)0x11000000 &&
+             s0 <  (const uint8_t*)0x12000000) own = 'P';            // butter page
+    Debug::log("NEXT: pc=%04X s0=%08X%c s1=%08X spd=%u/%u"
+               " mmu=%02X.%02X.%02X.%02X.%02X.%02X.%02X.%02X"
+               " rom=%u boot=%c cfg=%c pg=%02X am=%u 7FFD=%02X 1FFD=%02X DFFD=%02X"
+               " FF=%02X fps=%u pal/s=%u cop/s=%u spr/s=%u sd=%ums/%u",
+        (unsigned)Z80::getRegPC(), (unsigned)(uintptr_t)s0, own,
+        (unsigned)(uintptr_t)MemESP::ramCurrent[1],
+        (unsigned)ESPectrum::multiplicator, (unsigned)(NextReg::reg[0x07] & 3),
+        MemESP::mmu[0], MemESP::mmu[1], MemESP::mmu[2], MemESP::mmu[3],
+        MemESP::mmu[4], MemESP::mmu[5], MemESP::mmu[6], MemESP::mmu[7],
+        (unsigned)MemESP::romInUse,
+        MemESP::nextBootRomActive ? '1' : '0', MemESP::nextConfigMode ? '1' : '0',
+        MemESP::nextConfigPage, (unsigned)DivMMC::automap,
+        NextReg::port7FFD, NextReg::port1FFD, NextReg::portDFFD, NextReg::portFF,
+        (unsigned)frames, (unsigned)s_nt_pal, (unsigned)s_nt_cop, (unsigned)s_nt_spr,
+        (unsigned)(g_sd_stall_us / 1000u), (unsigned)g_sd_ops);
+    s_nt_pal = s_nt_cop = s_nt_spr = 0;
+    g_sd_stall_us = 0;
+    g_sd_ops = 0;
+    // Ring line: newest LAST, budget spent from the newest end backwards, a
+    // leading ".." marks dropped older entries (never drop the newest — the
+    // NeoGS ring printed oldest-first once and hid every wedge it saw).
+    char line[200];
+    uint32_t n = s_nt_w < 64 ? s_nt_w : 64;
+    int pos = sizeof(line);
+    line[--pos] = 0;
+    uint32_t shown = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const NextTraceEnt& e = s_nt_ring[(s_nt_w - 1 - i) & 63];
+        char ent[24];
+        int el;
+        if (e.rep > 1)
+            el = snprintf(ent, sizeof(ent), "%c%02X:%02X@%04X*%u ",
+                          e.kind, e.reg, e.val, e.pc, (unsigned)e.rep);
+        else
+            el = snprintf(ent, sizeof(ent), "%c%02X:%02X@%04X ", e.kind, e.reg, e.val, e.pc);
+        if (pos - el < 2) break;
+        pos -= el;
+        memcpy(line + pos, ent, el);
+        shown++;
+    }
+    Debug::log("NEXT ev:%s%s", shown < s_nt_w ? " .." : "", line + pos);
+}
+#define NT_EV(k, r, v) next_trace_ev((k), (r), (v))
+#else
+#define NT_EV(k, r, v) ((void)0)
+#endif
 
 void NextReg::reset(bool hard) {
+    // The zxnext.vhd reset block (~4900-5111) runs on BOTH reset types — a
+    // soft reset restores the nextreg defaults too (zx_go pins this with
+    // TestResetRestoresDefaults). hw 2026-08-10: Alt-F11 after a 48K .tap
+    // game used to leave the game's Layer2/sprite/alt-ROM latches standing —
+    // NextZXOS rebooted into garbage and only the full MCU reboot recovered.
+    //
+    // Alt-ROM first: reset PROMOTES the staged nibble (bits 3:0) into the
+    // active one (bits 7:4) — zxnext.vhd:2255, both reset types.
+    uint8_t altStaged = reg[0x8C] & 0x0F;
+    for (int i = 0; i < 256; i++) reg[i] = 0;
+    selected = 0;
+    reg[0x8C] = (uint8_t)((altStaged << 4) | altStaged);
+    MemESP::altrom_rd  = (reg[0x8C] & 0x80) && !(reg[0x8C] & 0x40);
+    MemESP::altrom_wr  = (reg[0x8C] & 0x80) && (reg[0x8C] & 0x40);
+    MemESP::altrom_sel = (reg[0x8C] & 0x20) ? 1 :
+                         (reg[0x8C] & 0x10) ? 0 : (MemESP::romInUse & 1);
     if (hard) {
-        for (int i = 0; i < 256; i++) reg[i] = 0;
-        selected = 0;
+        // TBBLUE power-on: bootrom readable + config_mode = 1 — but only when
+        // the boot chain is armed (TBBLUE.FW found on SD, see ESPectrum::setup).
+        // The direct enNextZX boot never enters config mode: nothing would
+        // exit it (boot.bin's first NR 0x03 write is the exit on real hw).
+        MemESP::nextBootRomActive = (MemESP::nextBootRom != nullptr);
+        MemESP::nextConfigMode = MemESP::nextBootRomActive;
+        MemESP::nextConfigPage = 0;
+        s_machineType = 0x03; s_machineTiming = 0x03;
+        s_userDTLock = 0; s_reg03TopBit = 1;
+        reg[0x8C] = 0;                 // power-on: alt-ROM fully off
+        MemESP::altrom_rd = MemESP::altrom_wr = false;
+        MemESP::altrom_sel = 0;
     }
+    // Soft reset: bootrom/config flags survive (NextZXOS soft-resets between
+    // boot stages with config mode already off; re-arming would loop the boot).
+    portFF = 0;
+    portFFIntDisable = false;
     port7FFD = 0;
     portDFFD = 0;
     port1FFD = 0;
@@ -70,6 +209,9 @@ void NextReg::reset(bool hard) {
     reg[0x4A] = 0xE3; // fallback colour (VHDL reset value)
     reg[0x4B] = 0xE3; // sprite transparency index
     reg[0x4C] = 0x0F; // tilemap transparency index
+    reg[0x03] = reg03Compose();
+    reg[0x04] = MemESP::nextConfigPage;
+    MemESP::applyNextConfigWindow();
 }
 
 // Raster line for reg 0x1E/0x1F and the line interrupt. Line 0 is the first
@@ -91,7 +233,46 @@ static void applyBankC000();
 
 void NextReg::write(uint8_t r, uint8_t v) {
     reg[r] = v;
+#if NEXT_TRACE
+    // Flood sources are counted, not recorded (palette / copper / sprite
+    // streams run thousands of writes a second and would purge the ring).
+    if (r == 0x40 || r == 0x41 || r == 0x44) s_nt_pal++;
+    else if (r >= 0x60 && r <= 0x63) s_nt_cop++;
+    else if (r >= 0x34 && r <= 0x39) s_nt_spr++;
+    else NT_EV('N', r, v);
+#endif
     switch (r) {
+        case 0x03: { // Machine type / display timing / config mode
+            bool bootromWasActive = MemESP::nextBootRomActive;
+            // machine_timing: only with bit7 set, user lock clear, bit3 clear
+            if ((v & 0x80) && !s_userDTLock && !(v & 0x08)) {
+                uint8_t t = (v >> 4) & 7;
+                s_machineTiming = (t <= 1) ? 1 : (t <= 4 ? t : 3);
+            }
+            s_userDTLock ^= (v >> 3) & 1;   // XOR-toggles on every bit3=1 write
+            // machine_type: updates only in config mode and only to 1..4
+            if (MemESP::nextConfigMode) {
+                uint8_t t = v & 7;
+                if (t >= 1 && t <= 4) s_machineType = t;
+            }
+            // config_mode: 111 re-enters, other non-zero exits, 000 no change
+            switch (v & 7) {
+                case 0: break;
+                case 7: MemESP::nextConfigMode = true;  break;
+                default: MemESP::nextConfigMode = false; break;
+            }
+            s_reg03TopBit = (v >> 7) & 1;
+            // The bootrom read overlay dies on the very first NR 0x03 write
+            // of any value (zxnext.vhd:5122)
+            if (bootromWasActive) MemESP::nextBootRomActive = false;
+            MemESP::applyNextConfigWindow();
+            reg[0x03] = reg03Compose();
+            break;
+        }
+        case 0x04: // Config-mode RAMPAGE: 16K page at 0x0000-0x3FFF
+            MemESP::nextConfigPage = v;
+            MemESP::applyNextConfigWindow();
+            break;
         case 0x02: // Reset request: bit1 = hard, bit0 = soft. NextZXOS uses a
                    // soft reset to restart into the freshly configured state
                    // at the end of each boot stage — latching only left the
@@ -213,6 +394,7 @@ uint8_t NextReg::read(uint8_t r) {
     switch (r) {
         case 0x00: return 10;    // machine ID: ZX Spectrum Next
         case 0x01: return 0x32;  // core major.minor = 3.2
+        case 0x03: return reg03Compose();
         case 0x0E: return 0x03;  // core sub-minor: report 3.02.03 — the
                                   // current NextZXOS distro gates boot on
                                   // >= 3.02.03 (hw: 3.02.00 failed the check
@@ -252,7 +434,20 @@ void NextReg::writeLayer2Port(uint8_t v) {
     updateLayer2Window();
 }
 
+// Timex/SCLD port 0xFF. bit6 = ULA frame INT disable (consumed by
+// Z80Ops::isActiveINT alongside nextreg 0x22 bit 2); bits 5:0 mirror into
+// nextreg 0x69, which is what NEXTVID reads for the screen-mode bits.
+void NextReg::writePortFF(uint8_t v) {
+    portFF = v;
+    portFFIntDisable = (v & 0x40) != 0;
+    reg[0x69] = (uint8_t)((reg[0x69] & 0xC0) | (v & 0x3F));
+    NT_EV('F', 0xFF, v);
+}
+
 void NextReg::updateLayer2Window() {
+    // The TBBLUE config window owns the write overlay while it is up;
+    // applyNextConfigWindow() calls back here the moment it closes.
+    if (MemESP::nextBootRomActive || MemESP::nextConfigMode) return;
     if (port123B & 0x01) { // write enable
         uint8_t bank = (port123B & 0x08) ? reg[0x13] : reg[0x12];
         uint8_t off = (port123B >> 6) & 3;
@@ -300,6 +495,7 @@ static void applyBankC000() {
 void NextReg::write7FFD(uint8_t v) {
     // nextreg 0x08 bit 6 releases the 0x7FFD paging lock
     if (MemESP::pagingLock && !(reg[0x08] & 0x40)) return;
+    NT_EV('7', 0x7F, v);
     port7FFD = v;
     applyBankC000();
     uint8_t vl = (v >> 3) & 1;
@@ -314,11 +510,13 @@ void NextReg::write7FFD(uint8_t v) {
 }
 
 void NextReg::writeDFFD(uint8_t v) {
+    NT_EV('D', 0xDF, v);
     portDFFD = v & 0x0F;
     applyBankC000();
 }
 
 void NextReg::write1FFD(uint8_t v) {
+    NT_EV('1', 0x1F, v);
     uint8_t prev = port1FFD;
     port1FFD = v;
     if (v & 0x01) {
