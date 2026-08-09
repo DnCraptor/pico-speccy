@@ -1849,6 +1849,16 @@ static inline uint32_t hdmi_tmds_level888(uint32_t c) { return c; }
 // value, and the second moves by at most one code), and CLAMP still runs upstream
 // in hdmi_emit_slot, so the value arriving here is already conditioned.
 //
+// The Spectrum Next branch independently hit the SAME defect this replaces — an
+// olive striped NextZXOS backdrop from the G3R3B2 colour cube's mid-level channel
+// values (0x6D/0xB6/0xAA) while XOR-class legacy ZX values stayed clean (hw
+// 2026-08-03) — and fixed it with a full reference-DVI two-character encoder
+// (tmds_ref_pair). That work predates this file's balanced pair and was dropped
+// at the merge: the systematic 1-LSB error on the 128 XNOR-coded values is
+// exactly what tmds_qm/tmds_rep remove, so the two fixes have one root cause.
+// Recheck that backdrop on hardware; if it stripes again, the reference encoder
+// is in git history at 0e59c36.
+//
 // Build with -DHDMI_TMDS_BALANCED_PAIR=0 to A/B against the old pairing.
 #ifndef HDMI_TMDS_BALANCED_PAIR
 #define HDMI_TMDS_BALANCED_PAIR 1
