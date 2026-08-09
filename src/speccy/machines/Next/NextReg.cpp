@@ -107,6 +107,13 @@ void NextReg::write(uint8_t r, uint8_t v) {
         }
         case 0x07: { // CPU speed: 0=3.5, 1=7, 2=14, 3=28 MHz
             uint8_t m = v & 0x03;
+            // 28 MHz is beyond what the emulation core keeps up with today —
+            // the frame takes longer than its 20 ms budget and the machine
+            // crawls. Cap the EFFECTIVE speed at 14 MHz; reg[0x07] keeps the
+            // programmed value and the read-back reports the actual speed in
+            // bits 5:4, which is how real boards expose "asked for more than
+            // I can do". Revisit when the core is profiled at 28.
+            if (m > NEXTREG_MAX_TURBO) m = NEXTREG_MAX_TURBO;
             uint8_t old = ESPectrum::multiplicator;
             if (old != m) {
                 // The switch happens MID-FRAME: everything measured in
@@ -211,8 +218,11 @@ uint8_t NextReg::read(uint8_t r) {
                                   // >= 3.02.03 (hw: 3.02.00 failed the check
                                   // at ROM PC=0E13 → 1.4s restart loop);
                                   // same stable version zx_go settled on
-        case 0x07: // bits 5:4 = actual speed, 1:0 = programmed
-            return ((reg[0x07] & 3) << 4) | (reg[0x07] & 3);
+        case 0x07: { // bits 5:4 = actual speed, 1:0 = programmed
+            uint8_t actual = reg[0x07] & 3;
+            if (actual > NEXTREG_MAX_TURBO) actual = NEXTREG_MAX_TURBO;
+            return (actual << 4) | (reg[0x07] & 3);
+        }
         case 0x18: case 0x19: case 0x1A: case 0x1B: {
             // Read returns the CURRENT coordinate (index not advanced) —
             // zxnext.vhd read mux 5947-5975 via zx_go's conformance notes

@@ -16,6 +16,12 @@ Reference: https://wiki.specnext.dev/TBBlue_Register_Select
 
 #include <inttypes.h>
 
+// Highest EFFECTIVE CPU-speed multiplier honoured by nextreg 0x07
+// (0=3.5, 1=7, 2=14, 3=28 MHz). 28 MHz is not real-time on the RP2350 yet,
+// so the effective speed is capped at 14; the programmed value is kept and
+// the read-back reports the actual speed in bits 5:4.
+#define NEXTREG_MAX_TURBO 2
+
 class NextReg {
 public:
     static uint8_t reg[256];     // raw latched values
