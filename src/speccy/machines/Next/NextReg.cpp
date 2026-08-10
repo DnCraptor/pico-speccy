@@ -78,6 +78,7 @@ void next_trace_ev(char kind, uint8_t r, uint8_t v) {
 void next_trace_dump(uint32_t frames) {
     extern bool g_next_automap_armed;
     extern volatile uint32_t g_sd_stall_us, g_sd_ops;   // DivMMC.cpp
+    extern volatile uint32_t g_nextvid_us;              // NextVideo.cpp
     // Who REALLY owns slot 0 right now — the flags can say "bootrom" while a
     // missed replug hands the CPU something else entirely (2026-08-09: flags
     // said boot=1 while the machine visibly ran a machine ROM).
@@ -94,7 +95,7 @@ void next_trace_dump(uint32_t frames) {
     Debug::log("NEXT: pc=%04X s0=%08X%c s1=%08X spd=%u/%u"
                " mmu=%02X.%02X.%02X.%02X.%02X.%02X.%02X.%02X"
                " rom=%u boot=%c cfg=%c pg=%02X am=%u 7FFD=%02X 1FFD=%02X DFFD=%02X"
-               " FF=%02X fps=%u pal/s=%u cop/s=%u spr/s=%u sd=%ums/%u",
+               " FF=%02X fps=%u pal/s=%u cop/s=%u spr/s=%u sd=%ums/%u vid=%ums",
         (unsigned)Z80::getRegPC(), (unsigned)(uintptr_t)s0, own,
         (unsigned)(uintptr_t)MemESP::ramCurrent[1],
         (unsigned)ESPectrum::multiplicator, (unsigned)(NextReg::reg[0x07] & 3),
@@ -105,10 +106,12 @@ void next_trace_dump(uint32_t frames) {
         MemESP::nextConfigPage, (unsigned)DivMMC::automap,
         NextReg::port7FFD, NextReg::port1FFD, NextReg::portDFFD, NextReg::portFF,
         (unsigned)frames, (unsigned)s_nt_pal, (unsigned)s_nt_cop, (unsigned)s_nt_spr,
-        (unsigned)(g_sd_stall_us / 1000u), (unsigned)g_sd_ops);
+        (unsigned)(g_sd_stall_us / 1000u), (unsigned)g_sd_ops,
+        (unsigned)(g_nextvid_us / 1000u));
     s_nt_pal = s_nt_cop = s_nt_spr = 0;
     g_sd_stall_us = 0;
     g_sd_ops = 0;
+    g_nextvid_us = 0;
     // Ring line: newest LAST, budget spent from the newest end backwards, a
     // leading ".." marks dropped older entries (never drop the newest — the
     // NeoGS ring printed oldest-first once and hid every wedge it saw).

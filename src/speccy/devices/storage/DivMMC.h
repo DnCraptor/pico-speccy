@@ -94,6 +94,10 @@ public:
     static inline void preOpcFetch(uint16_t pc);
     static inline void postOpcFetch();
 
+    // Raw-SD adaptive read-ahead (DivSD/ZC): see DivMMC.cpp
+    static void raInit();
+    static void raInvalidate();
+
     // Reopen files after SD remount
     static void reopenFiles();
 
@@ -219,6 +223,15 @@ inline void DivMMC::preOpcFetch(uint16_t pc) {
     if (__builtin_expect(pc >= 0x4000, 1)) return;
     trap_after = false;
     unmap_after = false;
+
+    // Fast path: EVERY automap trigger lives below 0x4000 — the RST vectors
+    // (<= 0x0066), the tape traps (0x04C6/0x04D7/0x0562/0x056A), the 0x3Dxx
+    // page and the 0x1FF8-0x1FFF off-region. Code running from RAM (games,
+    // the OS in upper banks — i.e. most of every frame) pays exactly this
+    // one compare. This is per-opcode on the 14/28 MHz budget of ~120/60
+    // M33 cycles per instruction, where the full check chain below was
+    // eating a double-digit share by itself.
+    if (pc >= 0x4000) return;
 
     // ZX Spectrum Next: the entry points are PROGRAMMABLE via nextreg
     // 0xB8-0xBB (NextZXOS reconfigures them right after its RAM check:

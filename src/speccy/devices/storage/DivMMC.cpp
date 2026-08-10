@@ -17,10 +17,12 @@
 #include "fs/FileUtils.h"
 #include "speccy/core/roms.h"
 #include "speccy/z80/z80.h"
+#include "app/Buffer.h"
 extern "C" {
     #include "fatfs/diskio.h"
 }
 extern int butter_pages;
+extern "C" size_t getLargestAllocatable(void);   // OSDMain.cpp
 
 // Raw-passthrough target: physical SD (pdrv 0) normally, the USB stick
 // (pdrv 1) when it took over as the root volume (no SD card at boot).
@@ -340,6 +342,7 @@ void DivMMC::init() {
         mmc_ocr[4] = 0x00;
         Debug::log("%s: raw %s, %lu sectors, SDHC mode", mode_name,
                    FileUtils::usbRoot ? "USB" : "SD", (unsigned long)sector_count);
+        raInit();
         Debug::log("CSD: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
             mmc_csd[0], mmc_csd[1], mmc_csd[2], mmc_csd[3], mmc_csd[4],
             mmc_csd[5], mmc_csd[6], mmc_csd[7], mmc_csd[8], mmc_csd[9], mmc_csd[10]);
@@ -561,6 +564,7 @@ void DivMMC::reset() {
     mmc_sector_buf_addr = 0xFFFFFFFF;
     mmc_sector_dirty = false;
     raDrop();
+    raInvalidate();
 
     // Reset IDE state
     ide_feature = 0;
@@ -1004,14 +1008,96 @@ void DivMMC::zc_read_consume(uint32_t words) { mmc_read_index += (int)(2 * words
 volatile uint32_t g_sd_stall_us = 0;
 volatile uint32_t g_sd_ops = 0;
 
+// Adaptive read-ahead for the raw-SD (DivSD/ZC) path. esxDOS/NextZXOS file
+// streaming asks for one 512-byte sector per call, and every call used to be
+// a full blocking CMD17 round-trip on the physical card — the whole emulator
+// stalls for its duration (NgsSd solved the same disease for the NeoGS
+// firmware loader). One multi-sector CMD18 costs far less per sector than N
+// CMD17s, so: when the requested sector is exactly `last + 1` (a sequential
+// stream), fetch RA_SECTORS in one burst and serve the following hits from
+// RAM; ANY other pattern pays the old single-sector price and never waits
+// for a speculative burst. Unlike NgsSd's attempt (disabled 2026-08-05),
+// this cache is filled synchronously on core0 — a miss always refills from
+// the REQUESTED sector, so the stale-content race that bit the NGS loader
+// (async mailbox fill answering the VBR read with zeroes) cannot happen.
+// Coherency: invalidated on any write and on reset; FatFs writing the card
+// behind our back is out of scope (same assumption as the rest of raw-SD).
+#define DIVSD_RA_SECTORS 8
+// The 4 KB burst buffer must be plain SRAM the SD driver can DMA into (butter
+// is out: DMA bypasses the XIP cache — the readFileToButter lesson). It lived
+// in SCRATCH_Y on the Next branch, where that bank was empty; it is not empty
+// here — hdmi.c's 4 KB conv_color_b owns all of it (see the alignas note in
+// rp2350-memmap.ld / CLAUDE.md), and keeping both overflowed the bank 2:1.
+// So: heap, allocated lazily at raInit(). That was the FIRST version of this
+// buffer and it re-broke the Next boot (hw 2026-08-10: heap at VIDEO::Init
+// down to 139136, the CPU-reset-era allocations OOM-panicked) — but the
+// hazard is gone, because the main framebuffer is now claimed at the top of
+// setup() (VIDEO::reserveFrameBuffer) instead of inside VIDEO::Init, so an
+// allocation this late cannot starve it. HOT_SRAM asks for the heap with the
+// reduced margin; anything else (or no room at all) leaves s_sq_buf null and
+// every read takes the single-sector path — the read-ahead is a pure
+// optimisation and the code below already handles its absence.
+static Buffer s_sqBuf;
+static uint8_t* s_sq_buf = nullptr;            // = s_sqBuf.data() once inited
+static uint32_t s_sq_base = 0xFFFFFFFFu;       // first cached sector, ~0 = none
+static uint32_t s_sq_count = 0;
+static uint32_t s_sq_last = 0xFFFFFFFFu;       // previous request (sequen. detect)
+static uint32_t s_sq_gen = 0;                  // g_disk_write_gen when filled (host writes)
+
+void DivMMC::raInit() {
+    if (!s_sq_buf) {
+        if (s_sqBuf.alloc(DIVSD_RA_SECTORS * 512, Buffer::NEED_POINTER | Buffer::HOT_SRAM) &&
+            s_sqBuf.data() && s_sqBuf.tier() == Buffer::TIER_HEAP) {
+            s_sq_buf = (uint8_t*)s_sqBuf.data();
+        } else {
+            s_sqBuf.free();   // butter/arena is not DMA-able here
+            Debug::log("[divSD] read-ahead off: no SRAM for the %u KB burst buffer",
+                       (unsigned)(DIVSD_RA_SECTORS * 512 / 1024));
+        }
+    }
+    s_sq_base = 0xFFFFFFFFu;
+    s_sq_count = 0;
+    s_sq_last = 0xFFFFFFFFu;
+}
+
+void DivMMC::raInvalidate() {
+    s_sq_base = 0xFFFFFFFFu;
+    s_sq_count = 0;
+}
+
 void DivMMC::loadSector(uint32_t sector) {
     if (divsd_mode) {
-        const uint32_t sdT0 = time_us_32();
-        DRESULT r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
-        const uint32_t sdUs = time_us_32() - sdT0;
+        // Read-ahead hit: no card access at all
+        if (s_sq_buf && sector >= s_sq_base && sector < s_sq_base + s_sq_count &&
+            s_sq_gen == g_disk_write_gen) {
+            memcpy(mmc_sector_buf, s_sq_buf + (size_t)(sector - s_sq_base) * 512, 512);
+            s_sq_last = sector;
+            return;
+        }
+        uint64_t t0 = time_us_64();
+        DRESULT r;
+        if (s_sq_buf && sector == s_sq_last + 1) {
+            // Sequential stream detected: one burst, next 7 reads are free
+            const uint32_t gen = g_disk_write_gen;
+            r = disk_read(raw_pdrv(), s_sq_buf, sector, DIVSD_RA_SECTORS);
+            if (r == RES_OK) {
+                s_sq_gen = gen;
+                s_sq_base = sector;
+                s_sq_count = DIVSD_RA_SECTORS;
+                memcpy(mmc_sector_buf, s_sq_buf, 512);
+            } else {
+                // e.g. burst past the end of the card — retry as single
+                raInvalidate();
+                r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
+            }
+        } else {
+            r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
+        }
+        const uint32_t sdUs = (uint32_t)(time_us_64() - t0);
         zc_rd_sectors++; zc_rd_us += sdUs;
         g_sd_stall_us += sdUs;
         g_sd_ops++;
+        s_sq_last = sector;
 #if ZC_PORT_TRACE
         {   // folded: a FAT walk re-reads the same handful of sectors forever
             char line[64];
@@ -1038,6 +1124,9 @@ void DivMMC::loadSector(uint32_t sector) {
 void DivMMC::storeSector(uint32_t sector) {
     raDrop();
     if (divsd_mode) {
+        // Keep the read-ahead coherent with our own writes
+        if (sector >= s_sq_base && sector < s_sq_base + s_sq_count)
+            raInvalidate();
         uint64_t t0 = time_us_64();
         DRESULT r = disk_write(raw_pdrv(), mmc_sector_buf, sector, 1);
         g_sd_stall_us += (uint32_t)(time_us_64() - t0);
@@ -1878,6 +1967,7 @@ void DivMMC::zc_init() {
     zc_config = 0;
     zc_ft_cs = false; zc_ft_rd = 0xFF;
     zc_enabled = true;
+    raInit();
     Debug::log("Z-Controller: raw %s, %lu sectors, SDHC mode",
                FileUtils::usbRoot ? "USB" : "SD", (unsigned long)sector_count);
 }

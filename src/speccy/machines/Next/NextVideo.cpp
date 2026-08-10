@@ -397,6 +397,13 @@ IRAM_ATTR void NEXTVID::Tick_Opcode(bool contended) {
 
 void NEXTVID::DrawBorderNop() {}
 
+#if NEXT_TRACE
+// Compositor cost estimate for the 1 Hz NEXT: line: every 16th visible line
+// is timed and extrapolated ×16 (~15 time_us_64 pairs per frame — noise-level
+// overhead, but enough to see RenderLine's real share of cpu_frame_us).
+volatile uint32_t g_nextvid_us = 0;
+#endif
+
 IRAM_ATTR void NEXTVID::ScanlineWork() {
     uint8_t m = ESPectrum::multiplicator;
     if (lineIdx < totalLines) {
@@ -404,8 +411,16 @@ IRAM_ATTR void NEXTVID::ScanlineWork() {
         uint32_t paperStart = (uint32_t)(firstVisibleLine + paperTopRow);
         copperLine((uint16_t)((lineIdx + totalLines - paperStart) % totalLines));
         int row = (int)lineIdx - firstVisibleLine;
-        if (!skipFrame && row >= 0 && row < (int)VIDEO::vga.yres)
+        if (!skipFrame && row >= 0 && row < (int)VIDEO::vga.yres) {
+#if NEXT_TRACE
+            if ((lineIdx & 15) == 0) {
+                uint64_t t0 = time_us_64();
+                RenderLine(row);
+                g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
+            } else
+#endif
             RenderLine(row);
+        }
         lineIdx++;
         nextLineTstate = (lineIdx + 1) * ((uint32_t)VIDEO::tStatesPerLine << m);
     } else {

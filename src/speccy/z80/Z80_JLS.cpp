@@ -1421,6 +1421,11 @@ IRAM_ATTR void Z80::exec_nocheck() {
 
     int nbp = Config::numPcBP;
     z80_in_nocheck = true;
+    // Loop-invariant: DivMMC enable only changes from the menu (DivMMC::init),
+    // never from guest execution — hoist the global load out of the hot loop.
+    // (VIDEO::Draw_Opcode canNOT be hoisted: the video state machine swaps it
+    // mid-frame at blank/paper boundaries.)
+    const bool divmmc = DivMMC::enabled;
 
     while (CPU::tstates < CPU::stFrame) {
 
@@ -1439,7 +1444,7 @@ IRAM_ATTR void Z80::exec_nocheck() {
             const uint32_t w = TsConf::cpuMemMiss(REG_PC, true);
             if (w) VIDEO::Draw(w, false);
         }
-        if (DivMMC::enabled) {
+        if (divmmc) {
             DivMMC::preOpcFetch(REG_PC);
             // Fetch opcode from currently mapped memory
             pg = REG_PCh >> 5; // re-read in case 0x3Dxx instant map changed it
