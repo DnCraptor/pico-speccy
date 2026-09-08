@@ -29,6 +29,30 @@ Ported from the pico-next donor branch (`~/github/pico-next`,
   registry; (2) accessor banks null BOTH slots (`plugPtr16(b, nullptr)`), a
   naive `p+0x2000` would make slot1 = (uint8_t*)0x2000; (3) both slots of a
   pair share one dirty/access hook. Tape flashload walks 8K slots.
+  **What the 2026-09-08 rebase onto the TS-Conf line had to extend** (the 8K
+  refactor predates +3/+3e, TS-Conf and Scorpion/GMX/ProfROM, and every one of
+  those machines writes the slot arrays itself — a 16K-indexed store lands in the
+  wrong slot silently, so this list is the audit, not a diff): `MemESP::plus3Remap`
+  (both the four all-RAM configurations and the normal map) and `TsConf::setBanks`
+  now go through plug16/plugPtr16; so do the GMX #78FD / #DFFD / #1FFD page writes
+  and the Scorpion TR-DOS + NMI-DOS `rom[]` plugs. `Z80::blockRepeat` (the
+  LDIR/LDDR batch) bounds its run inside ONE 8K slot at each end, treats slots 0
+  AND 1 as page 0, and its `dbase == VIDEO::grmem` guard tests `grmem + 0x2000`
+  too — slot 3 of the screen page would otherwise batch past the beam. The
+  TS-Conf fast-memory helpers in CPU.cpp (`peek8_tick`, `tsPoke8Store`,
+  `tsPeek16Load`, the exec_nocheck fetch) index by `>>13` with `& 0x1FFF`, while
+  `mem_desc_t::bank_dirty[]` was already slot-indexed; the IM1-ROM0 dead-stub
+  check reads page 5 through slot 2; and the PERF_HIST page histograms keep
+  16K-grained sources (`TsConf::r.page[pg >> 1]`, `TS_PAGE_HIT` on `>>14`) because
+  a TS-Conf window IS 16K. Two collisions were decided rather than merged: the
+  Next branch's reference-DVI `tmds_ref_pair` was dropped in favour of this line's
+  hw-confirmed `tmds_balanced_pair` (same root cause — see the note in
+  drivers/hdmi/hdmi.c, and recheck the NextZXOS backdrop on hardware), and the
+  divSD read-ahead burst buffer moved out of SCRATCH_Y — full here, hdmi.c's
+  `conv_color_b` owns all 4 KB of it — into a lazy HOT_SRAM Buffer, which is safe
+  only because the framebuffer is now reserved at the top of setup() (see the
+  framebuffer-first section) and degrades to the single-sector path if the SRAM
+  is not there.
 - **Machine**: gate = RP2350 + butter ≥2MB (`p_showNext`, MachineSwitch,
   setup() fallback to 128K). MMU `nextRamPtr[224]`: banks 0-7 = static SRAM
   `ram[0..7]`, banks 8-111 + 72K ROM region carved from butter bottom-up in
