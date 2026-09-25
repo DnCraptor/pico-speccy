@@ -1334,7 +1334,8 @@ IRAM_ATTR void Z80::incRegR(uint32_t inc) {
 // count as themselves — the prefixed instruction is dispatched by decodeXX, not
 // by dcOpcode). Read + cleared by the [PERF] dump in Video.cpp every 600 frames.
 uint32_t z80_op_hist[256];
-uint32_t z80_chk_cnt;   // instructions that went through the checked execute() path
+uint32_t z80_chk_cnt;
+uint32_t z80_fetch_src[3];   // PERF_HIST: exec_nocheck fetches by backing (SRAM / PSRAM / flash)   // instructions that went through the checked execute() path
 #endif
 
 IRAM_ATTR void Z80::execute() {
@@ -1430,6 +1431,43 @@ IRAM_ATTR void Z80::exec_nocheck() {
 
     while (CPU::tstates < CPU::stFrame) {
 
+#if !NEO8_TRAP
+        // Spectrum Next, every guest read a plain ramCurrent[] load
+        // (g_next_fastrd): a loop of its own, with none of the TS-Conf,
+        // Timex, overlay or beam-video tests the shared one carries. PC profile
+        // 2026-09-26 (text viewer, 14 MHz): the shared fetch sequence was ~47%
+        // of core0 by itself. g_next_fastrd may drop mid-slice (a divMMC
+        // mapping change, a memory breakpoint), so it is re-tested per
+        // instruction and the shared loop takes over from the same state.
+        if (g_next_fastrd) {
+            do {
+                const uint16_t pc = REG_PC;
+                if (nbp > 0 && Config::pcBreakHit(pc)) { z80_in_nocheck = false; return; }
+                tsFastTick(4);
+                if (divmmc) DivMMC::preOpcFetch(pc);
+                opCode = MemESP::ramCurrent[pc >> 13][pc & 0x1fff];
+                if (divmmc) DivMMC::postOpcFetch();
+                regR++;
+                REG_PC = pc + 1;
+#if PERF_TRACE && PERF_HIST
+                z80_op_hist[opCode]++;
+#endif
+                if (__builtin_expect(prefixOpcode == 0, 1)) {
+                    flagQ = pendingEI = false;
+                    dcOpcode[opCode]();
+                    lastFlagQ = flagQ;
+                    continue;
+                }
+                if (prefixOpcode == 0xDD) { prefixOpcode = 0; decodeDDFD(regIX); }
+                else if (prefixOpcode == 0xED) { prefixOpcode = 0; decodeED(); }
+                else if (prefixOpcode == 0xFD) { prefixOpcode = 0; decodeDDFD(regIY); }
+                else continue;
+                if (prefixOpcode == 0) lastFlagQ = flagQ;
+            } while (CPU::tstates < CPU::stFrame && g_next_fastrd);
+            continue;
+        }
+#endif
+
         if (nbp > 0 && Config::pcBreakHit(REG_PC)) { z80_in_nocheck = false; return; }
 #if NEO8_TRAP
         Debug::neo8TrapStep(REG_PC, REG_SP, REG_IX, REG_IY);
@@ -1485,6 +1523,11 @@ IRAM_ATTR void Z80::exec_nocheck() {
         REG_PC++;
 #if PERF_TRACE && PERF_HIST
         z80_op_hist[opCode]++;
+        {   // where the fetched code lives: 0 SRAM, 1 butter PSRAM, 2 flash
+            extern uint32_t z80_fetch_src[3];
+            const uintptr_t fp = (uintptr_t)MemESP::ramCurrent[pg];
+            z80_fetch_src[(fp >= 0x11000000u && fp < 0x12000000u) ? 1 : (fp >= 0x10000000u && fp < 0x11000000u) ? 2 : 0]++;
+        }
         if (Z80Ops::isTsconf) {
             extern uint32_t ts_page_hist[257];
             const uintptr_t bp = (uintptr_t)MemESP::ramCurrent[pg];

@@ -2,6 +2,8 @@
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 #include <pico/time.h>
+#include <hardware/timer.h>
+#include <hardware/irq.h>
 
 #include "drivers/audio/audio.h"
 #include "pwm_audio.h"
@@ -220,7 +222,6 @@ volatile int16_t* pcm_end_callback(volatile size_t* size) {
 
 static int16_t buff_L[640] = { 0 };
 static int16_t buff_R[640] = { 0 };
-static repeating_timer_t m_timer = { 0 };
 static volatile size_t m_off = 0; // in 16-bit words
 static volatile size_t m_size = 0; // 16-bit values prepared (available)
 
@@ -610,14 +611,60 @@ mixed:
     return;
 }
 
-static bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
+// The sample clock: a hardware alarm of its own with a RAM-resident ISR. It
+// used to be an SDK repeating_timer, whose alarm_pool_irq_handler (and the
+// pairing-heap walk behind it) runs from FLASH on every one of the 31250
+// ticks a second — ~3% of core0 in the Spectrum Next PC profile (2026-09-26).
+// Same semantics as the negative-delay repeating timer it replaces: the next
+// target is the previous one plus the period, so the rate does not drift with
+// ISR latency; a target already in the past is caught up at once.
+static int s_au_alarm = -1;
+static uint32_t s_au_period = 0;
+static uint32_t s_au_target = 0;
+static bool s_au_on = false;
+
+static void __not_in_flash_func(au_alarm_isr)(void) {
+    const uint32_t bit = 1u << s_au_alarm;
+    timer_hw->intr = bit;
+    hw_clear_bits(&timer_hw->intf, bit);
+    s_au_target += s_au_period;
+    timer_hw->alarm[s_au_alarm] = s_au_target;
     pcm_call_inner();
-    return true;
+    // An alarm fires only on an exact match, so a target already behind the
+    // counter (a long IRQ-off stretch) would wait for the 32-bit wrap: force
+    // the interrupt instead, and the ticks catch up back to back.
+    if ((int32_t)(s_au_target - timer_hw->timerawl) <= 0) hw_set_bits(&timer_hw->intf, bit);
+}
+
+static void au_timer_stop(void) {
+    if (!s_au_on) return;
+    s_au_on = false;
+    const uint32_t bit = 1u << s_au_alarm;
+    hw_clear_bits(&timer_hw->inte, bit);
+    hw_clear_bits(&timer_hw->intf, bit);
+    timer_hw->armed = bit;          // write 1 to disarm
+    timer_hw->intr = bit;
+}
+
+static void au_timer_start(int hz) {
+    au_timer_stop();
+    if (s_au_alarm < 0) {
+        s_au_alarm = hardware_alarm_claim_unused(true);
+        const uint irq = hardware_alarm_get_irq_num(s_au_alarm);
+        irq_set_exclusive_handler(irq, au_alarm_isr);
+        irq_set_enabled(irq, true);
+    }
+    s_au_period = 1000000u / (uint32_t)hz;
+    s_au_target = timer_hw->timerawl + s_au_period;
+    const uint32_t bit = 1u << s_au_alarm;
+    timer_hw->intr = bit;
+    hw_set_bits(&timer_hw->inte, bit);
+    timer_hw->alarm[s_au_alarm] = s_au_target;
+    s_au_on = true;
 }
 
 void pcm_cleanup(void) {
-    cancel_repeating_timer(&m_timer);
-    m_timer.delay_us = 0;
+    au_timer_stop();
     if (Config::audio_driver == 4) {
         return;  // HDMI audio — no hardware to clean up
     }
@@ -644,8 +691,7 @@ void pcm_setup(int hz) {
     s_dc_R = 0;
     if (Config::audio_driver == 4) {
         // HDMI audio — timer only, no I2S/PWM hardware
-        if (m_timer.delay_us) cancel_repeating_timer(&m_timer);
-        add_repeating_timer_us(-1000000 / hz, timer_callback, NULL, &m_timer);
+        au_timer_start(hz);
         return;
     }
     if (Config::audio_driver == 3) {
@@ -660,11 +706,11 @@ void pcm_setup(int hz) {
         i2s_config.dma_trans_count = 1; // TODO: ensure
         i2s_init(&i2s_config);
     } else {
-        if (m_timer.delay_us) {
+        if (s_au_on) {
             pcm_cleanup();
         }
     }
     //hz; // 44100;	//44000 //44100 //96000 //22050
     // negative timeout means exact delay (rather than delay between callbacks)
-    add_repeating_timer_us(-1000000 / hz, timer_callback, NULL, &m_timer);
+    au_timer_start(hz);
 }

@@ -95,8 +95,7 @@ bool DivMMC::automap = false;
 // Next cold-boot: $0000 automap stays disarmed until the CPU leaves the
 // reset vector (the FPGA bootrom overlay does this on real hardware)
 bool g_next_automap_armed = false;
-bool DivMMC::trap_after = false;
-bool DivMMC::unmap_after = false;
+uint8_t DivMMC::pend_after = 0;
 bool DivMMC::conmem = false;
 bool DivMMC::mapram = false;
 uint8_t DivMMC::bank = 0;
@@ -531,8 +530,7 @@ void DivMMC::reopenFiles() {
 void DivMMC::reset() {
     automap = false;
     g_next_automap_armed = false;   // Next: $0000 trap re-arms after reset vector
-    trap_after = false;
-    unmap_after = false;
+    pend_after = 0;
     conmem = false;
     mapram = false;
     bank = 0;

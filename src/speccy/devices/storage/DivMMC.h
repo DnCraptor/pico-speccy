@@ -103,8 +103,10 @@ public:
 
 private:
     // Automap deferred signals (ZEsarUX model)
-    static bool trap_after;       // Entry point hit → map after fetch
-    static bool unmap_after;      // Off-point hit → unmap after fetch
+    // Automap deferred signals as ONE byte, so the per-opcode test in
+    // postOpcFetch is a single load: bit 0 = entry point hit -> map after
+    // fetch, bit 1 = off-point hit -> unmap after fetch.
+    static uint8_t pend_after;
 
     // SD protocol state machine
     static uint8_t mmc_last_command;
@@ -223,8 +225,22 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
     // every instruction of an esxDOS session (the flags are consumed and
     // cleared by postOpcFetch, so nothing stale survives an early return).
     if (__builtin_expect(pc >= 0x4000, 1)) return;
-    trap_after = false;
-    unmap_after = false;
+    // Every automap point lives in one of five 256-byte pages: 0x00 (RST
+    // vectors, 0x0066 NMI, the Next's programmable 0x0000-0x0038 set), 0x04 /
+    // 0x05 (the tape traps 0x04C6/0x04D7/0x0562/0x056A), 0x1F (the 0x1FF8-0x1FFF
+    // off-area) and 0x3D (the instant TR-DOS page). A fetch anywhere else in
+    // ROM space can neither map nor unmap — one shift and test instead of the
+    // whole check chain, per instruction of every ROM routine (PC profile,
+    // Next text viewer: this function was most of exec_nocheck's 56%). The
+    // flags are consumed and cleared by postOpcFetch after every fetch, so an
+    // early return leaves nothing stale.
+    {   // 32-bit mask for pages 0x00-0x1F, one compare for 0x3D (a 64-bit mask
+        // compiled into a ~10-instruction double-word shift)
+        const uint32_t tp = pc >> 8;
+        static constexpr uint32_t kTrapPagesLo = (1u << 0x00) | (1u << 0x04) | (1u << 0x05) | (1u << 0x1F);
+        if (tp != 0x3D && (tp >= 32 || !((kTrapPagesLo >> tp) & 1))) return;
+    }
+    pend_after = 0;
 
     // Fast path: EVERY automap trigger lives below 0x4000 — the RST vectors
     // (<= 0x0066), the tape traps (0x04C6/0x04D7/0x0562/0x056A), the 0x3Dxx
@@ -267,14 +283,14 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
                 uint8_t bit = (uint8_t)(1u << (pc >> 3));
                 if (pc == 0x0000 && !g_next_automap_armed) bit = 0;
                 if (bit && (nr[0xB8] & bit) && ((nr[0xB9] & bit) || rom3)) {
-                    trap_after = true;
+                    pend_after |= 1;
                 }
             } else if (rom3) {
                 if ((pc == 0x04C6 && (nr[0xBB] & 0x04)) ||
                     (pc == 0x0562 && (nr[0xBB] & 0x08)) ||
                     (pc == 0x04D7 && (nr[0xBB] & 0x10)) ||
                     (pc == 0x056A && (nr[0xBB] & 0x20))) {
-                    trap_after = true;
+                    pend_after |= 1;
                 } else if ((pc & 0xFF00) == 0x3D00 && (nr[0xBB] & 0x80)) {
                     automap = true;
                     if (!conmem) applyMapping();
@@ -284,7 +300,7 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
         }
         if (automap && pc >= DIVMMC_OFF_START && pc <= DIVMMC_OFF_END &&
             (nr[0xBB] & 0x40)) {
-            unmap_after = true;
+            pend_after |= 2;
         }
         return;
     }
@@ -294,7 +310,7 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
         if (pc == DIVMMC_TRAP_0000 || pc == DIVMMC_TRAP_0008 ||
             pc == DIVMMC_TRAP_0038 || pc == DIVMMC_TRAP_0066 ||
             pc == DIVMMC_TRAP_04C6 || pc == DIVMMC_TRAP_0562) {
-            trap_after = true;
+            pend_after |= 1;
         }
     }
 
@@ -308,22 +324,23 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
 
     // Off-points: unmap AFTER fetch, only if automap is currently ON
     if (automap && pc >= DIVMMC_OFF_START && pc <= DIVMMC_OFF_END) {
-        unmap_after = true;
+        pend_after |= 2;
     }
 }
 
 // Called AFTER opcode is fetched (and PC incremented)
 __attribute__((always_inline)) inline void DivMMC::postOpcFetch() {
-    if (trap_after) {
-        trap_after = false;
+    const uint8_t p = pend_after;
+    if (__builtin_expect(p == 0, 1)) return;
+    pend_after = 0;
+    if (p & 1) {
         automap = true;
         if (!conmem) applyMapping();
 #if NEXT_TRACE
         next_trace_ev('A', 0x01, 0);   // records PC itself
 #endif
     }
-    if (unmap_after) {
-        unmap_after = false;
+    if (p & 2) {
         automap = false;
         if (!conmem) applyMapping();
 #if NEXT_TRACE

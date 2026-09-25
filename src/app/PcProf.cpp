@@ -56,23 +56,29 @@ void pcprof_start() {
 void pcprof_dump() {
     // Read the table in place with the tick masked (no second copy: RAM is
     // scarce on the Next). Samples missed while it is masked are ~1 ms/s.
+    // The 42 hottest buckets over three lines ("PROF", "PROF+", "PROF+"):
+    // the handlers are spread thinly, 14 buckets covered only ~60% of the time.
     systick_hw->csr &= ~0x2u;
     const uint32_t total = s_total, lost = s_lost;
-    char line[240]; int n = snprintf(line, sizeof line, "PROF %u smp:", (unsigned)total);
-    for (int k = 0; total && k < 14 && n < (int)sizeof line - 20; k++) {
-        uint32_t best = 0, bi = 0;
-        for (uint32_t i = 0; i < PCPROF_SLOTS; i++) if (s_cnt[i] > best) { best = s_cnt[i]; bi = i; }
-        if (!best) break;
-        n += snprintf(line + n, sizeof line - n, " %08X:%u",
-                      (unsigned)((s_key[bi] - 1u) << PCPROF_SHIFT),
-                      (unsigned)(best * 1000u / total));   // per mille
-        s_cnt[bi] = 0;
+    for (int part = 0; total && part < 3; part++) {
+        char line[240];
+        int n = part ? snprintf(line, sizeof line, "PROF+") :
+                       snprintf(line, sizeof line, "PROF %u smp:", (unsigned)total);
+        for (int k = 0; k < 14 && n < (int)sizeof line - 20; k++) {
+            uint32_t best = 0, bi = 0;
+            for (uint32_t i = 0; i < PCPROF_SLOTS; i++) if (s_cnt[i] > best) { best = s_cnt[i]; bi = i; }
+            if (!best) break;
+            n += snprintf(line + n, sizeof line - n, " %08X:%u",
+                          (unsigned)((s_key[bi] - 1u) << PCPROF_SHIFT),
+                          (unsigned)(best * 1000u / total));   // per mille
+            s_cnt[bi] = 0;
+        }
+        if (part == 2 && lost) snprintf(line + n, sizeof line - n, " lost=%u", (unsigned)lost);
+        Debug::log("%s", line);
     }
-    if (lost) snprintf(line + n, sizeof line - n, " lost=%u", (unsigned)lost);
     memset(s_key, 0, sizeof s_key); memset(s_cnt, 0, sizeof s_cnt);
     s_total = s_lost = 0;
     systick_hw->csr |= 0x2u;
-    if (total) Debug::log("%s", line);
 }
 
 #else
