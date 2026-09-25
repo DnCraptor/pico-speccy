@@ -48,6 +48,7 @@ uint16_t Z80DMA::cur_port_a = 0;
 uint16_t Z80DMA::cur_port_b = 0;
 uint32_t Z80DMA::byte_counter = 0;
 bool     Z80DMA::transfer_active = false;
+bool     Z80DMA::nextZ80Mode = false;
 bool     Z80DMA::transfer_started = false;
 bool     Z80DMA::block_end = false;
 
@@ -442,20 +443,24 @@ IRAM_ATTR void Z80DMA::collectParam(uint8_t data) {
     }
 }
 
+static inline bool z80Mode() {
+    return Z80Ops::isNext ? Z80DMA::nextZ80Mode : Config::dma_mode == 1;
+}
+
 void Z80DMA::doLoad() {
     cur_port_a = port_a_addr;
     cur_port_b = port_b_addr;
     // FPGA: zxn mode counter starts at 0, z80 mode counter starts at 0xFFFF
     // zxn: transfers block_length bytes; z80: transfers block_length+1 bytes
     byte_counter = block_length;
-    if (Config::dma_mode == 1) byte_counter++; // z80 DMA always: length+1
+    if (z80Mode()) byte_counter++; // z80 DMA always: length+1
     block_end = false;
 }
 
 void Z80DMA::doContinue() {
     // Reset byte counter but keep current working pointers
     byte_counter = block_length;
-    if (Config::dma_mode == 1) byte_counter++;
+    if (z80Mode()) byte_counter++;
     block_end = false;
 }
 

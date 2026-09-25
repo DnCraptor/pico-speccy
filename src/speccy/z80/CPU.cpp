@@ -736,9 +736,46 @@ IRAM_ATTR void CPU::loop() {
     BREAKPOINTS
     bool halted = Z80::isHalted();
     if (Z80Ops::isNext && NextReg::lineIrqEnabled) {
-        // Line IRQ can fire mid-frame: skip the exec_nocheck/FlushOnHalt fast
-        // paths and let the INT-checking tail loop run the whole frame
+        // Line IRQ armed: the frame is sliced around its 32-T window instead
+        // of running execute() (an INT check per instruction) for the whole
+        // frame — that cost TX-1696 half its speed (cpu 31 ms/fr with a 15 ms
+        // render, 32 fps). Unchecked slices up to the window and after it,
+        // checked execute() only inside it, a HALT fast-forwarded to the next
+        // event without flushing the frame (NEXTVID renders by line). A write
+        // to NR 0x22/0x23 inside a slice ends it (NextReg), so a moved window
+        // is re-derived here.
         halted = false;
+        // The last IntEnd T stay with the checked tail loop below (the frame
+        // INT straddles the frame boundary there), as on the unsliced path.
+        const uint32_t sliceEnd = statesInFrame - IntEnd;
+        while (tstates < sliceEnd && NextReg::lineIrqEnabled) {
+            const uint8_t m = ESPectrum::multiplicator;
+            const uint32_t lines = (statesInFrame >> m) / VIDEO::tStatesPerLine;
+            int32_t ws = (int32_t)((((NextReg::lineIrqLine + 63) % lines) * VIDEO::tStatesPerLine) << m)
+                         - (int32_t)CPU::latetiming;
+            if (ws < 0) ws = 0;
+            const uint32_t s0 = (uint32_t)ws, e0 = s0 + (32u << m);
+            if (tstates >= s0 && tstates < e0) {
+                // inside the window: at a boundary take the INT at once
+                // (execute() would run one more instruction first)
+                if (Z80::atInstrBoundary()) Z80::checkINT();
+                Z80::execute();
+                BREAKPOINTS
+                continue;
+            }
+            uint32_t target = (tstates < s0) ? s0 : sliceEnd;
+            if (target > sliceEnd) target = sliceEnd;
+            if (Z80::isHalted()) {
+                halted = true;
+                NEXTVID::haltAdvanceTo(target);
+            } else {
+                stFrame = target;
+                Z80::exec_nocheck();
+                if (stFrame == 0) { halted = true; NEXTVID::haltAdvanceTo(target); }
+            }
+            BREAKPOINTS
+        }
+        if (halted) tstates_active = tstates;
     } else
     if (!halted) {
         stFrame = statesInFrame - IntEnd;

@@ -2020,7 +2020,8 @@ void VIDEO::ulaPlusDisable() {
     // When GigaScreen is enabled we must NOT touch slots 17..63 — those hold blend
     // values built at boot, and rewriting them here would force a heavy 120-entry
     // re-emit and race with HDMI DMA reading conv_color from port-write context.
-    int g3r3b2_upper = gigascreenArmed() ? 17 : 64;
+    // Next: slots 17..183 hold NEXTVID's colour lattice, not the cube.
+    int g3r3b2_upper = (gigascreenArmed() || Config::arch == A_NEXT) ? 17 : 64;
     for (int i = 0; i < g3r3b2_upper; i++)
         graphics_set_palette(i, paletteFinal(grb_to_rgb888(i)));
     for (int i = 0; i < 16; i++) {
@@ -2110,6 +2111,8 @@ void VIDEO::applyPalette() {
         // snapTransform still applies on Next: it is the Capture-safe colours
         // stage (Config::hdmi_snap), and skipping it with the matrix made that
         // option a no-op in Next mode (capture card, TBBLUE mode test, 2026-09-25).
+        if (Config::arch == A_NEXT && NEXTVID::isSlot(i))
+            c = NEXTVID::slotRgb(i);   // the Next's colour lattice, not the cube
         c = (Config::arch != A_NEXT) ? paletteFinal(c) : snapTransform(crtTransform(c));
         graphics_set_palette(i, c);
     }
@@ -3686,7 +3689,9 @@ void VIDEO::applyCrtFilter() {
 void VIDEO::getBmpPalette(uint8_t* out) {
     // G3R3B2 entries (0-239) with palette transform
     for (int i = 0; i < 240; i++) {
-        uint32_t c = paletteFinal(grb_to_rgb888(i));
+        uint32_t c = (Config::arch == A_NEXT && NEXTVID::isSlot(i))
+            ? snapTransform(crtTransform(NEXTVID::slotRgb(i)))
+            : paletteFinal(grb_to_rgb888(i));
         out[i * 4 + 0] = c & 0xFF;         // B
         out[i * 4 + 1] = (c >> 8) & 0xFF;  // G
         out[i * 4 + 2] = (c >> 16) & 0xFF; // R
@@ -5330,15 +5335,17 @@ void VIDEO::Reset() {
         // Placed last so nothing below re-points the Draw handlers.
         gigascreen_enabled = false;
         graphics_set_dither(false);
-        // NEXTVID's palette LUTs map into the plain G3R3B2 cube at 17-183;
+        // NEXTVID's palette LUTs map into its colour lattice (NEXTVID::isSlot);
         // Gigascreen (17-127) and the dither table (64-127) may have
-        // repurposed those CLUT slots — restore the cube, LINEAR (no palette
+        // repurposed those CLUT slots — program the lattice, LINEAR (no palette
         // matrix: Next owns its colours via the RGB333 palettes). 184+ stays
-        // untouched: HDMI audio data islands / guard bands live there.
+        // untouched: HDMI audio data islands / guard bands live there;
+        // 152-167 is the UI block.
         // Same stages as applyPalette's Next branch: CRT filter + Capture-safe
         // snap, never the ZX palette matrix.
-        for (int i = 17; i < 184; i++)
-            graphics_set_palette(i, snapTransform(crtTransform(grb_to_rgb888(i))));
+        for (int i = 17; i < 216; i++)
+            if (NEXTVID::isSlot(i))
+                graphics_set_palette(i, snapTransform(crtTransform(NEXTVID::slotRgb(i))));
         NEXTVID::Reset();
         Draw = &NEXTVID::Tick;
         Draw_Opcode = &NEXTVID::Tick_Opcode;

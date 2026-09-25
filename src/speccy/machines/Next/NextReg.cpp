@@ -85,6 +85,7 @@ void next_trace_dump(uint32_t frames) {
     extern volatile uint32_t g_sd_stall_us, g_sd_ops;   // DivMMC.cpp
     extern uint32_t g_nextvid_frames;
     extern volatile uint32_t g_nextvid_us;              // NextVideo.cpp
+    extern volatile uint32_t g_nextvid_layer_us[4];     // ula / tilemap / L2 / sprites
     // Who REALLY owns slot 0 right now — the flags can say "bootrom" while a
     // missed replug hands the CPU something else entirely (2026-08-09: flags
     // said boot=1 while the machine visibly ran a machine ROM).
@@ -132,6 +133,13 @@ void next_trace_dump(uint32_t frames) {
             (unsigned)(ESPectrum::multiplicator == 0 ? 3 : 7u << (ESPectrum::multiplicator - 1)),
             (unsigned)frames, (unsigned)g_nextvid_frames,
             (unsigned)ESPectrum::maxSpeed);
+        // Which layer the renderer's time goes to (same sampled lines, the
+        // paper rows only — border rows are in vid but not split here).
+        Debug::log("NEXT vid: ula=%u.%u tm=%u.%u l2=%u.%u spr=%u.%u ms/fr",
+            (unsigned)(g_nextvid_layer_us[0] / f / 1000u), (unsigned)(g_nextvid_layer_us[0] / f % 1000u / 100u),
+            (unsigned)(g_nextvid_layer_us[1] / f / 1000u), (unsigned)(g_nextvid_layer_us[1] / f % 1000u / 100u),
+            (unsigned)(g_nextvid_layer_us[2] / f / 1000u), (unsigned)(g_nextvid_layer_us[2] / f % 1000u / 100u),
+            (unsigned)(g_nextvid_layer_us[3] / f / 1000u), (unsigned)(g_nextvid_layer_us[3] / f % 1000u / 100u));
 #if PERF_TRACE && PERF_HIST
         // The TS-Conf opcode histogram (Z80_JLS.cpp, exec_nocheck), printed here
         // because VIDEO::EndFrame's PERF block never runs on the Next. ns/instr is
@@ -165,6 +173,7 @@ void next_trace_dump(uint32_t frames) {
     g_sd_ops = 0;
     g_nextvid_us = 0;
     g_nextvid_frames = 0;
+    for (int i = 0; i < 4; i++) g_nextvid_layer_us[i] = 0;
     // Ring line: newest LAST, budget spent from the newest end backwards, a
     // leading ".." marks dropped older entries (never drop the newest — the
     // NeoGS ring printed oldest-first once and hid every wedge it saw).
@@ -318,7 +327,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
     // streams run thousands of writes a second and would purge the ring).
     if (r == 0x40 || r == 0x41 || r == 0x44) s_nt_pal++;
     else if (r >= 0x60 && r <= 0x63) s_nt_cop++;
-    else if (r >= 0x34 && r <= 0x39) s_nt_spr++;
+    else if ((r >= 0x34 && r <= 0x39) || (r >= 0x75 && r <= 0x79)) s_nt_spr++;
     else NT_EV('N', r, v);
 #endif
     switch (r) {
@@ -387,9 +396,11 @@ void NextReg::write(uint8_t r, uint8_t v) {
             ulaIrqDisabled = v & 0x04;
             lineIrqEnabled = v & 0x02;
             lineIrqLine = (lineIrqLine & 0xFF) | ((v & 0x01) << 8);
+            lineIrqReslice();
             break;
         case 0x23: // Line interrupt value LSB
             lineIrqLine = (lineIrqLine & 0x100) | v;
+            lineIrqReslice();
             break;
         case 0x12: case 0x13: // Layer 2 active/shadow bank
             updateLayer2Window();
@@ -412,11 +423,14 @@ void NextReg::write(uint8_t r, uint8_t v) {
         case 0x1C: // clip window index reset
             NEXTVID::clipIndexReset(v);
             break;
-        case 0x34: // sprite slot select mirror
-            NEXTVID::spriteSlotSelect(v);
+        case 0x34: // sprite number (own index unless lockstep, NR 0x09 bit 4)
+            NEXTVID::spriteNrSelect(v);
             break;
         case 0x35: case 0x36: case 0x37: case 0x38: case 0x39:
             NEXTVID::spriteAttrDirect(r - 0x35, v);
+            break;
+        case 0x75: case 0x76: case 0x77: case 0x78: case 0x79:
+            NEXTVID::spriteAttrDirect(r - 0x75, v, true);   // + sprite number
             break;
         case 0x40: NEXTVID::palIndex(v);   break;
         case 0x41: NEXTVID::palValue8(v);  break;
@@ -637,3 +651,10 @@ void NextReg::write1FFD(uint8_t v) {
 }
 
 
+
+// stFrame 0 means "HALT" to CPU::loop, so the slice ends one T later at the
+// earliest; a slice already ending sooner is left alone.
+void NextReg::lineIrqReslice() {
+    const uint32_t cut = CPU::tstates + 1;
+    if (CPU::stFrame > cut) CPU::stFrame = cut;
+}

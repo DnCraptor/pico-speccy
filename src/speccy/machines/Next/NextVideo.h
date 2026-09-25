@@ -63,7 +63,9 @@ public:
     static uint8_t spriteFlagsRead();          // port 0x303B read
     static void spriteAttrWrite(uint8_t v);    // port 0x57 write
     static void spritePatternWrite(uint8_t v); // port 0x5B write
-    static void spriteAttrDirect(uint8_t byteIdx, uint8_t v); // nextreg 0x35-0x39
+    static void spriteNrSelect(uint8_t v);     // nextreg 0x34
+    // nextreg 0x35-0x39 (inc=false) / 0x75-0x79 (inc=true: advance the sprite)
+    static void spriteAttrDirect(uint8_t byteIdx, uint8_t v, bool inc = false);
 
     // Copper (nextreg 0x60-0x63)
     static void copperDataWrite(uint8_t v);    // reg 0x60: byte at index++
@@ -74,6 +76,35 @@ public:
     // Timex hi-res: rebuild the palette-index -> pair-slot table (VIDEO's
     // EndFrame, when the packed-pair driver comes on).
     static void rebuildPairMap();
+
+    // CLUT slots the Next's colours map into: 17..151, 168..183, 200..215 —
+    // the TS-Conf ts256 pool minus 0..16. Excluded: 0..15 the ZX colours, 16
+    // the hi-res marker, 152..167 the nm:: UI block (the menu and the F8 stats
+    // box install their colours there — hw: the NextZXOS browser cursor went
+    // dark), 184..199/216..239 HDMI data-island words, 240+ sync/border.
+    // They hold a 6(R) x 7(G) x 4(B) lattice minus black (= ZX colour 0),
+    // each channel's levels taken FROM the Next's own 8 RGB333 levels and
+    // always including 0, 5 and 7: the ZX colours (normal = 5, BRIGHT = 7)
+    // and the greys 0/3/5/7 land exactly. An evenly spaced 0..255 lattice had
+    // no neutral grey at the ULA's white (5,5,5) and painted NextZXOS's paper
+    // PINK (204,170,170). Chosen by exhaustive search over the 512 RGB333
+    // colours: worst error 63, mean 27. The plain G3R3B2 cube these slots once
+    // held stopped at 183 = G5 (no whites, yellows or sky blues at all).
+    static constexpr bool isSlot(int j) {
+        return (j >= 17 && j < 152) || (j >= 168 && j < 184) || (j >= 200 && j < 216);
+    }
+    static constexpr int latticeIndex(int j) {        // 1..167
+        return j < 152 ? j - 16 : j < 184 ? j - 32 : j - 48;
+    }
+    static inline uint32_t slotRgb(int j) {
+        static constexpr uint8_t lv[8] = { 0, 36, 72, 109, 145, 182, 218, 255 };
+        static constexpr uint8_t kR[6] = { 0, 2, 3, 4, 5, 7 };
+        static constexpr uint8_t kG[7] = { 0, 1, 2, 3, 5, 6, 7 };
+        static constexpr uint8_t kB[4] = { 0, 3, 5, 7 };
+        const int k = latticeIndex(j);             // 0 = black: ZX colour 0
+        const int b = k & 3, g = (k >> 2) % 7, r = (k >> 2) / 7;
+        return ((uint32_t)lv[kR[r]] << 16) | ((uint32_t)lv[kG[g]] << 8) | (uint32_t)lv[kB[b]];
+    }
 
     // Rendering on core1 (the TS-Conf model): core0 posts each visible line with
     // a snapshot of the registers it reads, core1 draws it. Anything the
@@ -106,6 +137,23 @@ private:
     static uint8_t  sprAttrSlot;         // attribute upload sprite index
     static uint8_t  sprAttrByte;         // attribute upload byte index
     static uint8_t  sprFlags;            // bit0 collision, bit1 overflow
+    static uint8_t  sprNrSlot;           // nextreg 0x34 sprite index (separate unless lockstep)
+    // Attributes resolved against their anchors (relative / composite /
+    // unified), rebuilt lazily after any attribute write (sprDirty).
+    struct SprRes {
+        int16_t  x;          // 0..511, wraps at 512; >319 is left of the display
+        int16_t  y;          // -256..255
+        uint16_t pat;        // byte offset into sprPatterns
+        uint8_t  flags;      // SR_* below
+        uint8_t  pal;        // palette offset (high nibble)
+        uint8_t  xs, ys;     // scale shift 0..3
+    };
+    enum : uint8_t { SR_XM = 1, SR_YM = 2, SR_ROT = 4, SR_4BPP = 8 };
+    static SprRes*  sprRes;              // [128] (in the Next heap block)
+    static uint8_t* sprVis;              // [128] visible sprite numbers, 0 -> 127
+    static uint8_t  sprVisN;
+    static bool     sprDirty;
+    static void     resolveSprites();
 
     // copper state
     static void copperLine(uint16_t rasterLine);
@@ -124,7 +172,7 @@ private:
     // 4 palettes x 2 banks: 0=ULA1 1=L2-1 2=Spr1 3=TM1 4=ULA2 5=L2-2 6=Spr2 7=TM2
     static uint16_t (*rawPal)[256];  // [8][256] 9-bit RGB333
     static uint8_t  (*lut)[256];     // [8][256] palette entry -> CLUT index
-    static uint8_t  remap[256];      // G3R3B2 index -> allowed CLUT index
+    static uint8_t* remap;           // [512] RGB333 -> allowed CLUT index (Next heap block)
 
     static uint8_t palIdx;           // reg 0x40 write index
     static bool    pal9Second;       // expecting 2nd byte of reg 0x44

@@ -35,6 +35,10 @@ public:
     // MB-02+ deferred DMA: trigger pending transfer externally
     static bool mb02_deferred;
     static bool transfer_active;
+    // Spectrum Next: ONE DMA behind two ports — #0B = Zilog mode (a block of
+    // length+1 bytes), #6B = zxn mode (length). The port of the latest write
+    // decides, as on the FPGA. Other machines: Config::dma_mode picks the port.
+    static bool nextZ80Mode;
     static void executeTransfer();
 
 private:

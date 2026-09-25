@@ -30,7 +30,7 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 
 uint16_t (*NEXTVID::rawPal)[256] = nullptr;
 uint8_t  (*NEXTVID::lut)[256] = nullptr;
-uint8_t  NEXTVID::remap[256];
+uint8_t* NEXTVID::remap = nullptr;
 bool     NEXTVID::palHasPrio[8];
 
 uint8_t NEXTVID::clip[4][4];
@@ -50,6 +50,11 @@ uint16_t NEXTVID::sprPatWrite = 0;
 uint8_t  NEXTVID::sprAttrSlot = 0;
 uint8_t  NEXTVID::sprAttrByte = 0;
 uint8_t  NEXTVID::sprFlags = 0;
+uint8_t  NEXTVID::sprNrSlot = 0;
+NEXTVID::SprRes* NEXTVID::sprRes = nullptr;
+uint8_t* NEXTVID::sprVis = nullptr;
+uint8_t  NEXTVID::sprVisN = 0;
+bool     NEXTVID::sprDirty = true;
 
 uint8_t* NEXTVID::copperMem = nullptr;
 uint16_t NEXTVID::copIndex = 0;
@@ -179,32 +184,24 @@ uint32_t g_nextvid_frames = 0; // completed frames with composition enabled
 
 // ===== palette machinery =====
 
-static inline uint8_t g3r3b2_of_rgb333(uint16_t v) {
-    // rgb333 = RRRGGGBBB; CLUT cube layout is GGGRRRBB (grb_to_rgb888)
-    uint8_t r = (v >> 6) & 7, g = (v >> 3) & 7, b = v & 7;
-    return (g << 5) | (r << 2) | (b >> 1);
-}
 
-// Nearest usable CLUT index for a G3R3B2 target colour. Usable candidates:
-//  - 17..183: the linear G3R3B2 cube. NOT beyond: on HDMI, 184-199 and
-//    216-239 hold audio data-island / guard-band TMDS symbols (a pixel with
-//    such a value emits CONTROL symbols mid-line — hw: yellow vertical
-//    stripes where bright white (cube 219+) should be) and 200-215 are the
-//    textmode slots; 240+ is sync. Stay below 184 everywhere.
-//  - 0..15: the ZX palette entries — exact black/white/primaries. The cube's
-//    dark corner (indices < 17) is cut off by the OSD range, so without
-//    these, black lands on index 32 = visibly dark GREEN (hw). Their CLUT
-//    values follow the user's ZX palette transform, which for the nominal
-//    ZX points is close enough.
+// Nearest usable CLUT index for an RGB333 colour (remap[512]). Usable candidates:
+//  - isSlot(): the colour lattice (NextVideo.h slotRgb), programmed by
+//    VIDEO::Reset / applyPalette. NEVER 184-199 / 216-239 on HDMI: those hold
+//    audio data-island / guard-band TMDS symbols (a pixel with such a value
+//    emits CONTROL symbols mid-line — hw: yellow vertical stripes); 240+ is
+//    sync; 152-167 is the UI block the menu repaints.
+//  - 0..15: the ZX palette entries — exact black/white/primaries. Black is
+//    deliberately not in the lattice: it is ZX colour 0.
 // Distances are computed in 8-bit RGB with rough luma weights.
 void NEXTVID::buildRemap() {
     c1Drain();
     static const uint8_t zxlvl[2] = { 205, 255 };
-    for (int i = 0; i < 256; i++) {
-        int tr = ((i >> 2) & 7) * 255 / 7;
-        int tg = ((i >> 5) & 7) * 255 / 7;
-        int tb = (i & 3) * 255 / 3;
-        int best = 17;
+    for (int i = 0; i < 512; i++) {
+        int tr = ((i >> 6) & 7) * 255 / 7;
+        int tg = ((i >> 3) & 7) * 255 / 7;
+        int tb = (i & 7) * 255 / 7;
+        int best = 0;
         // max d = 255^2 * 10 < 2^32 — plain uint32 arithmetic (a 64-bit
         // sentinel via `long` was UB on 32-bit ARM: bestd == 0, nothing ever
         // beat it and the whole remap collapsed to index 17 — hw: solid
@@ -217,10 +214,10 @@ void NEXTVID::buildRemap() {
             uint32_t d = (uint32_t)(dr * dr * 3 + dg * dg * 6 + db * db);
             if (d < bestd) { bestd = d; best = c; }
         }
-        for (int j = 17; j < 184; j++) {          // linear cube
-            int cr = ((j >> 2) & 7) * 255 / 7;
-            int cg = ((j >> 5) & 7) * 255 / 7;
-            int cb = (j & 3) * 255 / 3;
+        for (int j = 17; j < 216; j++) {          // colour lattice
+            if (!isSlot(j)) continue;
+            const uint32_t rgb = slotRgb(j);
+            int cr = (rgb >> 16) & 0xFF, cg = (rgb >> 8) & 0xFF, cb = rgb & 0xFF;
             int dr = tr - cr, dg = tg - cg, db = tb - cb;
             uint32_t d = (uint32_t)(dr * dr * 3 + dg * dg * 6 + db * db);
             if (d < bestd) { bestd = d; best = j; }
@@ -232,7 +229,7 @@ void NEXTVID::buildRemap() {
 // Timex hi-res runs the driver in packed-pair mode: every framebuffer byte is
 // a (left, right) pair of the 16 ZX colours. The ULA's 512 pixels are exact
 // (VIDEO's timex_hr_lut); every other layer's palette index — 0..15 the ZX
-// colours themselves, 17..183 the G3R3B2 cube (buildRemap) — becomes the solid
+// colours themselves, the rest the colour lattice (buildRemap) — becomes the solid
 // pair of its nearest ZX colour, the same limit every pair mode has.
 void NEXTVID::rebuildPairMap() {
     if (!pairMap) return;
@@ -243,8 +240,11 @@ void NEXTVID::rebuildPairMap() {
         if (i < 16) {
             const int l = zxlvl[(i >> 3) & 1];
             tr = (i & 2) ? l : 0; tg = (i & 4) ? l : 0; tb = (i & 1) ? l : 0;
+        } else if (isSlot(i)) {
+            const uint32_t rgb = slotRgb(i);
+            tr = (rgb >> 16) & 0xFF; tg = (rgb >> 8) & 0xFF; tb = rgb & 0xFF;
         } else {
-            tr = ((i >> 2) & 7) * 255 / 7; tg = ((i >> 5) & 7) * 255 / 7; tb = (i & 3) * 255 / 3;
+            tr = tg = tb = 0;                     // never produced
         }
         int best = 0; uint32_t bestd = 0xFFFFFFFFu;
         for (int c = 0; c < 16; c++) {
@@ -260,13 +260,13 @@ void NEXTVID::rebuildPairMap() {
 void NEXTVID::setLutEntry(uint8_t pal, uint8_t idx, uint16_t rgb333) {
     c1Drain();
     rawPal[pal][idx] = rgb333;
-    lut[pal][idx] = remap[g3r3b2_of_rgb333(rgb333)];
+    lut[pal][idx] = remap[rgb333 & 0x1FF];
 }
 
 void NEXTVID::rebuildLut(uint8_t pal) {
     c1Drain();
     for (int i = 0; i < 256; i++)
-        lut[pal][i] = remap[g3r3b2_of_rgb333(rawPal[pal][i])];
+        lut[pal][i] = remap[rawPal[pal][i] & 0x1FF];
 }
 
 static inline uint16_t rgb332_to_333(uint8_t v) {
@@ -377,6 +377,7 @@ void NEXTVID::spriteAttrWrite(uint8_t v) {
     c1Drain();
     uint8_t* a = sprAttr[sprAttrSlot];
     a[sprAttrByte] = v;
+    sprDirty = true;
     // Auto-advance: 4-byte sprites move on after byte 3 unless byte 3
     // requests the 5th attribute byte
     if (sprAttrByte == 3 && !(v & 0x40)) {
@@ -397,10 +398,25 @@ void NEXTVID::spritePatternWrite(uint8_t v) {
     sprPatWrite = (sprPatWrite + 1) & 0x3FFF;
 }
 
-void NEXTVID::spriteAttrDirect(uint8_t byteIdx, uint8_t v) {
+// Nextreg 0x34 keeps its OWN sprite index; only with lockstep (NR 0x09 bit 4)
+// is it the port 0x303B index (and then it also selects the pattern). Sharing
+// it unconditionally moved the port's pattern upload pointer whenever a game
+// updated a sprite through nextregs (zxnext.vhd / ZEsarUX tbblue.c agree).
+void NEXTVID::spriteNrSelect(uint8_t v) {
+    if (NextReg::reg[0x09] & 0x10) spriteSlotSelect(v);
+    else sprNrSlot = v & 0x7F;
+}
+
+void NEXTVID::spriteAttrDirect(uint8_t byteIdx, uint8_t v, bool inc) {
     c1Drain();
-    // nextreg 0x35-0x39 mirror: write byte N of the selected sprite
-    if (byteIdx < 5) sprAttr[sprAttrSlot][byteIdx] = v;
+    const bool lock = NextReg::reg[0x09] & 0x10;
+    uint8_t& slot = lock ? sprAttrSlot : sprNrSlot;
+    if (byteIdx < 5) sprAttr[slot][byteIdx] = v;
+    sprDirty = true;
+    if (inc) {
+        slot = (slot + 1) & 0x7F;
+        if (lock) sprAttrByte = 0;
+    }
 }
 
 // ===== Copper =====
@@ -488,9 +504,10 @@ void NEXTVID::Reset() {
     if (!sprPatterns) {
         // One block, Next-boot only, never freed (the Next boundary reboots).
         // Layout: patterns 16K | copper 2K | rawPal 4K | lut 2K | sprAttr 640 |
-        // lineBuf 384 | pairMap 256 | hiresRow 256 (all word-aligned: 25216 is a
-        // multiple of 4)
-        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512);
+        // lineBuf 384 | pairMap 256 | hiresRow 256 | sprRes 1280 | sprVis 128 |
+        // remap 512 (all word-aligned: 27136 is a multiple of 4)
+        static_assert(sizeof(SprRes) == 10, "sprRes is sized 128 x 10 in the block");
+        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512 + 1408 + 512);
         sprPatterns = blk;
         copperMem   = blk + 16384;
         rawPal      = (uint16_t(*)[256])(blk + 16384 + 2048);
@@ -499,7 +516,10 @@ void NEXTVID::Reset() {
         lineBuf     = blk + 16384 + 2048 + 8*256*2 + 8*256 + 128*5;
         pairMap     = lineBuf + 384;
         hiresRow    = pairMap + 256;
-        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512);
+        sprRes      = (SprRes*)(hiresRow + 256);
+        sprVis      = hiresRow + 256 + 1280;
+        remap       = sprVis + 128;
+        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512 + 1408 + 512);
     }
     buildRemap();
     defaultPalettes();
@@ -516,6 +536,8 @@ void NEXTVID::Reset() {
     }
 
     memset(sprAttr, 0, 128 * 5);
+    sprDirty = true;
+    sprNrSlot = 0;
     sprPatWrite = 0;
     sprAttrSlot = 0;
     sprAttrByte = 0;
@@ -600,6 +622,17 @@ void NEXTVID::DrawBorderNop() {}
 // is timed and extrapolated ×16 (~15 time_us_64 pairs per frame — noise-level
 // overhead, but enough to see RenderLine's real share of cpu_frame_us).
 volatile uint32_t g_nextvid_us = 0;
+// Per-layer split of the same sampled lines (x16): ULA/LoRes, tilemap,
+// Layer 2, sprites. nx_layer_sample is set by the sampling wrapper.
+volatile uint32_t g_nextvid_layer_us[4] = {0, 0, 0, 0};
+static bool nx_layer_sample = false;
+#define NX_LT_BEGIN() uint64_t _lt0 = nx_layer_sample ? time_us_64() : 0
+#define NX_LT_END(i) do { if (nx_layer_sample) { const uint64_t _t = time_us_64(); \
+    g_nextvid_layer_us[i] += (uint32_t)(_t - _lt0) * 16; _lt0 = _t; } } while (0)
+#endif
+#if !NEXT_TRACE
+#define NX_LT_BEGIN() do {} while (0)
+#define NX_LT_END(i) do {} while (0)
 #endif
 
 // noinline: at -O3 it was inlined into Tick, Tick_Opcode, lineTick and
@@ -637,7 +670,9 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::ScanlineWork() {
 #if NEXT_TRACE
                 if ((lineIdx & 15) == 0) {
                     uint64_t t0 = time_us_64();
+                    nx_layer_sample = true;
                     RenderLine(row);
+                    nx_layer_sample = false;
                     g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
                 } else
 #endif
@@ -663,7 +698,9 @@ IRAM_ATTR void NEXTVID::c1Pump() {
 #if NEXT_TRACE
         if ((j & 15) == 0) {
             const uint64_t t0 = time_us_64();
+            nx_layer_sample = true;
             RenderLine((int)(j & 0xFFFF));
+            nx_layer_sample = false;
             g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
         } else
 #endif
@@ -752,6 +789,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         return;
     }
 
+    NX_LT_BEGIN();
     // left/right border
     memset(fb, borderIdx, xPaperOff);
     memset(fb + xPaperOff + 256, borderIdx, xres - xPaperOff - 256);
@@ -797,7 +835,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
                 uint8_t b = bmp[col];
                 uint8_t ink = ulaLut[a & mask];
                 uint8_t pap = (mask == 255)
-                    ? remap[g3r3b2_of_rgb333(rgb332_to_333(LS->r4A))]
+                    ? remap[rgb332_to_333(LS->r4A)]
                     : ulaLut[128 + (a >> shift)];
                 for (int bit = 0; bit < 8; bit++)
                     p[bit] = (b & (0x80 >> bit)) ? ink : pap;
@@ -825,27 +863,35 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         memset(fb + xPaperOff, borderIdx, 256);
     }
 
+    NX_LT_END(0);
     // Tilemap (over ULA/LoRes, under Layer 2 and sprites)
     if (LS->r6B & 0x80)
         RenderTilemapLine(fb, row);
+    NX_LT_END(1);
 
     // Layer 2, over ULA
     bool l2on = (LS->p123B & 0x02) || (LS->r69 & 0x80);
     uint8_t slu = (r15 >> 2) & 7;
     bool spritesUnderL2 = (slu == 1 || slu == 4); // L-S-U / L-U-S orders
 
-    if (spritesUnderL2 && (r15 & 0x01))
+    if (spritesUnderL2 && (r15 & 0x01)) {
         RenderSpritesLine(fb, y);
+        NX_LT_END(3);
+    }
 
     if (l2on)
         RenderL2Line(fb, row, false);
+    NX_LT_END(2);
 
-    if (!spritesUnderL2 && (r15 & 0x01))
+    if (!spritesUnderL2 && (r15 & 0x01)) {
         RenderSpritesLine(fb, y);
+        NX_LT_END(3);
+    }
 
     // Layer 2 palette-priority pixels sit above everything
     if (l2on && palHasPrio[(LS->palCtrl & 0x04) ? 5 : 1])
         RenderL2Line(fb, row, true);
+    NX_LT_END(2);
 }
 
 // Layer 2: 256x192x8bpp (row-major) or 320x256x8bpp (column-major, covers
@@ -938,111 +984,207 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
     int entrySz = noAttr ? 1 : 2;
     const uint8_t* mrow = map + (sy >> 3) * cols * entrySz;
     uint8_t inRow = sy & 7;
-    int xOrig = xPaperOff - 32;
-    int xres = VIDEO::vga.xres;
-    int cx1 = LS->clip[3][0] * 2, cx2 = LS->clip[3][1] * 2 + 1; // clip x in half-columns
+    const int xOrig = xPaperOff - 32;
+    const int xres = VIDEO::vga.xres;
+    // Visible tx range: the clip window (in half-columns) and the framebuffer.
+    int t0 = LS->clip[3][0] * 2, t1 = LS->clip[3][1] * 2 + 1;
+    if (t0 < -xOrig) t0 = -xOrig;
+    if (t1 > 319) t1 = 319;
+    if (t1 > xres - 1 - xOrig) t1 = xres - 1 - xOrig;
+    uint8_t* const out = fb + xOrig;
 
-    for (int tx = 0; tx < 320; tx++) {
-        if (tx < cx1 || tx > cx2) continue;
-        int fx = xOrig + tx;
-        if (fx < 0 || fx >= xres) continue;
-        // 80-column mode: 640 source pixels rendered halved
-        uint16_t sx = cols80 ? (uint16_t)((tx * 2 + scrollX) % 640)
-                             : (uint16_t)((tx + scrollX) % 320);
+    // Tile by tile: one map entry, one attribute decode and the tile's 8
+    // source pixels per tile instead of per output pixel. 80-column mode
+    // renders 640 source pixels halved: every other source pixel.
+    const int step = cols80 ? 2 : 1;
+    const int wrap = cols80 ? 640 : 320;
+    int tx = t0;
+    while (tx <= t1) {
+        int sx = (tx * step + scrollX) % wrap;
+        const int u0 = sx & 7;
+        int n = (8 - u0 + step - 1) / step;        // output pixels left in this tile
+        if (n > t1 - tx + 1) n = t1 - tx + 1;
         const uint8_t* e = mrow + (sx >> 3) * entrySz;
-        uint8_t tile = e[0];
-        uint8_t attr = noAttr ? LS->r6C : e[1];
-        if (attr & 0x01) continue; // ULA over this tile
-        uint8_t u = sx & 7, vv = inRow;
-        if (attr & 0x08) u = 7 - u;                              // X mirror
-        if (attr & 0x04) vv = 7 - vv;                            // Y mirror
-        if (attr & 0x02) { uint8_t t = u; u = vv; vv = 7 - t; }  // rotate
-        uint8_t b = defs[(uint16_t)tile * 32 + vv * 4 + (u >> 1)];
-        uint8_t pix = (u & 1) ? (b & 0x0F) : (b >> 4);
-        if (pix == transp) continue;
-        fb[fx] = lutTM[pix | (attr & 0xF0)];
+        const uint8_t tile = e[0];
+        const uint8_t attr = noAttr ? LS->r6C : e[1];
+        if (!(attr & 0x01)) {                      // bit 0: ULA over this tile
+            const bool xm = attr & 0x08, ym = attr & 0x04, rot = attr & 0x02;
+            const uint8_t* def = defs + (uint16_t)tile * 32;
+            const uint8_t palHi = attr & 0xF0;
+            for (int k = 0; k < n; k++) {
+                uint8_t u = (uint8_t)(u0 + k * step), vv = inRow;
+                if (xm) u = 7 - u;                                       // X mirror
+                if (ym) vv = 7 - vv;                                     // Y mirror
+                if (rot) { const uint8_t t = u; u = vv; vv = 7 - t; }    // rotate
+                const uint8_t b = def[vv * 4 + (u >> 1)];
+                const uint8_t pix = (u & 1) ? (b & 0x0F) : (b >> 4);
+                if (pix != transp) out[tx + k] = lutTM[pix | palHi];
+            }
+        }
+        tx += n;
     }
+}
+
+// Resolve all 128 attribute sets against their anchors, in sprite order —
+// the one order the anchor chain is defined in (a relative sprite belongs to
+// the last anchor BEFORE it), independent of the draw priority. Semantics are
+// ZEsarUX tbblue.c tbsprite_do_overlay line for line:
+//  - attr 4 bits 7:6 == 01 marks a RELATIVE sprite; anything else (incl. a
+//    4-byte sprite, E=0) is an anchor. Rendering those as independent 8-bit
+//    anchors put every part of a composite sprite at its small signed offset
+//    near the display's top-left corner (hw: TX-1696's broken ship/bosses).
+//  - relative: X/Y are signed 8-bit offsets from the anchor, visible only if
+//    the anchor is, 4bpp/8bpp from the anchor, N6 in attr 4 bit 5, attr 2 bit
+//    0 adds the anchor's palette offset, attr 4 bit 0 its pattern number.
+//  - an anchor with attr 4 bit 5 (T) makes its relatives UNIFIED: the anchor's
+//    rotate / mirror / scale transform the offsets and the parts as one sprite.
+IRAM_ATTR void NEXTVID::resolveSprites() {
+    int ax = 0, ay = 0, apat = 0, azx = 0, azy = 0;
+    uint8_t apal = 0;
+    bool avis = false, a4bpp = false, arot = false, axm = false, aym = false, unified = false;
+    uint8_t n = 0;
+    for (int s = 0; s < 128; s++) {
+        const uint8_t* a = sprAttr[s];
+        const uint8_t a4 = (a[3] & 0x40) ? a[4] : 0;
+        const bool rel = (a4 & 0xC0) == 0x40;
+        bool vis = a[3] & 0x80;
+        bool xm = a[2] & 0x08, ym = a[2] & 0x04, rot = a[2] & 0x02;
+        int x = a[0] | ((a[2] & 0x01) << 8);
+        int y = a[1];
+        uint8_t pal = a[2] & 0xF0;
+        int idx = a[3] & 0x3F;
+        int zx = (a4 >> 3) & 3, zy = (a4 >> 1) & 3;
+        bool is4;
+        if (!rel) {
+            y |= (a4 & 0x01) << 8;
+            is4 = a4 & 0x80;
+            if (is4) idx = idx * 2 + ((a4 >> 6) & 1);
+            avis = vis; a4bpp = is4; unified = a4 & 0x20;
+            ax = x; ay = y; apal = pal; apat = idx;
+            axm = xm; aym = ym; arot = rot; azx = zx; azy = zy;
+        } else {
+            vis = vis && avis;
+            is4 = a4bpp;
+            if (is4) idx = idx * 2 + ((a4 >> 5) & 1);
+            x = (int8_t)a[0];
+            y = (int8_t)a[1];
+            if (a[2] & 0x01) pal = (uint8_t)((pal + apal) & 0xF0);
+            if (a4 & 0x01) idx = (idx + apat) & (is4 ? 127 : 63);
+            if (unified) {
+                zx = azx; zy = azy;
+                if (arot) {
+                    rot = !rot;
+                    const int ox = x; x = -y; y = ox;
+                    const bool om = xm;
+                    xm = rot ? ym : !ym;
+                    ym = rot ? om : !om;
+                }
+                if (axm) { xm = !xm; x = -x; }
+                if (aym) { ym = !ym; y = -y; }
+                x <<= zx; y <<= zy;
+            }
+            x = (x + ax) & 0x1FF;
+            y = (y + ay) & 0x1FF;
+        }
+        SprRes& r = sprRes[s];
+        r.x = (int16_t)x;
+        r.y = (int16_t)(y > 255 ? y - 512 : y);
+        r.pat = (uint16_t)(is4 ? idx * 128 : idx * 256);
+        r.flags = (xm ? SR_XM : 0) | (ym ? SR_YM : 0) | (rot ? SR_ROT : 0) | (is4 ? SR_4BPP : 0);
+        r.pal = pal;
+        r.xs = (uint8_t)zx; r.ys = (uint8_t)zy;
+        if (vis) sprVis[n++] = (uint8_t)s;
+    }
+    sprVisN = n;
+    sprDirty = false;
 }
 
 // Render all visible sprites crossing paper line y (0-191). Sprite
 // coordinate space puts (32,32) at the paper top-left corner; rendering is
 // clipped to the paper area for now (sprites-over-border comes later).
 IRAM_ATTR void NEXTVID::RenderSpritesLine(uint8_t* fb, int y) {
+    if (sprDirty) resolveSprites();   // attribute writers drain core1 first
     const uint8_t* sprLut = lut[(LS->palCtrl & 0x02) ? 6 : 2];
-    uint8_t transp = LS->r4B;
-    int sline = y + 32;
+    const uint8_t transp = LS->r4B;
+    const int sline = y + 32;
     if (sline < 0 || sline > 255) return;
-    bool reverse = LS->r15 & 0x40; // bit6: sprite 0 drawn on top of 127
-    bool overBorder = LS->r15 & 0x02;
-    int xPixMin = overBorder ? -32 : 0;
-    int xPixMax = overBorder ? 287 : 255;
+    // NR 0x15 bit 6: 1 = sprite 0 on top, 0 = sprite 127 on top (ZEsarUX;
+    // was inverted). Painter's order: the top one is drawn last.
+    const bool zeroOnTop = LS->r15 & 0x40;
+    const bool overBorder = LS->r15 & 0x02;
+    // Everything that does not depend on the pixel is decided here, once per
+    // line / per sprite: the X window (paper or border, clip window, the
+    // framebuffer edges) becomes a px range, and the Y clip a line test.
+    int lo = overBorder ? -32 : 0, hi = overBorder ? 287 : 255;
+    if (!overBorder) {
+        if (y < LS->clip[1][2] || y > LS->clip[1][3]) return;
+        if (lo < LS->clip[1][0]) lo = LS->clip[1][0];
+        if (hi > LS->clip[1][1]) hi = LS->clip[1][1];
+    }
+    if (lo < -xPaperOff) lo = -xPaperOff;
+    if (hi > (int)VIDEO::vga.xres - 1 - xPaperOff) hi = (int)VIDEO::vga.xres - 1 - xPaperOff;
+    if (lo > hi) return;
     uint8_t coverage[40]; // 320-bit line coverage for the collision flag
     memset(coverage, 0, sizeof(coverage));
+    uint8_t* const fbp = fb + xPaperOff;      // indexed by paper x
     int rendered = 0;
+    const int nv = sprVisN;
+    uint8_t collided = 0;
 
-    // Default priority: lower sprite numbers on top — draw high numbers first
-    for (int i = 0; i < 128; i++) {
-        int s = reverse ? i : 127 - i;
-        const uint8_t* a = sprAttr[s];
-        if (!(a[3] & 0x80)) continue; // not visible
-        uint8_t a4 = (a[3] & 0x40) ? a[4] : 0;
-        // Relative/unified sprites (byte 4 type bits) not implemented yet —
-        // rendered as independent anchors
-        uint8_t yscale = (a4 >> 1) & 3;
-        uint8_t xscale = (a4 >> 3) & 3;
-        int sy = a[1] | ((a4 & 0x01) << 8);
-        int height = 16 << yscale;
-        int rowIn = sline - sy;
-        if (rowIn < 0 || rowIn >= height) {
-            if (sy + height > 511 && ((sline + 512 - sy) < height))
-                rowIn = sline + 512 - sy; // Y wrap
-            else
-                continue;
-        }
-        int sx = a[0] | ((a[2] & 0x01) << 8);
-        bool xmirror = a[2] & 0x08;
-        bool ymirror = a[2] & 0x04;
-        bool rotate  = a[2] & 0x02;
-        uint8_t palOfs = a[2] & 0xF0;
-        bool fourBit = a4 & 0x80;
-        uint16_t patBase = (uint16_t)(a[3] & 0x3F) * 256;
-        if (fourBit) patBase = (uint16_t)(a[3] & 0x3F) * 256 + ((a4 & 0x40) ? 128 : 0);
-
-        uint8_t v = rowIn >> yscale;
-        if (ymirror) v = 15 - v;
-        int width = 16 << xscale;
-        for (int px = 0; px < width; px++) {
-            int xPix = sx + px - 32; // paper coords
-            if (xPix < xPixMin || xPix > xPixMax) continue;
-            if (!overBorder) {
-                if (xPix < LS->clip[1][0] || xPix > LS->clip[1][1]) continue;
-                if (y < LS->clip[1][2] || y > LS->clip[1][3]) continue;
-            }
-            int fx = xPaperOff + xPix;
-            if (fx < 0 || fx >= (int)VIDEO::vga.xres) continue;
-            uint8_t u = px >> xscale;
-            if (xmirror) u = 15 - u;
-            uint8_t uu = u, vv = v;
-            if (rotate) { uu = v; vv = 15 - u; }
-            uint8_t pix;
-            if (fourBit) {
-                uint8_t b = sprPatterns[(patBase + vv * 8 + (uu >> 1)) & 0x3FFF];
-                pix = (uu & 1) ? (b & 0x0F) : (b >> 4);
-                if (pix == (transp & 0x0F)) continue;
-                pix |= palOfs;
-            } else {
-                pix = sprPatterns[(patBase + vv * 16 + uu) & 0x3FFF];
-                if (pix == transp) continue;
-                pix = (uint8_t)(pix + palOfs);
-            }
-            uint16_t cbit = xPix + 32;
-            uint8_t mask = 1 << (cbit & 7);
-            if (coverage[cbit >> 3] & mask) sprFlags |= 0x01; // collision
-            coverage[cbit >> 3] |= mask;
-            fb[fx] = sprLut[pix];
-        }
+    for (int i = 0; i < nv; i++) {
+        const SprRes& r = sprRes[sprVis[zeroOnTop ? nv - 1 - i : i]];
+        const int ys = r.ys, xs = r.xs;
+        const int rowIn = sline - r.y;
+        if (rowIn < 0 || rowIn >= (16 << ys)) continue;
         if (++rendered > 100) { sprFlags |= 0x02; break; } // per-line overflow
+
+        // Paper x of pixel 0. x > 319 is left of the display; a sprite whose
+        // pixels run past 319 is off the right edge either way, so the 512 wrap
+        // needs no per-pixel test.
+        const int x0 = (r.x > 319 ? r.x - 512 : r.x) - 32;
+        const int width = 16 << xs;
+        int p0 = lo - x0, p1 = hi - x0;            // px range, inclusive
+        if (p0 < 0) p0 = 0;
+        if (p1 > width - 1) p1 = width - 1;
+        if (p0 > p1) continue;
+
+        // The 16 source pixels of this sprite row, mirror/rotate applied;
+        // 0xFFFF = transparent.
+        uint16_t row[16];
+        uint8_t v = rowIn >> ys;
+        if (r.flags & SR_YM) v = 15 - v;
+        const uint8_t* pat = sprPatterns + r.pat;
+        const bool xm = r.flags & SR_XM, rot = r.flags & SR_ROT;
+        if (r.flags & SR_4BPP) {
+            const uint8_t tr = transp & 0x0F;
+            for (int u = 0; u < 16; u++) {
+                const int su = xm ? 15 - u : u;
+                const int uu = rot ? v : su, vv = rot ? 15 - su : v;
+                const uint8_t b = pat[vv * 8 + (uu >> 1)];
+                const uint8_t px = (uu & 1) ? (b & 0x0F) : (b >> 4);
+                row[u] = (px == tr) ? 0xFFFF : (uint16_t)(px | r.pal);
+            }
+        } else {
+            for (int u = 0; u < 16; u++) {
+                const int su = xm ? 15 - u : u;
+                const int uu = rot ? v : su, vv = rot ? 15 - su : v;
+                const uint8_t px = pat[vv * 16 + uu];
+                row[u] = (px == transp) ? 0xFFFF : (uint16_t)(uint8_t)(px + r.pal);
+            }
+        }
+
+        for (int px = p0; px <= p1; px++) {
+            const uint16_t c = row[px >> xs];
+            if (c == 0xFFFF) continue;
+            const int xp = x0 + px;
+            const unsigned cbit = (unsigned)(xp + 32);
+            const uint8_t mask = 1 << (cbit & 7);
+            collided |= coverage[cbit >> 3] & mask;
+            coverage[cbit >> 3] |= mask;
+            fbp[xp] = sprLut[c];
+        }
     }
+    if (collided) sprFlags |= 0x01;
 }
 
 

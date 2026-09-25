@@ -1382,9 +1382,9 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       return VIDEO::timex_port_ff;
     }
     // Z80 DMA / zxnDMA port read: listen on both 0x0B and 0x6B
-    // (Next always has zxnDMA on 0x6B)
+    // (Next always has its DMA on both: #0B Zilog mode, #6B zxn mode)
     if ((Config::dma_mode && ((address & 0xFF) == 0x0B || (address & 0xFF) == 0x6B)) ||
-        (Z80Ops::isNext && (address & 0xFF) == 0x6B)) {
+        (Z80Ops::isNext && ((address & 0xFF) == 0x6B || (address & 0xFF) == 0x0B))) {
       LED::touchR(LED::DMA);
       ioContentionLate(MemESP::ramContended[rambank]);
       return Z80DMA::readPort();
@@ -3457,9 +3457,10 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
       }
     }
     // Z80 DMA / zxnDMA port write: listen on both 0x0B and 0x6B
-    // (Next always has zxnDMA on 0x6B)
+    // (Next always has its DMA on both: #0B Zilog mode, #6B zxn mode)
     if ((Config::dma_mode && (a8 == 0x0B || a8 == 0x6B)) ||
-        (Z80Ops::isNext && a8 == 0x6B)) {
+        (Z80Ops::isNext && (a8 == 0x6B || a8 == 0x0B))) {
+      if (Z80Ops::isNext) Z80DMA::nextZ80Mode = (a8 == 0x0B);   // TX-1696 uploads its patterns via #0B
       LED::touchW(LED::DMA);
       Z80DMA::writePort(data);
       ioContentionLate(MemESP::ramContended[rambank]);
@@ -4297,6 +4298,22 @@ IRAM_ATTR void Ports::ioContentionLate(bool contend) {
 
 // DMA I/O: no contention, only side effects (border, AY, beeper)
 IRAM_ATTR void Ports::dmaOutput(uint16_t address, uint8_t data) {
+    // Spectrum Next: the DMA is how Next software feeds its video hardware —
+    // sprite patterns (#5B) and attributes (#57), nextreg data (#253B: palettes,
+    // copper), DACs. This path used to know only the ULA and the AY, so every
+    // such byte was DROPPED (hw: TX-1696's sprites were whatever the pattern
+    // RAM held, its patterns go memory -> #5B by DMA). The hot ports are
+    // handled here; anything else goes through the full decoder (which also
+    // charges 3 I/O T-states on top of the DMA's own cycle — a small
+    // over-count on rare ports, accepted).
+    if (Z80Ops::isNext) {
+        const uint8_t a8 = address & 0xFF;
+        if (a8 == 0x5B) { NEXTVID::spritePatternWrite(data); return; }
+        if (a8 == 0x57) { NEXTVID::spriteAttrWrite(data); return; }
+        if (address == 0x253B) { NextReg::write(NextReg::selected, data); return; }
+        if (address == 0x243B) { NextReg::selected = data; return; }
+        if (address & 0x0001) { output(address, data); return; }
+    }
     if ((address & 0x0001) == 0) {
         // ULA port (0xFE): border + beeper
         port254 = data;
@@ -4337,6 +4354,7 @@ IRAM_ATTR void Ports::dmaOutput(uint16_t address, uint8_t data) {
 
 IRAM_ATTR uint8_t Ports::dmaInput(uint16_t address) {
     // DMA read from I/O: return port value without contention
+    if (Z80Ops::isNext && address == 0x253B) return NextReg::read(NextReg::selected);
     if ((address & 0x0001) == 0) {
         // ULA port: keyboard + ear
         return 0xFF; // no keys pressed

@@ -46,6 +46,9 @@ public:
     // Re-derive the live clock from nextreg 0x07 under Config::next_clk_cap
     // (the menu's CPU cap hook; also the body of a 0x07 write).
     static void applySpeed();
+    // A write to NR 0x22/0x23 moves (or arms) the line interrupt: end the
+    // running unchecked exec_nocheck slice so CPU::loop re-derives the window.
+    static void lineIrqReslice();
     static uint8_t read(uint8_t r);
 
     // Legacy paging on Next (called from Ports.cpp with Next decodes)
