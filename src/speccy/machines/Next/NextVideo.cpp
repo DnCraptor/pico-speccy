@@ -18,6 +18,9 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 #include "speccy/core/MemESP.h"
 #include "NextReg.h"
 #include "app/Debug.h"
+#include "hardware/sync.h"
+#include "pico/time.h"
+#include "app/TryAlloc.h"
 
 // Hot render path in SRAM, like the rest of the video code
 #undef IRAM_ATTR
@@ -65,6 +68,107 @@ int  NEXTVID::paperTopRow = 0;
 int  NEXTVID::xPaperOff = 32;
 bool NEXTVID::skipFrame = false;
 static NextFramePacing framePacing;
+
+// Everything the scanline renderer reads that the guest (or the copper) can
+// change between two lines, captured by core0 when the line is posted. What is
+// NOT here is read live by whichever core renders, and its writers drain the
+// core1 queue first: the palettes (lut/rawPal/palHasPrio), sprite attributes
+// and patterns, the Timex hi-res LUT and pair map, the framebuffer rows.
+// Guest RAM (ULA screen, Layer 2, tilemap) is read live WITHOUT a drain — core1
+// lags core0 by a few lines, the same race the beam has against a program
+// drawing into the visible page (the TS-Conf rule).
+struct NextLineState {
+    const uint8_t* grmem;
+    uint8_t clip[4][4];
+    uint8_t r12, r14, r15, r16, r17, r2F, r30, r31, r32, r33, r42, r4A, r4B, r4C, r68, r69, r6B, r6C, r6E, r6F, r70, r71;
+    uint8_t p123B, palCtrl, border, flashing, hires, osd;
+};
+static const NextLineState* LS = nullptr;
+static_assert(sizeof(NextLineState) % 4 == 0, "compared a word at a time");
+// memcmp is libc in FLASH; 12 words compared inline instead, once per line.
+static inline __attribute__((always_inline)) bool nxSameState(const NextLineState& a, const NextLineState& b) {
+    const uint32_t* x = (const uint32_t*)&a; const uint32_t* y = (const uint32_t*)&b;
+    uint32_t d = 0;
+    for (unsigned i = 0; i < sizeof(NextLineState) / 4; i++) d |= x[i] ^ y[i];
+    return d == 0;
+}   // the line being rendered (one renderer at a time)
+
+IRAM_ATTR void NEXTVID::captureLine(NextLineState& st) {
+    const uint8_t* r = NextReg::reg;
+    st.grmem = VIDEO::grmem;
+    memcpy(st.clip, clip, sizeof st.clip);
+    st.r12 = r[0x12];
+    st.r14 = r[0x14];
+    st.r15 = r[0x15];
+    st.r16 = r[0x16];
+    st.r17 = r[0x17];
+    st.r2F = r[0x2F];
+    st.r30 = r[0x30];
+    st.r31 = r[0x31];
+    st.r32 = r[0x32];
+    st.r33 = r[0x33];
+    st.r42 = r[0x42];
+    st.r4A = r[0x4A];
+    st.r4B = r[0x4B];
+    st.r4C = r[0x4C];
+    st.r68 = r[0x68];
+    st.r69 = r[0x69];
+    st.r6B = r[0x6B];
+    st.r6C = r[0x6C];
+    st.r6E = r[0x6E];
+    st.r6F = r[0x6F];
+    st.r70 = r[0x70];
+    st.r71 = r[0x71];
+    st.p123B = NextReg::port123B;
+    st.palCtrl = palCtrl;
+    st.border = VIDEO::borderColor;
+    st.flashing = VIDEO::flashing;
+    st.hires = VIDEO::timex_hires_live ? 1 : 0;
+    st.osd = VIDEO::OSD;
+}
+
+// ---- the core1 line queue (NEXT_C1_*) ----
+// Jobs are {row, state slot}; a state slot is written only when the captured
+// inputs differ from the last posted line's, and reused only once core1 has
+// consumed the last job naming it. Free-running indices, one writer each.
+#define NEXT_C1_RING   320
+#define NEXT_C1_STATES 64
+static uint32_t*      nx_ring = nullptr;     // [NEXT_C1_RING]  row | slot << 16
+static NextLineState* nx_st = nullptr;       // [NEXT_C1_STATES]
+static uint32_t*      nx_st_job = nullptr;   // [NEXT_C1_STATES] nx_w after the last job naming the slot
+static uint32_t       nx_cur = 0;
+static bool           nx_have = false;
+static volatile uint32_t nx_w = 0, nx_r = 0;
+static NextLineState  nx_sync;               // the queue-off path
+// Tested by core1's render_core loop on every machine: one byte in .data.
+extern "C" volatile bool g_next_c1_live = false;
+
+static void nxQueueDead(const char* why) {
+    Debug::log("[NXC1] core1 render queue %s (r=%u w=%u) - rendering on core0", why,
+               (unsigned)nx_r, (unsigned)nx_w);
+    g_next_c1_live = false;
+    nx_r = nx_w;
+}
+
+// core0: wait for core1 to finish every posted line. Bounded, like the TS-Conf
+// drain: a wedged core1 must not take core0 with it.
+IRAM_ATTR void NEXTVID::c1Drain() {
+    if (nx_r == nx_w) return;
+    const uint64_t t0 = time_us_64();
+    while (nx_r != nx_w) {
+        if (time_us_64() - t0 > 100000) { nxQueueDead("stuck"); return; }
+        tight_loop_contents();
+    }
+}
+
+static void __not_in_flash_func(nxWaitUntil)(uint32_t w1) {
+    if ((int32_t)(nx_r - w1) >= 0) return;
+    const uint64_t t0 = time_us_64();
+    while ((int32_t)(nx_r - w1) < 0) {
+        if (time_us_64() - t0 > 100000) { nxQueueDead("stuck"); return; }
+        tight_loop_contents();
+    }
+}
 // Palette index 16 is never produced (buildRemap skips it: 0..15 ZX colours,
 // 17..183 the cube), so it marks "Timex hi-res pixel here" in lineBuf.
 static constexpr uint8_t HIRES_MARK = 16;
@@ -94,6 +198,7 @@ static inline uint8_t g3r3b2_of_rgb333(uint16_t v) {
 //    ZX points is close enough.
 // Distances are computed in 8-bit RGB with rough luma weights.
 void NEXTVID::buildRemap() {
+    c1Drain();
     static const uint8_t zxlvl[2] = { 205, 255 };
     for (int i = 0; i < 256; i++) {
         int tr = ((i >> 2) & 7) * 255 / 7;
@@ -131,6 +236,7 @@ void NEXTVID::buildRemap() {
 // pair of its nearest ZX colour, the same limit every pair mode has.
 void NEXTVID::rebuildPairMap() {
     if (!pairMap) return;
+    c1Drain();
     static const uint8_t zxlvl[2] = { 205, 255 };
     for (int i = 0; i < 256; i++) {
         int tr, tg, tb;
@@ -152,11 +258,13 @@ void NEXTVID::rebuildPairMap() {
 }
 
 void NEXTVID::setLutEntry(uint8_t pal, uint8_t idx, uint16_t rgb333) {
+    c1Drain();
     rawPal[pal][idx] = rgb333;
     lut[pal][idx] = remap[g3r3b2_of_rgb333(rgb333)];
 }
 
 void NEXTVID::rebuildLut(uint8_t pal) {
+    c1Drain();
     for (int i = 0; i < 256; i++)
         lut[pal][i] = remap[g3r3b2_of_rgb333(rawPal[pal][i])];
 }
@@ -266,6 +374,7 @@ uint8_t NEXTVID::spriteFlagsRead() {
 }
 
 void NEXTVID::spriteAttrWrite(uint8_t v) {
+    c1Drain();
     uint8_t* a = sprAttr[sprAttrSlot];
     a[sprAttrByte] = v;
     // Auto-advance: 4-byte sprites move on after byte 3 unless byte 3
@@ -283,11 +392,13 @@ void NEXTVID::spriteAttrWrite(uint8_t v) {
 }
 
 void NEXTVID::spritePatternWrite(uint8_t v) {
+    c1Drain();
     sprPatterns[sprPatWrite] = v;
     sprPatWrite = (sprPatWrite + 1) & 0x3FFF;
 }
 
 void NEXTVID::spriteAttrDirect(uint8_t byteIdx, uint8_t v) {
+    c1Drain();
     // nextreg 0x35-0x39 mirror: write byte N of the selected sprite
     if (byteIdx < 5) sprAttr[sprAttrSlot][byteIdx] = v;
 }
@@ -359,6 +470,21 @@ IRAM_ATTR void NEXTVID::copperLine(uint16_t rasterLine) {
 // ===== geometry / frame control =====
 
 void NEXTVID::Reset() {
+    c1Drain();
+    if (!nx_ring) {
+        // The core1 line queue (~4.6 KB). No RAM = render on core0 as before.
+        uint8_t* q = (uint8_t*)tryMalloc(4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
+                                         + 4 * NEXT_C1_STATES);
+        if (q) {
+            nx_ring = (uint32_t*)q;
+            nx_st = (NextLineState*)(q + 4 * NEXT_C1_RING);
+            nx_st_job = (uint32_t*)(q + 4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES);
+            memset(nx_st_job, 0, 4 * NEXT_C1_STATES);
+        }
+        Debug::log("[NXC1] core1 line renderer %s", q ? "ON" : "unavailable (no RAM)");
+    }
+    nx_have = false;
+    g_next_c1_live = nx_ring != nullptr;
     if (!sprPatterns) {
         // One block, Next-boot only, never freed (the Next boundary reboots).
         // Layout: patterns 16K | copper 2K | rawPal 4K | lut 2K | sprAttr 640 |
@@ -476,7 +602,9 @@ void NEXTVID::DrawBorderNop() {}
 volatile uint32_t g_nextvid_us = 0;
 #endif
 
-IRAM_ATTR void NEXTVID::ScanlineWork() {
+// noinline: at -O3 it was inlined into Tick, Tick_Opcode, lineTick and
+// haltAdvanceTo — four ~0.5 KB SRAM copies of a once-per-scanline function.
+__attribute__((noinline)) IRAM_ATTR void NEXTVID::ScanlineWork() {
     uint8_t m = ESPectrum::multiplicator;
     if (lineIdx < totalLines) {
         // Copper runs before the line is drawn; raster line 0 = paper start
@@ -484,14 +612,37 @@ IRAM_ATTR void NEXTVID::ScanlineWork() {
         copperLine((uint16_t)((lineIdx + totalLines - paperStart) % totalLines));
         int row = (int)lineIdx - firstVisibleLine;
         if (!skipFrame && row >= 0 && row < (int)VIDEO::vga.yres) {
+            if (g_next_c1_live) {
+                // Post the line: capture, and open a new state slot only when
+                // something the renderer reads has moved since the last line.
+                NextLineState st;
+                captureLine(st);
+                if (!nx_have || !nxSameState(st, nx_st[nx_cur])) {
+                    const uint32_t k = (nx_cur + 1) % NEXT_C1_STATES;
+                    nxWaitUntil(nx_st_job[k]);
+                    nx_st[k] = st;
+                    nx_cur = k;
+                    nx_have = true;
+                }
+                if (nx_w - nx_r >= NEXT_C1_RING) nxWaitUntil(nx_w - NEXT_C1_RING + 1);
+            }
+            if (g_next_c1_live) {
+                nx_ring[nx_w % NEXT_C1_RING] = (uint32_t)row | (nx_cur << 16);
+                __dmb();                    // job + state visible before the index
+                nx_w = nx_w + 1;
+                nx_st_job[nx_cur] = nx_w;
+            } else {
+                captureLine(nx_sync);
+                LS = &nx_sync;
 #if NEXT_TRACE
-            if ((lineIdx & 15) == 0) {
-                uint64_t t0 = time_us_64();
-                RenderLine(row);
-                g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
-            } else
+                if ((lineIdx & 15) == 0) {
+                    uint64_t t0 = time_us_64();
+                    RenderLine(row);
+                    g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
+                } else
 #endif
-            RenderLine(row);
+                RenderLine(row);
+            }
         }
         lineIdx++;
         nextLineTstate = (lineIdx + 1) * ((uint32_t)VIDEO::tStatesPerLine << m);
@@ -500,6 +651,28 @@ IRAM_ATTR void NEXTVID::ScanlineWork() {
         nextLineTstate = 0xFFFFFFFF;
     }
 }
+
+
+// core1: render up to 8 posted lines per call (render_core interleaves the
+// GS pump and the rest of its loop between batches).
+IRAM_ATTR void NEXTVID::c1Pump() {
+    for (int n = 0; n < 8 && nx_r != nx_w; n++) {
+        __dmb();
+        const uint32_t j = nx_ring[nx_r % NEXT_C1_RING];
+        LS = &nx_st[j >> 16];
+#if NEXT_TRACE
+        if ((j & 15) == 0) {
+            const uint64_t t0 = time_us_64();
+            RenderLine((int)(j & 0xFFFF));
+            g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
+        } else
+#endif
+        RenderLine((int)(j & 0xFFFF));
+        __dmb();                            // the row is written before it is released
+        nx_r = nx_r + 1;
+    }
+}
+extern "C" IRAM_ATTR void next_render_core1_pump(void) { NEXTVID::c1Pump(); }
 
 // ===== scanline compositor =====
 
@@ -520,7 +693,7 @@ IRAM_ATTR void NEXTVID::ScanlineWork() {
 IRAM_ATTR void NEXTVID::RenderLine(int row) {
     uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
     RenderLayers(lineBuf, row);
-    if (VIDEO::timex_hires_live) {
+    if (LS->hires) {
         // Packed-pair frame (Timex hi-res): the ULA left HIRES_MARK where its
         // 512-pixel line goes (hiresRow, already pair slots); everything else
         // is a palette index and becomes a solid pair.
@@ -548,7 +721,7 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     const int words = ((int)VIDEO::vga.xres + 3) >> 2;
     int k0 = words, k1 = words;                    // [k0, k1) = words left alone
     const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
-    if ((VIDEO::OSD & 0x07) != 0 && row >= cy0 && row < cy0 + 16) {
+    if ((LS->osd & 0x07) != 0 && row >= cy0 && row < cy0 + 16) {
         k0 = ((VIDEO::vga.xres >= 360) ? 188 : 168) >> 2;
         k1 = k0 + 144 / 4;
     }
@@ -558,21 +731,21 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
 
 IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     int xres = VIDEO::vga.xres;
-    const uint8_t* ulaLut = lut[(palCtrl & 0x08) ? 4 : 0];
+    const uint8_t* ulaLut = lut[(LS->palCtrl & 0x08) ? 4 : 0];
 
-    bool ulaNext = palCtrl & 0x01;
-    uint8_t borderIdx = ulaNext ? ulaLut[128 + (VIDEO::borderColor & 7)]
-                                : ulaLut[16 + (VIDEO::borderColor & 7)];
+    bool ulaNext = LS->palCtrl & 0x01;
+    uint8_t borderIdx = ulaNext ? ulaLut[128 + (LS->border & 7)]
+                                : ulaLut[16 + (LS->border & 7)];
     int y = row - paperTopRow;
-    uint8_t r15 = NextReg::reg[0x15];
+    uint8_t r15 = LS->r15;
 
     if (y < 0 || y >= 192) {
         memset(fb, borderIdx, xres);
         // tilemap and Layer 2 (320x256 mode) cover the border area of the
         // 320x256 window; sprites reach it with the over-border bit
-        if (NextReg::reg[0x6B] & 0x80)
+        if (LS->r6B & 0x80)
             RenderTilemapLine(fb, row);
-        if ((NextReg::port123B & 0x02) || (NextReg::reg[0x69] & 0x80))
+        if ((LS->p123B & 0x02) || (LS->r69 & 0x80))
             RenderL2Line(fb, row, false);
         if ((r15 & 0x03) == 0x03) // sprites enabled + over border
             RenderSpritesLine(fb, y);
@@ -587,22 +760,22 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     // via nextreg 0x68 bit 7 — border colour shows through. LoRes (128x96,
     // reg 0x15 bit 7) replaces the ULA output.
     uint8_t* p = fb + xPaperOff;
-    if (NextReg::reg[0x15] & 0x80) {
-        uint8_t ly = (uint8_t)((y + NextReg::reg[0x33]) % 192) >> 1;
-        const uint8_t* base = VIDEO::grmem +
+    if (LS->r15 & 0x80) {
+        uint8_t ly = (uint8_t)((y + LS->r33) % 192) >> 1;
+        const uint8_t* base = LS->grmem +
             (ly < 48 ? ly * 128 : 0x2000 + (uint16_t)(ly - 48) * 128);
-        uint8_t sxl = NextReg::reg[0x32];
+        uint8_t sxl = LS->r32;
         for (int x = 0; x < 256; x++)
             p[x] = ulaLut[base[(uint8_t)(x + sxl) >> 1]];
     }
-    else if (!(NextReg::reg[0x68] & 0x80) && VIDEO::timex_hires_live) {
+    else if (!(LS->r68 & 0x80) && LS->hires) {
         // Timex hi-res 512x192: screen 0 (0x4000) gives the left 8 pixels of
         // each 16-pixel column, screen 1 (0x6000) the right 8 — the TC2048
         // layout VIDEO's renderer uses, and its nibble LUT (ink/paper from port
         // FF bits 5:3, all BRIGHT). hiresRow gets the pair slots in linear
         // order; the paper carries HIRES_MARK so layers drawn over the ULA win.
         const uint16_t* hl = VIDEO::timexHiresLut();
-        const uint8_t* bmp = VIDEO::grmem + VIDEO::offBmp[y];
+        const uint8_t* bmp = LS->grmem + VIDEO::offBmp[y];
         uint32_t* hr = (uint32_t*)hiresRow;
         for (int col = 0; col < 32; col++) {
             const uint8_t e = bmp[col], o = bmp[col + 0x2000];
@@ -611,12 +784,12 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         }
         memset(p, HIRES_MARK, 256);
     }
-    else if (!(NextReg::reg[0x68] & 0x80)) {
-        const uint8_t* bmp = VIDEO::grmem + VIDEO::offBmp[y];
-        const uint8_t* att = VIDEO::grmem + VIDEO::offAtt[y];
+    else if (!(LS->r68 & 0x80)) {
+        const uint8_t* bmp = LS->grmem + VIDEO::offBmp[y];
+        const uint8_t* att = LS->grmem + VIDEO::offAtt[y];
         if (ulaNext) {
             // ULANext attribute format: ink = attr & mask, paper = 128 + rest
-            uint8_t mask = NextReg::reg[0x42];
+            uint8_t mask = LS->r42;
             uint8_t shift = 0;
             for (uint8_t m = mask; m; m >>= 1) shift++;
             for (int col = 0; col < 32; col++) {
@@ -624,7 +797,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
                 uint8_t b = bmp[col];
                 uint8_t ink = ulaLut[a & mask];
                 uint8_t pap = (mask == 255)
-                    ? remap[g3r3b2_of_rgb333(rgb332_to_333(NextReg::reg[0x4A]))]
+                    ? remap[g3r3b2_of_rgb333(rgb332_to_333(LS->r4A))]
                     : ulaLut[128 + (a >> shift)];
                 for (int bit = 0; bit < 8; bit++)
                     p[bit] = (b & (0x80 >> bit)) ? ink : pap;
@@ -633,7 +806,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         } else {
             for (int col = 0; col < 32; col++) {
                 uint8_t a = att[col];
-                uint8_t b = bmp[col] ^ (uint8_t)(-((a & VIDEO::flashing) >> 7));
+                uint8_t b = bmp[col] ^ (uint8_t)(-((a & LS->flashing) >> 7));
                 uint8_t bright = (a & 0x40) >> 3;
                 uint8_t ink = ulaLut[(a & 7) | bright];
                 uint8_t pap = ulaLut[16 + (((a >> 3) & 7) | bright)];
@@ -653,11 +826,11 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     }
 
     // Tilemap (over ULA/LoRes, under Layer 2 and sprites)
-    if (NextReg::reg[0x6B] & 0x80)
+    if (LS->r6B & 0x80)
         RenderTilemapLine(fb, row);
 
     // Layer 2, over ULA
-    bool l2on = (NextReg::port123B & 0x02) || (NextReg::reg[0x69] & 0x80);
+    bool l2on = (LS->p123B & 0x02) || (LS->r69 & 0x80);
     uint8_t slu = (r15 >> 2) & 7;
     bool spritesUnderL2 = (slu == 1 || slu == 4); // L-S-U / L-U-S orders
 
@@ -671,7 +844,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         RenderSpritesLine(fb, y);
 
     // Layer 2 palette-priority pixels sit above everything
-    if (l2on && palHasPrio[(palCtrl & 0x04) ? 5 : 1])
+    if (l2on && palHasPrio[(LS->palCtrl & 0x04) ? 5 : 1])
         RenderL2Line(fb, row, true);
 }
 
@@ -679,27 +852,27 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
 // the border window). prioPass re-draws only palette-priority pixels after
 // the sprites so they end up on top.
 IRAM_ATTR void NEXTVID::RenderL2Line(uint8_t* fb, int row, bool prioPass) {
-    uint8_t pal = (palCtrl & 0x04) ? 5 : 1;
+    uint8_t pal = (LS->palCtrl & 0x04) ? 5 : 1;
     const uint8_t* l2Lut = lut[pal];
     const uint16_t* raw = rawPal[pal];
-    uint8_t transp = NextReg::reg[0x14];
-    uint8_t mode = (NextReg::reg[0x70] >> 4) & 3;
-    uint8_t palOfs = (NextReg::reg[0x70] & 0x0F) << 4;
-    uint16_t bank = (uint16_t)(NextReg::reg[0x12] & 0x7F) * 2;
+    uint8_t transp = LS->r14;
+    uint8_t mode = (LS->r70 >> 4) & 3;
+    uint8_t palOfs = (LS->r70 & 0x0F) << 4;
+    uint16_t bank = (uint16_t)(LS->r12 & 0x7F) * 2;
 
     if (mode == 0) {
         // 256x192, aligned with the paper area
         int y = row - paperTopRow;
         if (y < 0 || y >= 192) return;
-        if (y < clip[0][2] || y > clip[0][3]) return;
-        uint16_t sy = y + NextReg::reg[0x17];
+        if (y < LS->clip[0][2] || y > LS->clip[0][3]) return;
+        uint16_t sy = y + LS->r17;
         if (sy >= 192) sy -= 192;
         uint16_t page = bank + (sy >> 5);
         if (page >= MemESP::NEXT_PAGES - 1u) return;
         const uint8_t* src = MemESP::nextRamPtr[page] + (sy & 31) * 256;
-        uint8_t sx = NextReg::reg[0x16] + clip[0][0];
-        uint8_t* q = fb + xPaperOff + clip[0][0];
-        int count = (int)clip[0][1] - (int)clip[0][0] + 1;
+        uint8_t sx = LS->r16 + LS->clip[0][0];
+        uint8_t* q = fb + xPaperOff + LS->clip[0][0];
+        int count = (int)LS->clip[0][1] - (int)LS->clip[0][0] + 1;
         if (!prioPass) {
             while (count-- > 0) {
                 uint8_t v = src[sx++]; // uint8 wrap = 256px scroll wrap
@@ -718,13 +891,13 @@ IRAM_ATTR void NEXTVID::RenderL2Line(uint8_t* fb, int row, bool prioPass) {
         // 320x256, column-major (byte offset = x*256 + y), covers the border
         int ty = row - (paperTopRow - 32);
         if (ty < 0 || ty >= 256) return;
-        int cy1 = clip[0][2], cy2 = clip[0][3];
+        int cy1 = LS->clip[0][2], cy2 = LS->clip[0][3];
         if (ty < cy1 || ty > cy2) return;
-        uint16_t scrollX = ((NextReg::reg[0x71] & 1) << 8) | NextReg::reg[0x16];
-        uint8_t sy = (uint8_t)(ty + NextReg::reg[0x17]);
+        uint16_t scrollX = ((LS->r71 & 1) << 8) | LS->r16;
+        uint8_t sy = (uint8_t)(ty + LS->r17);
         int xOrig = xPaperOff - 32;
         int xres = VIDEO::vga.xres;
-        int cx1 = clip[0][0] * 2, cx2 = clip[0][1] * 2 + 1;
+        int cx1 = LS->clip[0][0] * 2, cx2 = LS->clip[0][1] * 2 + 1;
         for (int tx = 0; tx < 320; tx++) {
             if (tx < cx1 || tx > cx2) continue;
             int fx = xOrig + tx;
@@ -747,27 +920,27 @@ IRAM_ATTR void NEXTVID::RenderL2Line(uint8_t* fb, int row, bool prioPass) {
 // Map and tile definitions live in bank 5 (offsets from nextreg 0x6E/0x6F).
 // The tilemap window is 320x256 and covers the border area around the paper.
 IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
-    uint8_t ctrl = NextReg::reg[0x6B];
+    uint8_t ctrl = LS->r6B;
     int ty = row - (paperTopRow - 32);
     if (ty < 0 || ty >= 256) return;
-    if (ty < clip[3][2] || ty > clip[3][3]) return;
+    if (ty < LS->clip[3][2] || ty > LS->clip[3][3]) return;
 
     bool cols80 = ctrl & 0x40;
     bool noAttr = ctrl & 0x20;
     const uint8_t* lutTM = lut[(ctrl & 0x10) ? 7 : 3];
-    uint8_t transp = NextReg::reg[0x4C] & 0x0F;
+    uint8_t transp = LS->r4C & 0x0F;
     const uint8_t* bank = MemESP::ram[5].direct();
-    const uint8_t* map  = bank + (uint16_t)(NextReg::reg[0x6E] & 0x3F) * 256;
-    const uint8_t* defs = bank + (uint16_t)(NextReg::reg[0x6F] & 0x3F) * 256;
-    uint16_t scrollX = ((NextReg::reg[0x2F] & 3) << 8) | NextReg::reg[0x30];
-    uint8_t sy = (uint8_t)(ty + NextReg::reg[0x31]); // wraps at 256
+    const uint8_t* map  = bank + (uint16_t)(LS->r6E & 0x3F) * 256;
+    const uint8_t* defs = bank + (uint16_t)(LS->r6F & 0x3F) * 256;
+    uint16_t scrollX = ((LS->r2F & 3) << 8) | LS->r30;
+    uint8_t sy = (uint8_t)(ty + LS->r31); // wraps at 256
     int cols = cols80 ? 80 : 40;
     int entrySz = noAttr ? 1 : 2;
     const uint8_t* mrow = map + (sy >> 3) * cols * entrySz;
     uint8_t inRow = sy & 7;
     int xOrig = xPaperOff - 32;
     int xres = VIDEO::vga.xres;
-    int cx1 = clip[3][0] * 2, cx2 = clip[3][1] * 2 + 1; // clip x in half-columns
+    int cx1 = LS->clip[3][0] * 2, cx2 = LS->clip[3][1] * 2 + 1; // clip x in half-columns
 
     for (int tx = 0; tx < 320; tx++) {
         if (tx < cx1 || tx > cx2) continue;
@@ -778,7 +951,7 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
                              : (uint16_t)((tx + scrollX) % 320);
         const uint8_t* e = mrow + (sx >> 3) * entrySz;
         uint8_t tile = e[0];
-        uint8_t attr = noAttr ? NextReg::reg[0x6C] : e[1];
+        uint8_t attr = noAttr ? LS->r6C : e[1];
         if (attr & 0x01) continue; // ULA over this tile
         uint8_t u = sx & 7, vv = inRow;
         if (attr & 0x08) u = 7 - u;                              // X mirror
@@ -795,12 +968,12 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
 // coordinate space puts (32,32) at the paper top-left corner; rendering is
 // clipped to the paper area for now (sprites-over-border comes later).
 IRAM_ATTR void NEXTVID::RenderSpritesLine(uint8_t* fb, int y) {
-    const uint8_t* sprLut = lut[(palCtrl & 0x02) ? 6 : 2];
-    uint8_t transp = NextReg::reg[0x4B];
+    const uint8_t* sprLut = lut[(LS->palCtrl & 0x02) ? 6 : 2];
+    uint8_t transp = LS->r4B;
     int sline = y + 32;
     if (sline < 0 || sline > 255) return;
-    bool reverse = NextReg::reg[0x15] & 0x40; // bit6: sprite 0 drawn on top of 127
-    bool overBorder = NextReg::reg[0x15] & 0x02;
+    bool reverse = LS->r15 & 0x40; // bit6: sprite 0 drawn on top of 127
+    bool overBorder = LS->r15 & 0x02;
     int xPixMin = overBorder ? -32 : 0;
     int xPixMax = overBorder ? 287 : 255;
     uint8_t coverage[40]; // 320-bit line coverage for the collision flag
@@ -842,8 +1015,8 @@ IRAM_ATTR void NEXTVID::RenderSpritesLine(uint8_t* fb, int y) {
             int xPix = sx + px - 32; // paper coords
             if (xPix < xPixMin || xPix > xPixMax) continue;
             if (!overBorder) {
-                if (xPix < clip[1][0] || xPix > clip[1][1]) continue;
-                if (y < clip[1][2] || y > clip[1][3]) continue;
+                if (xPix < LS->clip[1][0] || xPix > LS->clip[1][1]) continue;
+                if (y < LS->clip[1][2] || y > LS->clip[1][3]) continue;
             }
             int fx = xPaperOff + xPix;
             if (fx < 0 || fx >= (int)VIDEO::vga.xres) continue;

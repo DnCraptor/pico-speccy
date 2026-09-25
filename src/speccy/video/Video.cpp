@@ -828,6 +828,7 @@ uint32_t VIDEO::tsTraceState() {
 }
 
 void VIDEO::tsRenderDrain() {
+    if (Z80Ops::isNext) NEXTVID::c1Drain();   // the Spectrum Next's own core1 line queue
     if (!tsC1Pending()) return;
     const uint64_t t0 = time_us_64();
     while (tsC1Pending()) {
@@ -8368,6 +8369,8 @@ IRAM_ATTR void VIDEO::EndFrame() {
         // 512 px and maps its other layers onto the 16 pair colours.
         {
             const bool was = timex_hires_live;
+            // The pair driver and the LUTs change under the core1 line queue.
+            if (timex_hires_pending_on || timex_hires_pending_off) NEXTVID::c1Drain();
             timexHiresApplyPending();
             if (timex_hires_live && !was) NEXTVID::rebuildPairMap();
         }

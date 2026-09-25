@@ -24,6 +24,8 @@ tricks never touch the hardware CLUT.
 
 #include <inttypes.h>
 
+struct NextLineState;   // NextVideo.cpp: the per-line render inputs
+
 class NEXTVID {
 public:
     static void Reset();       // machine reset: geometry, default palettes
@@ -73,7 +75,15 @@ public:
     // EndFrame, when the packed-pair driver comes on).
     static void rebuildPairMap();
 
+    // Rendering on core1 (the TS-Conf model): core0 posts each visible line with
+    // a snapshot of the registers it reads, core1 draws it. Anything the
+    // renderer reads LIVE (palettes, sprite RAM, the pair tables, the
+    // framebuffer itself) may only change after c1Drain().
+    static void c1Drain();
+    static void c1Pump();      // core1 render_core loop
+
 private:
+    static void captureLine(NextLineState& s);
     static void ScanlineWork();
     static void RenderLine(int row);
     static void RenderLayers(uint8_t* fb, int row);   // RenderLine's body, linear pixel order

@@ -154,20 +154,6 @@ void next_trace_dump(uint32_t frames) {
             hl[hp] = 0;
             Debug::log("NEXT z80: %u instr/fr %u ns/instr top%%:%s",
                 (unsigned)(total / f), (unsigned)(total ? (uint64_t)d * 1000 / total : 0), hl);
-            {
-                extern uint32_t z80_fetch_src[3];
-                const uint32_t ft = z80_fetch_src[0] + z80_fetch_src[1] + z80_fetch_src[2];
-                volatile uint32_t* xh = (volatile uint32_t*)(XIP_CTRL_BASE + XIP_CTR_HIT_OFFSET);
-                volatile uint32_t* xa = (volatile uint32_t*)(XIP_CTRL_BASE + XIP_CTR_ACC_OFFSET);
-                const uint32_t h = *xh, a = *xa; *xh = 0; *xa = 0;
-                Debug::log("NEXT mem: fetch sram/psram/flash=%u/%u/%u%% xip acc=%lu/s miss=%lu/s (%u.%u%% hit)",
-                    (unsigned)(ft ? (uint64_t)z80_fetch_src[0] * 100 / ft : 0),
-                    (unsigned)(ft ? (uint64_t)z80_fetch_src[1] * 100 / ft : 0),
-                    (unsigned)(ft ? (uint64_t)z80_fetch_src[2] * 100 / ft : 0),
-                    (unsigned long)a, (unsigned long)(a - h),
-                    (unsigned)(a ? (uint64_t)h * 100 / a : 0), (unsigned)(a ? (uint64_t)h * 1000 / a % 10 : 0));
-                z80_fetch_src[0] = z80_fetch_src[1] = z80_fetch_src[2] = 0;
-            }
             for (int i = 0; i < 256; i++) z80_op_hist[i] = 0;
             extern void pcprof_dump();
             pcprof_dump();
@@ -527,6 +513,7 @@ void NextReg::writeLayer2Port(uint8_t v) {
 // Screen-mode bits 5:0 (port FF and NR 0x69 are one latch): hand the Timex
 // mode to VIDEO's hi-res machinery, which switches the driver in vblank.
 static void applyTimexMode(uint8_t v) {
+    NEXTVID::c1Drain();   // core1 reads the hi-res LUT live
     const uint8_t pm = VIDEO::timex_mode, pi = VIDEO::timex_hires_ink;
     VIDEO::timex_mode = v & 0x07;
     VIDEO::timex_hires_ink = (v >> 3) & 0x07;

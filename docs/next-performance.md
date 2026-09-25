@@ -99,3 +99,35 @@ NextReg 07 to zero without resetting the live multiplier. Warm reset already
 sets it to zero. Setup now also sets the live multiplier to zero before
 CPU::reset/VIDEO::Reset derive their timing, preserving the saved generic turbo
 preference for other machines. Hardware confirmation is pending.
+
+## Session 2026-09-26: fetch loop, audio timer, NEXTVID on core1
+
+Measured on DVp2 at 378 MHz, 14 MHz guest, plain (non-PERF) builds, ms of
+core0 per frame (`NEXT cpu`):
+
+| Scene | start | Next fetch loop | + audio timer | + NEXTVID on core1 |
+| --- | ---: | ---: | ---: | ---: |
+| TBBLUE menu | 22.1 | 17.1 | 16.6 | 15.4 |
+| NextZXOS boot | 28.6 | 22.7 | 22.6 | 21.7 |
+| Text viewer (Timex hi-res) | 25.9 | 19.9 | 19.3 | 17.4 |
+
+- **Next fetch loop** (`Z80::exec_nocheck`, under `g_next_fastrd`): a loop of
+  its own without the TS-Conf / Timex / overlay / beam-video tests; the shared
+  fetch sequence was ~47% of core0 in the PC profile. Re-tests the flag per
+  instruction, so the shared loop takes over when it drops mid-slice.
+- **divMMC automap flags** merged into one byte (`DivMMC::pend_after`) and a
+  trap-page filter in `preOpcFetch`.
+- **Audio sample clock** (`pwm_audio.cpp`): own hardware alarm with a RAM ISR
+  instead of the SDK repeating_timer, whose alarm_pool_irq_handler ran from
+  flash 31250 times a second (~3% of core0). Every machine and driver.
+- **NEXTVID on core1**: core0 runs the copper, snapshots the 48 bytes of line
+  inputs (`NextLineState`) and posts `{row, state}`; core1's render_core loop
+  draws (`NEXTVID::c1Pump`). Palette, sprite, Timex LUT/pair-map writers and
+  every `VIDEO::tsRenderDrain()` site drain first; guest RAM is read live (the
+  TS-Conf rule). ~4.6 KB heap, +480 B static SRAM (ScanlineWork is `noinline`:
+  at -O3 it was inlined four times, +2.9 KB). Falls back to core0 when the
+  heap block is missing or the queue sticks (`[NXC1]` log line).
+- **Tried and dropped**: inlining ~44 hot handlers into a switch in the Next
+  loop — within noise (viewer −1.5%, menu +1%) for +2.2 KB SRAM. The call
+  itself is cheap; the cost is the handlers' global-register traffic, which
+  only a full core rewrite would change.

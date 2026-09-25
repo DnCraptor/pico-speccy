@@ -1335,7 +1335,6 @@ IRAM_ATTR void Z80::incRegR(uint32_t inc) {
 // by dcOpcode). Read + cleared by the [PERF] dump in Video.cpp every 600 frames.
 uint32_t z80_op_hist[256];
 uint32_t z80_chk_cnt;
-uint32_t z80_fetch_src[3];   // PERF_HIST: exec_nocheck fetches by backing (SRAM / PSRAM / flash)   // instructions that went through the checked execute() path
 #endif
 
 IRAM_ATTR void Z80::execute() {
@@ -1523,11 +1522,6 @@ IRAM_ATTR void Z80::exec_nocheck() {
         REG_PC++;
 #if PERF_TRACE && PERF_HIST
         z80_op_hist[opCode]++;
-        {   // where the fetched code lives: 0 SRAM, 1 butter PSRAM, 2 flash
-            extern uint32_t z80_fetch_src[3];
-            const uintptr_t fp = (uintptr_t)MemESP::ramCurrent[pg];
-            z80_fetch_src[(fp >= 0x11000000u && fp < 0x12000000u) ? 1 : (fp >= 0x10000000u && fp < 0x11000000u) ? 2 : 0]++;
-        }
         if (Z80Ops::isTsconf) {
             extern uint32_t ts_page_hist[257];
             const uintptr_t bp = (uintptr_t)MemESP::ramCurrent[pg];

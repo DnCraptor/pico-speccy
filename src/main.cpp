@@ -1048,6 +1048,8 @@ extern "C" bool ts_render_core1_prio(void);   // render queue pre-empts GS::pump
 extern "C" volatile bool g_ts_c1_live;       // TS-Conf lines on core1 right now (Video.cpp)
 extern "C" volatile bool g_ft_c1_live;       // TS-Conf VDAC2: the FT812 frame renderer is live (Video.cpp)
 extern "C" void ft812_render_core1_pump(void);
+extern "C" void next_render_core1_pump(void);
+extern "C" volatile bool g_next_c1_live;     // Spectrum Next lines on core1 (NextVideo.cpp)
 #ifdef VGA_HDMI
 extern "C" void hdmi_lut_clear(void);       // zero the .hdmi_lut section (hdmi.c)
 extern "C" void vga_reinit(void);
@@ -1093,6 +1095,7 @@ void __scratch_x("render") render_core() {
         // The body lives in flash, not the TS overlay, so the gate is only a
         // fast exit — no jump-into-heap hazard here.
         if (g_ft_c1_live) ft812_render_core1_pump();
+        if (g_next_c1_live) next_render_core1_pump(); // Spectrum Next scanlines (NextVideo.cpp)
 #ifndef SOFTTV
         // Wall-clock-locked: runs GS-Z80 at exactly 12 MHz off core0.
         // Under SOFTTV, GS::pump() runs in pcm_call_inner (core0) instead,
