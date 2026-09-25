@@ -85,6 +85,7 @@ uint8_t  Config::evo_raster = 0;       // BaseConf raster: Pentagon
 bool     Config::tsconf_vdac2 = false;
 bool     Config::tsconf_vdac2_smooth = false;
 bool     Config::tsconf_vdac2_adapt = true;
+uint8_t  Config::next_clk_cap = 2;     // nextreg 0x07 cap: 14 MHz (28 not real-time yet)
 bool     Config::rtc_enabled = false;
 uint16_t Config::mouse_sens = 64;        // Q8: 64 = x1/4, the historical divisor
 bool     Config::psram_enabled = true;   // Debug > PSRAM (runtime set(PSRAM OFF) twin)
@@ -1654,6 +1655,9 @@ void Config::load() {
         nvs_get_b("tsconf_vdac2", tsconf_vdac2, sts);
         nvs_get_b("tsconf_vdac2_smooth", tsconf_vdac2_smooth, sts);
         nvs_get_b("tsconf_vdac2_adapt", tsconf_vdac2_adapt, sts);
+        int nxc = -1;
+        nvs_get_i("next_clk_cap", nxc, sts);
+        next_clk_cap = (nxc >= 0 && nxc <= 3) ? (uint8_t)nxc : 2;
     }
     loaded = true;
     if (FileUtils::fsMount)
@@ -1970,6 +1974,7 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_str(buf,"tsconf_vdac2", tsconf_vdac2 ? "true" : "false");
     nvs_set_str(buf,"tsconf_vdac2_smooth", tsconf_vdac2_smooth ? "true" : "false");
     nvs_set_str(buf,"tsconf_vdac2_adapt", tsconf_vdac2_adapt ? "true" : "false");
+    nvs_set_i(buf,"next_clk_cap", next_clk_cap);
 
 }
 

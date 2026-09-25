@@ -57,6 +57,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "app/CodeOverlay.h" // TS_OVL_CODE (CPU::tsFrameLoop)
 #include "speccy/core/Rzx.h"
 #include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextVideo.h"
 #if PERF_TRACE && PERF_HIST
 // TS-Conf guest-memory access histogram by PHYSICAL page (the page each CPU
 // bank is mapped to), fetch + peek8 + poke8. Tells which pages a title hammers,
@@ -825,11 +826,9 @@ IRAM_ATTR void CPU::FlushOnHaltTo(uint32_t stEnd) {
         // NEXTVID renders by scanline and never re-points VIDEO::Draw, so the
         // legacy "flush until Draw == Blank" below spins forever (hw: core0
         // stuck here on NextZXOS's first HALT, tstates looping the 32-bit
-        // ring, R/PC frozen). Tick the scanline renderer in 4T steps instead.
-        while (tstates < stEnd) {
-            VIDEO::Draw_Opcode(false);
-            Z80::incRegR(1);
-        }
+        // ring, R/PC frozen). NEXTVID::haltAdvanceTo skips to each line
+        // boundary instead of ticking 4T at a time.
+        NEXTVID::haltAdvanceTo(stEnd);
         return;
     }
 
@@ -1112,7 +1111,7 @@ static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_dram(uint16_t address) 
 }
 IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
     TS_PAGE_HIT(address);
-    if (g_ts_fastmem) {
+    if (g_ts_fastmem > tsFastLo8(address)) {
         // The DRAM hit test runs FIRST, while nothing but the address is live:
         // placed after the T-state add it needed two more registers and GCC
         // paid a push/pop pair on EVERY access (2026-09-13). The _dram helpers
@@ -1296,7 +1295,7 @@ static IRAM_ATTR __attribute__((noinline)) void poke8_cold(uint16_t address, uin
 }
 IRAM_ATTR void Z80Ops::poke8(uint16_t address, uint8_t value) {
     TS_PAGE_HIT(address);
-    if (g_ts_fastmem) {
+    if (g_ts_fastmem > tsFastLo8(address)) {
         // Same register discipline as peek8: the cache invalidate and the two
         // cold gates go first, the T-state add and the line test last.
         if (__builtin_expect(g_ts_memcyc != 0, 0)) {
@@ -1338,7 +1337,7 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_dram(uint16_t address
 }
 IRAM_ATTR uint16_t Z80Ops::peek16(uint16_t address) {
     TS_PAGE_HIT(address);
-    if (g_ts_fastmem) {
+    if (g_ts_fastmem > tsFastLo16(address)) {
         // An even address reads both halves out of ONE cache word (index a[8:1]),
         // so the second half can only miss when the first did; odd = two words.
         // Test first, add T-states after (the peek8 register note).
@@ -1415,7 +1414,7 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_cold(uint16_t address, Re
 }
 IRAM_ATTR void Z80Ops::poke16(uint16_t address, RegisterPair word) {
     TS_PAGE_HIT(address);
-    if (g_ts_fastmem) {
+    if (g_ts_fastmem > tsFastLo16(address)) {
         if (__builtin_expect(g_ts_memcyc != 0, 0)) {
             // a running DMA or a cache hit on either half -> poke16_cold (even: one cache word)
             if ((g_ts_memcyc & 2) || tsMemWriteHit(address) || ((address & 1) && tsMemWriteHit((uint16_t)(address + 1)))) return poke16_cold(address, word);

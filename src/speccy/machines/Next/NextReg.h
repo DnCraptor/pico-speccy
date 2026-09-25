@@ -16,11 +16,11 @@ Reference: https://wiki.specnext.dev/TBBlue_Register_Select
 
 #include <inttypes.h>
 
-// Highest EFFECTIVE CPU-speed multiplier honoured by nextreg 0x07
-// (0=3.5, 1=7, 2=14, 3=28 MHz). 28 MHz is not real-time on the RP2350 yet,
-// so the effective speed is capped at 14; the programmed value is kept and
-// the read-back reports the actual speed in bits 5:4.
-#define NEXTREG_MAX_TURBO 2
+// The highest EFFECTIVE CPU-speed multiplier honoured by nextreg 0x07
+// (0=3.5, 1=7, 2=14, 3=28 MHz) is Config::next_clk_cap — Machine > Spectrum
+// Next > Options > CPU cap, default 14 MHz because 28 is not real-time on the
+// RP2350 yet. The programmed value is kept and the read-back reports the
+// actual speed in bits 5:4.
 
 class NextReg {
 public:
@@ -43,6 +43,9 @@ public:
     // it at the next frame boundary (0 = none, 1 = soft, 2 = hard)
     static uint8_t resetPending;
     static void write(uint8_t r, uint8_t v);
+    // Re-derive the live clock from nextreg 0x07 under Config::next_clk_cap
+    // (the menu's CPU cap hook; also the body of a 0x07 write).
+    static void applySpeed();
     static uint8_t read(uint8_t r);
 
     // Legacy paging on Next (called from Ports.cpp with Next decodes)

@@ -16,6 +16,17 @@
 #include "speccy/video/Video.h"
 
 extern uint8_t g_ts_fastmem;
+// g_ts_fastmem values: 0 = off, 2 = TS-Conf (every address), 1 = Spectrum Next
+// (0x4000-0xFFFF only). Everything the Next adds to guest memory — the divMMC
+// window, the Layer 2 write window (port 0x123B), the write-protected NextZXOS
+// ROM and its Alt-ROM capture, the TBBLUE config window, ROM overlays — lives
+// in slots 0/1, so above 0x4000 its banks are exactly TS-Conf's case: plain
+// pointer pages with a T-state-counter video hook (NEXTVID shares ts_line_t,
+// and tsDrawTick hands the crossing to NEXTVID::ScanlineWork). One compare
+// against the address keeps TS-Conf's path the same length.
+static inline bool tsFastLo8(uint16_t a)  { return a < 0x4000; }
+// 16-bit access: the second byte of 0xFFFF wraps to 0x0000 (slot 0).
+static inline bool tsFastLo16(uint16_t a) { return (uint16_t)(a - 0x4000) >= 0xBFFF; }
 
 static inline void tsFastTick(uint32_t n) {
     CPU::tstates += n;

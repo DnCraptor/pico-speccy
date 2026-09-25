@@ -482,6 +482,12 @@ static bool p_evoBaseActive() {
     if (m < 0) return Config::isEvoBase();
     return ((m >> 8) & 0xFF) == A_ATM && (m & 0xFF) == R_EVO_BASE;
 }
+static bool p_nextActive() {
+    const int32_t m = Stage::get(SET_MACHINE);
+    if (m < 0) return Config::arch == A_NEXT;
+    return ((m >> 8) & 0xFF) == A_NEXT;
+}
+
 static bool p_tsconfActive() {
     const int32_t m = Stage::get(SET_MACHINE);
     if (m < 0) return Config::arch == A_TSCONF;
@@ -672,6 +678,14 @@ static bool p_showNext() { return butter_psram_size() >= (2u << 20); }
 static const Option opt_mach_next[] = {
     { TXT_ROM_NEXT,       NM_MACH(A_NEXT, R_NEXT) },
 };
+// Next CPU cap: nextreg 0x07 asks for up to 28 MHz; the cap bounds what is
+// actually run. 28 MHz is offered to try, but is not real-time yet.
+static const Option opt_next_clk[] = {
+    { "3.5 MHz", 0 },
+    { "7 MHz",   1 },
+    { "14 MHz",  2 },
+    { "28 MHz",  3 },
+};
 
 // ZX Evolution BaseConf raster — the AVR's MODES_RASTER (Scroll Lock on the real board,
 // kept in its NVRAM), video_sync_v.v / zclock.v: the frame, the INT position and, in
@@ -734,6 +748,11 @@ static const Node kEvoBase[] = {
     NM_RADIO(TXT_MACH_EVO_RASTER, SET_EVO_RASTER, opt_evo_raster, nullptr),
 };
 
+// Spectrum Next options: the CPU cap alone for now (the TS-Conf level's twin).
+static const Node kNext[] = {
+    NM_RADIO(TXT_MACH_NEXT_CLK, SET_NEXT_CLK, opt_next_clk, nullptr),
+};
+
 // Timex TC2068 cartridge port. A cartridge is not a setting: it is mounted and
 // ejected right here, like a tape or a disk, and the machine restarts on it (the
 // HOME ROM probes the DOCK at reset and starts what it finds there by itself).
@@ -768,6 +787,7 @@ static const Node kMachine[] = {
     NM_RADIO(TXT_MACH_ALF,   SET_MACHINE, opt_mach_alf,   nullptr),
     NM_RADIO(TXT_MACH_OTHER, SET_MACHINE, opt_mach_other, p_extRam),
     NM_RADIO(TXT_MACH_NEXT,  SET_MACHINE, opt_mach_next,  p_showNext),
+    NM_SUB  (NM_IND TXT_MACH_TSCONF_OPTS, kNext, p_nextActive),
     // Not a machine, but it lives with them by request: the built-in game — the
     // one "machine" that needs neither ROM nor SD card. Also reachable by
     // holding S during the boot R/M probe window.

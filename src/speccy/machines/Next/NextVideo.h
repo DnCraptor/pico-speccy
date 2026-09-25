@@ -29,6 +29,11 @@ public:
     static void Reset();       // machine reset: geometry, default palettes
     static void EndFrame();    // frame restart (called from VIDEO::EndFrame)
     static void onClockChange(); // nextreg 0x07 turbo switch: rescale line boundary
+    // HALT flush (CPU::FlushOnHaltTo): advance CPU::tstates to stEnd a line at
+    // a time, rendering each line crossed, R stepped as by 4T HALT cycles.
+    static void haltAdvanceTo(uint32_t stEnd);
+    // The line-boundary crossing of the fast memory path (VIDEO::tsDrawTick).
+    static void lineTick();
 
     // VIDEO::Draw replacements
     static void Tick(unsigned int statestoadd, bool contended);
@@ -67,6 +72,7 @@ public:
 private:
     static void ScanlineWork();
     static void RenderLine(int row);
+    static void RenderLayers(uint8_t* fb, int row);   // RenderLine's body, linear pixel order
     static void RenderSpritesLine(uint8_t* fb, int y);
     static void rebuildLut(uint8_t pal);
     static void setLutEntry(uint8_t pal, uint8_t idx, uint16_t rgb333);
@@ -110,7 +116,10 @@ private:
 
     static uint32_t lineIdx;
     static uint32_t totalLines;
-    static uint32_t nextLineTstate;
+    // T-state of the next line boundary. It IS VIDEO::ts_line_t (a reference):
+    // the TS-Conf fast memory path (TsFastMem.h) ticks that one directly, and
+    // VIDEO::tsDrawTick hands the crossing back to lineTick().
+    static uint32_t& nextLineTstate;
     static int firstVisibleLine;
     static int paperTopRow;
     static int xPaperOff;

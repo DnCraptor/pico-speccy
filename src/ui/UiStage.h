@@ -368,7 +368,10 @@ const char* romsetName(int32_t composite);
     X(SET_RZX_LOOP,        AC_PURE,   0,                     get_rzxLoop,    put_rzxLoop,    nullptr,        -1)          \
     /* ZX Evolution BaseConf raster (Config::evo_raster: Pentagon/60 Hz/48K/128K).   */ \
     /* Live: restarts the machine, which re-derives frame, audio and video timing.   */ \
-    X(SET_EVO_RASTER,      AC_LIVE,   0,                     get_evoRaster,  put_evoRaster,  hook_evoRaster, -1)
+    X(SET_EVO_RASTER,      AC_LIVE,   0,                     get_evoRaster,  put_evoRaster,  hook_evoRaster, -1) \
+    /* Spectrum Next CPU clock cap (Config::next_clk_cap): live, re-applies the  */ \
+    /* nextreg 0x07 speed — the SET_TSCONF_CLK twin. Appended last (APPEND ONLY). */ \
+    X(SET_NEXT_CLK,        AC_LIVE,   0,                     get_nextClk,    put_nextClk,    hook_nextClk,   -1)
 
 #define NM_X_ENUM(id, cls, flags, g, p, h, f) id,
 enum SettingId : uint16_t {

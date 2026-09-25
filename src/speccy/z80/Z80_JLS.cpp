@@ -1434,7 +1434,7 @@ IRAM_ATTR void Z80::exec_nocheck() {
         Debug::neo8TrapStep(REG_PC, REG_SP, REG_IX, REG_IY);
 #endif
         uint8_t pg = REG_PCh >> 5;
-        if (g_ts_fastmem) {                   // TsFastMem.h: TS-Conf, plain POINTER banks, counter video
+        if (g_ts_fastmem > tsFastLo8(REG_PC)) {   // TsFastMem.h: TS-Conf / Next above 0x4000, plain POINTER banks, counter video
             tsFastTick(4);
             if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(REG_PC)) tsFastTick(TsConf::cpuMemMiss(REG_PC, true));   // DRAM model: a cache miss
             opCode = MemESP::ramCurrent[pg][REG_PC & 0x1fff];

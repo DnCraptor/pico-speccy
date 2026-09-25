@@ -351,9 +351,9 @@ if Z80Ops::isAtm
 # unresolved symbol must not lose the main dump). NextReg register file +
 # MMU/paging/divMMC-automap/TBBLUE-window snapshot: a Browser or .tap hang
 # with only the main dump reads as "PC somewhere in ROM"; this names the
-# mapping that put it there. arch enum: 9 == A_NEXT (ArchRom.h X-macro).
+# mapping that put it there. arch enum: 11 == A_NEXT (ArchRom.h X-macro).
 shell rm -f /tmp/picospec_nextregs.bin /tmp/picospec_next.txt
-if Config::arch == 9
+if Config::arch == 11
   dump binary memory /tmp/picospec_nextregs.bin NextReg::reg (NextReg::reg + 256)
   set logging file /tmp/picospec_next.txt
   set logging overwrite on

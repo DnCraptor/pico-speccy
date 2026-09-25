@@ -16,6 +16,7 @@
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
 #include "app/ESPectrum.h"
+#include "speccy/machines/Next/NextReg.h"
 #include "LEDIndicators.h"
 #include "drivers/sdcard/sdcard.h"
 #include "speccy/core/MemESP.h"
@@ -390,6 +391,12 @@ static bool    hook_evoRaster(int32_t, int32_t) {
 }
 static bool    hook_tsconfClk(int32_t, int32_t) {
     if (Config::arch == A_TSCONF) TsConf::applyZclk(true);   // re-derive the live clock under the new cap
+    return true;
+}
+static int32_t get_nextClk()          { return (int32_t)Config::next_clk_cap; }
+static void    put_nextClk(int32_t v) { Config::next_clk_cap = (uint8_t)v; }
+static bool    hook_nextClk(int32_t, int32_t) {
+    if (Config::arch == A_NEXT) NextReg::applySpeed();   // re-derive the live clock under the new cap
     return true;
 }
 

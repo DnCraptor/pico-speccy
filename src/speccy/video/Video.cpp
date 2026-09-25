@@ -2103,7 +2103,10 @@ void VIDEO::applyPalette() {
     // still applies.
     for (int i = 0; i < 240; i++) {
         uint32_t c = grb_to_rgb888(i);
-        c = (Config::arch != A_NEXT) ? paletteFinal(c) : crtTransform(c);
+        // snapTransform still applies on Next: it is the Capture-safe colours
+        // stage (Config::hdmi_snap), and skipping it with the matrix made that
+        // option a no-op in Next mode (capture card, TBBLUE mode test, 2026-09-25).
+        c = (Config::arch != A_NEXT) ? paletteFinal(c) : snapTransform(crtTransform(c));
         graphics_set_palette(i, c);
     }
     // Override indices 0-15 with Spectrum colors (already rebuilt with correct brightness)
@@ -5225,7 +5228,7 @@ void VIDEO::Reset() {
         switch (Config::baseVideoMode(vmSel)) {
             case Config::VM_640x480_50:
                 if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster()) video_mode = 2;
-                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster()) video_mode = 3;
+                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || Config::arch == A_NEXT) video_mode = 3;
                 else video_mode = 1; // Pentagon
                 break;
             case Config::VM_720x480_60:
@@ -5233,7 +5236,7 @@ void VIDEO::Reset() {
                 break;
             case Config::VM_720x576_50:
                 if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster()) video_mode = 5;
-                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster()) video_mode = 6;
+                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || Config::arch == A_NEXT) video_mode = 6;
                 else video_mode = 4; // Pentagon
                 break;
             default: // VM_640x480_60
@@ -5250,7 +5253,7 @@ void VIDEO::Reset() {
                 break;
             case Config::VM_640x480_50:
                 if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster()) video_mode = 2;
-                else if (Config::arch == A_128K || Config::isEvo128Raster()) video_mode = 3;
+                else if (Config::arch == A_128K || Config::isEvo128Raster() || Config::arch == A_NEXT) video_mode = 3;
                 else video_mode = 1; // Pentagon
                 break;
             case Config::VM_720x480_60:
@@ -5258,7 +5261,7 @@ void VIDEO::Reset() {
                 break;
             case Config::VM_720x576_50:
                 if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster()) video_mode = 5;
-                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster()) video_mode = 6;
+                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || Config::arch == A_NEXT) video_mode = 6;
                 else video_mode = 4; // Pentagon
                 break;
             default:
@@ -5327,8 +5330,10 @@ void VIDEO::Reset() {
         // repurposed those CLUT slots — restore the cube, LINEAR (no palette
         // matrix: Next owns its colours via the RGB333 palettes). 184+ stays
         // untouched: HDMI audio data islands / guard bands live there.
+        // Same stages as applyPalette's Next branch: CRT filter + Capture-safe
+        // snap, never the ZX palette matrix.
         for (int i = 17; i < 184; i++)
-            graphics_set_palette(i, grb_to_rgb888(i));
+            graphics_set_palette(i, snapTransform(crtTransform(grb_to_rgb888(i))));
         NEXTVID::Reset();
         Draw = &NEXTVID::Tick;
         Draw_Opcode = &NEXTVID::Tick_Opcode;
@@ -6371,14 +6376,19 @@ void VIDEO::tsFastMemRecalc() {
     // RAM are the write gate g_atm_ro, which sends a write to the cold path.
     // Pentagon 16col (col16DrawTick): the gate Pentagon::col16FastMemOk() settled
     // at the arming — pointer pages only, no DivMMC/MB-02, no overlay on rom[0..4].
-    const uint8_t v = (((Z80Ops::isTsconf && ((ts_fast_armed && ts_render_live) || (ft_live && ts_line_t == 0xFFFFFFFFu))) ||
-                        (Z80Ops::isAtm && ts_fast_armed && gmx_ext_live) ||
-                        (col16_fast && ts_fast_armed && col16_memok))
-                       && Config::numMemReadBP == 0 && Config::numMemWriteBP == 0
-                       && !g_ngs_zxdma && !MemESP::divmmc_mapped) ? 1 : 0;
+    const bool nobp = Config::numMemReadBP == 0 && Config::numMemWriteBP == 0;
+    // g_ts_fastmem: 2 = every address (TS-Conf / ATM / Pentagon 16col), 1 = Spectrum
+    // Next, 0x4000-0xFFFF only (TsFastMem.h) — the divMMC / NeoGS ZX-DMA windows,
+    // both below 0x4000, do not gate it.
+    const uint8_t v = Z80Ops::isNext ? (nobp ? 1 : 0)
+                    : (((Z80Ops::isTsconf && ((ts_fast_armed && ts_render_live) || (ft_live && ts_line_t == 0xFFFFFFFFu))) ||
+                                            (Z80Ops::isAtm && ts_fast_armed && gmx_ext_live) ||
+                                            (col16_fast && ts_fast_armed && col16_memok))
+                                           && Config::numMemReadBP == 0 && Config::numMemWriteBP == 0
+                                           && !g_ngs_zxdma && !MemESP::divmmc_mapped) ? 2 : 0;
     if (v != g_ts_fastmem) {
         g_ts_fastmem = v;
-        Debug::log("[TSF] fast memory path %s (render=%u armed=%u ft=%u bp=%d/%d zxdma=%u divmmc=%u)", v ? "ON" : "off",
+        Debug::log("[TSF] fast memory path %s%s (render=%u armed=%u ft=%u bp=%d/%d zxdma=%u divmmc=%u)", v ? "ON" : "off", v == 1 ? " (Next, >= 0x4000)" : "",
                    ts_render_live, (unsigned)ts_fast_armed, (unsigned)ft_live, Config::numMemReadBP, Config::numMemWriteBP,
                    (unsigned)g_ngs_zxdma, (unsigned)MemESP::divmmc_mapped);
     }
@@ -6820,6 +6830,7 @@ void VIDEO::tsBandReplay() {
 }
 
 IRAM_ATTR void VIDEO::tsDrawTick() {
+    if (Z80Ops::isNext) { NEXTVID::lineTick(); return; }   // TsFastMem.h: the Next shares the fast path
     // ATM-Turbo / ZX-Evo whole-line modes share this clock (atmDrawTick, flash):
     // one test per rendered line, not per access. Pentagon 16col likewise.
     if (__builtin_expect(col16_fast, 0)) { col16DrawTick(); return; }
@@ -8334,6 +8345,7 @@ IRAM_ATTR void VIDEO::EndFrame() {
 
     if (Z80Ops::isNext) {
         NEXTVID::EndFrame();
+        tsFastMemRecalc();   // TsFastMem.h: breakpoints can revoke it per frame
         framecnt++;
         return;
     }

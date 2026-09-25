@@ -179,9 +179,12 @@ Machine `A_NEXT` (RP2350 + butter ≥2MB): Z80N, NextReg (`src/NextReg.cpp`),
 **zx_go** (conorarmstrong/zx_go, VHDL_CONFORMANCE.md; их pkg/memory/next.go +
 pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД гаданием).
 
-- **CPU speed cap**: nextreg 0x07 клампится `NEXTREG_MAX_TURBO=2` (14 MHz) —
-  28 MHz пока не real-time; программное значение хранится, read-back отдаёт
-  actual в битах 5:4. Разбор 28 MHz — отложен.
+- **CPU speed cap**: nextreg 0x07 клампится `Config::next_clk_cap` (NVS
+  `next_clk_cap`, по умолч. 2 = 14 MHz; Machine → Spectrum Next → Options →
+  CPU cap, AC_LIVE, хук `NextReg::applySpeed()` — близнец TS-Conf
+  `tsconf_clk_cap`). 28 MHz в меню есть, но пока не real-time; программное
+  значение хранится, read-back отдаёт actual в битах 5:4. Был compile-time
+  `NEXTREG_MAX_TURBO=2` до 2026-09-25.
 - **TBBLUE boot chain** (2026-08-09): с `/TBBLUE.FW` на SD бут идёт через
   вшитый 8K bootrom (`src/roms/next/tbblue_loader.c`, GPLv3, из zx_go) →
   config mode → NextZXOS; без файла — прямой бут enNextZX.rom (fallback).

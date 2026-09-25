@@ -823,7 +823,17 @@ void ESPectrum::setup() {
   // at the bottom, from a pristine heap, before Config::load()). It must precede
   // the reserveFrameBuffer() re-check below, which is the first allocation that
   // can want the extra room.
-  CodeOverlay::apply(Config::arch == A_TSCONF, Config::gs_enabled != 0, Config::dma_mode != 0,
+  // The Spectrum Next always has its zxnDMA (port 0x6B, CPU::loop calls
+  // Z80DMA::handleDMA unconditionally there), so a Next boot needs the Z80 DMA
+  // window whatever Config::dma_mode says. The arch is not final yet (the
+  // pref_arch override below can still pick the Next), so the preferred arch
+  // counts too — keeping a 5 KB window on a boot that turns out not to need it
+  // costs heap, missing it is a jump into heap data (UNDEFINSTR in
+  // Z80DMA::executeTransfer, hw 2026-09-25). The backstop after the arch is
+  // final covers anything this misses.
+  const bool dmaWin = Config::dma_mode != 0 || Config::arch == A_NEXT ||
+                      (Config::ram_file == NO_RAM_FILE && Config::pref_arch == A_NEXT);
+  CodeOverlay::apply(Config::arch == A_TSCONF, Config::gs_enabled != 0, dmaWin,
                      Config::gs_enabled == 2,    // NeoGS-only code/data window
                      Config::tsconf_vdac2        // VDAC2 window (with TS-Conf only); its load
                        && FlashRoms::intact());  // image is in .psramroms, gone once traded
@@ -1049,6 +1059,15 @@ void ESPectrum::setup() {
   // only has to relabel the machine.
   if (Config::arch == A_NEXT && butter_psram_size() < (2u << 20)) {
     Debug::log2SD("setup: Next requires 2MB+ butter PSRAM, falling back to 128K");
+    Config::arch = A_128K;
+    Config::romSet = R_128K;
+    Config::romSet128 = R_128K;
+  }
+  // Backstop for the overlay decision above: the Next cannot run without the
+  // zxnDMA code. The heap has barely grown by now, so the claim normally
+  // succeeds; if it does not, fall back rather than jump into heap data.
+  if (Config::arch == A_NEXT && !CodeOverlay::claimForDma()) {
+    Debug::log2SD("setup: Next needs the Z80 DMA code window, heap took it - falling back to 128K");
     Config::arch = A_128K;
     Config::romSet = R_128K;
     Config::romSet128 = R_128K;

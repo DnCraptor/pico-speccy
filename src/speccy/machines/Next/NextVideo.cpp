@@ -5,6 +5,7 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 */
 
 #include "NextVideo.h"
+#include "speccy/z80/z80.h"
 
 
 
@@ -54,7 +55,7 @@ uint8_t  NEXTVID::cop16First = 0;
 
 uint32_t NEXTVID::lineIdx = 0;
 uint32_t NEXTVID::totalLines = 311;
-uint32_t NEXTVID::nextLineTstate = 228;
+uint32_t& NEXTVID::nextLineTstate = VIDEO::ts_line_t;   // see NextVideo.h
 int  NEXTVID::firstVisibleLine = 0;
 int  NEXTVID::paperTopRow = 0;
 int  NEXTVID::xPaperOff = 32;
@@ -373,6 +374,23 @@ void NEXTVID::onClockChange() {
     nextLineTstate = (lineIdx + 1) * ((uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator);
 }
 
+// Skip straight to the next line boundary instead of ticking 4T at a time
+// (~17.7k Draw_Opcode calls a frame at 3.5 MHz, 4x that at 14) — TS-Conf's
+// haltAdvanceTo. Exactly equivalent to the 4T loop it replaced: every step is
+// a whole number of 4T HALT cycles, so tstates ends on the same value, R
+// advances by the same count (mod 256 is enough, R is 7-bit), and
+// ScanlineWork runs at the same crossings.
+IRAM_ATTR void NEXTVID::haltAdvanceTo(uint32_t stEnd) {
+    while (CPU::tstates < stEnd) {
+        uint32_t tgt = nextLineTstate;
+        if (tgt > stEnd) tgt = stEnd;
+        const uint32_t n = (tgt > CPU::tstates) ? ((tgt - CPU::tstates + 3) & ~3u) : 4u;
+        CPU::tstates += n;
+        Z80::incRegR((uint8_t)(n >> 2));
+        while (CPU::tstates >= nextLineTstate) ScanlineWork();
+    }
+}
+
 IRAM_ATTR void NEXTVID::EndFrame() {
     static uint8_t skipCnt = 0;
     skipFrame = ESPectrum::maxSpeed && (++skipCnt & 63);
@@ -387,6 +405,10 @@ IRAM_ATTR void NEXTVID::EndFrame() {
 
 IRAM_ATTR void NEXTVID::Tick(unsigned int statestoadd, bool contended) {
     CPU::tstates += statestoadd;
+    while (CPU::tstates >= nextLineTstate) ScanlineWork();
+}
+
+IRAM_ATTR void NEXTVID::lineTick() {
     while (CPU::tstates >= nextLineTstate) ScanlineWork();
 }
 
@@ -431,13 +453,44 @@ IRAM_ATTR void NEXTVID::ScanlineWork() {
 
 // ===== scanline compositor =====
 
+// One framebuffer row: compose the layers, rotate to scanout order, and leave
+// the OSD box alone. The F8 stats / F9-F10 volume box is 144x16 at x 168
+// (320-wide) / 188 (360-wide), rows 220 (240-row fb) / 268 (288-row fb), and
+// ESPectrum::loop repaints it only after EndFrame — the same rectangle
+// tsRenderLine and Update_Border_DS80 carve out. This used to skip 32 WHOLE
+// rows instead, which left the bottom 16 paper rows + 4 border rows black
+// while the stats were up and still overwrote the box's last 4 rows every
+// frame (hw 2026-09-25). The box is word-aligned (168/188 and 144 are
+// multiples of 4), so its bytes are unaffected by the word rotation and can
+// simply be saved before the layers run and put back after.
 IRAM_ATTR void NEXTVID::RenderLine(int row) {
-    // Keep the F8 stats overlay readable: it lives in paper rows 176-191
-    // (16:9 modes) or the top of the bottom border (4:3 modes)
-    if (VIDEO::OSD && row >= paperTopRow + 176 && row < paperTopRow + 192 + 16)
-        return;
-
     uint8_t* fb = VIDEO::vga.frameBuffer[row];
+    const int cx0 = (VIDEO::vga.xres >= 360) ? 188 : 168;
+    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    const bool carve = (VIDEO::OSD & 0x07) != 0 && row >= cy0 && row < cy0 + 16;
+    uint32_t keep[144 / 4];
+    if (carve) memcpy(keep, fb + cx0, sizeof(keep));
+
+    RenderLayers(fb, row);
+
+    // Scanout byte order: the HDMI/VGA ISR reads fb bytes at x^2 (16-bit
+    // halves of each 32-bit word swapped — legacy renderers bake this into
+    // their AluBytes words). NEXTVID renders linearly, so rotate each word
+    // once at the end of the line (hw: NextZXOS text scrambled in 4-pixel
+    // groups while solid areas looked fine). Every row, border rows included:
+    // tilemap / Layer 2 320 / sprites draw there too.
+    {
+        uint32_t* w = (uint32_t*)fb;
+        int words = ((int)VIDEO::vga.xres + 3) >> 2;
+        for (int k = 0; k < words; k++) {
+            uint32_t v = w[k];
+            w[k] = (v >> 16) | (v << 16);
+        }
+    }
+    if (carve) memcpy(fb + cx0, keep, sizeof(keep));
+}
+
+IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     int xres = VIDEO::vga.xres;
     const uint8_t* ulaLut = lut[(palCtrl & 0x08) ? 4 : 0];
 
@@ -538,20 +591,6 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     // Layer 2 palette-priority pixels sit above everything
     if (l2on && palHasPrio[(palCtrl & 0x04) ? 5 : 1])
         RenderL2Line(fb, row, true);
-
-    // Scanout byte order: the HDMI/VGA ISR reads fb bytes at x^2 (16-bit
-    // halves of each 32-bit word swapped — legacy renderers bake this into
-    // their AluBytes words). NEXTVID renders linearly, so rotate each word
-    // once at the end of the line (hw: NextZXOS text scrambled in 4-pixel
-    // groups while solid areas looked fine).
-    {
-        uint32_t* w = (uint32_t*)fb;
-        int words = ((int)VIDEO::vga.xres + 3) >> 2;
-        for (int k = 0; k < words; k++) {
-            uint32_t v = w[k];
-            w[k] = (v >> 16) | (v << 16);
-        }
-    }
 }
 
 // Layer 2: 256x192x8bpp (row-major) or 320x256x8bpp (column-major, covers

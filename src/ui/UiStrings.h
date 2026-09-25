@@ -236,6 +236,7 @@
 #define TXT_MACH_SCORP      "Scorpion"
 #define TXT_MACH_ALF        "ALF TV GAME"
 #define TXT_MACH_NEXT       "Spectrum Next"
+#define TXT_MACH_NEXT_CLK   "CPU cap"
 #define TXT_ROM_NEXT        "NextZXOS"
 #define TXT_MACH_MURM       "Murmuzavr mode"
 #define TXT_MACH_MURM_SIZE  "Extra RAM"

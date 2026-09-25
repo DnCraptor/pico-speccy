@@ -10,6 +10,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "app/ESPectrum.h"
 #include "speccy/video/Video.h"
 #include "app/Debug.h"
+#include "app/Config.h"
 #include "NextVideo.h"
 #include "app/Debug.h"
 #include "speccy/z80/z80.h"
@@ -108,6 +109,24 @@ void next_trace_dump(uint32_t frames) {
         (unsigned)frames, (unsigned)s_nt_pal, (unsigned)s_nt_cop, (unsigned)s_nt_spr,
         (unsigned)(g_sd_stall_us / 1000u), (unsigned)g_sd_ops,
         (unsigned)(g_nextvid_us / 1000u));
+    // Frame cost on its own line (the one above is near Debug::log's 256-byte
+    // cap). VIDEO::EndFrame returns before its PERF block on the Next, so this
+    // is the only place the CPU::loop time shows: cpu = ms per emulated frame
+    // (Z80 + rendering + DMA, the whole CPU::loop), vid = the renderer's share,
+    // li = line interrupt armed (the frame then runs execute() per instruction).
+    {
+        extern volatile uint32_t cpu_frame_us;          // CPU.cpp, never reset on Next
+        static uint32_t s_prev_cpu = 0;
+        const uint32_t c = cpu_frame_us, d = c - s_prev_cpu;
+        s_prev_cpu = c;
+        const uint32_t f = frames ? frames : 1;
+        Debug::log("NEXT cpu: %u.%ums/fr vid=%u.%ums/fr li=%u line=%u clk=%u MHz fps=%u",
+            (unsigned)(d / f / 1000u), (unsigned)(d / f % 1000u / 100u),
+            (unsigned)(g_nextvid_us / f / 1000u), (unsigned)(g_nextvid_us / f % 1000u / 100u),
+            (unsigned)NextReg::lineIrqEnabled, (unsigned)NextReg::lineIrqLine,
+            (unsigned)(ESPectrum::multiplicator == 0 ? 3 : 7u << (ESPectrum::multiplicator - 1)),
+            (unsigned)frames);
+    }
     s_nt_pal = s_nt_cop = s_nt_spr = 0;
     g_sd_stall_us = 0;
     g_sd_ops = 0;
@@ -234,6 +253,29 @@ uint16_t NextReg::activeLine() {
 static void applyRomSelect();
 static void applyBankC000();
 
+// 28 MHz is beyond what the emulation core keeps up with today — the frame
+// takes longer than its 20 ms budget and the machine crawls — so the EFFECTIVE
+// speed is capped by Config::next_clk_cap (menu: CPU cap, default 14 MHz).
+// reg[0x07] keeps the programmed value and the read-back reports the actual
+// speed in bits 5:4, which is how real boards expose "asked for more than I
+// can do". Same idea as TS-Conf's tsconf_clk_cap.
+void NextReg::applySpeed() {
+    uint8_t m = reg[0x07] & 0x03;
+    if (m > Config::next_clk_cap) m = Config::next_clk_cap;
+    uint8_t old = ESPectrum::multiplicator;
+    if (old == m) return;
+    // The switch happens MID-FRAME: everything measured in T-states (tstates,
+    // statesInFrame, the NEXTVID line boundary) must move to the new clock
+    // domain together, or the end-of-frame `tstates -= statesInFrame`
+    // underflows and the INT window is never hit again (hw: NextZXOS set
+    // 28MHz and froze on the next HALT with tstates = 0xFFFFFFFF).
+    ESPectrum::multiplicator = m;
+    if (m > old) CPU::tstates <<= (m - old);
+    else         CPU::tstates >>= (old - m);
+    CPU::updateStatesInFrame();
+    NEXTVID::onClockChange();
+}
+
 void NextReg::write(uint8_t r, uint8_t v) {
     reg[r] = v;
 #if NEXT_TRACE
@@ -289,31 +331,9 @@ void NextReg::write(uint8_t r, uint8_t v) {
             CPU::updateStatesInFrame();
             break;
         }
-        case 0x07: { // CPU speed: 0=3.5, 1=7, 2=14, 3=28 MHz
-            uint8_t m = v & 0x03;
-            // 28 MHz is beyond what the emulation core keeps up with today —
-            // the frame takes longer than its 20 ms budget and the machine
-            // crawls. Cap the EFFECTIVE speed at 14 MHz; reg[0x07] keeps the
-            // programmed value and the read-back reports the actual speed in
-            // bits 5:4, which is how real boards expose "asked for more than
-            // I can do". Revisit when the core is profiled at 28.
-            if (m > NEXTREG_MAX_TURBO) m = NEXTREG_MAX_TURBO;
-            uint8_t old = ESPectrum::multiplicator;
-            if (old != m) {
-                // The switch happens MID-FRAME: everything measured in
-                // T-states (tstates, statesInFrame, the NEXTVID line
-                // boundary) must move to the new clock domain together, or
-                // the end-of-frame `tstates -= statesInFrame` underflows and
-                // the INT window is never hit again (hw: NextZXOS set 28MHz
-                // and froze on the next HALT with tstates = 0xFFFFFFFF).
-                ESPectrum::multiplicator = m;
-                if (m > old) CPU::tstates <<= (m - old);
-                else         CPU::tstates >>= (old - m);
-                CPU::updateStatesInFrame();
-                NEXTVID::onClockChange();
-            }
+        case 0x07: // CPU speed: 0=3.5, 1=7, 2=14, 3=28 MHz
+            applySpeed();
             break;
-        }
         case 0x22: // Line interrupt control
             ulaIrqDisabled = v & 0x04;
             lineIrqEnabled = v & 0x02;
@@ -405,7 +425,7 @@ uint8_t NextReg::read(uint8_t r) {
                                   // same stable version zx_go settled on
         case 0x07: { // bits 5:4 = actual speed, 1:0 = programmed
             uint8_t actual = reg[0x07] & 3;
-            if (actual > NEXTREG_MAX_TURBO) actual = NEXTREG_MAX_TURBO;
+            if (actual > Config::next_clk_cap) actual = Config::next_clk_cap;
             return (actual << 4) | (reg[0x07] & 3);
         }
         case 0x18: case 0x19: case 0x1A: case 0x1B: {
