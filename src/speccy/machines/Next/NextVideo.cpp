@@ -39,6 +39,8 @@ uint8_t NEXTVID::pal9First = 0;
 uint8_t NEXTVID::palCtrl = 0;
 
 uint8_t* NEXTVID::lineBuf = nullptr;
+uint8_t* NEXTVID::pairMap = nullptr;
+uint8_t* NEXTVID::hiresRow = nullptr;
 uint8_t* NEXTVID::sprPatterns = nullptr;
 uint8_t  (*NEXTVID::sprAttr)[5] = nullptr;
 uint16_t NEXTVID::sprPatWrite = 0;
@@ -63,6 +65,10 @@ int  NEXTVID::paperTopRow = 0;
 int  NEXTVID::xPaperOff = 32;
 bool NEXTVID::skipFrame = false;
 static NextFramePacing framePacing;
+// Palette index 16 is never produced (buildRemap skips it: 0..15 ZX colours,
+// 17..183 the cube), so it marks "Timex hi-res pixel here" in lineBuf.
+static constexpr uint8_t HIRES_MARK = 16;
+static_assert(HIRES_MARK == 0x10, "RenderLine's word test spells it 0x10101010");
 #if NEXT_TRACE
 uint32_t g_nextvid_frames = 0; // completed frames with composition enabled
 #endif
@@ -115,6 +121,33 @@ void NEXTVID::buildRemap() {
             if (d < bestd) { bestd = d; best = j; }
         }
         remap[i] = (uint8_t)best;
+    }
+}
+
+// Timex hi-res runs the driver in packed-pair mode: every framebuffer byte is
+// a (left, right) pair of the 16 ZX colours. The ULA's 512 pixels are exact
+// (VIDEO's timex_hr_lut); every other layer's palette index — 0..15 the ZX
+// colours themselves, 17..183 the G3R3B2 cube (buildRemap) — becomes the solid
+// pair of its nearest ZX colour, the same limit every pair mode has.
+void NEXTVID::rebuildPairMap() {
+    if (!pairMap) return;
+    static const uint8_t zxlvl[2] = { 205, 255 };
+    for (int i = 0; i < 256; i++) {
+        int tr, tg, tb;
+        if (i < 16) {
+            const int l = zxlvl[(i >> 3) & 1];
+            tr = (i & 2) ? l : 0; tg = (i & 4) ? l : 0; tb = (i & 1) ? l : 0;
+        } else {
+            tr = ((i >> 2) & 7) * 255 / 7; tg = ((i >> 5) & 7) * 255 / 7; tb = (i & 3) * 255 / 3;
+        }
+        int best = 0; uint32_t bestd = 0xFFFFFFFFu;
+        for (int c = 0; c < 16; c++) {
+            const int l = zxlvl[(c >> 3) & 1];
+            const int dr = tr - ((c & 2) ? l : 0), dg = tg - ((c & 4) ? l : 0), db = tb - ((c & 1) ? l : 0);
+            const uint32_t d = (uint32_t)(dr * dr * 3 + dg * dg * 6 + db * db);
+            if (d < bestd) { bestd = d; best = c; }
+        }
+        pairMap[i] = VIDEO::profi_pair_lookup[best][best];
     }
 }
 
@@ -329,15 +362,18 @@ void NEXTVID::Reset() {
     if (!sprPatterns) {
         // One block, Next-boot only, never freed (the Next boundary reboots).
         // Layout: patterns 16K | copper 2K | rawPal 4K | lut 2K | sprAttr 640 |
-        // lineBuf 384 (word-aligned: 25216 is a multiple of 4)
-        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384);
+        // lineBuf 384 | pairMap 256 | hiresRow 256 (all word-aligned: 25216 is a
+        // multiple of 4)
+        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512);
         sprPatterns = blk;
         copperMem   = blk + 16384;
         rawPal      = (uint16_t(*)[256])(blk + 16384 + 2048);
         lut         = (uint8_t(*)[256])(blk + 16384 + 2048 + 8*256*2);
         sprAttr     = (uint8_t(*)[5])(blk + 16384 + 2048 + 8*256*2 + 8*256);
         lineBuf     = blk + 16384 + 2048 + 8*256*2 + 8*256 + 128*5;
-        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384);
+        pairMap     = lineBuf + 384;
+        hiresRow    = pairMap + 256;
+        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512);
     }
     buildRemap();
     defaultPalettes();
@@ -484,6 +520,30 @@ IRAM_ATTR void NEXTVID::ScanlineWork() {
 IRAM_ATTR void NEXTVID::RenderLine(int row) {
     uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
     RenderLayers(lineBuf, row);
+    if (VIDEO::timex_hires_live) {
+        // Packed-pair frame (Timex hi-res): the ULA left HIRES_MARK where its
+        // 512-pixel line goes (hiresRow, already pair slots); everything else
+        // is a palette index and becomes a solid pair.
+        // Word at a time: almost every 4-byte group is either all HIRES_MARK
+        // (take the hi-res word as is) or one colour (border, ULA-free paper);
+        // only groups that mix layers go byte by byte. xPaperOff is a multiple
+        // of 4 in both fb widths (32 / 52), so paper words line up with hiresRow.
+        const int x0 = xPaperOff, words = ((int)VIDEO::vga.xres + 3) >> 2;
+        uint32_t* lw = (uint32_t*)lineBuf;
+        const uint32_t* hw = (const uint32_t*)hiresRow;
+        for (int k = 0; k < words; k++) {
+            const uint32_t w = lw[k];
+            const int x = k << 2;
+            if (w == 0x10101010u && (unsigned)(x - x0) < 256u) { lw[k] = hw[(x - x0) >> 2]; continue; }
+            const uint8_t b0 = (uint8_t)w;
+            if (w == b0 * 0x01010101u && b0 != HIRES_MARK) { lw[k] = pairMap[b0] * 0x01010101u; continue; }
+            uint8_t* b = (uint8_t*)&lw[k];
+            for (int i = 0; i < 4; i++) {
+                const uint8_t v = b[i];
+                b[i] = (v == HIRES_MARK && (unsigned)(x + i - x0) < 256u) ? hiresRow[x + i - x0] : pairMap[v];
+            }
+        }
+    }
     const uint32_t* src = (const uint32_t*)lineBuf;
     const int words = ((int)VIDEO::vga.xres + 3) >> 2;
     int k0 = words, k1 = words;                    // [k0, k1) = words left alone
@@ -534,6 +594,22 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         uint8_t sxl = NextReg::reg[0x32];
         for (int x = 0; x < 256; x++)
             p[x] = ulaLut[base[(uint8_t)(x + sxl) >> 1]];
+    }
+    else if (!(NextReg::reg[0x68] & 0x80) && VIDEO::timex_hires_live) {
+        // Timex hi-res 512x192: screen 0 (0x4000) gives the left 8 pixels of
+        // each 16-pixel column, screen 1 (0x6000) the right 8 — the TC2048
+        // layout VIDEO's renderer uses, and its nibble LUT (ink/paper from port
+        // FF bits 5:3, all BRIGHT). hiresRow gets the pair slots in linear
+        // order; the paper carries HIRES_MARK so layers drawn over the ULA win.
+        const uint16_t* hl = VIDEO::timexHiresLut();
+        const uint8_t* bmp = VIDEO::grmem + VIDEO::offBmp[y];
+        uint32_t* hr = (uint32_t*)hiresRow;
+        for (int col = 0; col < 32; col++) {
+            const uint8_t e = bmp[col], o = bmp[col + 0x2000];
+            hr[2 * col]     = (uint32_t)hl[e >> 4] | ((uint32_t)hl[e & 0x0F] << 16);
+            hr[2 * col + 1] = (uint32_t)hl[o >> 4] | ((uint32_t)hl[o & 0x0F] << 16);
+        }
+        memset(p, HIRES_MARK, 256);
     }
     else if (!(NextReg::reg[0x68] & 0x80)) {
         const uint8_t* bmp = VIDEO::grmem + VIDEO::offBmp[y];

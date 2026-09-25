@@ -69,6 +69,10 @@ public:
     static void copperControl(uint8_t v);      // reg 0x62: index MSB + mode
     static void copperData16Write(uint8_t v);  // reg 0x63: 16-bit two-write
 
+    // Timex hi-res: rebuild the palette-index -> pair-slot table (VIDEO's
+    // EndFrame, when the packed-pair driver comes on).
+    static void rebuildPairMap();
+
 private:
     static void ScanlineWork();
     static void RenderLine(int row);
@@ -85,6 +89,8 @@ private:
     // pays. Pointer-to-array types keep the 2D indexing syntax intact.
     static uint8_t* sprPatterns;         // [16384] 64 patterns x 256B
     static uint8_t* lineBuf;             // [384] one row, composed linearly, copied rotated
+    static uint8_t* pairMap;             // [256] Timex hi-res: palette index -> solid pair slot
+    static uint8_t* hiresRow;            // [256] Timex hi-res: this row's ULA as pair slots, linear
     static uint8_t  (*sprAttr)[5];       // [128][5]
     static uint16_t sprPatWrite;         // pattern upload byte position
     static uint8_t  sprAttrSlot;         // attribute upload sprite index

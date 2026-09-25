@@ -18,6 +18,8 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include <cstdio>
 #include <cstring>
 
+static void applyTimexMode(uint8_t v);   // port FF / NR 0x69 screen-mode bits (below)
+
 extern "C" const unsigned char gb_rom_tbblue_loader[];  // src/speccy/roms/next/
 
 #pragma GCC optimize("O3")
@@ -225,6 +227,7 @@ void NextReg::reset(bool hard) {
     // boot stages with config mode already off; re-arming would loop the boot).
     portFF = 0;
     portFFIntDisable = false;
+    applyTimexMode(0);   // leave Timex hi-res with the latch
     port7FFD = 0;
     portDFFD = 0;
     port1FFD = 0;
@@ -393,6 +396,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
                      // renderer), bit6 = ULA shadow display — the same latch
                      // as port 7FFD bit 3 (hw: NextZXOS drew its boot screen
                      // into bank 7 via this and we kept showing blank bank 5)
+            applyTimexMode(v & 0x3F);
             uint8_t vl = (v >> 6) & 1;
             if (MemESP::videoLatch != vl) {
                 MemESP::videoLatch = vl;
@@ -504,10 +508,23 @@ void NextReg::writeLayer2Port(uint8_t v) {
 // Timex/SCLD port 0xFF. bit6 = ULA frame INT disable (consumed by
 // Z80Ops::isActiveINT alongside nextreg 0x22 bit 2); bits 5:0 mirror into
 // nextreg 0x69, which is what NEXTVID reads for the screen-mode bits.
+// Screen-mode bits 5:0 (port FF and NR 0x69 are one latch): hand the Timex
+// mode to VIDEO's hi-res machinery, which switches the driver in vblank.
+static void applyTimexMode(uint8_t v) {
+    const uint8_t pm = VIDEO::timex_mode, pi = VIDEO::timex_hires_ink;
+    VIDEO::timex_mode = v & 0x07;
+    VIDEO::timex_hires_ink = (v >> 3) & 0x07;
+    if ((VIDEO::timex_mode == 6) != (pm == 6))
+        VIDEO::timexHiresRequest(VIDEO::timex_mode == 6);
+    else if (VIDEO::timex_hires_ink != pi && VIDEO::timex_hires_live)
+        VIDEO::timexHiresColour();
+}
+
 void NextReg::writePortFF(uint8_t v) {
     portFF = v;
     portFFIntDisable = (v & 0x40) != 0;
     reg[0x69] = (uint8_t)((reg[0x69] & 0xC0) | (v & 0x3F));
+    applyTimexMode(v);
     NT_EV('F', 0xFF, v);
 }
 

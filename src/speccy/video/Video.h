@@ -633,6 +633,7 @@ public:
   static void timexHiresRefresh();             // ... or the ZX palette was rebuilt
   static uint8_t timexHiresInk();              // 4-bit pair index, always BRIGHT
   static uint8_t timexHiresPaper();            // ... = ink ^ 7, also the border
+  static const uint16_t* timexHiresLut();      // nibble -> 2 pair bytes (NEXTVID reuses it)
 
   // ULA+
   static bool ulaplus_enabled;

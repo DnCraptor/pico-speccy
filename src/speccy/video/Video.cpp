@@ -518,6 +518,7 @@ static uint16_t timex_hr_lut[16];
 // on BRIGHT, MAME alone renders the non-bright half of the palette.
 uint8_t VIDEO::timexHiresInk()   { return (uint8_t)((timex_hires_ink & 7) | 8); }
 uint8_t VIDEO::timexHiresPaper() { return (uint8_t)((~timex_hires_ink & 7) | 8); }
+const uint16_t* VIDEO::timexHiresLut() { return timex_hr_lut; }
 uint8_t VIDEO::gmx_border_col = 0xFF;
 
 // Per-frame cost meters for the TS-Conf whole-line renderer (PERF_TRACE line).
@@ -8362,6 +8363,14 @@ IRAM_ATTR void VIDEO::EndFrame() {
     Debug::pumpUart();
 
     if (Z80Ops::isNext) {
+        // Timex hi-res (port FF %110 / NR 0x69): the same vblank-deferred
+        // packed-pair switch as on a TC2048; NEXTVID then renders the ULA at
+        // 512 px and maps its other layers onto the 16 pair colours.
+        {
+            const bool was = timex_hires_live;
+            timexHiresApplyPending();
+            if (timex_hires_live && !was) NEXTVID::rebuildPairMap();
+        }
         NEXTVID::EndFrame();
         tsFastMemRecalc();   // TsFastMem.h: breakpoints can revoke it per frame
         framecnt++;
