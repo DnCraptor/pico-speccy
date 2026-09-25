@@ -102,6 +102,7 @@ bool     Config::wasd = true;
 Config::BreakPoint Config::breakPoints[Config::MAX_BREAKPOINTS];
 int Config::numBreakPoints = 0;
 int Config::numPcBP = 0;
+uint32_t Config::bpPcFilter[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 int Config::numPortReadBP = 0;
 int Config::numPortWriteBP = 0;
 int Config::numMemWriteBP = 0;

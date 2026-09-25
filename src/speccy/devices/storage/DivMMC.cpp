@@ -598,6 +598,9 @@ void DivMMC::applyMapping() {
         materialize(b);
         MemESP::page0_hi = bank_ptr[b];
         MemESP::divmmc_mapped = true;
+        if (Config::arch == A_NEXT && MemESP::nextRamReady &&
+            !MemESP::nextBootRomActive && !MemESP::nextConfigMode)
+            MemESP::nextDivPlug();
         // Track slot indices for dirty marking
         if (!use_psram) {
             hi_slot = -1;
@@ -625,6 +628,12 @@ void DivMMC::applyMapping() {
         lo_slot = -1;
         MemESP::divmmc_hi_dirty = nullptr;
         MemESP::divmmc_lo_dirty = nullptr;
+    }
+    // Next: the fast read level (TsFastMem.h) follows the mapping — re-derive
+    // it on every change (the window itself is in ramCurrent[0/1] while paged in).
+    if (Config::arch == A_NEXT) {
+        extern void ts_fastrd_recalc();
+        ts_fastrd_recalc();
     }
 }
 
@@ -1065,6 +1074,7 @@ void DivMMC::raInvalidate() {
     s_sq_count = 0;
 }
 
+
 void DivMMC::loadSector(uint32_t sector) {
     if (divsd_mode) {
         // Read-ahead hit: no card access at all
@@ -1129,6 +1139,9 @@ void DivMMC::storeSector(uint32_t sector) {
             raInvalidate();
         uint64_t t0 = time_us_64();
         DRESULT r = disk_write(raw_pdrv(), mmc_sector_buf, sector, 1);
+        // The firmware's FatFs has this volume mounted too: drop its cached copy
+        // of the sector and adopt the guest's FSInfo (ff.c, PICO-SPEC PATCH).
+        if (r == RES_OK) ff_raw_write_notify(raw_pdrv(), sector, mmc_sector_buf);
         g_sd_stall_us += (uint32_t)(time_us_64() - t0);
         g_sd_ops++;
 #if ZC_PORT_TRACE
@@ -1180,14 +1193,26 @@ void DivMMC::mmc_cs(uint8_t value) {
 // block is programmed, then 0xFF for ever. Drivers wait for BOTH edges — the
 // token to know it was accepted, the return to 0xFF to know the card is free —
 // so the sequence has to end, and end at 0xFF.
-uint8_t DivMMC::mmcWriteResponse() {
+// The SD read path in SRAM (DIVMMC_HOT_IN_RAM, the TSCONF_HOT_IN_RAM pattern):
+// every IN (EB) lands here — 512 per sector through INIR, and NextZXOS's SD
+// driver polls it up to 12800 times after each sector write (its busy wait ends
+// only on timeout, enNextZX page 2 0x1925/0x19A1). From flash each call waited
+// behind butter-PSRAM line fills in the one XIP cache: ~3.6 us per IN on the
+// Next at 14 MHz (hw 2026-09-25, PERF_HIST: IN/CP/RET NZ/DJNZ at 1320 ns avg).
+#if DIVMMC_HOT_IN_RAM
+#define DIVMMC_HOT __not_in_flash("divmmc")
+#else
+#define DIVMMC_HOT
+#endif
+
+DIVMMC_HOT uint8_t DivMMC::mmcWriteResponse() {
     const uint8_t v = (mmc_wr_resp == 0) ? 0x05 : (mmc_wr_resp == 1) ? 0x00 : 0xFF;
     if (mmc_wr_resp < 2) mmc_wr_resp++;
     return v;
 }
 
 // Port 0xEB read — SD protocol response
-uint8_t DivMMC::mmc_read() {
+DIVMMC_HOT uint8_t DivMMC::mmc_read() {
     if (!mmc_file_open[0] && !divsd_mode) return 0xFF;
     if (!mmc_cs_active) return 0xFF;
 

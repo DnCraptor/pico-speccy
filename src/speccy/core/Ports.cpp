@@ -1028,6 +1028,17 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       TsConf::fddPortIo(address, false, 0) == TsConf::FDD_EATEN)
     return 0xFF;
 
+  // Spectrum Next: the SD SPI data port answers here, before the ~40 other
+  // machines' decodes below — the TS-Conf #nnAF shape. It is the hottest port
+  // the Next has: 512 reads a sector through INIR, and NextZXOS's driver polls
+  // it up to 12800 times after every sector write (enNextZX page 2 0x1925 /
+  // 0x19A1 — its busy wait only ends on timeout). Nothing between here and the
+  // DivMMC branch claims 0xEB on the Next, so the answer is the same one.
+  if (Z80Ops::isNext && (address & 0xFF) == 0xEB && DivMMC::enabled && !DivMMC::divide_mode) {
+    LED::touchR(LED::SD);
+    return DivMMC::mmc_read();
+  }
+
   if (MEM_PG_CNT > 64 && !Z80Ops::isTsconf && address == 0xAFF7) {
     LED::touchR(LED::RAM);
     return portAFF7;

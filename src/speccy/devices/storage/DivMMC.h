@@ -214,7 +214,9 @@ private:
 
 // ZEsarUX-style automap: pre-fetch check
 // Called BEFORE opcode is fetched
-inline void DivMMC::preOpcFetch(uint16_t pc) {
+// always_inline: -Os declined to inline these and paid a call on every fetch
+// (PC profile 2026-09-25: ~13% of core0 time in NextZXOS's divMMC phases).
+__attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
     // Every entry point (0000/0008/0038/0066/04C6/0562), the 3D00-3DFF instant
     // map and the 1FF8-1FFF off-points live below 0x4000, so a fetch from RAM
     // space cannot arm anything: one compare instead of six plus two stores on
@@ -311,7 +313,7 @@ inline void DivMMC::preOpcFetch(uint16_t pc) {
 }
 
 // Called AFTER opcode is fetched (and PC incremented)
-inline void DivMMC::postOpcFetch() {
+__attribute__((always_inline)) inline void DivMMC::postOpcFetch() {
     if (trap_after) {
         trap_after = false;
         automap = true;

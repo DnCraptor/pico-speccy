@@ -1013,6 +1013,9 @@ void MemESP::applyMMU(uint8_t slot, uint8_t page) {
             p = (uint8_t*)open_bus_page.b;
     }
     ramCurrent[slot] = p;
+    // divMMC paged in: the window, not the MMU page, is what 0x0000-0x3FFF
+    // shows (see nextDivPlug) — mmu[]/next_rom_mask above still track the MMU.
+    if (slot <= 1 && divmmc_mapped) ramCurrent[slot] = slot ? page0_hi : page0_lo;
     ramContended[slot] = false; // Next has no contention
     // Next pages are direct pointers (SRAM or butter XIP) — no pool
     // write-back tracking, so the write hooks must not touch a stale

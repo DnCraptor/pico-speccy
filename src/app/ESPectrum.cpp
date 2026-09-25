@@ -1275,6 +1275,11 @@ void ESPectrum::setup() {
 
   if (Config::arch == A_NEXT && MemESP::nextRamReady) {
     NextReg::reset(true);
+    // Match NR 07's reset value, just as ESPectrum::reset() does. Restoring
+    // the generic NVS turbo above otherwise boots Next at up to 28 MHz
+    // while NR 07 says 3.5 MHz (93 ms for the first frame on hardware).
+    // CPU::reset() and VIDEO::Reset() below derive timing from this value.
+    ESPectrum::multiplicator = 0;
     MemESP::resetNextMapping();
   }
 
@@ -1652,6 +1657,9 @@ void ESPectrum::setup() {
   UsbMsc::armHotplug();
 
   Debug::log("setup: COMPLETE, freeHeap=%u", getFreeHeap());
+#if PERF_TRACE && PERF_HIST
+  { extern void pcprof_start(); pcprof_start(); }   // PcProf.cpp: core0 PC sampling
+#endif
   Debug::log2SD("setup: COMPLETE, freeHeap=%u", (unsigned)getFreeHeap());
 
   // Create loop function as task: it doesn't seem better than calling from
@@ -2275,7 +2283,7 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
   bool j[10] = {true, true, true, true, true, true, true, true, true, true};
   bool jShift = true;
 
-  if ((Config::numPcBP > 0 && Config::hasBreakPoint(Z80::getRegPC(), Config::BP_PC)) ||
+  if ((Config::numPcBP > 0 && Config::pcBreakHit(Z80::getRegPC())) ||
       CPU::portBasedBP) {
     int64_t osd_start = esp_timer_get_time();
     OSD::osdDebug();

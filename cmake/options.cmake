@@ -73,6 +73,7 @@ option(TSCONF_DRAM_MODEL "TS-Conf: model DRAM contention (CPU/video vs DMA) and 
 # already drives (core0 sync while a NeoGS is playing, core1 queue otherwise).
 # The queue is started lazily and only on TS-Conf, so there was nothing to gate.
 option(WD1793_IN_RAM "WD1793: keep the FDC step/read/write/_do code in SRAM (~6.8 KB). OFF since 2026-09-30: flash is fast enough now that the Z80 core is in SRAM" OFF)
+option(DIVMMC_HOT_IN_RAM "DivMMC/DivSD: keep the SD SPI read path (port 0xEB, mmc_read) in SRAM (~0.9 KB; every IN (EB) otherwise fetches flash code through the XIP cache the Next's butter RAM keeps busy)" ON)
 option(TSCONF_HOT_IN_RAM "TS-Conf: keep the #nnAF port / DMA / INT-source code in SRAM (~4 KB; ~0.8 ms/frame on port-heavy titles)" ON)
 option(TSCONF_RENDER_IN_RAM "TS-Conf: keep the whole-line renderer (tsRenderExec + tsuComposeLine) in SRAM (~10 KB)" ON)
 

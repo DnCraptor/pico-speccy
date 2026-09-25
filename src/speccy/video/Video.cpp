@@ -589,6 +589,8 @@ static uint64_t ts_frame_start_us = 0;
 #define TSPAL_PALGEN()             ((void)0)
 #endif
 uint8_t g_ts_fastmem = 0;
+uint8_t g_ts_fastrd = 0;    // TsFastMem.h: the read twin
+bool g_next_fastrd = false; // Z80_JLS/next_memory.h: inline operand reads
 bool     VIDEO::ts_tsu_live = false;
 bool     VIDEO::ts_pal256_live = false;
 bool     VIDEO::tsPalScanWanted = false;
@@ -5194,7 +5196,8 @@ void VIDEO::Reset() {
         Draw = &Blank;
         Draw_Opcode = &Blank_Opcode;
     }
-    ts_fast_armed = false; ts_line_t = 0xFFFFFFFFu; g_ts_fastmem = 0;   // TsFastMem.h: re-armed by EndFrame
+    ts_fast_armed = false; ts_line_t = 0xFFFFFFFFu; g_ts_fastmem = 0; g_ts_fastrd = 0; // TsFastMem.h: re-armed by EndFrame
+    g_next_fastrd = false;
     col16_fast = false;
 
     // Restart border drawing + main screen draw state
@@ -6360,6 +6363,19 @@ IRAM_ATTR void VIDEO::Blank(unsigned int statestoadd, bool contended) { CPU::tst
 // See TsFastMem.h. Called at the EndFrame arming and from the NeoGS ZX-DMA
 // window toggles (GS.cpp) — anything that must revoke the fast path mid-frame.
 void ts_fastmem_recalc() { VIDEO::tsFastMemRecalc(); }
+// The Next's read level (TsFastMem.h). Cheap on purpose: DivMMC::applyMapping
+// runs it on every automap on/off, i.e. every RST 8 of an esxDOS call.
+static inline uint8_t tsFastRdFor(uint8_t mem) {
+    extern volatile uint8_t g_ngs_zxdma;
+    if (mem != 1) return mem;   // TS-Conf (2) / off (0): reads == writes
+    // divMMC paged in no longer revokes it: the window is plugged into
+    // ramCurrent[0/1] while it is up (MemESP::nextDivPlug).
+    return (MemESP::nextRomBase && !g_ngs_zxdma) ? 2 : 1;
+}
+void ts_fastrd_recalc() {
+    g_ts_fastrd = tsFastRdFor(g_ts_fastmem);
+    g_next_fastrd = g_ts_fastmem == 1 && g_ts_fastrd == 2;
+}
 void VIDEO::tsFastMemRecalc() {
     extern volatile uint8_t g_ngs_zxdma;
     // No overlay test: TS-Conf's bank pointers are TsConf::romPtr() flash pages or
@@ -6386,6 +6402,8 @@ void VIDEO::tsFastMemRecalc() {
                                             (col16_fast && ts_fast_armed && col16_memok))
                                            && Config::numMemReadBP == 0 && Config::numMemWriteBP == 0
                                            && !g_ngs_zxdma && !MemESP::divmmc_mapped) ? 2 : 0;
+    g_ts_fastrd = tsFastRdFor(v);
+    g_next_fastrd = v == 1 && g_ts_fastrd == 2;
     if (v != g_ts_fastmem) {
         g_ts_fastmem = v;
         Debug::log("[TSF] fast memory path %s%s (render=%u armed=%u ft=%u bp=%d/%d zxdma=%u divmmc=%u)", v ? "ON" : "off", v == 1 ? " (Next, >= 0x4000)" : "",

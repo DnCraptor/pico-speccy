@@ -46,6 +46,7 @@
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/core/Rzx.h"     // Rzx::mode / onIn: RZX playback substitutes every IN
 #include "speccy/machines/Next/NextReg.h"
+#include "speccy/z80/next_memory.h"
 
 
 // #include "speccy/core/Snapshot.h"
@@ -688,7 +689,7 @@ void Z80::daa(void) {
 
 // POP
 uint16_t Z80::pop(void) {
-    uint16_t word = Z80Ops::peek16(REG_SP);
+    uint16_t word = NextMemory::peek16(REG_SP);
     REG_SP = REG_SP + 2;
     return word;
 }
@@ -1429,7 +1430,7 @@ IRAM_ATTR void Z80::exec_nocheck() {
 
     while (CPU::tstates < CPU::stFrame) {
 
-        if (nbp > 0 && Config::hasBreakPoint(REG_PC, Config::BP_PC)) { z80_in_nocheck = false; return; }
+        if (nbp > 0 && Config::pcBreakHit(REG_PC)) { z80_in_nocheck = false; return; }
 #if NEO8_TRAP
         Debug::neo8TrapStep(REG_PC, REG_SP, REG_IX, REG_IY);
 #endif
@@ -1438,6 +1439,16 @@ IRAM_ATTR void Z80::exec_nocheck() {
             tsFastTick(4);
             if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(REG_PC)) tsFastTick(TsConf::cpuMemMiss(REG_PC, true));   // DRAM model: a cache miss
             opCode = MemESP::ramCurrent[pg][REG_PC & 0x1fff];
+        } else if (g_ts_fastrd == 2) {
+            // Next below 0x4000 (TS-Conf is fully served by the branch above):
+            // ROM, MMU RAM or the divMMC window, all plain pointers in
+            // ramCurrent[0/1]. The automap hooks may re-plug the slot, so the
+            // load follows them.
+            tsFastTick(4);
+            if (divmmc) DivMMC::preOpcFetch(REG_PC);
+            pg = REG_PCh >> 5;
+            opCode = MemESP::ramCurrent[pg][REG_PC & 0x1fff];
+            if (divmmc) DivMMC::postOpcFetch();
         } else {
         VIDEO::Draw_Opcode(MemESP::ramContended[pg]);
         if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(REG_PC)) {   // TS-Conf DRAM model (TsConf.cpp)
@@ -2667,7 +2678,7 @@ uint8_t* const Z80::reg8[8] __attribute__((section(".time_critical.z80"))) = {
 void Z80::decodeLD8() {   /* LD r,r' 0x40-0x7F (0x76 = HALT keeps its own handler) */
     const uint8_t op = opCode;
     uint8_t* src = reg8[op & 7];
-    const uint8_t v = src ? *src : Z80Ops::peek8(REG_HL);
+    const uint8_t v = src ? *src : NextMemory::peek8(REG_HL);
     uint8_t* dst = reg8[(op >> 3) & 7];
     if (dst) *dst = v; else Z80Ops::poke8(REG_HL, v);
 }
@@ -2675,7 +2686,7 @@ void Z80::decodeLD8() {   /* LD r,r' 0x40-0x7F (0x76 = HALT keeps its own handle
 void Z80::decodeALU8() {  /* ADD/ADC/SUB/SBC/AND/XOR/OR/CP A,r 0x80-0xBE (0xBF = CP A keeps the tape LOAD trap) */
     const uint8_t op = opCode;
     uint8_t* src = reg8[op & 7];
-    const uint8_t v = src ? *src : Z80Ops::peek8(REG_HL);
+    const uint8_t v = src ? *src : NextMemory::peek8(REG_HL);
     switch ((op >> 3) & 7) {
         case 0: add(v); break;
         case 1: adc(v); break;
@@ -2709,7 +2720,7 @@ void Z80::decodeRETcc() {  /* RET cc */
 }
 
 void Z80::decodeJPcc() {   /* JP cc,nn */
-    REG_WZ = Z80Ops::peek16(REG_PC);
+    REG_WZ = NextMemory::peek16(REG_PC);
     if (condMet((opCode >> 3) & 7)) {
         REG_PC = REG_WZ;
         check_trdos();
@@ -2719,7 +2730,7 @@ void Z80::decodeJPcc() {   /* JP cc,nn */
 }
 
 void Z80::decodeCALLcc() { /* CALL cc,nn */
-    REG_WZ = Z80Ops::peek16(REG_PC);
+    REG_WZ = NextMemory::peek16(REG_PC);
     if (condMet((opCode >> 3) & 7)) {
         Z80Ops::addressOnBus(REG_PC + 1, 1);
         push(REG_PC + 2);
@@ -2779,7 +2790,7 @@ void Z80::decodeINCDEC8() { /* INC r (bit 0 clear) / DEC r (bit 0 set), incl. (H
         if (op & 1) dec8(*p); else inc8(*p);
         return;
     }
-    uint8_t work8 = Z80Ops::peek8(REG_HL);
+    uint8_t work8 = NextMemory::peek8(REG_HL);
     if (op & 1) dec8(work8); else inc8(work8);
     Z80Ops::addressOnBus(REG_HL, 1);
     Z80Ops::poke8(REG_HL, work8);
@@ -2796,7 +2807,7 @@ void Z80::decodeCB() {
     const uint8_t n = (op >> 3) & 7;
     const uint8_t mask = 1u << n;
     uint8_t* reg = reg8[r];
-    uint8_t work8 = reg ? *reg : Z80Ops::peek8(REG_HL);
+    uint8_t work8 = reg ? *reg : NextMemory::peek8(REG_HL);
     switch (op >> 6) {
         case 0:
             switch (n) {
@@ -2860,12 +2871,12 @@ void Z80::decodeDDFDLD8(RegisterPair& regIXY) {   /* LD r,r' block under DD/FD, 
     const uint8_t op = opCode;
     const int s = op & 7, d = (op >> 3) & 7;
     if (s == 6) {                 // LD r,(IX+d): r is the REAL register, H/L included
-        REG_WZ = regIXY.word + (int8_t) Z80Ops::peek8(REG_PC);
+        REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
         Z80Ops::addressOnBus(REG_PC, 5);
         REG_PC++;
-        *reg8[d] = Z80Ops::peek8(REG_WZ);
+        *reg8[d] = NextMemory::peek8(REG_WZ);
     } else if (d == 6) {          // LD (IX+d),r: likewise
-        REG_WZ = regIXY.word + (int8_t) Z80Ops::peek8(REG_PC);
+        REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
         Z80Ops::addressOnBus(REG_PC, 5);
         REG_PC++;
         Z80Ops::poke8(REG_WZ, *reg8[s]);
@@ -2879,10 +2890,10 @@ void Z80::decodeDDFDALU8(RegisterPair& regIXY) {  /* ADD..CP A,r / A,(IX+d) unde
     const int s = op & 7;
     uint8_t v;
     if (s == 6) {
-        REG_WZ = regIXY.word + (int8_t) Z80Ops::peek8(REG_PC);
+        REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
         Z80Ops::addressOnBus(REG_PC, 5);
         REG_PC++;
-        v = Z80Ops::peek8(REG_WZ);
+        v = NextMemory::peek8(REG_WZ);
     } else {
         v = *ixyReg8(s, regIXY);
     }
@@ -2914,13 +2925,13 @@ void Z80::decodeDDFD(RegisterPair& regIXY) {
         }
         case 0x21:
         { /* LD IX,nn */
-            regIXY.word = Z80Ops::peek16(REG_PC);
+            regIXY.word = NextMemory::peek16(REG_PC);
             REG_PC = REG_PC + 2;
             break;
         }
         case 0x22:
         { /* LD (nn),IX */
-            REG_WZ = Z80Ops::peek16(REG_PC);
+            REG_WZ = NextMemory::peek16(REG_PC);
             Z80Ops::poke16(REG_WZ++, regIXY);
             REG_PC = REG_PC + 2;
             break;
@@ -2943,7 +2954,7 @@ void Z80::decodeDDFD(RegisterPair& regIXY) {
         }
         case 0x26:
         { /* LD IXh,n */
-            regIXY.byte8.hi = Z80Ops::peek8(REG_PC);
+            regIXY.byte8.hi = NextMemory::peek8(REG_PC);
             REG_PC++;
             break;
         }
@@ -2955,8 +2966,8 @@ void Z80::decodeDDFD(RegisterPair& regIXY) {
         }
         case 0x2A:
         { /* LD IX,(nn) */
-            REG_WZ = Z80Ops::peek16(REG_PC);
-            regIXY.word = Z80Ops::peek16(REG_WZ++);
+            REG_WZ = NextMemory::peek16(REG_PC);
+            regIXY.word = NextMemory::peek16(REG_WZ++);
             REG_PC = REG_PC + 2;
             break;
         }
@@ -3055,16 +3066,16 @@ void Z80::decodeDDFD(RegisterPair& regIXY) {
         }
         case 0x2E:
         { /* LD IXl,n */
-            regIXY.byte8.lo = Z80Ops::peek8(REG_PC);
+            regIXY.byte8.lo = NextMemory::peek8(REG_PC);
             REG_PC++;
             break;
         }
         case 0x34:
         { /* INC (IX+d) */
-            REG_WZ = regIXY.word + (int8_t) Z80Ops::peek8(REG_PC);
+            REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
             Z80Ops::addressOnBus(REG_PC, 5);
             REG_PC++;
-            uint8_t work8 = Z80Ops::peek8(REG_WZ);
+            uint8_t work8 = NextMemory::peek8(REG_WZ);
             Z80Ops::addressOnBus(REG_WZ, 1);
             inc8(work8);
             Z80Ops::poke8(REG_WZ, work8);
@@ -3072,10 +3083,10 @@ void Z80::decodeDDFD(RegisterPair& regIXY) {
         }
         case 0x35:
         { /* DEC (IX+d) */
-            REG_WZ = regIXY.word + (int8_t) Z80Ops::peek8(REG_PC);
+            REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
             Z80Ops::addressOnBus(REG_PC, 5);
             REG_PC++;
-            uint8_t work8 = Z80Ops::peek8(REG_WZ);
+            uint8_t work8 = NextMemory::peek8(REG_WZ);
             Z80Ops::addressOnBus(REG_WZ, 1);
             dec8(work8);
             Z80Ops::poke8(REG_WZ, work8);
@@ -3083,9 +3094,9 @@ void Z80::decodeDDFD(RegisterPair& regIXY) {
         }
         case 0x36:
         { /* LD (IX+d),n */
-            REG_WZ = regIXY.word + (int8_t) Z80Ops::peek8(REG_PC);
+            REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
             REG_PC++;
-            uint8_t work8 = Z80Ops::peek8(REG_PC);
+            uint8_t work8 = NextMemory::peek8(REG_PC);
             Z80Ops::addressOnBus(REG_PC, 2);
             REG_PC++;
             Z80Ops::poke8(REG_WZ, work8);
@@ -3129,9 +3140,9 @@ void Z80::decodeDDFD(RegisterPair& regIXY) {
         }
         case 0xCB:
         { /* Subconjunto de instrucciones */
-            REG_WZ = regIXY.word + (int8_t) Z80Ops::peek8(REG_PC);
+            REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
             REG_PC++;
-            opCode = Z80Ops::peek8(REG_PC);
+            opCode = NextMemory::peek8(REG_PC);
             Z80Ops::addressOnBus(REG_PC, 2);
             REG_PC++;
             decodeDDFDCB(REG_WZ);
@@ -3149,7 +3160,7 @@ void Z80::decodeDDFD(RegisterPair& regIXY) {
         { /* EX (SP),IX */
             // Instrucción de ejecución sutil como pocas... atento al dato.
             RegisterPair work16 = regIXY;
-            regIXY.word = Z80Ops::peek16(REG_SP);
+            regIXY.word = NextMemory::peek16(REG_SP);
             Z80Ops::addressOnBus(REG_SP + 1, 1);
             // I can't call to poke16 from here because the Z80 do the writes in inverted order
             // Same for EX (SP), HL
@@ -3219,7 +3230,7 @@ void Z80::decodeDDFDCB(uint16_t address) {
     const uint8_t op = opCode;
     const uint8_t n = (op >> 3) & 7;
     const uint8_t mask = 1u << n;
-    uint8_t work8 = Z80Ops::peek8(address);
+    uint8_t work8 = NextMemory::peek8(address);
     switch (op >> 6) {
         case 0:
             switch (n) {

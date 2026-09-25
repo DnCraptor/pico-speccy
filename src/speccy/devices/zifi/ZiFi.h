@@ -162,9 +162,13 @@ private:
     static inline bool    fifo_full(uint8_t head, uint8_t tail)  { return (uint8_t)(head - tail) == 255; }
 
     // IN ring helpers (zifi_in_size, free-running uint16_t; access masked).
-    static inline uint16_t in_fill()  { return (uint16_t)(zifi_in_head - zifi_in_tail); }
-    static inline bool     in_empty() { return zifi_in_head == zifi_in_tail; }
-    static inline bool     in_full()  { return in_fill() >= zifi_in_size; }
+    // always_inline: uart_rx_irq_handler() is RAM-resident and calls in_full();
+    // at -Os GCC emitted in_fill() out of line in FLASH, i.e. an ISR fetching
+    // flash code — hw 2026-09-25: SIGBUS PC=0 from the UART0 IRQ right after
+    // ZiFi init. Anything an ISR calls must be RAM or inlined.
+    __attribute__((always_inline)) static inline uint16_t in_fill()  { return (uint16_t)(zifi_in_head - zifi_in_tail); }
+    __attribute__((always_inline)) static inline bool     in_empty() { return zifi_in_head == zifi_in_tail; }
+    __attribute__((always_inline)) static inline bool     in_full()  { return in_fill() >= zifi_in_size; }
 
     static bool rxRingResize(uint16_t sz);   // move the ring to a block of sz bytes
     static void rxRingFit(bool grow);        // settle the size on rxWantSize()

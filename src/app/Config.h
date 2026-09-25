@@ -290,13 +290,25 @@ public:
     static int numPortWriteBP;
     static int numMemWriteBP;
     static int numMemReadBP;
+    // PC breakpoints are checked on EVERY instruction; a full scan of the 20
+    // slots was 9% of core0 time with one breakpoint set (they persist in NVS,
+    // so a forgotten one costs every session — PC profile, Next, 2026-09-25).
+    // One bit per low byte of the address, rebuilt by recountBP: the scan runs
+    // only on a matching low byte.
+    static uint32_t bpPcFilter[8];
+    static inline bool pcBreakHit(uint16_t pc) {
+        return ((bpPcFilter[(pc >> 5) & 7] >> (pc & 31)) & 1) && hasBreakPoint(pc, BP_PC);
+    }
     static void recountBP() {
         numBreakPoints = numPcBP = numPortReadBP = numPortWriteBP = numMemWriteBP = numMemReadBP = 0;
+        for (int i = 0; i < 8; i++) bpPcFilter[i] = 0;
         for (int i = 0; i < MAX_BREAKPOINTS; i++) {
             if (breakPoints[i].type == BP_NONE) continue;
             numBreakPoints++;
             switch (breakPoints[i].type) {
-                case BP_PC: numPcBP++; break;
+                case BP_PC: numPcBP++;
+                    bpPcFilter[(breakPoints[i].addr >> 5) & 7] |= 1u << (breakPoints[i].addr & 31);
+                    break;
                 case BP_PORT_READ: numPortReadBP++; break;
                 case BP_PORT_WRITE: numPortWriteBP++; break;
                 case BP_MEM_WRITE: numMemWriteBP++; break;

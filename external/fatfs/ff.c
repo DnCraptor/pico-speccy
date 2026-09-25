@@ -1137,12 +1137,27 @@ static FRESULT sync_fs (	/* Returns FR_OK or FR_DISK_ERR */
 		if (fs->fsi_flag == 1) {	/* Allocation changed? */
 			fs->fsi_flag = 0;
 			if (fs->fs_type == FS_FAT32) {	/* FAT32: Update FSInfo sector */
+				/* PICO-SPEC PATCH: never LOWER the card's next-free hint. The card is
+				   shared with a guest OS writing it raw (NextZXOS / esxDOS through the
+				   divMMC SD emulation), and FatFs moves its own hint back to the start
+				   of every file it rewrites with FA_CREATE_ALWAYS ("reuse the cluster
+				   hole" in f_open). Writing that back made the guest's next save search
+				   the FAT from the start -- minutes on a large card (hw 2026-09-25).
+				   The hint is advisory, so keeping the higher value is always legal. */
+				DWORD nxt = fs->last_clst;
+				if (disk_read(fs->pdrv, fs->win, fs->volbase + 1, 1) == RES_OK
+					&& ld_32(fs->win + FSI_LeadSig) == 0x41615252
+					&& ld_32(fs->win + FSI_StrucSig) == 0x61417272
+					&& ld_32(fs->win + FSI_TrailSig) == 0xAA550000) {
+					DWORD dnf = ld_32(fs->win + FSI_Nxt_Free);
+					if (dnf >= 2 && dnf < fs->n_fatent && (nxt < 2 || nxt >= fs->n_fatent || dnf > nxt)) nxt = dnf;
+				}
 				/* Create FSInfo structure */
 				memset(fs->win, 0, sizeof fs->win);
 				st_32(fs->win + FSI_LeadSig, 0x41615252);		/* Leading signature */
 				st_32(fs->win + FSI_StrucSig, 0x61417272);		/* Structure signature */
 				st_32(fs->win + FSI_Free_Count, fs->free_clst);	/* Number of free clusters */
-				st_32(fs->win + FSI_Nxt_Free, fs->last_clst);	/* Last allocated culuster */
+				st_32(fs->win + FSI_Nxt_Free, nxt);	/* Last allocated culuster (PICO-SPEC PATCH: see above) */
 				st_32(fs->win + FSI_TrailSig, 0xAA550000);		/* Trailing signature */
 				disk_write(fs->pdrv, fs->win, fs->winsect = fs->volbase + 1, 1);	/* Write it into the FSInfo sector (Next to VBR) */
 			}
@@ -7312,5 +7327,35 @@ void fclose2 (FIL* f) {
 			}
 		}
 		free(f);
+	}
+}
+
+
+/*-----------------------------------------------------------------------*/
+/* PICO-SPEC PATCH: a guest wrote a sector of this drive behind our back  */
+/*-----------------------------------------------------------------------*/
+/* The divMMC SD emulation lets the guest write the card raw while FatFs has
+   the same volume mounted. FatFs caches one sector (fs->win) and the free-
+   cluster bookkeeping; both go stale. Drop a clean cached copy of the written
+   sector (a dirty one is FatFs's own pending write -- it stays), and adopt the
+   guest's FSInfo so FatFs neither allocates from a stale view nor writes stale
+   numbers back. */
+void ff_raw_write_notify (BYTE pdrv, LBA_t sector, const BYTE* data)
+{
+	UINT v;
+	for (v = 0; v < FF_VOLUMES; v++) {
+		FATFS* fs = FatFs[v];
+		if (!fs || !fs->fs_type || fs->pdrv != pdrv) continue;
+		if (fs->winsect == sector && !fs->wflag) fs->winsect = (LBA_t)0 - 1;
+#if !FF_FS_READONLY
+		if (fs->fs_type == FS_FAT32 && sector == fs->volbase + 1 && data
+			&& ld_32(data + FSI_LeadSig) == 0x41615252
+			&& ld_32(data + FSI_StrucSig) == 0x61417272
+			&& ld_32(data + FSI_TrailSig) == 0xAA550000) {
+			fs->free_clst = ld_32(data + FSI_Free_Count);
+			fs->last_clst = ld_32(data + FSI_Nxt_Free);
+			fs->fsi_flag = 0;
+		}
+#endif
 	}
 }

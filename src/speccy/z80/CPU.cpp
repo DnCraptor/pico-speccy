@@ -527,7 +527,7 @@ IRAM_ATTR void CPU::step() {
     Z80::execute();
 }
 
-#define BREAKPOINTS if (pbbp || (nbp > 0 && Config::hasBreakPoint(Z80::getRegPC(), Config::BP_PC))) { VIDEO::EndFrame(); return; }
+#define BREAKPOINTS if (pbbp || (nbp > 0 && Config::pcBreakHit(Z80::getRegPC()))) { VIDEO::EndFrame(); return; }
 
 
 // Phase of the CPU's own 4 T NOP grid while it sits in HALT, taken at the
@@ -1111,7 +1111,7 @@ static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_dram(uint16_t address) 
 }
 IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
     TS_PAGE_HIT(address);
-    if (g_ts_fastmem > tsFastLo8(address)) {
+    if (g_ts_fastrd > tsFastLo8(address)) {
         // The DRAM hit test runs FIRST, while nothing but the address is live:
         // placed after the T-state add it needed two more registers and GCC
         // paid a push/pop pair on EVERY access (2026-09-13). The _dram helpers
@@ -1157,6 +1157,24 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
     dbg_last_pc = pc;
 #endif
     uint8_t pg = pc >> 13;
+    // TsFastMem.h — the same two fast cases as Z80::exec_nocheck's fetch. This
+    // one serves the prefixed opcodes (DD/FD/CB/ED second bytes) and the
+    // checked loop, which used to walk the whole generic chain below.
+    if (g_ts_fastmem > tsFastLo8(pc)) {
+        tsFastTick(4);
+        if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(pc)) tsFastTick(TsConf::cpuMemMiss(pc, true));
+        return MemESP::ramCurrent[pg][pc & 0x1fff];
+    }
+    if (g_ts_fastrd == 2) {   // Next below 0x4000 (see exec_nocheck)
+        tsFastTick(4);
+        if (DivMMC::enabled) {
+            DivMMC::preOpcFetch(pc);
+            const uint8_t op = MemESP::ramCurrent[pc >> 13][pc & 0x1fff];
+            DivMMC::postOpcFetch();
+            return op;
+        }
+        return MemESP::ramCurrent[pg][pc & 0x1fff];
+    }
     // Scorpion Yellow-PCB even-M1 (see the g_scorp_even_m1 note in CPU.h): an M1
     // cycle fetching from 0x4000+ that would start on an odd T-state gets one
     // wait T first. Draw(1) so the renderer accounts the extra tact too.
@@ -1337,7 +1355,7 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_dram(uint16_t address
 }
 IRAM_ATTR uint16_t Z80Ops::peek16(uint16_t address) {
     TS_PAGE_HIT(address);
-    if (g_ts_fastmem > tsFastLo16(address)) {
+    if (g_ts_fastrd > tsFastLo16(address)) {
         // An even address reads both halves out of ONE cache word (index a[8:1]),
         // so the second half can only miss when the first did; odd = two words.
         // Test first, add T-states after (the peek8 register note).

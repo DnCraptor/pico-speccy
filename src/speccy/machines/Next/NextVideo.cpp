@@ -6,6 +6,7 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 
 #include "NextVideo.h"
 #include "speccy/z80/z80.h"
+#include "NextFramePacing.h"
 
 
 
@@ -37,6 +38,7 @@ bool    NEXTVID::pal9Second = false;
 uint8_t NEXTVID::pal9First = 0;
 uint8_t NEXTVID::palCtrl = 0;
 
+uint8_t* NEXTVID::lineBuf = nullptr;
 uint8_t* NEXTVID::sprPatterns = nullptr;
 uint8_t  (*NEXTVID::sprAttr)[5] = nullptr;
 uint16_t NEXTVID::sprPatWrite = 0;
@@ -60,6 +62,10 @@ int  NEXTVID::firstVisibleLine = 0;
 int  NEXTVID::paperTopRow = 0;
 int  NEXTVID::xPaperOff = 32;
 bool NEXTVID::skipFrame = false;
+static NextFramePacing framePacing;
+#if NEXT_TRACE
+uint32_t g_nextvid_frames = 0; // completed frames with composition enabled
+#endif
 
 // ===== palette machinery =====
 
@@ -322,14 +328,16 @@ IRAM_ATTR void NEXTVID::copperLine(uint16_t rasterLine) {
 void NEXTVID::Reset() {
     if (!sprPatterns) {
         // One block, Next-boot only, never freed (the Next boundary reboots).
-        // Layout: patterns 16K | copper 2K | rawPal 4K | lut 2K | sprAttr 640
-        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5);
+        // Layout: patterns 16K | copper 2K | rawPal 4K | lut 2K | sprAttr 640 |
+        // lineBuf 384 (word-aligned: 25216 is a multiple of 4)
+        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384);
         sprPatterns = blk;
         copperMem   = blk + 16384;
         rawPal      = (uint16_t(*)[256])(blk + 16384 + 2048);
         lut         = (uint8_t(*)[256])(blk + 16384 + 2048 + 8*256*2);
         sprAttr     = (uint8_t(*)[5])(blk + 16384 + 2048 + 8*256*2 + 8*256);
-        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5);
+        lineBuf     = blk + 16384 + 2048 + 8*256*2 + 8*256 + 128*5;
+        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384);
     }
     buildRemap();
     defaultPalettes();
@@ -366,6 +374,7 @@ void NEXTVID::Reset() {
     lineIdx = 0;
     nextLineTstate = (uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator;
     skipFrame = false;
+    framePacing.reset(time_us_32());
 }
 
 // nextreg 0x07 can switch the CPU clock MID-FRAME; the pending line
@@ -392,8 +401,13 @@ IRAM_ATTR void NEXTVID::haltAdvanceTo(uint32_t stEnd) {
 }
 
 IRAM_ATTR void NEXTVID::EndFrame() {
-    static uint8_t skipCnt = 0;
-    skipFrame = ESPectrum::maxSpeed && (++skipCnt & 63);
+#if NEXT_TRACE
+    if (!skipFrame) ++g_nextvid_frames;
+#endif
+    // A fixed 1-in-64 skip made the BIOS update at <1 Hz even when the CPU
+    // managed 50 emulated frames/s. Bound skipping by wall time instead;
+    // when emulation is slow, every frame is drawn.
+    skipFrame = framePacing.skip(ESPectrum::maxSpeed, time_us_32());
     lineIdx = 0;
     nextLineTstate = (uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator;
     totalLines = (CPU::statesInFrame >> ESPectrum::multiplicator) / VIDEO::tStatesPerLine;
@@ -453,41 +467,33 @@ IRAM_ATTR void NEXTVID::ScanlineWork() {
 
 // ===== scanline compositor =====
 
-// One framebuffer row: compose the layers, rotate to scanout order, and leave
-// the OSD box alone. The F8 stats / F9-F10 volume box is 144x16 at x 168
-// (320-wide) / 188 (360-wide), rows 220 (240-row fb) / 268 (288-row fb), and
-// ESPectrum::loop repaints it only after EndFrame — the same rectangle
-// tsRenderLine and Update_Border_DS80 carve out. This used to skip 32 WHOLE
-// rows instead, which left the bottom 16 paper rows + 4 border rows black
-// while the stats were up and still overwrote the box's last 4 rows every
-// frame (hw 2026-09-25). The box is word-aligned (168/188 and 144 are
-// multiples of 4), so its bytes are unaffected by the word rotation and can
-// simply be saved before the layers run and put back after.
+// One framebuffer row. The layers are composed into lineBuf in linear pixel
+// order, then copied into the framebuffer in ONE pass, already rotated into
+// scanout order (the HDMI/VGA ISR reads fb bytes at x^2 — legacy renderers bake
+// that into their AluBytes words; hw: NextZXOS text scrambled in 4-pixel groups
+// without it). The framebuffer therefore only ever holds a finished row. It used
+// to be composed in place and rotated afterwards, and whenever the scanout read
+// the row between those two passes the display showed it unrotated for a frame:
+// 4-pixel specks on glyph edges of a STATIC picture, one fb row at a time,
+// drifting slowly with the frame/display phase (capture 2026-09-25).
+// The copy also skips the OSD box: the F8 stats / F9-F10 volume box, 144x16 at
+// x 168 (320-wide) / 188 (360-wide), rows 220 (240-row fb) / 268 (288-row fb),
+// which ESPectrum::loop repaints only after EndFrame — tsRenderLine's and
+// Update_Border_DS80's rectangle. The box is word-aligned (168/188 and 144 are
+// multiples of 4), so it is a range of whole words.
 IRAM_ATTR void NEXTVID::RenderLine(int row) {
-    uint8_t* fb = VIDEO::vga.frameBuffer[row];
-    const int cx0 = (VIDEO::vga.xres >= 360) ? 188 : 168;
+    uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
+    RenderLayers(lineBuf, row);
+    const uint32_t* src = (const uint32_t*)lineBuf;
+    const int words = ((int)VIDEO::vga.xres + 3) >> 2;
+    int k0 = words, k1 = words;                    // [k0, k1) = words left alone
     const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
-    const bool carve = (VIDEO::OSD & 0x07) != 0 && row >= cy0 && row < cy0 + 16;
-    uint32_t keep[144 / 4];
-    if (carve) memcpy(keep, fb + cx0, sizeof(keep));
-
-    RenderLayers(fb, row);
-
-    // Scanout byte order: the HDMI/VGA ISR reads fb bytes at x^2 (16-bit
-    // halves of each 32-bit word swapped — legacy renderers bake this into
-    // their AluBytes words). NEXTVID renders linearly, so rotate each word
-    // once at the end of the line (hw: NextZXOS text scrambled in 4-pixel
-    // groups while solid areas looked fine). Every row, border rows included:
-    // tilemap / Layer 2 320 / sprites draw there too.
-    {
-        uint32_t* w = (uint32_t*)fb;
-        int words = ((int)VIDEO::vga.xres + 3) >> 2;
-        for (int k = 0; k < words; k++) {
-            uint32_t v = w[k];
-            w[k] = (v >> 16) | (v << 16);
-        }
+    if ((VIDEO::OSD & 0x07) != 0 && row >= cy0 && row < cy0 + 16) {
+        k0 = ((VIDEO::vga.xres >= 360) ? 188 : 168) >> 2;
+        k1 = k0 + 144 / 4;
     }
-    if (carve) memcpy(fb + cx0, keep, sizeof(keep));
+    for (int k = 0; k < k0; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
+    for (int k = k1; k < words; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
 }
 
 IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {

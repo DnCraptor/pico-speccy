@@ -79,6 +79,7 @@ void next_trace_ev(char kind, uint8_t r, uint8_t v) {
 void next_trace_dump(uint32_t frames) {
     extern bool g_next_automap_armed;
     extern volatile uint32_t g_sd_stall_us, g_sd_ops;   // DivMMC.cpp
+    extern uint32_t g_nextvid_frames;
     extern volatile uint32_t g_nextvid_us;              // NextVideo.cpp
     // Who REALLY owns slot 0 right now — the flags can say "bootrom" while a
     // missed replug hands the CPU something else entirely (2026-08-09: flags
@@ -120,17 +121,46 @@ void next_trace_dump(uint32_t frames) {
         const uint32_t c = cpu_frame_us, d = c - s_prev_cpu;
         s_prev_cpu = c;
         const uint32_t f = frames ? frames : 1;
-        Debug::log("NEXT cpu: %u.%ums/fr vid=%u.%ums/fr li=%u line=%u clk=%u MHz fps=%u",
+        Debug::log("NEXT cpu: %u.%ums/fr vid=%u.%ums/fr li=%u line=%u clk=%u MHz fps=%u draw=%u max=%u",
             (unsigned)(d / f / 1000u), (unsigned)(d / f % 1000u / 100u),
             (unsigned)(g_nextvid_us / f / 1000u), (unsigned)(g_nextvid_us / f % 1000u / 100u),
             (unsigned)NextReg::lineIrqEnabled, (unsigned)NextReg::lineIrqLine,
             (unsigned)(ESPectrum::multiplicator == 0 ? 3 : 7u << (ESPectrum::multiplicator - 1)),
-            (unsigned)frames);
+            (unsigned)frames, (unsigned)g_nextvid_frames,
+            (unsigned)ESPectrum::maxSpeed);
+#if PERF_TRACE && PERF_HIST
+        // The TS-Conf opcode histogram (Z80_JLS.cpp, exec_nocheck), printed here
+        // because VIDEO::EndFrame's PERF block never runs on the Next. ns/instr is
+        // against this second's CPU::loop time — pessimistic by the histogram's own
+        // cost, as on TS-Conf. Prefixes count as themselves (ED = IN/OUT/block ops).
+        {
+            extern uint32_t z80_op_hist[256];
+            uint64_t total = 0;
+            for (int i = 0; i < 256; i++) total += z80_op_hist[i];
+            char hl[200]; int hp = 0; uint8_t used[256] = {0};
+            for (int k = 0; k < 16 && hp < (int)sizeof(hl) - 12; k++) {
+                int best = -1; uint32_t bv = 0;
+                for (int i = 0; i < 256; i++)
+                    if (!used[i] && z80_op_hist[i] > bv) { bv = z80_op_hist[i]; best = i; }
+                if (best < 0 || bv == 0) break;
+                used[best] = 1;
+                hp += snprintf(hl + hp, sizeof(hl) - hp, " %02X:%u", best,
+                               (unsigned)(total ? (uint64_t)bv * 100 / total : 0));
+            }
+            hl[hp] = 0;
+            Debug::log("NEXT z80: %u instr/fr %u ns/instr top%%:%s",
+                (unsigned)(total / f), (unsigned)(total ? (uint64_t)d * 1000 / total : 0), hl);
+            for (int i = 0; i < 256; i++) z80_op_hist[i] = 0;
+            extern void pcprof_dump();
+            pcprof_dump();
+        }
+#endif
     }
     s_nt_pal = s_nt_cop = s_nt_spr = 0;
     g_sd_stall_us = 0;
     g_sd_ops = 0;
     g_nextvid_us = 0;
+    g_nextvid_frames = 0;
     // Ring line: newest LAST, budget spent from the newest end backwards, a
     // leading ".." marks dropped older entries (never drop the newest — the
     // NeoGS ring printed oldest-first once and hid every wedge it saw).
@@ -325,6 +355,20 @@ void NextReg::write(uint8_t r, uint8_t v) {
                    // blinking). Deferred to the frame boundary.
             if (v & 0x02) resetPending = 2;
             else if (v & 0x01) resetPending = 1;
+            if (v & 0x03) {
+                // On hardware the OUT asserts /RESET at once: not one more
+                // instruction runs. We reset at the frame boundary, so park the
+                // CPU the way HALT does (halted + end the slice) with interrupts
+                // off. Letting it run on was a real bug: TBBLUE.FW's video test
+                // writes NR 02 = 2 after the user's Y and then, in the very next
+                // loop iteration, re-writes its "VideoTest" resume signature for
+                // the following mode (0x618F -> 0xD5C1) — the reboot found it and
+                // started the test again, for ever (hw 2026-09-25).
+                Z80::setHalted(true);
+                Z80::setIFF1(false);
+                Z80::setIFF2(false);
+                CPU::stFrame = 0;
+            }
             break;
         case 0x05: { // Peripheral 1: bit 2 = 50/60 Hz
             ESPectrum::target = (v & 0x04) ? 17067 : MICROS_PER_FRAME_128;

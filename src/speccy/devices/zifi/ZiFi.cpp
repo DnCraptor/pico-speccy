@@ -290,7 +290,9 @@ void __not_in_flash("zifi") ZiFi::uart_rx_irq_handler() {
     if (!g_uart) return;
     bool got = false;
     while (uart_is_readable(g_uart)) {
-        uint8_t b = (uint8_t)uart_getc(g_uart);
+        // Direct DR read, not uart_getc(): that SDK inline was emitted out of
+        // line in FLASH, and this handler must not leave RAM (see in_full).
+        uint8_t b = (uint8_t)uart_get_hw(g_uart)->dr;
         rx_bytes++;
         got = true;
         if (!in_full())

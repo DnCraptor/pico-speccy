@@ -84,6 +84,7 @@ private:
     // first NEXTVID::Reset() (~25KB) — Next-only cost, not BSS every machine
     // pays. Pointer-to-array types keep the 2D indexing syntax intact.
     static uint8_t* sprPatterns;         // [16384] 64 patterns x 256B
+    static uint8_t* lineBuf;             // [384] one row, composed linearly, copied rotated
     static uint8_t  (*sprAttr)[5];       // [128][5]
     static uint16_t sprPatWrite;         // pattern upload byte position
     static uint8_t  sprAttrSlot;         // attribute upload sprite index

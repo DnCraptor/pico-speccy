@@ -444,6 +444,17 @@ public:
 
     static bool buildNextRam();    // carve Next RAM out of butter PSRAM
     static void applyMMU(uint8_t slot, uint8_t page);
+    // Next: while the divMMC window is paged in, slots 0/1 of ramCurrent[] ARE
+    // the divMMC pages (page0_lo / page0_hi), so the fast read/fetch path
+    // (TsFastMem.h, g_ts_fastrd == 2) can load from them directly. Every
+    // generic accessor still tests divmmc_mapped first, and writes below
+    // 0x4000 never take the fast path, so nothing else reads these two
+    // pointers as the MMU's. Plugged by DivMMC::applyMapping and re-plugged
+    // by applyMMU for slots 0/1; the window going away re-applies the MMU.
+    static inline void nextDivPlug() {
+        ramCurrent[0] = page0_lo;
+        ramCurrent[1] = page0_hi;
+    }
     static void resetNextMapping();// apply power-on MMU defaults
 
     // Layer 2 write-through window (port 0x123B): writes to 0x0000-0x3FFF
