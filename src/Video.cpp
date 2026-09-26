@@ -4228,7 +4228,8 @@ size_t VIDEO::gigascreenPrevFBBytes() {
 bool VIDEO::gigascreenModeIncompatible() {
     return profi_ds80_active            // Profi/Karabas DS80 512x240 (pair slots)
         || gmx_ext_live                 // Scorpion GMX 640x200x16 (pair slots)
-        || ts_render_live != 0;         // TS-Conf TEXT/16c/256c/NOGFX, or the TSU
+        || ts_render_live != 0          // TS-Conf TEXT/16c/256c/NOGFX, or the TSU
+        || bl_live;                     // Borderless: the prev-FB is laid out for the bordered row
 }
 
 // The one predicate every palette/blend decision uses: the user wants Gigascreen
@@ -4776,6 +4777,9 @@ void VIDEO::Reset() {
     brdnextframe = true;
     brdcol_cnt = brdcol_start;
     brdlin_cnt = 0;
+    // Borderless: the per-arch blocks above re-armed the border machine; it must
+    // stay parked (the scaler owns every row). blRecalc re-decides at EndFrame.
+    if (bl_live) DrawBorder = &Border_Blank;
 #ifdef VGA_HDMI
     // A "fast" (90/75 Hz) pick selects the SAME index plus VMODE_FAST_OFFSET —
     // graphics.c holds the 37.8 MHz twin of every standard mode there, with the
@@ -4935,6 +4939,17 @@ void VIDEO::InitPrevBuffer() {
     }
 }
 
+// Borderless mode (VIDEO::bl_live): the paper renderer writes one line into this
+// staging buffer (same layout as a fb row's 256 content bytes, x^2 order) and
+// blExpandLine() scales it into the framebuffer when the line completes. Heap,
+// allocated only while the mode is live (blRecalc).
+bool VIDEO::bl_live = false;
+static uint32_t* bl_stage_ptr = nullptr;
+static bool bl_line_done = false;
+// A line just completed inside this Draw call — scale it once its last columns
+// are in the staging buffer (the completion block runs BEFORE the column loop).
+#define BL_FLUSH() do { if (__builtin_expect(bl_line_done, 0)) { bl_line_done = false; VIDEO::blExpandLine(curline); } } while (0)
+
 //  VIDEO DRAW FUNCTIONS
 IRAM_ATTR void VIDEO::MainScreen_Blank(unsigned int statestoadd, bool contended) {    
     
@@ -4944,7 +4959,7 @@ IRAM_ATTR void VIDEO::MainScreen_Blank(unsigned int statestoadd, bool contended)
 
         if (brdChange) DrawBorder(); // Needed to avoid tearing in demos like Gabba (Pentagon)
 
-        if (paper_off) {
+        if (paper_off && !bl_live) {
             // Debug "Paper off": keep the exact T-state/contention flow but write
             // nothing — MiddleBorder paints through the paper columns instead.
             coldraw_cnt = 0;
@@ -4955,7 +4970,8 @@ IRAM_ATTR void VIDEO::MainScreen_Blank(unsigned int statestoadd, bool contended)
             return;
         }
 
-        lineptr32 = (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
+        lineptr32 = bl_live ? bl_stage_ptr
+                            : (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
         prevLineptr16 = vga.prevFrameBuffer
                           ? prevRowContent(linedraw_cnt) + lineptr_offset
                           : (uint16_t *)lineptr32;
@@ -5025,7 +5041,7 @@ IRAM_ATTR void VIDEO::MainScreen_Blank_Snow(unsigned int statestoadd, bool conte
 
         if (brdChange) DrawBorder();
 
-        if (paper_off) {
+        if (paper_off && !bl_live) {
             coldraw_cnt = 0;
             Draw = &MainScreen_NoPaper;
             Draw_Opcode = &MainScreen_Opcode;
@@ -5034,7 +5050,8 @@ IRAM_ATTR void VIDEO::MainScreen_Blank_Snow(unsigned int statestoadd, bool conte
             return;
         }
 
-        lineptr32 = (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
+        lineptr32 = bl_live ? bl_stage_ptr
+                            : (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
         prevLineptr16 = vga.prevFrameBuffer
                           ? prevRowContent(linedraw_cnt) + lineptr_offset
                           : (uint16_t *)lineptr32;
@@ -5101,7 +5118,7 @@ IRAM_ATTR void VIDEO::MainScreen_Blank_Snow_Opcode(bool contended) {
 
         if (brdChange) DrawBorder();
 
-        if (paper_off) {
+        if (paper_off && !bl_live) {
             coldraw_cnt = 0;
             Draw = &MainScreen_NoPaper;
             Draw_Opcode = &MainScreen_Opcode;
@@ -5110,7 +5127,8 @@ IRAM_ATTR void VIDEO::MainScreen_Blank_Snow_Opcode(bool contended) {
             return;
         }
 
-        lineptr32 = (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
+        lineptr32 = bl_live ? bl_stage_ptr
+                            : (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
         prevLineptr16 = vga.prevFrameBuffer
                           ? prevRowContent(linedraw_cnt) + lineptr_offset
                           : (uint16_t *)lineptr32;
@@ -5251,6 +5269,7 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
             Draw_Opcode = &MainScreen_Blank_Opcode;
         }
         loopCount -= coldraw_cnt - 32;
+        bl_line_done = bl_live;
     }
 
     if (__builtin_expect(ts_render_live != 0, 0)) {
@@ -5525,6 +5544,7 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
             *lineptr32++ = AluByte[bmp & 0xF][att];
         }
     }
+    BL_FLUSH();
 }
 
 // Debug "Paper off": MainScreen's timing skeleton with the pixel writes removed.
@@ -5610,7 +5630,8 @@ IRAM_ATTR void VIDEO::MainScreen_Snow(unsigned int statestoadd, bool contended) 
             Draw = &MainScreen_Blank_Snow;
             Draw_Opcode = &MainScreen_Blank_Snow_Opcode;
         }
-        statestoadd -= coldraw_cnt - 128;  
+        statestoadd -= coldraw_cnt - 128;
+        bl_line_done = bl_live;  
     }
 
     for (;statestoadd--;) {
@@ -5671,6 +5692,7 @@ IRAM_ATTR void VIDEO::MainScreen_Snow(unsigned int statestoadd, bool contended) 
 
     }
 
+    BL_FLUSH();
 }
 
 // ----------------------------------------------------------------------------------
@@ -5703,11 +5725,13 @@ IRAM_ATTR void VIDEO::MainScreen_Snow_Opcode(bool contended) {
         }
 
         statestoadd -= coldraw_cnt - 128;
+        bl_line_done = bl_live;
 
     }
 
     if (dispUpdCycle == 6) {
         dispUpdCycle = 2;
+        BL_FLUSH();
         return;
     }
 
@@ -5807,6 +5831,7 @@ IRAM_ATTR void VIDEO::MainScreen_Snow_Opcode(bool contended) {
 
     }
 
+    BL_FLUSH();
 }
 
 #else
@@ -5951,6 +5976,152 @@ IRAM_ATTR void VIDEO::tsBandRow(uint32_t row) {
 // Only when the tick actually walked the whole raster this frame: otherwise
 // ts_band_slot[] is stale (a mode change, a held re-index, a skipped frame) and
 // the flat fill is the right thing to leave standing.
+// ─── Borderless mode ────────────────────────────────────────────────────────
+// The 256x192 paper scaled to fill the framebuffer, integer-patterned so every
+// character cell is distorted the same way (never a drifting nearest-neighbour):
+//   320x240 (640x480)       5/4 x 5/4   → 320x240, no frame
+//   360x240 (720x480)      11/8 x 5/4   → 352x240 + 4-byte frame each side
+//   360x288 (720x576)      11/8 x 3/2   → 352x288 + 4-byte frame each side
+// The frame is painted per line with the border colour at line end, so it still
+// carries a (coarse) border effect. Everything the scaler needs lives in ONE heap
+// block that exists only while the mode is live.
+static constexpr int BL_MAX_X = 360;                       // widest fb row we scale into
+static constexpr int BL_CARVE_MAX_RECTS = VIDEO::BL_CARVE_N + 2;   // + stats box + notify banner
+struct BlState {
+    uint32_t stage[64];          // one paper line, fb layout (logical px p at byte p^2)
+    uint32_t out[BL_MAX_X / 4];  // the scaled line, fb layout, pads included
+    uint8_t  hsrc[BL_MAX_X];     // content byte q of the scaled line ← stage byte hsrc[q]
+    uint16_t vrow[192];          // first fb row of paper line c; bit 15 = also the next row
+    uint16_t cw, pad;            // content bytes, pad bytes on EACH side
+    int16_t  carve[VIDEO::BL_CARVE_N][4];   // x0, y0, x1, y1 (y1 <= y0 = unused)
+};
+static BlState* bl = nullptr;
+
+static bool blGeometryOk() {
+    const int xr = (int)VIDEO::vga.xres, yr = (int)VIDEO::vga.yres;
+    return (xr == 320 || xr == 360) && (yr == 240 || yr == 288) && xr <= BL_MAX_X;
+}
+
+static void blBuildTables() {
+    const int xr = (int)VIDEO::vga.xres, yr = (int)VIDEO::vga.yres;
+    // Horizontal: one period = one pattern group, the duplicated source pixels
+    // spread over it (5/4: the 3rd of every 4; 11/8: the 2nd, 5th and 7th of 8).
+    static const uint8_t k54[5]  = { 0, 1, 2, 2, 3 };
+    static const uint8_t k118[11] = { 0, 1, 1, 2, 3, 4, 4, 5, 6, 6, 7 };
+    const bool wide = (xr == 360);
+    bl->cw  = wide ? 352 : 320;
+    bl->pad = (uint16_t)((xr - bl->cw) / 2);    // 0 or 4, keeps content 4-aligned
+    for (int q = 0; q < bl->cw; q++) {
+        const int x = q ^ 2;                     // logical output pixel stored at byte q
+        const int sx = wide ? (x / 11) * 8 + k118[x % 11] : (x / 5) * 4 + k54[x % 5];
+        bl->hsrc[q] = (uint8_t)(sx ^ 2);         // its source pixel, at stage byte sx^2
+    }
+    // Vertical: 5/4 (192 → 240) or 3/2 (192 → 288), the doubled line spread the
+    // same way.
+    for (int c = 0; c < 192; c++) {
+        uint16_t row, dup;
+        if (yr == 288) { row = (uint16_t)((c >> 1) * 3 + (c & 1 ? 2 : 0)); dup = !(c & 1); }
+        else           { const int r = c & 3; row = (uint16_t)((c >> 2) * 5 + (r <= 2 ? r : r + 1)); dup = (r == 2); }
+        bl->vrow[c] = (uint16_t)(row | (dup ? 0x8000u : 0));
+    }
+}
+
+void VIDEO::blSetCarve(int id, int x0, int y0, int x1, int y1) {
+    if (!bl || id < 0 || id >= BL_CARVE_N) return;
+    int16_t* r = bl->carve[id];
+    r[0] = (int16_t)(x0 & ~3); r[1] = (int16_t)y0;
+    r[2] = (int16_t)((x1 + 3) & ~3); r[3] = (int16_t)y1;
+}
+
+void VIDEO::blClearCarve(int id) {
+    if (!bl || id < 0 || id >= BL_CARVE_N) return;
+    bl->carve[id][3] = bl->carve[id][1];
+}
+
+void VIDEO::blRecalc() {
+    // The scaler only runs under the standard beam renderer: the pair-slot modes
+    // (profi_ds80_active also covers GMX 640x200 and Timex hi-res) and the TS-Conf
+    // whole-line renderer own their own geometry.
+    const bool want = Config::borderless && vga.frameBuffer && blGeometryOk()
+                      && !profi_ds80_active && !gmx_ext_live && !ts_render_live && !timex_hires_live;
+    if (want == bl_live) return;
+    if (want) {
+        static bool warned = false;
+        BlState* st = (BlState*)tryMalloc(sizeof(BlState));
+        if (!st) {
+            if (!warned) { warned = true; Debug::log("[VID] borderless: no heap for %u B, staying bordered", (unsigned)sizeof(BlState)); }
+            return;
+        }
+        memset(st, 0, sizeof(BlState));
+        bl = st;
+        blBuildTables();
+        bl_stage_ptr = bl->stage;
+        bl_line_done = false;
+        bl_live = true;
+        DrawBorder = &Border_Blank;
+        brdChange = false;
+        Debug::log("[VID] borderless on: %dx%d, content %u + 2x%u pad", (int)vga.xres, (int)vga.yres, (unsigned)bl->cw, (unsigned)bl->pad);
+    } else {
+        bl_live = false;
+        bl_line_done = false;
+        bl_stage_ptr = nullptr;
+        free(bl);
+        bl = nullptr;
+        // Hand the rows back: the border machine repaints them next frame, the
+        // paper renderer re-renders its window.
+        brdChange = true;
+        brdnextframe = true;
+        Debug::log("[VID] borderless off");
+    }
+}
+
+// Copy the scaled line into one fb row, leaving the overlay rectangles alone.
+static IRAM_ATTR __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void blPutRow(int row) {
+    uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
+    if (!dst) return;
+    const int words = (int)VIDEO::vga.xres >> 2;
+    int cx[BL_CARVE_MAX_RECTS][2]; int n = 0;
+    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    if ((VIDEO::OSD & 0x07) && row >= cy0 && row < cy0 + 16) {   // F8 stats / F9-F10 volume box
+        cx[n][0] = ((int)VIDEO::vga.xres >= 360) ? 188 : 168; cx[n][1] = cx[n][0] + 24 * 6; n++;
+    }
+    if (row >= ts_notice_y0 && row < ts_notice_y1) {              // OSD::notify banner
+        cx[n][0] = ts_notice_x0; cx[n][1] = ts_notice_x1; n++;
+    }
+    for (int i = 0; i < VIDEO::BL_CARVE_N; i++) {
+        const int16_t* r = bl->carve[i];
+        if (row >= r[1] && row < r[3]) { cx[n][0] = r[0]; cx[n][1] = r[2]; n++; }
+    }
+    // Plain word loops, not memcpy: libc's lives in flash, and this runs ~240
+    // times a frame from the RAM-resident renderer (the XIP-contention rule).
+    if (!n) { for (int w = 0; w < words; w++) dst[w] = bl->out[w]; return; }
+    for (int w = 0; w < words; w++) {
+        const int x = w << 2;
+        bool skip = false;
+        for (int i = 0; i < n; i++) if (x >= cx[i][0] && x < cx[i][1]) { skip = true; break; }
+        if (!skip) dst[w] = bl->out[w];
+    }
+}
+
+IRAM_ATTR __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void VIDEO::blExpandLine(uint32_t line) {
+    if (!bl || line >= 192 || !vga.frameBuffer) return;
+    const uint8_t* src = (const uint8_t*)bl->stage;
+    const uint8_t* t = bl->hsrc;
+    const int padw = bl->pad >> 2, cww = bl->cw >> 2;
+    uint32_t* o = bl->out;
+    const uint32_t b32 = (uint8_t)brd * 0x01010101u;
+    for (int i = 0; i < padw; i++) o[i] = b32;
+    uint32_t* c = o + padw;
+    for (int w = 0; w < cww; w++, t += 4)
+        c[w] = (uint32_t)src[t[0]] | ((uint32_t)src[t[1]] << 8)
+             | ((uint32_t)src[t[2]] << 16) | ((uint32_t)src[t[3]] << 24);
+    for (int i = 0; i < padw; i++) c[cww + i] = b32;
+    const uint16_t v = bl->vrow[line];
+    const int row = v & 0x7FFF;
+    if (row < (int)vga.yres) blPutRow(row);
+    if ((v & 0x8000) && row + 1 < (int)vga.yres) blPutRow(row + 1);
+}
+
 void VIDEO::tsBandReplay() {
     if (!vga.frameBuffer || !ts_band_valid) return;
     for (uint32_t row = 0; row < (uint32_t)vga.yres; row++) {
@@ -6066,7 +6237,7 @@ int VIDEO::gmxTopBandRows() { return (gmx_ext_live || ts_render_live) ? (int)lin
 // border machine is parked (Scorpion GMX 640x200, every TS-Conf non-ZX mode):
 // the top/bottom bands are painted frame-granularly by gmxBorderFrame and their
 // height is lin_end — which can be ZERO, unlike the border machine's 24/48.
-bool VIDEO::bandBorderMode() { return gmx_ext_live || ts_render_live; }
+bool VIDEO::bandBorderMode() { return gmx_ext_live || ts_render_live || bl_live; }
 
 
 void VIDEO::setNoticeCarve(int x0, int y0, int x1, int y1) {
@@ -7283,6 +7454,9 @@ IRAM_ATTR void VIDEO::EndFrame() {
         if (timex_hires_pending_on || timex_hires_pending_off) timexHiresApplyPending();
         // ── TS-Conf VConfig mode/geometry switch — same vblank-only rule ──
         if (Z80Ops::isTsconf) tsVideoApplyPending();
+        // ── Borderless scaler on/off — after the three above, which decide whether
+        // the standard renderer owns the framebuffer at all this frame.
+        blRecalc();
 
         // Every mode that can take the framebuffer away from the standard renderer
         // has just settled (DS80 above, GMX and TS-Conf here) — suspend or resume
@@ -7764,7 +7938,14 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
     ds80_osd_carve = ds80_border_geom && (VIDEO::OSD & 0x03) && !(VIDEO::OSD & 0x04);
     ds80_carve240  = (int)vga.yres < 288;
 
-    if (gmx_ext_live || ts_render_live) {
+    if (bl_live) {
+        // Borderless: no border to draw — the scaler writes every row (frame pads
+        // included) at line end, so the machine stays parked.
+        brdGigascreenChange = false;
+        DrawBorder = &Border_Blank;
+        lastBrdTstate = tStatesBorder;
+        brdChange = false;
+    } else if (gmx_ext_live || ts_render_live) {
         // GMX 640x200 / TS-Conf non-ZX modes: the per-T-state border machine
         // stays parked (its writers would put raw ZX indices into a pair-slot
         // framebuffer) — cold flash body in gmxBorderFrame, cheap check here.
@@ -7873,6 +8054,8 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
     if (Config::ledIndicators) {
         if (gigascreen_enabled) LED::touchR(LED::GIGASCREEN);
         LED::draw();
+    } else if (bl_live) {
+        blClearCarve(BL_CARVE_LED);   // strip gone: the scaler takes its rows back
     }
 
     // Top-border status banner (OSD::notify). Repainted here, after the border
@@ -7940,7 +8123,9 @@ void VIDEO::RedrawPausedFrame() {
     // writer would put raw ZX indices into the pair-slot framebuffer), the bands
     // are frame-granular, and the side pads come with the content lines just
     // walked above — so repaint the bands directly instead.
-    if (gmx_ext_live || ts_render_live) {
+    if (bl_live) {
+        // Borderless: the walk above rewrote every row, frame pads included.
+    } else if (gmx_ext_live || ts_render_live) {
         gmx_border_dirty = true;
         gmxBorderFrame(false);
     } else {

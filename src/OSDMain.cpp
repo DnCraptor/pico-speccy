@@ -1471,7 +1471,7 @@ static bool notifyGeom(int textw, int& x, int& y, bool* carve = nullptr) {
     if (VIDEO::bandBorderMode()) {               // GMX 640x200 / TS-Conf non-ZX
         top = VIDEO::gmxTopBandRows();           // = lin_end, authoritative, may be 0
         if (top < NOTIFY_BAND_H) {
-            if (!VIDEO::ts_render_live) return false;
+            if (!VIDEO::ts_render_live && !VIDEO::bl_live) return false;
             // Carved out of the content instead. Keep the 24-row band's own
             // offset so the banner sits where it does on every other machine
             // (6 fb rows down) rather than flush against the screen edge — the
@@ -1620,7 +1620,7 @@ void OSD::drawNotify() {
         // rows read this rect at render time, which is also what erases the
         // banner authoritatively when the rect is cleared. GMX ignores it — it
         // has no whole-line renderer and gmxBorderFrame still owns its bands.
-        if (carve || VIDEO::ts_render_live) VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
+        if (carve || VIDEO::ts_render_live || VIDEO::bl_live) VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
         else                               VIDEO::clearNoticeCarve();
     } else {
         VIDEO::setNoticeBand(y, y + NOTIFY_BAND_H - 1, px0, px1);

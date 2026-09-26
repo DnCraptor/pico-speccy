@@ -447,6 +447,20 @@ public:
   // MainScreen_Blank* select MainScreen_NoPaper and MiddleBorder does not skip
   // the paper columns. Synced in Reset(); the menu hook flips it live.
   static bool paper_off;
+  // Borderless mode (Config::borderless). bl_live = the scaler is running this
+  // frame: MainScreen_Blank* point lineptr32 at a 256-byte staging line, and
+  // blExpandLine() scales each finished line into its framebuffer row(s). Only
+  // while the standard beam renderer owns the fb — DS80 / GMX 640x200 / Timex
+  // hi-res / TS-Conf whole-line modes keep their own geometry. Decided per frame
+  // in EndFrame (blRecalc), so the menu hook only has to write Config.
+  static bool bl_live;
+  static void blRecalc();
+  static void blExpandLine(uint32_t line);
+  // Overlays that live in the border elsewhere sit on content here; the scaler
+  // leaves their rectangles alone while they are up (fb bytes, 4-aligned).
+  enum { BL_CARVE_LAMP = 0, BL_CARVE_LED, BL_CARVE_N };
+  static void blSetCarve(int id, int x0, int y0, int x1, int y1);
+  static void blClearCarve(int id);
   static uint32_t lastBrdTstate;
 
   static uint8_t tStatesPerLine;

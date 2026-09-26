@@ -369,6 +369,10 @@ public:
     // machine paints straight through it (per-T-state, like top/bottom border),
     // showing the border colour "under" the paper — for border-timing debugging.
     static bool render_paper;
+    // Video > Hide border: the 256x192 paper is scaled up to fill the framebuffer
+    // (5/4 at 640x480, 11/8 x 5/4 or 3/2 with an 8-px frame at 720-wide) and the
+    // border machine is parked. Applied at the next EndFrame (VIDEO::blRecalc).
+    static bool borderless;
     static uint8_t persist_slot;
     // Options > Save/Load my settings: the profile slot this config was last
     // saved to or loaded from (1..CONFIG_PROFILE_SLOTS; 0 = none). Shown on both

@@ -3965,6 +3965,19 @@ void ESPectrum::loop() {
                     (Z80Ops::isP3 && (Config::trdosSoundLed & 1)) ||
                     (hasFdd && (Config::trdosSoundLed & 1)));
     static bool lamp_was_on = false;
+    if (VIDEO::bl_live) {
+        // Borderless: the lamp sits on the picture. Reserve its cell and back it
+        // with the border colour while lit; hand the cell back when it goes out.
+        if (lamp_on) {
+            VIDEO::blSetCarve(VIDEO::BL_CARVE_LAMP, 308, 2, 320, 10);
+            for (int row = 2; row < 10; row++) {
+                uint8_t* line = (uint8_t*)VIDEO::vga.frameBuffer[row];
+                if (line) memset(line + 308, (uint8_t)VIDEO::brd, 12);
+            }
+        } else {
+            VIDEO::blClearCarve(VIDEO::BL_CARVE_LAMP);
+        }
+    }
     if (lamp_on) {
         LED::drawSpriteFg(LED::FDD, 311, 2,
                           fdd_write ? zxColor(2, 1)      // red  — write

@@ -342,7 +342,11 @@ const char* romsetName(int32_t composite);
     /* Video > VGA > Colour (Config::vga_pwm). AC_REBOOT, and it has to be: the     */ \
     /* flag decides how many bytes a palette entry and a line-buffer pixel are, and */ \
     /* both are allocated once at boot. Appended last per the APPEND ONLY rule.     */ \
-    X(SET_VGA_PWM,         AC_REBOOT, 0,                     get_vgaPwm,     put_vgaPwm,     nullptr,        -1)
+    X(SET_VGA_PWM,         AC_REBOOT, 0,                     get_vgaPwm,     put_vgaPwm,     nullptr,        -1) \
+    /* Video > Hide border (Config::borderless). AC_PURE: VIDEO::blRecalc re-decides */ \
+    /* at every EndFrame from Config, so writing it IS the apply — after the menu     */ \
+    /* closes, which is also the only time the effect can be seen. Appended last.     */ \
+    X(SET_BORDERLESS,      AC_PURE,   0,                     get_borderless, put_borderless, nullptr,        -1)
 
 #define NM_X_ENUM(id, cls, flags, g, p, h, f) id,
 enum SettingId : uint16_t {

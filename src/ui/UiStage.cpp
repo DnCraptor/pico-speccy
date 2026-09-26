@@ -174,6 +174,7 @@ static int32_t get_gsRam()          { return Config::gs_ram_size >= 3 ? 3 : (Con
 static void    put_gsRam(int32_t v) { Config::gs_ram_size = (uint8_t)v; }
 NM_BOOL_ACCESS(cobmect,   byte_cobmect_mode)
 NM_BOOL_ACCESS(paper,     render_paper)
+NM_BOOL_ACCESS(borderless, borderless)
 
 // ── TFT panel (ST7789 / ILI9341 builds) ────────────────────────────────────────
 // Not Config fields: the driver owns TFT_INVERSION and the MADCTL byte TFT_FLAGS, and
