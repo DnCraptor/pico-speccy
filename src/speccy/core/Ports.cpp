@@ -4354,7 +4354,12 @@ IRAM_ATTR void Ports::dmaOutput(uint16_t address, uint8_t data) {
 
 IRAM_ATTR uint8_t Ports::dmaInput(uint16_t address) {
     // DMA read from I/O: return port value without contention
-    if (Z80Ops::isNext && address == 0x253B) return NextReg::read(NextReg::selected);
+    // Spectrum Next: every port the DMA can read goes through the full decoder
+    // — above all the SD card's SPI data port #EB, which NextZXOS streams
+    // sectors from with the DMA once it finds one answering (since #0B is
+    // decoded). This path used to return 0xFF there: every file read by DMA
+    // came in as 0xFF (hw: TX-1696 died loading its level after PLAY).
+    if (Z80Ops::isNext) return input(address);
     if ((address & 0x0001) == 0) {
         // ULA port: keyboard + ear
         return 0xFF; // no keys pressed

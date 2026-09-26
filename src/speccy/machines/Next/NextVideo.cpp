@@ -798,7 +798,11 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     // via nextreg 0x68 bit 7 — border colour shows through. LoRes (128x96,
     // reg 0x15 bit 7) replaces the ULA output.
     uint8_t* p = fb + xPaperOff;
-    if (LS->r15 & 0x80) {
+    // NR 0x68 bit 7 disables the ULA layer, LoRes included (LoRes REPLACES the
+    // ULA screen). TX-1696 runs NR 0x15 = 0x81 (LoRes on) with NR 0x68 = 0x80
+    // and a tilemap: drawing LoRes anyway showed its 2x2 garbage through every
+    // "ULA over" tile of the menu.
+    if ((LS->r15 & 0x80) && !(LS->r68 & 0x80)) {
         uint8_t ly = (uint8_t)((y + LS->r33) % 192) >> 1;
         const uint8_t* base = LS->grmem +
             (ly < 48 ? ly * 128 : 0x2000 + (uint16_t)(ly - 48) * 128);
@@ -996,6 +1000,7 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
     // Tile by tile: one map entry, one attribute decode and the tile's 8
     // source pixels per tile instead of per output pixel. 80-column mode
     // renders 640 source pixels halved: every other source pixel.
+    const bool ulaOff = LS->r68 & 0x80;
     const int step = cols80 ? 2 : 1;
     const int wrap = cols80 ? 640 : 320;
     int tx = t0;
@@ -1007,7 +1012,9 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
         const uint8_t* e = mrow + (sx >> 3) * entrySz;
         const uint8_t tile = e[0];
         const uint8_t attr = noAttr ? LS->r6C : e[1];
-        if (!(attr & 0x01)) {                      // bit 0: ULA over this tile
+        // attr bit 0: the ULA is drawn OVER this tile. With the ULA layer
+        // off (NR 0x68 bit 7) there is nothing over it, so the tile shows.
+        if (!(attr & 0x01) || ulaOff) {
             const bool xm = attr & 0x08, ym = attr & 0x04, rot = attr & 0x02;
             const uint8_t* def = defs + (uint16_t)tile * 32;
             const uint8_t palHi = attr & 0xF0;

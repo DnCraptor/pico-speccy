@@ -135,6 +135,17 @@ void next_trace_dump(uint32_t frames) {
             (unsigned)ESPectrum::maxSpeed);
         // Which layer the renderer's time goes to (same sampled lines, the
         // paper rows only — border rows are in vid but not split here).
+        {
+            extern volatile uint32_t g_dma_n, g_dma_bytes, g_dma_endframes, g_dma_maxlen,
+                                     g_dma_max_pc, g_dma_max_src, g_dma_max_dst, g_dma_max_fl;
+            // fl: 100 A->B, 80 auto-restart, 40 #0B (Zilog) mode, 2 src IO,
+            // 1 dst IO, bits 12+ = prescaler
+            Debug::log("NEXT dma: n=%u bytes=%u endfr=%u max=%u pc=%04X %04X->%04X fl=%X",
+                (unsigned)g_dma_n, (unsigned)g_dma_bytes, (unsigned)g_dma_endframes,
+                (unsigned)g_dma_maxlen, (unsigned)g_dma_max_pc, (unsigned)g_dma_max_src,
+                (unsigned)g_dma_max_dst, (unsigned)g_dma_max_fl);
+            g_dma_n = g_dma_bytes = g_dma_endframes = g_dma_maxlen = 0;
+        }
         Debug::log("NEXT vid: ula=%u.%u tm=%u.%u l2=%u.%u spr=%u.%u ms/fr",
             (unsigned)(g_nextvid_layer_us[0] / f / 1000u), (unsigned)(g_nextvid_layer_us[0] / f % 1000u / 100u),
             (unsigned)(g_nextvid_layer_us[1] / f / 1000u), (unsigned)(g_nextvid_layer_us[1] / f % 1000u / 100u),

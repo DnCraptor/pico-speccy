@@ -735,6 +735,12 @@ IRAM_ATTR void CPU::loop() {
     }
     BREAKPOINTS
     bool halted = Z80::isHalted();
+#ifndef NEXT_LINEIRQ_SLICE
+#define NEXT_LINEIRQ_SLICE 1
+#endif
+    if (Z80Ops::isNext && NextReg::lineIrqEnabled && !NEXT_LINEIRQ_SLICE) {
+        halted = false;   // bisect build: the whole frame through execute()
+    } else
     if (Z80Ops::isNext && NextReg::lineIrqEnabled) {
         // Line IRQ armed: the frame is sliced around its 32-T window instead
         // of running execute() (an INT check per instruction) for the whole

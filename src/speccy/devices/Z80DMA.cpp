@@ -568,8 +568,32 @@ static IRAM_ATTR void captureAttrAfterTransfer(uint16_t dest_start) {
     memcpy(g_dma_buf->prev_attrs[charrow], &page[attr_base], 32);
 }
 
+#if NEXT_TRACE
+// 1 Hz DMA summary for the Next health line (NextReg.cpp next_trace_dump):
+// transfers, bytes, frames closed mid-transfer, and the longest transfer.
+volatile uint32_t g_dma_n = 0, g_dma_bytes = 0, g_dma_endframes = 0;
+volatile uint32_t g_dma_maxlen = 0, g_dma_max_pc = 0, g_dma_max_src = 0, g_dma_max_dst = 0, g_dma_max_fl = 0;
+#endif
+
 IRAM_ATTR void Z80DMA::executeTransfer() {
     dma_in_progress = true;
+#if NEXT_TRACE
+    {
+        g_dma_n++;
+        g_dma_bytes += byte_counter;
+        if (byte_counter > g_dma_maxlen) {
+            g_dma_maxlen = byte_counter;
+            g_dma_max_pc = Z80::getRegPC();
+            g_dma_max_src = transfer_dir ? cur_port_a : cur_port_b;
+            g_dma_max_dst = transfer_dir ? cur_port_b : cur_port_a;
+            g_dma_max_fl = (transfer_dir ? 0x100 : 0) | (auto_restart ? 0x80 : 0) |
+                           (Z80DMA::nextZ80Mode ? 0x40 : 0) |
+                           ((transfer_dir ? port_a_is_io : port_b_is_io) ? 0x2 : 0) |
+                           ((transfer_dir ? port_b_is_io : port_a_is_io) ? 0x1 : 0) |
+                           ((uint32_t)prescalar << 12);
+        }
+    }
+#endif
 
     uint16_t dest_start = transfer_dir ? cur_port_b : cur_port_a;
 #if Z80DMA_LOG
@@ -629,6 +653,9 @@ IRAM_ATTR void Z80DMA::executeTransfer() {
 
         // Handle frame boundary mid-transfer
         if (CPU::tstates >= CPU::statesInFrame) {
+#if NEXT_TRACE
+            g_dma_endframes++;
+#endif
             VIDEO::EndFrame();
             CPU::global_tstates += CPU::statesInFrame;
             CPU::tstates -= CPU::statesInFrame;
