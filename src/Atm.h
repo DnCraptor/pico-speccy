@@ -70,6 +70,48 @@ namespace Atm {
     void reset();               // machine reset: register file + remap
     void remap();               // the one writer of MemESP::ramCurrent[0..3] on ATM
 
+    // After reset(): skip the BIOS and start a ROM directly, the way Unreal's
+    // reset(RM_DOS/RM_128/RM_SOS) does for ATM (Alt+F11 "Reset to", the Web-catalog
+    // TRD launch). Target: BOOT_TRDOS / BOOT_128 / BOOT_48 (48 BASIC, paging locked).
+    enum BootTarget : uint8_t { BOOT_TRDOS = 1, BOOT_128 = 2, BOOT_48 = 3 };
+    void bootRom(BootTarget t);
+
+    // "Reset to CP/M" on the ATM-Turbo 2+ (BIOS 1.07.x, and xBIOS's page 7 which
+    // carries the same code): after its hardware init the BIOS copies its boot menu
+    // to #8000 and does CALL #8003 at #00E1; A = 0 on return is the menu's "CP/M"
+    // answer (#0138 POP AF / OR A / JP NZ,#8000, else the CP/M cold boot). Armed
+    // after a reset, the hook in Z80::check_trdos answers that CALL with A = 0
+    // without running the menu. One-shot, cleared by every reset.
+    // ATM-Turbo 1 (BIOS 1.04rs) has the same shape at other addresses: after
+    // decrypting CP/M into #C000 it does CALL #F864 at #1727, and A = 0 on return
+    // (#172A) is again CP/M (#1733 OR A / JR Z -> ... JP #F85C); 1 TR-DOS, 2 128, else 48.
+    extern bool cpmBootArmed;
+    constexpr uint16_t kBiosMenuCall = 0x8003, kBiosMenuRet = 0x00E4;     // ATM-Turbo 2+
+    constexpr uint16_t kBios1MenuCall = 0xF864, kBios1MenuRet = 0x172A;   // ATM-Turbo 1
+
+    // "Reset to TR-DOS" the way the 128 menu's TR-DOS entry does it: TR-DOS started
+    // from under 128 BASIC (the handler at #2816 runs RANDOMIZE USR 15616 in the 128
+    // editor), not cold from its own ROM — a cold start leaves 48 BASIC in charge and
+    // 128K titles (Trashe) decide the machine is a 48K. Armed by bootRom(BOOT_TRDOS),
+    // which boots the 128 ROM; the hook in Z80::check_trdos takes the first entry
+    // into the menu loop (JP #2653, SP = #5BFF there) and goes to #2816 instead.
+    // Same two addresses in the Pentagon 128 ROM (ATM1 / ATM2 page 2) and in xBIOS's
+    // page 6, whose menu table differs but whose TR-DOS handler does not.
+    extern bool trdosMenuArmed;
+    constexpr uint16_t k128MenuLoop = 0x2653, k128MenuTrdos = 0x2816, k128MenuSp = 0x5BFF;
+
+    // ...and a TR-DOS entered that way does not run "boot" by itself (its first-entry
+    // autorun needs (#5B00) == #AA, a byte only its cold start sets; under 128 BASIC
+    // #5B00 is the 128 ROM's SWAP routine, and forcing the byte ran a RUN "boot"
+    // that skipped the prompt's own init at #02CB and did nothing). So the hook does
+    // what the user does: at the first prompt it answers the line editor with RUN.
+    // #02E9 CALL #2135 prints "A>" and reaches the 48 ROM editor through JP #1D90;
+    // the hook writes RUN (token #F7) into E_LINE, the way the editor would leave it,
+    // and returns from #2135 to #02EC, where #3032 / #02EF parse and run the line.
+    // 0 = off, 1 = armed.
+    extern uint8_t trdosBootState;
+    constexpr uint16_t kTrdosEditor = 0x1D90, kTrdosEditorRet = 0x02EC;
+
     // Port hooks, called early from Ports::output/input. true = consumed.
     bool portWrite(uint16_t address, uint8_t data);
     bool portRead(uint16_t address, uint8_t& v);

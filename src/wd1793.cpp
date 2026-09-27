@@ -2954,6 +2954,20 @@ static void fdiFlushTrack(rvmWD1793 *wd) {
 
 // Generate MFM track image from FDI sector data (ZXMAK2 approach).
 // Called on demand when cylinder/side changes, same as udiLoadTrack.
+bool rvmWD1793IsCpmDisk(rvmwdDisk *disk) {
+    if (!disk || !disk->Diskfile) return false;
+    if (disk->IsProFile) return true;
+    if (!disk->IsFDIFile) return false;
+    // FDI track header: 4 B data offset, 2 reserved, 1 sector count, then 7 B per
+    // sector (C H R N flags off16). TR-DOS formats 256-byte sectors (N = 1).
+    uint8_t hdr[7 + 7];
+    UINT br = 0;
+    if (f_lseek(disk->Diskfile, disk->fdiTrackHdrOffsets[0]) != FR_OK) return false;
+    if (f_read(disk->Diskfile, hdr, sizeof hdr, &br) != FR_OK || br < sizeof hdr) return false;
+    if (hdr[6] == 0) return false;
+    return (hdr[7 + 3] & 3) >= 2;   // 512 or 1024 bytes
+}
+
 void fdiLoadTrack(rvmWD1793 *wd, uint32_t cyl, uint8_t side) {
     if ((int)cyl == wd->diskLoadedCyl && (int)side == wd->diskLoadedSide
         && wd->diskS == wd->diskLoadedUnit)

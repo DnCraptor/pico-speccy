@@ -468,6 +468,9 @@ void wdDiskEject(rvmWD1793 *wd, unsigned char UnitNum);
 void rvmWD1793SwapDrives(rvmWD1793 *wd, uint8_t a, uint8_t b);
 void SCLtoTRD(rvmwdDisk *d, unsigned char *track0);
 bool rvmWD1793CreateEmptyTRD(const char *path);
+// A non-TR-DOS (CP/M) floppy: track 0 of an FDI carries 512/1024-byte sectors, or a
+// Profi .pro image. TRD/SCL are TR-DOS by construction; UDI/TD0 answer false.
+bool rvmWD1793IsCpmDisk(rvmwdDisk *disk);
 void udiLoadTrack(rvmWD1793 *wd, uint32_t cyl, uint8_t side);
 void fdiLoadTrack(rvmWD1793 *wd, uint32_t cyl, uint8_t side);
 void mbdLoadTrack(rvmWD1793 *wd, uint32_t cyl, uint8_t side);

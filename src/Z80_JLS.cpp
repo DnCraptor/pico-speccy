@@ -745,7 +745,54 @@ IRAM_ATTR void Z80::check_trdos() {
     // executing RAM) and remaps through TsConf::setBanks().
     if (Z80Ops::isTsconf) { TsConf::trdosTrap(REG_PCh); return; }
     // ATM-Turbo: same shape — the memory manager owns every window (Atm::remap).
-    if (Z80Ops::isAtm) { Atm::trdosTrap(REG_PCh); return; }
+    if (Z80Ops::isAtm) {
+        const uint16_t menuCall = Atm::atm1 ? Atm::kBios1MenuCall : Atm::kBiosMenuCall;
+        const uint16_t menuRet  = Atm::atm1 ? Atm::kBios1MenuRet  : Atm::kBiosMenuRet;
+        if (Atm::cpmBootArmed && REG_PC == menuCall && (g_atm_ro & 1)) {
+            Atm::cpmBootArmed = false;
+            const uint16_t ret = (uint16_t)(MemESP::readbyte(REG_SP) |
+                                            (MemESP::readbyte((uint16_t)(REG_SP + 1)) << 8));
+            Debug::log("[ATM] BIOS boot menu call, ret=%04X: %s", ret,
+                       ret == menuRet ? "answering CP/M" : "not the BIOS's, left alone");
+            if (ret == menuRet) {             // the BIOS's own call: skip the menu, answer CP/M
+                REG_SP += 2;
+                REG_PC = ret;
+                regA = 0;
+            }
+        }
+        if (Atm::trdosMenuArmed && REG_PC == Atm::k128MenuLoop && (g_atm_ro & 1)
+            && !(Atm::p7ffd & 0x10) && !ESPectrum::trdos) {
+            Atm::trdosMenuArmed = false;       // the 128 menu is up: pick its TR-DOS entry
+            REG_SP = Atm::k128MenuSp;
+            REG_PC = Atm::k128MenuTrdos;
+            Atm::trdosBootState = 1;             // ...and let it run "boot"
+            Debug::log("[ATM] 128 menu reached: taking its TR-DOS entry");
+        }
+        Atm::trdosTrap(REG_PCh);
+        if (Atm::trdosBootState && ESPectrum::trdos && REG_PC == Atm::kTrdosEditor) {
+            const uint16_t ret = (uint16_t)(MemESP::readbyte(REG_SP) |
+                                            (MemESP::readbyte((uint16_t)(REG_SP + 1)) << 8));
+            Atm::trdosBootState = 0;
+            if (ret == Atm::kTrdosEditorRet) {
+                // The first TR-DOS prompt: "type" RUN and press Enter.
+                const uint16_t e = (uint16_t)(MemESP::readbyte(0x5C59) | (MemESP::readbyte(0x5C5A) << 8));
+                MemESP::writebyte(e, 0xF7);                    // RUN
+                MemESP::writebyte((uint16_t)(e + 1), 0x0D);
+                MemESP::writebyte((uint16_t)(e + 2), 0x80);
+                const uint16_t kcur = (uint16_t)(e + 1), end = (uint16_t)(e + 3);
+                MemESP::writebyte(0x5C5B, kcur & 0xFF); MemESP::writebyte(0x5C5C, kcur >> 8);   // K_CUR
+                for (uint16_t v : { (uint16_t)0x5C61, (uint16_t)0x5C63, (uint16_t)0x5C65 }) {   // WORKSP, STKBOT, STKEND
+                    MemESP::writebyte(v, end & 0xFF); MemESP::writebyte((uint16_t)(v + 1), end >> 8);
+                }
+                REG_SP += 2;
+                REG_PC = ret;
+                Debug::log("[ATM] TR-DOS prompt: typed RUN (E_LINE=%04X)", e);
+            } else {
+                Debug::log("[ATM] TR-DOS editor entered from %04X, not the prompt: autorun skipped", ret);
+            }
+        }
+        return;
+    }
 
     // Detect NMI-DOS handler return: exact PC and SP match after planted RET at 0x5C00
     if (nmiDosInProgress && REG_PC == nmiDos_savedPC && REG_SP == nmiDos_savedSP) {

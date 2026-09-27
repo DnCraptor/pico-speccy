@@ -144,6 +144,9 @@ visit https://zxespectrum.speccy.org/contacto
 // Scorpion reset menu: Service monitor=1, TR-DOS=2, 128K=3, 48K=4
 #define MENU_RESETTO_SCORP "Reset to\n" "Service monitor\n" "TR-DOS\n" "128K\n" "48K\n"
 #define MENU_RESETTO_KAY "Reset to\n" "Service\n" "TR-DOS\n" "128K\n" "48K\n"
+// ATM-Turbo 1 / 2+: BIOS=1 (plain reset), CP/M=2 (the BIOS with its menu answered
+// "CP/M" — Atm::cpmBootArmed), then the ROMs directly (Atm::bootRom).
+#define MENU_RESETTO_ATM "Reset to\n" "BIOS\n" "CP/M\n" "TR-DOS\n" "128K\n" "48K\n"
 // TS-Conf: TS-BIOS Setup=1 (the one entry that still goes through the BIOS —
 // it samples Symbol Shift at START), then one entry per ROM page of the
 // selected BIOS set, cold-booted directly like the Pentagon/Scorpion entries.

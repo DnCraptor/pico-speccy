@@ -190,7 +190,14 @@ void remap() {
     VIDEO::grmem = MemESP::ram[MemESP::videoLatch ? 7 : 5].direct();
 }
 
+bool cpmBootArmed = false;
+bool trdosMenuArmed = false;
+uint8_t trdosBootState = 0;
+
 void reset() {
+    cpmBootArmed = false;
+    trdosMenuArmed = false;
+    trdosBootState = 0;
     resolveRoms();
     p7ffd = 0;
     beta = false;
@@ -226,6 +233,59 @@ void reset() {
     memset(pF7, 0, sizeof pF7);
     dosRecalc();
     remap();
+}
+
+// Skip the BIOS: the memory state its menu leaves behind for "TR-DOS" / "128" /
+// "48". ATM-Turbo 2+ follows Unreal reset(RM_DOS): memory manager on (PEN), /CPM
+// off, /PEN2 = 1 (no palette through #FF), ZX mode, frame INT on, and a page table
+// of ROM-by-#7FFD in window 0 — set 0 (D4=0) the 128 ROM, set 1 the 48 ROM with
+// bit 0 = the DOS signal, so the #3Dxx trap and the 128 menu's own paging keep
+// working — RAM 5 / RAM 2 / RAM-by-#7FFD above. (Unreal pins RAM 0 in window 3;
+// taking the low bits from #7FFD is what the BIOS itself sets and keeps 128K
+// paging alive.) ATM-Turbo 1: Unreal's RM_DOS aFE = #E0 (no CP/M, ZX), aFB = 0
+// (no CPSYS), then the ordinary #7FFD D4 / DOS ROM select.
+void bootRom(BootTarget t) {
+    const uint8_t n = romPageCount();
+    const uint8_t base = (n >= 8) ? (uint8_t)(n - 4) : 0;   // xBIOS: the standard set
+    if (atm1) {
+        aFE = 0xE0;
+        aFB = 0;
+    } else {
+        a77 = 0x4000 | 0x0200 | 0x0100;
+        p77 = 0x20 | 3;
+        const uint8_t w0set0 = (uint8_t)(~(base + 2) & 0x3F);          // ROM: 128
+        const uint8_t w0set1 = (uint8_t)(0x80 | (~base & 0x3F));        // ROM: 48 | DOS
+        const uint8_t tbl[4] = { 0, (uint8_t)(0x40 | (~5 & 0x3F)),
+                                    (uint8_t)(0x40 | (~2 & 0x3F)), 0xFF };
+        for (int s = 0; s < 2; s++)
+            for (int w = 0; w < 4; w++)
+                pF7[s * 4 + w] = w ? tbl[w] : (s ? w0set1 : w0set0);
+    }
+    switch (t) {
+        case BOOT_TRDOS: p7ffd = 0x00; beta = false; trdosMenuArmed = true;
+                         Debug::log("[ATM] boot TR-DOS via the 128 menu"); break;
+        case BOOT_128:   p7ffd = 0x00; beta = false; break;
+        case BOOT_48:    p7ffd = 0x30; beta = false; break;
+    }
+    // The BIOS has already programmed its own palette by the time a reset reaches
+    // here (it runs before the machine is handed over), and nothing on the direct
+    // path rewrites it: load the standard ZX colours into the palette RAM, as
+    // Unreal's reset() does (load_spec_colors), and hand the 16 hardware slots back
+    // to the emulator's own ZX palette until the guest programs one.
+    for (int i = 0; i < 16; i++) {
+        const bool b = i & 1, r = i & 2, g = i & 4, br = i & 8;
+        uint8_t v;
+        if (atm1) v = (uint8_t)((b ? 0x01 : 0) | (r ? 0x02 : 0) | (g ? 0x04 : 0) |
+                                (br ? ((b ? 0x08 : 0) | (r ? 0x10 : 0) | (g ? 0x20 : 0)) : 0));
+        else      v = (uint8_t)((b ? 0x01 : 0) | (r ? 0x02 : 0) | (g ? 0x10 : 0) |
+                                (br ? ((b ? 0x20 : 0) | (r ? 0x40 : 0) | (g ? 0x80 : 0)) : 0));
+        pal[i] = (uint8_t)~v;
+    }
+    palDirty = false;
+    VIDEO::atmPaletteRestore();
+    dosRecalc();
+    remap();
+    VIDEO::atmVideoModeChanged();
 }
 
 // ------------------------------------------------------------------ palette --

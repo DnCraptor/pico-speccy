@@ -48,6 +48,7 @@ using namespace std;
 #include "Config.h"
 #include "ESPectrum.h"
 #include "CPU.h"
+#include "Atm.h"
 #include "Video.h"
 #include "messages.h"
 #include <math.h>
@@ -470,7 +471,16 @@ static bool rfd_launch_tmp(string path) {
             ESPectrum::fdd.disk[0]->writeprotect =
                 Config::driveWP[0] || ESPectrum::fdd.disk[0]->IsTD0File;
         Config::save();
-        OSD::bootTrdos();              // cold-boot into TR-DOS so the disk auto-runs
+        if (Z80Ops::isAtm && rvmWD1793IsCpmDisk(ESPectrum::fdd.disk[0])) {
+            // ATM-Turbo: a CP/M floppy — TR-DOS cannot read it. Boot the BIOS
+            // with its menu answered "CP/M" (the same as Alt+F11 -> CP/M).
+            Config::ram_file = NO_RAM_FILE;
+            Config::last_ram_file = NO_RAM_FILE;
+            ESPectrum::reset();
+            Atm::cpmBootArmed = true;
+        } else {
+            OSD::bootTrdos();          // cold-boot into TR-DOS so the disk auto-runs
+        }
         return true;
     }
     if (FileUtils::ifaceForExt(ext) == IFACE_PLUS3) {

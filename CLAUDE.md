@@ -11870,6 +11870,33 @@ MM_ATM450 / MM_ATM710, io.cpp, atm.cpp, drawers.cpp) and **MAME sinclair/atm.cpp
   region (< the stock 1 668 026 B gm.dls), i.e. a no-butter z0p2 installing the stock
   bank trades the .psramroms ROMs — the documented automatic trade, not a failure.
   All of DVp2 VGA-HDMI, z0p2 PIOUSB, m2p2 SOFTTV and m1p2 TFT link.
+- **Alt+F11 "Reset to" on ATM = BIOS / CP/M / TR-DOS / 128K / 48K** (2026-09-27,
+  `MENU_RESETTO_ATM`). TR-DOS/128/48 skip the BIOS through `Atm::bootRom()` (Unreal
+  `reset(RM_DOS)`: 2+ PEN on, /CPM off, ZX mode, INT on, page table = ROM-by-#7FFD in
+  window 0 — set 0 the 128 ROM, set 1 the 48 ROM with bit 0 = DOS — then RAM 5/2/by-#7FFD;
+  ATM1 aFE=#E0 aFB=0). It also loads the standard ZX colours into the ATM palette RAM
+  and hands the hardware slots back (`atmPaletteRestore`) — the BIOS had programmed its
+  own palette and nothing on the direct path rewrote it.
+  - **TR-DOS must start from under 128 BASIC, not cold** (hw-confirmed, Trashe): a cold
+    TR-DOS leaves 48 BASIC in charge and 128K titles see a 48K. bootRom(BOOT_TRDOS) boots
+    the 128 ROM and a one-shot hook in `Z80::check_trdos` takes the first `JP #2653`
+    (the 128 menu loop, SP=#5BFF) to the menu's TR-DOS handler `#2816`
+    (`RANDOMIZE USR 15616`). Same two addresses in Pentagon ROM0 and xBIOS page 6.
+  - **...and "boot" is then typed, not forced** (hw-confirmed, Trashe from Web Archive):
+    TR-DOS's first-entry autorun needs (#5B00)=#AA, which only its cold start sets (under
+    128 BASIC #5B00 is the SWAP routine). Forcing #AA made it take the autorun branch,
+    which skips the prompt init at #02CB-#02EC and silently did nothing. The hook instead
+    catches `JP #1D90` (the 48 ROM editor, from #2135, with #02EC on the stack), writes
+    `F7 0D 80` (RUN) into E_LINE + K_CUR/WORKSP/STKBOT/STKEND, and returns to #02EC —
+    exactly RUN+Enter at the first prompt. `bootTrdos()` (Web-catalog TRD launch) uses it.
+  - **CP/M skips the BIOS boot menu**: `Atm::cpmBootArmed`, the hook answers the BIOS's
+    own menu CALL with A=0 (= CP/M): 2+ / xBIOS page 7 `CALL #8003` at #00E1 (ret #00E4),
+    ATM1 1.04rs `CALL #F864` at #1727 (ret #172A, after CP/M is decrypted to #C000).
+    Guarded by ROM in window 0 + the exact return address. 2+ NOT hw-confirmed, ATM1 fix
+    NOT hw-tested. A Web-catalog launch of a CP/M floppy (`rvmWD1793IsCpmDisk`: FDI with
+    512/1024-byte track-0 sectors, or .pro; UDI/TD0 not detected) takes the CP/M path.
+  - Log lines: `[ATM] boot TR-DOS via the 128 menu`, `128 menu reached...`, `TR-DOS
+    prompt: typed RUN`, `BIOS boot menu call, ret=...`.
 - **Hw check owed (nothing has run)**: ATM2 BIOS boot to its menu (PEN=0 → BIOS in
   all windows, then #F7 paging), TR-DOS from the BIOS, the 7 MHz switch, EGA/hires/
   text screens (CP/M, ATM2 text), the palette, ATM1 boot (CPSYS/SYS ROM, #FDFD pages),

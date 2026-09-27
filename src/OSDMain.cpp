@@ -43,6 +43,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include <pico/multicore.h>
 
 #include "OSDMain.h"
+#include "Atm.h"
 #include "FileUtils.h"
 #include "Subsystem.h"
 #include "CPU.h"
@@ -2035,6 +2036,9 @@ void OSD::bootTrdos() {
         ESPectrum::reset(1);
         MemESP::romLatch = 1;
         ESPectrum::trdos = true;
+    } else if (Z80Ops::isAtm) {
+        ESPectrum::reset();  // skip the BIOS: straight into the TR-DOS ROM
+        Atm::bootRom(Atm::BOOT_TRDOS);
     } else if (Config::arch == A_SCORP) {
         ESPectrum::reset(3); // Scorpion's own TR-DOS bank
         MemESP::romLatch = 1;
@@ -2308,6 +2312,8 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                 string reset_menu;
                 if (Config::arch == A_PROFI) {
                     reset_menu = MENU_RESETTO_PROFI;
+                } else if (Z80Ops::isAtm) {
+                    reset_menu = MENU_RESETTO_ATM;
                 } else if (Config::arch == A_SCORP && g_scorp_kay) {
                     reset_menu = MENU_RESETTO_KAY;
                 } else if (Config::arch == A_SCORP) {
@@ -2332,6 +2338,14 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                     if (Config::ram_file != NO_RAM_FILE) Config::ram_file = NO_RAM_FILE;
                     Config::last_ram_file = NO_RAM_FILE;
 
+                    if (Z80Ops::isAtm) {
+                        // BIOS=1, CP/M=2, TR-DOS=3, 128K=4, 48K=5
+                        ESPectrum::reset();
+                        if (opt == 2)      Atm::cpmBootArmed = true;
+                        else if (opt == 3) Atm::bootRom(Atm::BOOT_TRDOS);
+                        else if (opt == 4) Atm::bootRom(Atm::BOOT_128);
+                        else if (opt == 5) Atm::bootRom(Atm::BOOT_48);
+                    } else
                     if (Z80Ops::isTsconf) {
                         // Setup=1 is the only entry that runs the BIOS: TS-BIOS
                         // samples Symbol Shift at START (`IN (#7FFE)` bit 1) and
