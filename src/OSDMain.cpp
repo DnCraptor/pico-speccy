@@ -80,6 +80,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "BoardPins.h"
 #include "graphics.h"
 #include "ui/OSDNewMenu.h"
+#include "player/PicoPlayer.h"  // pp::available / playableExt (F5 -> Pico-Zx-Player)
 #include "ui/UiBrowser.h"
 #include "ui/UiDialog.h"
 #include "ui/UiGfx.h"
@@ -2731,6 +2732,11 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                     }
                     goto f5_retry;
                 }
+                // M + trailing '/' = F2 on a folder: play the folder and its subfolders.
+                if (mFile[0] == 'M' && mFile.back() == '/' && pp::available()) {
+                    nm::playerStandalone(FileUtils::ALL_Path + mFile.substr(1));
+                    goto f5_retry;
+                }
                 // P prefix = F5 pressed on a disk/image — force the slot picker.
                 if (mFile[0] == 'P') forcePopup = true;
                 fname = FileUtils::ALL_Path + mFile.substr(1);
@@ -2759,6 +2765,13 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                     fromZip = true;
                 }
 
+                // Pico-Zx-Player: F2 on any music file ('M'), Enter on the music-only
+                // formats. .mp3 keeps Enter = tape (MP3-encoded tapes exist).
+                if (pp::available() && pp::playableExt(ext) &&
+                        (mFile[0] == 'M' || (ext != "mp3"))) {
+                    nm::playerStandalone(fname);
+                    goto f5_retry;
+                }
                 if (ext == "tap" || ext == "tzx" || ext == "pzx" || ext == "wav" || ext == "mp3") {
                     // Tape — sync TAP_Path: /tmp/ for ZIP, ALL_Path for normal files
                     FileUtils::TAP_Path = fromZip ? "/tmp/" : FileUtils::ALL_Path;

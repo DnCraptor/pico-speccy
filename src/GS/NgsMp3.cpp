@@ -93,7 +93,14 @@ static volatile bool s_release_req = false;  // machine reset → core0: free it
 static uint32_t      s_idle_frames = 0;      // core0: service() calls with nothing to do
 static uint8_t       s_free_pending = 0;     // core0: frames left before the buffers go
 
+// Pico-Zx-Player owns its own Helix decoder while its page is open (the emulator —
+// and with it the NeoGS stream — is paused behind the menu). It points this at
+// its own bump allocator for the duration of MP3InitDecoder() and clears it
+// right after; Helix never allocates again, so no other call sees the hook.
+extern "C" { void* (*ngs_helix_alloc_hook)(size_t) = nullptr; }
+
 extern "C" void* ngs_helix_alloc(size_t sz) {
+    if (ngs_helix_alloc_hook) return ngs_helix_alloc_hook(sz);
     uint32_t need = ((uint32_t)sz + 3u) & ~3u;          // keep 4-byte alignment
     uint8_t* p = nullptr;
     if (s_helix_arena && s_helix_used + need <= s_helix_cap) {

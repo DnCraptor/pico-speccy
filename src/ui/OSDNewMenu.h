@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <string>
 
 namespace nm {
 
@@ -37,6 +38,9 @@ void loadSnapshotFile();
 // Pico-Scwong (the built-in game) outside the menu: the boot-time "hold S"
 // entrance in ESPectrum::setup. Owns its own gfx session, needs no SD card.
 void gameScwongStandalone();
+// Pico-Zx-Player on a music file picked in the F5 browser (full path). Only call
+// when pp::available().
+void playerStandalone(const std::string& path);
 
 // A yes/no question in THIS UI, asked from outside the menu while the machine
 // runs (the SD automount's "settings found on the card — reboot?"). Owns its

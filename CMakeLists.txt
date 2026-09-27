@@ -381,6 +381,12 @@ endif()
 
 # КРИТИЧНАЯ ОПТИМИЗАЦИЯ: принудительно -O3 для горячего кода независимо от CMAKE_BUILD_TYPE
 # Это важно для MinSizeRel (где по умолчанию -Os), чтобы не терять FPS
+# Pico-Zx-Player: libxmp-lite (S3M/XM/IT/MOD), vendored under src/player/libxmp.
+# Its allocations go to butter PSRAM through the forced pp_xmp_alloc.h; -w
+# because third-party warnings are not ours to fix.
+file(GLOB PP_XMP_SRC CONFIGURE_DEPENDS "src/player/libxmp/*.c" "src/player/libxmp/loaders/*.c")
+set_source_files_properties(${PP_XMP_SRC} PROPERTIES COMPILE_FLAGS
+    "-O2 -w -DLIBXMP_CORE_PLAYER -DLIBXMP_STATIC -I${CMAKE_SOURCE_DIR}/src/player/libxmp -include ${CMAKE_SOURCE_DIR}/src/player/pp_xmp_alloc.h")
 set_source_files_properties(src/AySound.cpp PROPERTIES
     COMPILE_FLAGS "-O3 -ffast-math -funroll-loops")
 set_source_files_properties(src/SAASound.cpp PROPERTIES

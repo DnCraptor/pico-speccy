@@ -46,6 +46,7 @@
 #include "Debug.h"
 #include "SortedFiles.h"
 #include "Buffer.h"
+#include "player/PicoPlayer.h"   // F2 = play in Pico-Zx-Player
 #include <pico/stdlib.h>
 
 using std::string;
@@ -454,7 +455,9 @@ static void drawFooter() {
         textClip(qx, y + 3, L.ix + L.iw - qx - L.pad, q.c_str(), C_WHITE);
     } else {
         text(L.ix + L.pad, y + 3,
-             SYM_UP SYM_DOWN " Move  " SYM_ENTER " Open  " SYM_LEFT " Up  F3 Find  Esc Close",
+             (s_ftype == DISK_ALLFILE || s_ftype == DISK_MUSFILE) && pp::available()
+                 ? SYM_UP SYM_DOWN " Move  " SYM_ENTER " Open  F2 Play  F3 Find  Esc Close"
+                 : SYM_UP SYM_DOWN " Move  " SYM_ENTER " Open  " SYM_LEFT " Up  F3 Find  Esc Close",
              C_TEXT_DIM);
     }
 }
@@ -1019,6 +1022,23 @@ static string runLoop() {
                     && FileUtils::hasZIPextension(name)) {
                 OSD::clickNoPause();
                 return leave("X" + name);
+            }
+            // F2 = play in Pico-Zx-Player. Needed for .mp3, where Enter means "tape";
+            // Enter on the music-only formats (.vgm/.vgz) goes to the player too
+            // (dispatched by the caller).
+            // On a folder F2 plays the whole folder (and its subfolders): the
+            // result carries a trailing '/', which is how callers tell it apart.
+            // Also on in the player's own browser (DISK_MUSFILE).
+            if ((all || s_ftype == DISK_MUSFILE) && k.vk == fabgl::VK_F2 && s_visTotal
+                    && pp::available()) {
+                if (onDir && !onUp) {
+                    OSD::clickNoPause();
+                    return leave("M" + name + "/");
+                }
+                if (!onDir && pp::playableExt(FileUtils::getLCaseExt(name))) {
+                    OSD::clickNoPause();
+                    return leave("M" + name);
+                }
             }
             if (all && k.vk == fabgl::VK_F5 && !onDir && s_visTotal
                     && FileUtils::ifaceForExt(FileUtils::getLCaseExt(name)) != IFACE_NONE) {

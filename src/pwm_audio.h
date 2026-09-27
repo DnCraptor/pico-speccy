@@ -58,3 +58,17 @@ esp_err_t pwm_audio_write(
     size_t *bytes_written,
     uint32_t wait_ms
 );
+
+// ── Pico-Zx-Player PCM source ──────────────────────────────────────────────────
+// While `pcm_player_ring` is set the audio timer plays THIS instead of the
+// emulator's frame buffer + the live GS: a ring of interleaved int16 L,R at the
+// 31250 Hz output rate, filled by the player page on core0. Frame count is a
+// power of two (`pcm_player_mask` = frames - 1); read/write are free-running
+// frame counters (one writer each side). An empty ring plays silence, never a
+// held sample. Set/cleared only by the player (pcm_player_attach/detach).
+extern volatile int16_t* volatile pcm_player_ring;
+extern volatile uint32_t pcm_player_mask;
+extern volatile uint32_t pcm_player_r;
+extern volatile uint32_t pcm_player_w;
+void pcm_player_attach(int16_t* ring, uint32_t frames);
+void pcm_player_detach();

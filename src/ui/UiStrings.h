@@ -30,6 +30,7 @@
 #define TXT_DEBUG           "Debug"
 #define TXT_RESET           "Reset"
 #define TXT_GAME            "Pico-Scwong"
+#define TXT_PLAYER          "Pico-Zx-Player"
 #define TXT_VOLUME          "Volume"
 
 // ── Help ───────────────────────────────────────────────────────────────────────

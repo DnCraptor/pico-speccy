@@ -23,8 +23,11 @@
 // while a GM.DLS bank is bound (i.e. GM.DLS MIDI is the active engine). This keeps
 // it out of permanent .bss for every other configuration. MidiSubsys owns the
 // lifecycle: bind allocates, midi_wt_unbind() (via MidiSynth::deinit) frees.
+// tryCalloc, not calloc: pico_malloc PANICS on NULL, and Pico-Zx-Player binds the bank
+// from inside the menu, where the heap can be thin — a refusal is handled below.
+void* tryCalloc(size_t n);
 int midi_wt_voices_alloc(void) {
-    if (!g_voices) g_voices = (wt_voice_t *) calloc(WT_MAX_VOICES, sizeof(wt_voice_t));
+    if (!g_voices) g_voices = (wt_voice_t *) tryCalloc(WT_MAX_VOICES * sizeof(wt_voice_t));
     return g_voices != (wt_voice_t *) 0;
 }
 

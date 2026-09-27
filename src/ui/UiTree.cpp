@@ -21,6 +21,7 @@
 #include "FlashRoms.h"      // romsUsable()/extendable() for the GMX, TS-Conf and bank rows
 #include "psram_spi.h"       // psram_size()
 #include "Buffer.h"          // Buffer::gsPsramAvailable() for the General Sound gate
+#include "player/PicoPlayer.h" // pp::available() for the Pico-Zx-Player row
 #include "BoardPins.h"       // the ESP-link predicate of the Network rows
 #include "messages.h"        // _PIN_XSTR for the Real sound input row label
 #include <hardware/vreg.h>   // VREG_VOLTAGE_* values used by the option table
@@ -66,6 +67,8 @@ namespace nm {
 // ── shared predicates ──────────────────────────────────────────────────────────
 
 static bool p_hasSD() { return FileUtils::fsMount; }
+// Pico-Zx-Player: QSPI PSRAM only (file images + decoder state live in the arena).
+static bool p_player() { return FileUtils::fsMount && pp::available(); }
 // Tape > Real sound input exists only where the board defines the pin; a build that
 // hands it a placeholder (PICO_DV with the debug UART sets 255) has no input at all.
 #if defined(LOAD_WAV_PIO) && (LOAD_WAV_PIO < 48)
@@ -1546,6 +1549,7 @@ static const Node kRoot[] = {
     NM_SUB   (TXT_RESET,     kReset,    nullptr),
     NM_SUB   (TXT_DEBUG,     kDebug,    nullptr),
     NM_INT   (TXT_VOLUME,    SET_VOLUME, -16, 0, 1, nullptr),
+    NM_PAGE  (TXT_PLAYER,    act_player, p_player),
 };
 
 // The disk hot key opens the menu straight on one of these, so the node has to be

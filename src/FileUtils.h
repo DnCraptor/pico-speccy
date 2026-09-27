@@ -60,6 +60,7 @@ using namespace std;
 // (rename / delete / new folder) rather than to pick a file. Its own slot so the F5
 // browser's remembered position is not clobbered by a trip through the config tree.
 #define DISK_CFGFILE 7
+#define DISK_MUSFILE 8   // Pico-Zx-Player: music files (session-only cursor, not persisted)
 
 struct DISK_FTYPE {
     string fileExts;
@@ -195,7 +196,7 @@ public:
     static string ALL_Path; // Current path for unified file dialog
     static string DLS_Path; // Current .dls path (GM.DLS soundbank conversion)
 
-    static DISK_FTYPE fileTypes[8];
+    static DISK_FTYPE fileTypes[9];
 
 private:
     friend class Config;

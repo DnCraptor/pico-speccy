@@ -193,8 +193,11 @@ bool uiClockDirty() {
 }
 
 // See UiRender.h: the shared idle wait of the UI's key loops.
+void (*uiIdleHook)() = nullptr;
+
 void uiIdle(int ms) {
     ESPectrum::netBackgroundTick();
+    if (uiIdleHook) uiIdleHook();
     if (ms > 0) sleep_ms(ms);
 }
 

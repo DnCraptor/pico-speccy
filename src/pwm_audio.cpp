@@ -464,8 +464,46 @@ volatile uint32_t g_pcm_hold_ct = 0;
 // the previous machine's pedestal for the first few ms.
 static int32_t s_dc_L = 0, s_dc_R = 0;
 
+volatile int16_t* volatile pcm_player_ring = nullptr;
+volatile uint32_t pcm_player_mask = 0;
+volatile uint32_t pcm_player_r = 0;
+volatile uint32_t pcm_player_w = 0;
+
+void pcm_player_attach(int16_t* ring, uint32_t frames) {
+    pcm_player_ring = nullptr;
+    __dmb();
+    pcm_player_mask = frames - 1;
+    pcm_player_r = pcm_player_w = 0;
+    __dmb();
+    pcm_player_ring = ring;
+}
+
+void pcm_player_detach() {
+    pcm_player_ring = nullptr;
+    __dmb();
+    // The emulator's frame buffer is stale by now; hold nothing from it.
+    m_off = m_size;
+}
+
 static void __not_in_flash_func(pcm_call_inner)() {
     g_pcm_tick_ct++;
+    int32_t sL, sR;
+    volatile int16_t* pring = pcm_player_ring;
+    if (pring) {
+        // Pico-Zx-Player owns the output: its ring is final, bipolar, already
+        // volume-scaled. Underrun = silence (a held sample would be DC).
+        const uint32_t r = pcm_player_r;
+        if (r != pcm_player_w) {
+            const uint32_t i = (r & pcm_player_mask) << 1;
+            sL = pring[i];
+            sR = pring[i + 1];
+            pcm_player_r = r + 1;
+        } else {
+            sL = sR = 0;
+        }
+        goto mixed;
+    }
+    {
     // Live GS contribution (signed offset around silence=128 × vol8).
     // Sampled here at the audio output rate (31.25 kHz) so playback tracks
     // the GS-Z80 DAC state in real time, not a pre-rendered frame buffer.
@@ -508,8 +546,10 @@ static void __not_in_flash_func(pcm_call_inner)() {
         zL = 0;
         zR = 0;
     }
-    int32_t sL = zL + gs_offL;
-    int32_t sR = zR + gs_offR;
+    sL = zL + gs_offL;
+    sR = zR + gs_offR;
+    }
+mixed:
     if (sL < -32768) sL = -32768; else if (sL > 32767) sL = 32767;
     if (sR < -32768) sR = -32768; else if (sR > 32767) sR = 32767;
 

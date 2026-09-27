@@ -95,7 +95,13 @@ typedef union {
 // drop under load. z80_run ≈ 916 B, z80_int ≈ 40 B — fits trivially in SRAM.
 // Z80_redcode.h checks #ifndef Z80_API, so defining it here takes precedence
 // and applies section(".time_critical.gs_z80") to all API functions.
+// PP_Z80_FLASH: Pico-Zx-Player's second copy (src/player/PlayerZ80.h) stays in flash —
+// it runs only while the menu owns core0, and SRAM is not worth spending on it.
+#ifdef PP_Z80_FLASH
+#   define Z80_API
+#else
 #   define Z80_API __attribute__((noinline, section(".time_critical.gs_z80")))
+#endif
 
 #define Z_MEMBER_OFFSET(type, member) ((zusize)offsetof(type, member))
 

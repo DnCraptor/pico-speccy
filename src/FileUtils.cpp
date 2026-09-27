@@ -77,18 +77,20 @@ string FileUtils::ROM_Path = "/";
 string FileUtils::IMG_Path = "/";
 string FileUtils::ALL_Path = "/";
 string FileUtils::DLS_Path = "/";
-DISK_FTYPE FileUtils::fileTypes[8] = {
+DISK_FTYPE FileUtils::fileTypes[9] = {
     {".sna,.SNA,.z80,.Z80,.p,.P,.spg,.SPG,.zip,.ZIP",2,2,0,""},
     {".tap,.TAP,.tzx,.TZX,.pzx,.PZX,.wav,.WAV,.mp3,.MP3,.zip,.ZIP",2,2,0,""},
     {".trd,.TRD,.scl,.SCL,.udi,.UDI,.fdi,.FDI,.td0,.TD0,.mbd,.MBD,.pro,.PRO,.dsk,.DSK,.zip,.ZIP",2,2,0,""},
     {".rom,.ROM,.bin,.BIN,.dck,.DCK,.zip,.ZIP",2,2,0,""},
     {".mmc,.MMC,.hdf,.HDF,.hdd,.HDD,.vhd,.VHD,.img,.IMG,.iso,.ISO,.zip,.ZIP",2,2,0,""},
-    {".sna,.SNA,.z80,.Z80,.p,.P,.spg,.SPG,.tap,.TAP,.tzx,.TZX,.pzx,.PZX,.wav,.WAV,.mp3,.MP3,.trd,.TRD,.scl,.SCL,.udi,.UDI,.fdi,.FDI,.td0,.TD0,.mbd,.MBD,.pro,.PRO,.dsk,.DSK,.mmc,.MMC,.hdf,.HDF,.vhd,.VHD,.hdd,.HDD,.img,.IMG,.rom,.ROM,.bin,.BIN,.dck,.DCK,.dls,.DLS,.zip,.ZIP",2,2,0,""},
+    {".sna,.SNA,.z80,.Z80,.p,.P,.spg,.SPG,.tap,.TAP,.tzx,.TZX,.pzx,.PZX,.wav,.WAV,.mp3,.MP3,.trd,.TRD,.scl,.SCL,.udi,.UDI,.fdi,.FDI,.td0,.TD0,.mbd,.MBD,.pro,.PRO,.dsk,.DSK,.mmc,.MMC,.hdf,.HDF,.vhd,.VHD,.hdd,.HDD,.img,.IMG,.rom,.ROM,.bin,.BIN,.dck,.DCK,.dls,.DLS,.vgm,.VGM,.vgz,.VGZ,.mid,.MID,.midi,.MIDI,.kar,.KAR,.rmi,.RMI,.etc,.ETC,.saa,.SAA,.cop,.COP,.sng,.SNG,.tfc,.TFC,.tfd,.TFD,.tfe,.TFE,.pt3,.PT3,.pt2,.PT2,.stc,.STC,.stp,.STP,.sqt,.SQT,.mod,.MOD,.s3m,.S3M,.xm,.XM,.it,.IT,.ay,.AY,.zip,.ZIP",2,2,0,""},
     {".dls,.DLS",2,2,0,""},  // DISK_DLSFILE (GM.DLS soundbank conversion)
     // DISK_CFGFILE (Debug > Config folders). No extension list on purpose: nothing
     // here is "of interest" over anything else, so an empty list means every name
     // draws as a normal entry (extMatches in UiBrowser.cpp).
-    {"",2,2,0,""}
+    {"",2,2,0,""},
+    // DISK_MUSFILE (Pico-Zx-Player). Keep in step with pp::playableExt().
+    {".mp3,.MP3,.vgm,.VGM,.vgz,.VGZ,.mid,.MID,.midi,.MIDI,.kar,.KAR,.rmi,.RMI,.etc,.ETC,.saa,.SAA,.cop,.COP,.sng,.SNG,.tfc,.TFC,.tfd,.TFD,.tfe,.TFE,.pt3,.PT3,.pt2,.PT2,.stc,.STC,.stp,.STP,.sqt,.SQT,.mod,.MOD,.s3m,.S3M,.xm,.XM,.it,.IT,.ay,.AY",2,2,0,""}
 };
 
 string toLower(const std::string& str) {
