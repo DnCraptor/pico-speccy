@@ -7858,6 +7858,43 @@ for anything raised while the MENU owns the screen.
 - Expiry is wall time (`esp_timer_get_time`), not frames, so max speed does not
   flash it past.
 
+## Video > Hide border — the paper scaled to fill the screen (2026-09-27, NOT hw-tested)
+
+`Config::borderless` (NVS `borderless`, `SET_BORDERLESS`, AC_PURE) → `VIDEO::bl_live`,
+re-decided at EVERY EndFrame by `VIDEO::blRecalc()` (right after the DS80/GMX/Timex/
+TS-Conf mode applies, before `gigascreenModeGate`), so the menu only writes Config.
+
+- **The renderer is untouched; only its destination moves.** While live,
+  `MainScreen_Blank*` point `lineptr32` at a 256-byte staging line (`BlState::stage`,
+  same x^2 layout as a fb row's content), and the line-completion block of
+  `MainScreen` / `MainScreen_Snow` / `_Snow_Opcode` sets `bl_line_done`; `BL_FLUSH()`
+  at every exit of those functions (the completion block runs BEFORE the column
+  loop, and `_Snow_Opcode` has an early return) scales it with `blExpandLine(curline)`.
+  So multicolour, ULA+, Timex hi-colour/screen 1, 16col, snow and the Timex hi-res
+  OR-merge fallback all work for free, and guest timing/contention does not move.
+  `paper_off` is ignored while live.
+- **Ratios, integer-patterned so every character cell is distorted identically**
+  (host-checked: each fb row covered exactly once, one pattern per cell): 320x240 =
+  5/4 x 5/4, no frame; 360x240 = 11/8 x 5/4 and 360x288 = 11/8 x 3/2, with a 4-byte
+  (8 output px) frame each side painted per line with `brd` at line end — a coarse
+  border effect survives there. Tables `hsrc[q] = map(q^2)^2`, `vrow[c]` (bit 15 = dup).
+- **Not live under** DS80 / GMX 640x200 / Timex hi-res (all `profi_ds80_active`) and
+  TS-Conf whole-line modes; TS-Conf ZX mode IS scaled. Gigascreen is SUSPENDED via
+  `gigascreenModeIncompatible()` (owner's call — the prev-FB is laid out for the
+  bordered row). Border machine parked (`Border_Blank` in EndFrame and Reset).
+- **Overlays sit on content, so the scaler carves them** (`blPutRow`): the F8/volume
+  rect (same test as TS-Conf), the `OSD::notify` rect (`ts_notice_*`, notify takes
+  the carve path via `bandBorderMode()`), and `BL_CARVE_LAMP` / `BL_CARVE_LED` set by
+  the corner lamp and `LED::draw`, which also back their cell with `brd` so no frozen
+  scrap of picture shows through. Clearing a carve hands the rows back next frame.
+- State is ONE heap block (~1.4 KB, `tryMalloc`, only while live); RAM code
+  `blExpandLine` 248 B + `blPutRow` 360 B, `-O2 no-unroll no-loop-distribute` so no
+  flash memcpy on the render path. Test ELF `debug/DVp2-borderless-1.0.7.elf`.
+- **Hw check owed**: picture at 640x480 / 720x480 / 720x576 on HDMI and VGA; a
+  multicolour title; ULA+; snow (48K/128K); F8 stats, F9/F10 volume, FDD lamp, LED
+  strip, notify banner over the picture (no blinking); toggling on/off; Gigascreen
+  suspend/resume; Profi DS80 / GMX / TS-Conf mode switches in and out; FPS cost.
+
 ## Debug > Paper (toggleable paper rendering, 2026-08-24, NOT hw-tested)
 
 `Config::render_paper` (NVS `render_paper`, default on) → live mirror

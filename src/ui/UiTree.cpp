@@ -1026,6 +1026,7 @@ static const Node kVideo[] = {
     NM_RADIO_D(TXT_VID_MODE,     SET_VIDEO_MODE, video_modeOpts, nullptr),
     NM_SUB  (TXT_VID_HDMI,       kHdmi,          p_hdmiOut),
     NM_SUB  (TXT_VID_VGA,        kVga,           p_vgaOut),
+    NM_BOOL (TXT_VID_BORDERLESS, SET_BORDERLESS, nullptr),
     NM_RADIO(TXT_VID_PALETTE,    SET_PALETTE,    opt_palette,    nullptr),
     NM_RADIO(TXT_VID_RENDER,     SET_RENDER,     opt_render,     nullptr),
     NM_RADIO(TXT_VID_SCANLINES,  SET_SCANLINES,  opt_scanlines,  nullptr),

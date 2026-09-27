@@ -98,6 +98,7 @@
 #define TXT_AUD_BOOST       "Volume boost"
 #define TXT_VID_DMA         "DMA"
 #define TXT_VID_MODE        "Mode"
+#define TXT_VID_BORDERLESS  "Hide border"
 #define TXT_VID_RENDER      "Render type"
 #define TXT_VID_GIGASCREEN  "Gigascreen"
 #define TXT_VID_ULAPLUS     "ULA+"

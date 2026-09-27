@@ -377,6 +377,22 @@ void draw() {
     int base_x = 0, base_y = 0;
     if (!resolveLayout(base_x, base_y)) return;
 
+    // Borderless: the strip sits on the picture, which the scaler repaints every
+    // line — reserve it (next frame on) and give it a border-coloured backing so
+    // the icons neither blink nor pile up over a frozen scrap of the picture.
+    if (VIDEO::bl_live) {
+        int n = 0;
+        for (uint8_t i = 0; i < COUNT; i++) if (isVisible((Id)i)) n++;
+        const int x0 = base_x & ~3;
+        int x1 = (base_x + n * CELL_W + 3) & ~3;
+        if (x1 > (int)VIDEO::vga.xres) x1 = (int)VIDEO::vga.xres;
+        VIDEO::blSetCarve(VIDEO::BL_CARVE_LED, x0, base_y, x1, base_y + 8);
+        for (int row = 0; row < 8; row++) {
+            uint8_t* line = (uint8_t*)VIDEO::vga.frameBuffer[base_y + row];
+            if (line && x1 > x0) memset(line + x0, (uint8_t)VIDEO::brd, (size_t)(x1 - x0));
+        }
+    }
+
     // Pack visible indicators in a single row, no gaps for disabled ones.
     // Border repaints underneath every frame so old positions auto-erase.
     uint8_t slot = 0;
