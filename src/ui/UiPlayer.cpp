@@ -369,10 +369,12 @@ void drawLegend() {
     struct Row { const char* k; const char* what; int on; };   // on: -1 = not a toggle
     const Row rows[] = {
         { "Spc",            "Pause",   E.paused ? 1 : 0 },
-        { SYM_LEFT SYM_RIGHT, "Seek",  -1 },
-        { "PgUp",           "Prev",    -1 },
-        { "PgDn",           "Next",    -1 },
-        { SYM_UP SYM_DOWN,  "Volume",  -1 },
+        { SYM_LEFT SYM_RIGHT, "Track", -1 },
+        { SYM_UP SYM_DOWN,  "Seek",    -1 },
+        { "PgUp",           "Prev dir", -1 },
+        { "PgDn",           "Next dir", -1 },
+        { "F9",             "Vol -",   -1 },
+        { "F10",            "Vol +",   -1 },
         { "M",              "Mute",    E.muted ? 1 : 0 },
         { "S",              "Shuffle", s_shuffle ? 1 : 0 },
         { "A",              "Auto",    s_auto ? 1 : 0 },
@@ -639,6 +641,35 @@ void seekStep() {
     ringFlush();
 }
 
+// ── folders ───────────────────────────────────────────────────────────────────
+// The playlist keeps each folder's tracks together (plBuild's sort), so a
+// folder is a run of equal directory prefixes. PgDn = first track of the next
+// folder, PgUp = first track of the previous one; both wrap.
+size_t dirLen(int i) {
+    const char* n = P.name(i);
+    const char* sl = strrchr(n, '/');
+    return sl ? (size_t)(sl - n) + 1 : 0;
+}
+bool sameDir(int a, int b) {
+    const size_t la = dirLen(a);
+    return la == dirLen(b) && !strncmp(P.name(a), P.name(b), la);
+}
+int dirStart(int i) {
+    while (i > 0 && sameDir(i - 1, i)) i--;
+    return i;
+}
+int folderNext() {
+    if (P.n <= 0) return -1;
+    const int c = P.cur >= 0 ? P.cur : 0;
+    for (int j = c + 1; j < P.n; j++) if (!sameDir(j, c)) return j;
+    return 0;
+}
+int folderPrev() {
+    if (P.n <= 0) return -1;
+    const int s0 = dirStart(P.cur >= 0 ? P.cur : 0);
+    return dirStart(s0 > 0 ? s0 - 1 : P.n - 1);
+}
+
 void pushHist(int i) {
     if (i < 0) return;
     if (P.nh == HIST) { memmove(P.hist, P.hist + 1, (HIST - 1) * sizeof(int)); P.nh--; }
@@ -741,16 +772,19 @@ bool browse() {
 }
 
 enum PlAct : uint8_t { PA_NONE, PA_UP, PA_DOWN, PA_LEFT, PA_RIGHT, PA_PAUSE, PA_BACK,
-                       PA_MUTE, PA_SHUF, PA_AUTO, PA_REPEAT, PA_SEEKB, PA_SEEKF, PA_FILES, PA_HOME, PA_END };
+                       PA_MUTE, PA_SHUF, PA_AUTO, PA_REPEAT, PA_SEEKB, PA_SEEKF, PA_DIRP, PA_DIRN, PA_FILES, PA_HOME, PA_END };
 
 PlAct plAct(fabgl::VirtualKey vk) {
     switch (vk) {
-        case fabgl::VK_UP:    case fabgl::VK_MENU_UP:    case fabgl::VK_PLUS: case fabgl::VK_KP_PLUS: return PA_UP;
-        case fabgl::VK_DOWN:  case fabgl::VK_MENU_DOWN:  case fabgl::VK_MINUS:                         return PA_DOWN;
-        case fabgl::VK_LEFT:  case fabgl::VK_MENU_LEFT:                                               return PA_SEEKB;
-        case fabgl::VK_RIGHT: case fabgl::VK_MENU_RIGHT:                                              return PA_SEEKF;
-        case fabgl::VK_PAGEUP:                                                                        return PA_LEFT;
-        case fabgl::VK_PAGEDOWN:                                                                      return PA_RIGHT;
+        // F9 / F10 = volume, the emulator's own hot keys (+ / - too)
+        case fabgl::VK_F10: case fabgl::VK_PLUS: case fabgl::VK_KP_PLUS:                             return PA_UP;
+        case fabgl::VK_F9:  case fabgl::VK_MINUS: case fabgl::VK_KP_MINUS:                           return PA_DOWN;
+        case fabgl::VK_UP:    case fabgl::VK_MENU_UP:                                                 return PA_SEEKF;
+        case fabgl::VK_DOWN:  case fabgl::VK_MENU_DOWN:                                               return PA_SEEKB;
+        case fabgl::VK_PAGEUP:                                                                        return PA_DIRP;
+        case fabgl::VK_PAGEDOWN:                                                                      return PA_DIRN;
+        case fabgl::VK_LEFT:  case fabgl::VK_MENU_LEFT:                                               return PA_LEFT;
+        case fabgl::VK_RIGHT: case fabgl::VK_MENU_RIGHT:                                              return PA_RIGHT;
         case fabgl::VK_SPACE: case fabgl::VK_RETURN: case fabgl::VK_MENU_ENTER:
         case fabgl::VK_p: case fabgl::VK_P:                                                           return PA_PAUSE;
         case fabgl::VK_ESCAPE: case fabgl::VK_F1: case fabgl::VK_MENU_BS:                             return PA_BACK;
@@ -844,6 +878,11 @@ void run(const string& startPath) {
                 case PA_SHUF:  s_shuffle = !s_shuffle; hdr = true; break;
                 case PA_AUTO:  s_auto = !s_auto; hdr = true; break;
                 case PA_REPEAT: s_repeat = !s_repeat; hdr = true; break;
+                case PA_DIRP: case PA_DIRN: {
+                    const int j = a == PA_DIRP ? folderPrev() : folderNext();
+                    if (j >= 0) { failRun = 0; pushHist(P.cur); playIndex(j); }
+                    break;
+                }
                 case PA_SEEKB: seekBy(-SEEK_STEP_MS); lastSec = 0xFFFFFFFF; break;
                 case PA_SEEKF: seekBy(SEEK_STEP_MS); lastSec = 0xFFFFFFFF; break;
                 case PA_PAUSE:
