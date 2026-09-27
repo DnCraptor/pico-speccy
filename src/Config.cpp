@@ -7,6 +7,9 @@
 #include "Ports.h"
 #include "TsConf.h"
 #include "roms.h"
+#include "Atm.h"
+#include "roms/atm/atm_banks.h"   // ATM page tables — this TU only (see requestMachine)
+#include "roms/kay/kay_banks.h"   // Nemo KAY bank tables — this TU only (same reason)
 #include "FileUtils.h"
 #include "ESPectrum.h"
 #include "MB02.h"
@@ -33,6 +36,7 @@ RomsetIdx Config::romSetP1M = R_PENT;
 RomsetIdx Config::romSetProfi = R_PROFI;
 RomsetIdx Config::romSetScorp = R_SCORP;
 RomsetIdx Config::romSetTsconf = R_TSCONF;
+RomsetIdx Config::romSetAtm = R_ATM2;
 ArchIdx   Config::pref_arch = A_LAST;
 RomsetIdx Config::pref_romSet_48 = R_LAST;
 RomsetIdx Config::pref_romSet_128 = R_LAST;
@@ -42,6 +46,7 @@ RomsetIdx Config::pref_romSetP1M = R_LAST;
 RomsetIdx Config::pref_romSetProfi = R_LAST;
 RomsetIdx Config::pref_romSetScorp = R_LAST;
 RomsetIdx Config::pref_romSetTsconf = R_LAST;
+RomsetIdx Config::pref_romSetAtm = R_LAST;
 string   Config::ram_file = NO_RAM_FILE;
 string   Config::last_ram_file = NO_RAM_FILE;
 string   Config::tape_file = "";
@@ -310,6 +315,16 @@ void profRegisterLiveOverlay(uint8_t bank) {
 }
 #endif
 
+// The running machine keeps its own TR-DOS as an overlay on the SHARED 5.04T base
+// (Scorpion GMX / ProfROM plane banks, every Nemo KAY's bank 3), so the user's TR-DOS
+// BIOS pick must not re-register that pointer while it runs — the registry keeps ONE
+// overlay per base and the pick would replace the machine's own DOS. Such machines
+// never read rom[4] anyway.
+bool Config::trdosBaseOwnedByMachine() {
+    return arch == A_SCORP && (isScorpGmxRomset(romSetScorp) || romSetScorp == R_SCORP_PROF ||
+                               isKayRomset(romSetScorp));
+}
+
 void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
 {
     // Karabas is a UI-level alias of Profi (see ArchRom.h) — the core never sees it.
@@ -320,13 +335,22 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
     // pointer-keyed overlay registry — all of which would be reading a region that is
     // either already erased or about to be, on this very boot, by provisionAtBoot().
     if (!FlashRoms::romsUsable()) {
-        if (newArch == A_TSCONF) {
+        if (newArch == A_ATM) {
+            OSD::bootNotice("ATM-Turbo ROM traded for the GM.DLS bank - using Pentagon");
+            newArch = A_PENT; newRomSet = R_NONE;
+        } else if (newArch == A_TSCONF) {
             OSD::bootNotice("TS-Conf ROM traded for the GM.DLS bank - using Pentagon");
             Debug::log("[FlashRoms] TS-Conf unavailable (overlay traded) - Pentagon");
             newArch = A_PENT; newRomSet = R_NONE;
         } else if (newArch == A_SCORP && isScorpGmxRomset(newRomSet)) {
             newRomSet = R_SCORP;
         }
+    }
+    // ATM-Turbo: its ROM pages are flattened into butter PSRAM (Atm::bindRoms) — a
+    // board without a QSPI chip cannot run it (same rule as TS-Conf and GMX).
+    if (newArch == A_ATM && butter_psram_size() == 0) {
+        OSD::bootNotice("ATM-Turbo needs QSPI PSRAM - using Pentagon");
+        newArch = A_PENT; newRomSet = R_NONE;
     }
     // Profi boundary: setup() lays out the Profi memory once at boot —
     // forced-SRAM pages (DS80 colour 56/58 + CP/M pool 60/61) on ALL RP2350
@@ -733,7 +757,23 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
                 MemESP::rom[i].assign_rom(tbl[i].data);
         } else
 #endif
-        {
+        if (isKayRomset(romSet)) {
+            // Nemo KAY: the same four roles as the Scorpion (rom[] 0 BASIC-128,
+            // 1 BASIC-48, 2 service, 3 TR-DOS), stored as overlays over ROMs the
+            // firmware ships raw (tools/rom_pack.py pack_kay). The four roles
+            // overlay four DIFFERENT bases, so a static registration per bank is
+            // exact — and it must register nullptr for a raw bank too, to clear
+            // whatever a previous romset left on that pointer. KAY2048 is the
+            // ZXM-Phoenix (its empty service page is an overlay over the KAY one).
+            const kay_rom_bank_t* tbl = (romSet == R_KAY1024) ? gb_rom_kay1024_banks
+                                      : (romSet == R_KAY2010) ? gb_rom_kay2010_banks
+                                      : (romSet == R_KAY2048) ? gb_rom_kay2048_banks
+                                                              : gb_rom_kay256_banks;
+            for (int i = 0; i < 4; ++i) {
+                MemESP::rom[i].assign_rom(tbl[i].data);
+                MemESP::registerOverlay(tbl[i].data, tbl[i].overlay);
+            }
+        } else {
             MemESP::rom[0].assign_rom(gb_rom_0_pentagon_128k);
             MemESP::registerOverlay(gb_rom_0_pentagon_128k, gb_overlay_scorpion_bank0);
             MemESP::rom[1].assign_rom(gb_rom_1_sinclair_128k);
@@ -772,6 +812,18 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         TsConf::bindRoms(pages);
         break;
     }
+    case A_ATM: {
+        romSet = (newRomSet == R_NONE) ? (isAtmRomset(romSetAtm) ? romSetAtm : R_ATM2)
+                                       : newRomSet;
+        romSetAtm = romSet;
+        // Page tables generated by tools/rom_pack.py pack_atm. They name the Sinclair
+        // 128K half (internal linkage), which is why they are included HERE and only
+        // here — see gmxRegisterLiveOverlay for the same rule.
+        if (romSet == R_ATM1)       Atm::bindRoms(romSet, gb_rom_atm1_pages, 4);
+        else if (romSet == R_ATM2X) Atm::bindRoms(romSet, gb_rom_atm2x_pages, 8);
+        else                        Atm::bindRoms(romSet, gb_rom_atm2_pages, 4);
+        break;
+    }
     default: { // Pentagon / P512 / P1024
         romSet = (newRomSet == R_NONE) ? R_PENT : newRomSet;
         // Keep the slot of the ACTUAL arch (P512/P1024 used to spill into romSetPent,
@@ -796,6 +848,9 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             MemESP::rom[0].assign_rom(gb_rom_0_pentagon_128k);
             MemESP::registerOverlay(gb_rom_0_pentagon_128k, nullptr);
             MemESP::rom[1].assign_rom(gb_rom_1_sinclair_128k);
+            // ...and so is the second half — but a Scorpion or KAY may have left its
+            // BASIC-48 overlay on that pointer, and the registry outlives romsets.
+            MemESP::registerOverlay(gb_rom_1_sinclair_128k, nullptr);
             if (romSet == R_PENT_GLUK) {
                 MemESP::rom[3].assign_rom(gb_rom_gluk);
             }
@@ -811,7 +866,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
     // the 5.05D base would evict the GMX plane-1 TR-DOS overlay keyed to the same
     // pointer. Scorpion never uses the shared rom[4] anyway (TR-DOS is the machine's
     // own bank 3).
-    if (!(arch == A_SCORP && (isScorpGmxRomset(romSetScorp) || romSetScorp == R_SCORP_PROF))) {
+    if (!trdosBaseOwnedByMachine()) {
         const uint8_t* base = gb_rom_4_trdos_504t;
         const uint8_t* ov = gb_overlay_trdos_505d;   // the base is 5.04T now
         switch (Config::trdosBios) {
@@ -1206,6 +1261,7 @@ void Config::load() {
         nvs_get_romset("romSetProfi", romSetProfi, sts);
         nvs_get_romset("romSetScorp", romSetScorp, sts);
         nvs_get_romset("romSetTsconf", romSetTsconf, sts);
+        nvs_get_romset("romSetAtm", romSetAtm, sts);
         nvs_get_arch("pref_arch", pref_arch, sts);
         pref_arch = archCanon(pref_arch);
         nvs_get_romset("pref_romSet_48", pref_romSet_48, sts);
@@ -1216,6 +1272,7 @@ void Config::load() {
         nvs_get_romset("pref_romSetProfi", pref_romSetProfi, sts);
         nvs_get_romset("pref_romSetScorp", pref_romSetScorp, sts);
         nvs_get_romset("pref_romSetTsconf", pref_romSetTsconf, sts);
+        nvs_get_romset("pref_romSetAtm", pref_romSetAtm, sts);
         nvs_get_str("ram", ram_file, sts);
         nvs_get_u8("ram_origin", ram_file_origin, sts); // provenance (default LOCAL)
         nvs_get_b("AY48", AY48, sts);
@@ -1711,6 +1768,7 @@ void Config::save(const char* path, const char* profileName) {
     nvs_set_str(buf,"romSetProfi",romsetToStr(romSetProfi));
     nvs_set_str(buf,"romSetScorp",romsetToStr(romSetScorp));
     nvs_set_str(buf,"romSetTsconf",romsetToStr(romSetTsconf));
+    nvs_set_str(buf,"romSetAtm",romsetToStr(romSetAtm));
     nvs_set_str(buf,"pref_arch",archToStr(pref_arch));
     nvs_set_str(buf,"pref_romSet_48",romsetToStr(pref_romSet_48));
     nvs_set_str(buf,"pref_romSet_128",romsetToStr(pref_romSet_128));
@@ -1720,6 +1778,7 @@ void Config::save(const char* path, const char* profileName) {
     nvs_set_str(buf,"pref_romSetProfi",romsetToStr(pref_romSetProfi));
     nvs_set_str(buf,"pref_romSetScorp",romsetToStr(pref_romSetScorp));
     nvs_set_str(buf,"pref_romSetTsconf",romsetToStr(pref_romSetTsconf));
+    nvs_set_str(buf,"pref_romSetAtm",romsetToStr(pref_romSetAtm));
     nvs_set_str(buf,"ram",ram_file.c_str());
     // Derive provenance from the file's actual location so the stored tag is never
     // stale: a /tmp path is a transient quick-start download, anything else is a

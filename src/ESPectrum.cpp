@@ -774,6 +774,7 @@ void ESPectrum::setup() {
   Ports::portAFF7 = 0;
   Ports::portDFFD = 0;
   Ports::port1FFD = 0;
+  Ports::kay7FFDd7 = 0;
   Ports::gmxPort00 = 0;
   Ports::gmxPort78FD = 0;
   Ports::gmxPort7EFD = 0;
@@ -910,6 +911,11 @@ void ESPectrum::setup() {
           Config::romSet = Config::pref_romSetTsconf;
         else
           Config::romSet = Config::romSetTsconf;
+      } else if (Config::arch == A_ATM) {
+        if (Config::pref_romSetAtm != R_LAST)
+          Config::romSet = Config::pref_romSetAtm;
+        else
+          Config::romSet = Config::romSetAtm;
       } else {
         if (Config::pref_romSetPent != R_LAST)
           Config::romSet = Config::pref_romSetPent;
@@ -960,6 +966,24 @@ void ESPectrum::setup() {
       Config::esxdos = 0;
       Config::zcontroller = false;
     }
+  }
+
+  // ATM-Turbo: boot-time twin of the MachineSwitch / CPU::reset rules — DivMMC and MB-02+
+  // would page over a BIOS that runs from all four windows, and the IDE scheme follows
+  // the board (the 2+ has its own interface, the ATM1 none). Before DivMMC::init reads
+  // the flags and IDE::init opens images.
+  if (Config::arch == A_ATM) {
+    if (Config::esxdos || Config::mb02) {
+      Debug::log("setup: ATM-Turbo — DivMMC/MB-02+ off");
+      Config::esxdos = 0;
+      Config::mb02 = false;
+    }
+    const bool atm2 = !isAtm1Romset(Config::romSet);
+    if (!atm2 && Config::ide_scheme == IDE::ATM) Config::ide_scheme = IDE::OFF;
+    else if (atm2 && Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATM)
+      Config::ide_scheme = IDE::ATM;
+  } else if (Config::ide_scheme == IDE::ATM) {
+    Config::ide_scheme = IDE::OFF;
   }
 
   // The live page count is derived from the persisted pick HERE and nowhere else: the arch
@@ -1157,7 +1181,7 @@ void ESPectrum::setup() {
   MemESP::ramContended[0] = false;
   MemESP::ramContended[1] = Config::arch == A_P1024 || Config::arch == A_P512 ||
                                     Config::arch == A_PENT || Config::arch == A_PROFI ||
-                                    Config::arch == A_SCORP
+                                    Config::arch == A_SCORP || Config::arch == A_ATM
                                 ? false
                                 : true;
   MemESP::ramContended[2] = false;
@@ -1279,14 +1303,17 @@ void ESPectrum::setup() {
   // branch is exact (the Pentagon branch would over-feed the DAC, see the reset()
   // twin). Scorpion Green (316-line frame) gets its own exact set below.
   if (Config::arch == A_48K || Config::arch == A_PROFI ||
-      (Config::arch == A_SCORP && Config::romSetScorp == R_SCORP)) {
+      (Config::arch == A_SCORP && isScorpYellowTiming(Config::romSetScorp)) ||
+      Config::arch == A_ATM) {
     samplesPerFrame = ESP_AUDIO_SAMPLES_48;
     audioOverSampleDivider = ESP_AUDIO_OVERSAMPLES_DIV_48;
     audioAYDivider = ESP_AUDIO_AY_DIV_48;
     audioSampleDivider = ESP_AUDIO_SAMPLES_DIV_48;
 
     Audio_freq = ESP_AUDIO_FREQ_48;
-    tstatesPerSampleFP = (TSTATES_PER_FRAME_48 << 8) / ESP_AUDIO_SAMPLES_48;
+    tstatesPerSampleFP = (((Config::arch == A_SCORP && isKayRomset(Config::romSetScorp))
+                               ? TSTATES_PER_FRAME_KAY : TSTATES_PER_FRAME_48) << 8)
+                         / ESP_AUDIO_SAMPLES_48;   // (KAY: Unreal's 69887 T frame)
   } else if (Config::arch == A_SCORP) {
     // Green PCB: 70784 T / 632 samples = exactly 31250 Hz at 49.4462 fps.
     samplesPerFrame = ESP_AUDIO_SAMPLES_SCORP_GR;
@@ -1644,6 +1671,7 @@ void ESPectrum::reset(uint8_t romInUse) {
   Timex::reset();
   Ports::portDFFD = 0;
   Ports::port1FFD = 0;   // Scorpion: reset clears the 1FFD latch (RAM0/service off)
+  Ports::kay7FFDd7 = 0;  // (Nemo KAY 1 MB bit lives with it)
   // GMX: warm reset clears the whole register file (MAME machine_reset), the
   // ProfROM plane included; the 640x200 mode is torn down below with DS80's.
   Ports::gmxPort00 = 0;
@@ -1723,7 +1751,7 @@ void ESPectrum::reset(uint8_t romInUse) {
   MemESP::ramContended[0] = false;
   MemESP::ramContended[1] = Config::arch == A_P1024 || Config::arch == A_P512 ||
                                     Config::arch == A_PENT || Config::arch == A_PROFI ||
-                                    Config::arch == A_SCORP
+                                    Config::arch == A_SCORP || Config::arch == A_ATM
                                 ? false
                                 : true;
   MemESP::ramContended[2] = false;
@@ -1832,13 +1860,16 @@ void ESPectrum::reset(uint8_t romInUse) {
   // Scorpion Yellow is the same 69888 T frame — same rule; Green (70784 T) gets
   // its own exact 632-sample set below.
   if (Config::arch == A_48K || Config::arch == A_PROFI ||
-      (Config::arch == A_SCORP && Config::romSetScorp == R_SCORP)) {
+      (Config::arch == A_SCORP && isScorpYellowTiming(Config::romSetScorp)) ||
+      Config::arch == A_ATM) {
     samplesPerFrame = ESP_AUDIO_SAMPLES_48;
     audioOverSampleDivider = ESP_AUDIO_OVERSAMPLES_DIV_48;
     audioAYDivider = ESP_AUDIO_AY_DIV_48;
     audioSampleDivider = ESP_AUDIO_SAMPLES_DIV_48;
     Audio_freq = ESP_AUDIO_FREQ_48;
-    tstatesPerSampleFP = (TSTATES_PER_FRAME_48 << 8) / ESP_AUDIO_SAMPLES_48;
+    tstatesPerSampleFP = (((Config::arch == A_SCORP && isKayRomset(Config::romSetScorp))
+                               ? TSTATES_PER_FRAME_KAY : TSTATES_PER_FRAME_48) << 8)
+                         / ESP_AUDIO_SAMPLES_48;   // (KAY: Unreal's 69887 T frame)
   } else if (Config::arch == A_SCORP) {
     samplesPerFrame = ESP_AUDIO_SAMPLES_SCORP_GR;
     audioOverSampleDivider = ESP_AUDIO_OVERSAMPLES_DIV_SCORP_GR;
@@ -3931,7 +3962,7 @@ void ESPectrum::loop() {
     // Draw fdd led indicator in top-right corner. Scorpion carries the Beta
     // interface on board (betadisk forced on), so it counts like Pentagon here;
     // the +3 has its own uPD765.
-    bool hasFdd = ((Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isScorpion || Z80Ops::isTsconf) ||
+    bool hasFdd = ((Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isScorpion || Z80Ops::isTsconf || Z80Ops::isAtm) ||
                    (Z80Ops::is128 && Z80Ops::isByte) || Z80Ops::isP3) && Tape::tapeStatus != TAPE_LOADING
         && !DivMMC::enabled
         ;

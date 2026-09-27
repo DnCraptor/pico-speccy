@@ -223,11 +223,18 @@
 #define TXT_MACH_MURM       "Murmuzavr mode"
 #define TXT_MACH_MURM_SIZE  "Extra RAM"
 #define TXT_MACH_TSCONF      "TS-Conf"
+#define TXT_MACH_ATM         "ATM-Turbo"
 #define TXT_MACH_TSCONF_OPTS "Options"
 #define TXT_MACH_TSCONF_CLK  "CPU cap"
 // The ZX-Evo BIOS images differ ONLY in the 128 service ROM at ROM page 2
 // (tslabs/zx-evo pentevo/rom/bin) — the TS-BIOS itself and its TR-DOS are the same
 // bytes in both, so the label names the service ROM, not the BIOS.
+#define TXT_ROM_ATM1         "ATM-Turbo 1 (BIOS 1.04rs)"
+#define TXT_ROM_ATM1_S       "Turbo 1"
+#define TXT_ROM_ATM2         "ATM-Turbo 2+ (BIOS 1.07.13)"
+#define TXT_ROM_ATM2_S       "Turbo 2+"
+#define TXT_ROM_ATM2X        "ATM-Turbo 2+ (xBIOS 1.37)"
+#define TXT_ROM_ATM2X_S      "Turbo 2+ xBIOS"
 #define TXT_ROM_TSBIOS       "TS-BIOS + 128"
 #define TXT_ROM_TSBIOS_S     "128"            // left-column short form (Option::slabel)
 #define TXT_ROM_TSBIOS_GLUK  "TS-BIOS + Mr Gluk"
@@ -300,6 +307,17 @@
 #define TXT_ROM_SCORP_PROF   "ZS-1024 + ProfROM"
 #define TXT_ROM_SCORP_PROF_S "ProfROM"
 #define TXT_ROM_ALF         "ALF cartridge"
+// Nemo KAY (St. Petersburg). Romsets of the Scorpion arch; the labels must read the
+// same as kRomsetUiName[R_KAY*] (ArchRom.h), which the info pages use.
+#define TXT_MACH_KAY         "Kay"
+#define TXT_ROM_KAY256       "KAY256 Turbo"
+#define TXT_ROM_KAY256_S     "256T"
+#define TXT_ROM_KAY1024      "KAY1024"
+#define TXT_ROM_KAY1024_S    "1024"
+#define TXT_ROM_KAY2010      "KAY1024 v2010/v2018"
+#define TXT_ROM_KAY2010_S    "1024 v2010"
+#define TXT_ROM_KAY2048      "KAY2048 (ZXM-Phoenix)"
+#define TXT_ROM_KAY2048_S    "2048"
 
 // ── Options ────────────────────────────────────────────────────────────────────
 #define TXT_OPT_PREF_MACHINE "Preferred machine"

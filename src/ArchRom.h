@@ -28,7 +28,8 @@
     X(A_KARABAS,    "Karabas")  \
     X(A_SCORP,      "Scorpion") \
     X(A_ALF,        "ALF")      \
-    X(A_TSCONF,     "TSconf")
+    X(A_TSCONF,     "TSconf")   \
+    X(A_ATM,        "ATM")
 
 // Third column = the human label. The second column is an on-disk spelling that
 // must never change (NVS, .esp sidecars); the third is what a user reads, kept
@@ -67,7 +68,14 @@
     X(R_P3E,            "P3e",              "+3 (IDEDOS)")           \
     X(R_P3DIV,          "P3div",            "+3 (DivIDE)")      \
     X(R_TSCONF,         "TS-Conf",          "TS-BIOS + 128")              \
-    X(R_TSCONF_GLUK,    "TS-Gluk",          "TS-BIOS + Mr Gluk")
+    X(R_TSCONF_GLUK,    "TS-Gluk",          "TS-BIOS + Mr Gluk")          \
+    X(R_ATM1,           "ATM1",             "ATM-Turbo 1 (BIOS 1.04rs)")  \
+    X(R_ATM2,           "ATM2",             "ATM-Turbo 2+ (BIOS 1.07.13)") \
+    X(R_ATM2X,          "ATM2x",            "ATM-Turbo 2+ (xBIOS 1.37)")  \
+    X(R_KAY256,         "Kay256",           "KAY256 Turbo")               \
+    X(R_KAY1024,        "Kay1024",          "KAY1024")                    \
+    X(R_KAY2010,        "Kay2010",          "KAY1024 v2010/v2018")        \
+    X(R_KAY2048,        "Kay2048",          "KAY2048 (ZXM-Phoenix)")
 
 #define NM_X_IDX(id, str) id,
 #define NM_XR_IDX(id, str, ui) id,
@@ -134,6 +142,7 @@ inline RomsetIdx defaultRomsetFor(ArchIdx a) {
         case A_SCORP:   return R_SCORP;
         case A_ALF:     return R_ALF1;
         case A_TSCONF:  return R_TSCONF;
+        case A_ATM:     return R_ATM2;
         default:        return R_PENT;   // Pentagon / P512 / P1024
     }
 }
@@ -193,6 +202,25 @@ inline bool isScorpGmxRomset(RomsetIdx r) {
     return r == R_SCORP_GMX;
 }
 
+// Nemo KAY (St. Petersburg): romsets of the SCORPION arch, not an arch of their own —
+// the ROM holds the same four roles in the same rom[] order (0 BASIC-128, 1 BASIC-48,
+// 2 service, 3 TR-DOS, "DOS with the 128 ROM selected shows the service page"), the
+// frame is the uncontended 48K one and TR-DOS is the machine's own bank 3. What
+// differs is small and lives behind g_scorp_kay (Ports.cpp): the #1FFD decode
+// (00xxxxxx xxxxxx01), the ROM select (1FFD D3 XORs the DOS bit instead of D1
+// overriding it), the page bits (1FFD D4 = 256K, D7 = 512K, 7FFD D7 = 1 MB) and
+// 1FFD D2 = turbo off. UnrealSpeccy MM_KAY; github.com/z00m128/kay1024. The ZXM-Phoenix
+// (R_KAY2048, UnrealSpeccy MM_PHOENIX) is the same board family grown to 2 MB: two more
+// page bits (1FFD D6, and the order moves) and 1FFD D1 forcing the service page.
+inline bool isKayRomset(RomsetIdx r) {
+    return r == R_KAY256 || r == R_KAY1024 || r == R_KAY2010 || r == R_KAY2048;
+}
+// The Yellow-PCB frame (224 T x 312 lines = 69888 T): plain Scorpion and every KAY.
+// Green / GMX / 1024 / ProfROM take the 316-line Turbo+ frame.
+inline bool isScorpYellowTiming(RomsetIdx r) {
+    return r == R_SCORP || isKayRomset(r);
+}
+
 inline bool isPlus3Romset(RomsetIdx r) {
     return r == R_P3 || r == R_P3E || r == R_P3DIV;
 }
@@ -220,3 +248,11 @@ inline bool isPlus3DivRomset(RomsetIdx r) {
 inline bool isTsconfRomset(RomsetIdx r) {
     return r == R_TSCONF || r == R_TSCONF_GLUK;
 }
+
+// MicroART ATM-Turbo. One arch, three romsets: the ATM-Turbo 1 (a different memory
+// manager — #FE address-line latch, #FDFD, #7DFD palette) and two BIOS images of the
+// ATM-Turbo 2+ (#xx77 system port, eight #xxF7 page registers, #FF palette). Both
+// boards share the 48K frame (224 T x 312 lines, uncontended) and the video modes;
+// see src/Atm.h. isAtm1Romset() is the one question that separates the two boards.
+inline bool isAtmRomset(RomsetIdx r)  { return r == R_ATM1 || r == R_ATM2 || r == R_ATM2X; }
+inline bool isAtm1Romset(RomsetIdx r) { return r == R_ATM1; }
