@@ -428,6 +428,16 @@ typedef struct {	/* Open object identifier with status */
 					0xD0,0xD1,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC,0xDD,0xDE,0xDF, \
 					0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0x9B,0x9C,0x9D,0x9E,0x9F, \
 					0xF0,0xF0,0xF2,0xF2,0xF4,0xF4,0xF6,0xF6,0xF8,0xF9,0xFA,0xFB,0xFC,0xFD,0xFE,0xFF}
+/* PICO-SPECCY PATCH: CP1251 (Windows Cyrillic) as the SBCS code page, so long
+   names reach the UI in the font's own encoding. Upper-case map for 0x80..0xFF. */
+#define TBL_CT1251 {0x80,0x81,0x82,0x81,0x84,0x85,0x86,0x87,0x88,0x89,0x8A,0x8B,0x8C,0x8D,0x8E,0x8F, \
+					0x80,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x8A,0x9B,0x8C,0x8D,0x8E,0x8F, \
+					0xA0,0xA1,0xA1,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xAB,0xAC,0xAD,0xAE,0xAF, \
+					0xB0,0xB1,0xB2,0xB2,0xA5,0xB5,0xB6,0xB7,0xA8,0xB9,0xAA,0xBB,0xA3,0xBD,0xBD,0xAF, \
+					0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xCB,0xCC,0xCD,0xCE,0xCF, \
+					0xD0,0xD1,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC,0xDD,0xDE,0xDF, \
+					0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xCB,0xCC,0xCD,0xCE,0xCF, \
+					0xD0,0xD1,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC,0xDD,0xDE,0xDF}
 #define TBL_CT869  {0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8A,0x8B,0x8C,0x8D,0x8E,0x8F, \
 					0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0x86,0x9C,0x8D,0x8F,0x90, \
 					0x91,0x90,0x92,0x95,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xAB,0xAC,0xAD,0xAE,0xAF, \
@@ -600,7 +610,7 @@ static const BYTE Dc936[] = TBL_DC936;
 static const BYTE Dc949[] = TBL_DC949;
 static const BYTE Dc950[] = TBL_DC950;
 
-#elif FF_CODE_PAGE < 900	/* Static code page configuration (SBCS) */
+#elif (FF_CODE_PAGE < 900 || FF_CODE_PAGE == 1251)	/* Static code page configuration (SBCS) */
 #define CODEPAGE FF_CODE_PAGE
 static const BYTE ExCvt[] = MKCVTBL(TBL_CT, FF_CODE_PAGE);
 
@@ -705,7 +715,7 @@ static int dbc_1st (BYTE c)
 		if (c <= DbcTbl[1]) return 1;					/* 1st byte range 1 */
 		if (c >= DbcTbl[2] && c <= DbcTbl[3]) return 1;	/* 1st byte range 2 */
 	}
-#elif FF_CODE_PAGE >= 900	/* DBCS fixed code page */
+#elif (FF_CODE_PAGE >= 900 && FF_CODE_PAGE != 1251)	/* DBCS fixed code page */
 	if (c >= DbcTbl[0]) {
 		if (c <= DbcTbl[1]) return 1;
 		if (c >= DbcTbl[2] && c <= DbcTbl[3]) return 1;
@@ -726,7 +736,7 @@ static int dbc_2nd (BYTE c)
 		if (c >= DbcTbl[6] && c <= DbcTbl[7]) return 1;	/* 2nd byte range 2 */
 		if (c >= DbcTbl[8] && c <= DbcTbl[9]) return 1;	/* 2nd byte range 3 */
 	}
-#elif FF_CODE_PAGE >= 900	/* DBCS fixed code page */
+#elif (FF_CODE_PAGE >= 900 && FF_CODE_PAGE != 1251)	/* DBCS fixed code page */
 	if (c >= DbcTbl[4]) {
 		if (c <= DbcTbl[5]) return 1;
 		if (c >= DbcTbl[6] && c <= DbcTbl[7]) return 1;
@@ -2829,10 +2839,10 @@ static DWORD get_achar (	/* Get a character and advance ptr */
 	if (IsLower(chr)) chr -= 0x20;		/* To upper ASCII char */
 #if FF_CODE_PAGE == 0
 	if (ExCvt && chr >= 0x80) chr = ExCvt[chr - 0x80];	/* To upper (SBCS extended char) */
-#elif FF_CODE_PAGE < 900
+#elif (FF_CODE_PAGE < 900 || FF_CODE_PAGE == 1251)
 	if (chr >= 0x80) chr = ExCvt[chr - 0x80];	/* To upper (SBCS extended char) */
 #endif
-#if FF_CODE_PAGE == 0 || FF_CODE_PAGE >= 900
+#if FF_CODE_PAGE == 0 || (FF_CODE_PAGE >= 900 && FF_CODE_PAGE != 1251)
 	if (dbc_1st((BYTE)chr)) {	/* Get DBC 2nd byte if needed */
 		chr = dbc_2nd((BYTE)**ptr) ? chr << 8 | (BYTE)*(*ptr)++ : 0;
 	}
@@ -2986,7 +2996,7 @@ static FRESULT create_name (	/* FR_OK: successful, FR_INVALID_NAME: could not cr
 			} else {		/* In DBCS cfg */
 				wc = ff_uni2oem(ff_wtoupper(wc), CODEPAGE);	/* Unicode ==> Up-convert ==> ANSI/OEM code */
 			}
-#elif FF_CODE_PAGE < 900	/* In SBCS cfg */
+#elif (FF_CODE_PAGE < 900 || FF_CODE_PAGE == 1251)	/* In SBCS cfg */
 			wc = ff_uni2oem(wc, CODEPAGE);			/* Unicode ==> ANSI/OEM code */
 			if (wc & 0x80) wc = ExCvt[wc & 0x7F];	/* Convert extended character to upper (SBCS) */
 #else						/* In DBCS cfg */
@@ -3073,7 +3083,7 @@ static FRESULT create_name (	/* FR_OK: successful, FR_INVALID_NAME: could not cr
 		if (ExCvt && c >= 0x80) {		/* Is SBC extended character? */
 			c = ExCvt[c & 0x7F];		/* To upper SBC extended character */
 		}
-#elif FF_CODE_PAGE < 900
+#elif (FF_CODE_PAGE < 900 || FF_CODE_PAGE == 1251)
 		if (c >= 0x80) {				/* Is SBC extended character? */
 			c = ExCvt[c & 0x7F];		/* To upper SBC extended character */
 		}
@@ -5671,7 +5681,7 @@ FRESULT f_setlabel (
 			if (IsLower(wc)) wc -= 0x20;		/* To upper ASCII characters */
 #if FF_CODE_PAGE == 0
 			if (ExCvt && wc >= 0x80) wc = ExCvt[wc - 0x80];	/* To upper extended characters (SBCS cfg) */
-#elif FF_CODE_PAGE < 900
+#elif (FF_CODE_PAGE < 900 || FF_CODE_PAGE == 1251)
 			if (wc >= 0x80) wc = ExCvt[wc - 0x80];	/* To upper extended characters (SBCS cfg) */
 #endif
 #endif

@@ -40,6 +40,7 @@ public:
     static int fetchSites(std::string* ids, std::string* names, int maxn);
 
     bool listStream(const std::string& path, RemoteListCb cb, void* ctx) override;
+    bool listFiles(RemoteFileCb cb, void* ctx) override;
     std::string cacheId() const override { return "cat_" + site; }
     // Conditional GET of the directory's .tsv (static tree only) → 304 = fresh,
     // 200 = changed (+ new ETag). Dynamic /v1 has no validator → CACHE_UNKNOWN.

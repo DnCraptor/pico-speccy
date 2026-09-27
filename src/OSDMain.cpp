@@ -978,6 +978,12 @@ static bool f5Locations() {
     }
 }
 
+// The same chooser for the Pico-Zx-Player's own browser ("..", at a volume root).
+// true = a local source was picked and ALL_Path points at it; false = Esc, or a
+// network flow ran (its tracks play in a player of their own).
+bool osdPlayerHasLocations() { return f5HasChooser(); }
+bool osdPlayerLocations() { return f5Locations(); }
+
 // ── FTP server: share the SD card to the LAN ─────────────────────────────────
 // Scrolling log ring for the on-screen terminal, holding the most recent lines;
 // the renderer always shows the tail (auto-scroll).
@@ -2765,11 +2771,21 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                     fromZip = true;
                 }
 
-                // Pico-Zx-Player: F2 on any music file ('M'), Enter on the music-only
-                // formats. .mp3 keeps Enter = tape (MP3-encoded tapes exist).
+                // Pico-Zx-Player: Enter / F2 on any music file. An .mp3 can also be an
+                // MP3-encoded tape: F5 ('P') loads it as one, like the Tape menu.
                 if (pp::available() && pp::playableExt(ext) &&
-                        (mFile[0] == 'M' || (ext != "mp3"))) {
+                        !(ext == "mp3" && mFile[0] == 'P')) {
                     nm::playerStandalone(fname);
+#if ZIFI_NET_CLIENT
+                    // The player's F5 may have gone to the network (Web Archives /
+                    // Remote): a launch there closes the OSD, Esc there too.
+                    if (OSD::net_launch_close || OSD::net_close_all) {
+                        OSD::net_launch_close = false;
+                        OSD::net_close_all = false;
+                        if (VIDEO::OSD) OSD::drawStats();
+                        return;
+                    }
+#endif
                     goto f5_retry;
                 }
                 if (ext == "tap" || ext == "tzx" || ext == "pzx" || ext == "wav" || ext == "mp3") {

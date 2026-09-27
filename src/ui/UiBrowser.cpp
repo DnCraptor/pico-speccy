@@ -419,15 +419,19 @@ static void drawInfo() {
     const bool zip = !dir && FileUtils::hasZIPextension(nm_);
     const bool dsk = !dir && FileUtils::ifaceForExt(FileUtils::getLCaseExt(nm_)) != IFACE_NONE;
     const bool view = !dir && !pickMode() && viewableExt(FileUtils::getLCaseExt(nm_));
+    // Enter on music plays it in Pico-Zx-Player; an .mp3 can also be a tape (F5).
+    const bool music = all && !dir && pp::available() && pp::playableExt(FileUtils::getLCaseExt(nm_));
+    const bool mp3 = all && !dir && FileUtils::getLCaseExt(nm_) == "mp3";
     const Verb verbs[] = {
         // Nothing in the config tree is runnable: Enter there reads a text file and
         // does nothing at all for anything else, so it is advertised accordingly.
-        { SYM_ENTER, dir ? "Open" : (view ? "View" : "Run"),
+        { SYM_ENTER, dir ? "Open" : (view ? "View" : music ? "Play" : "Run"),
                      dir || pickMode() || view },
         { "F1", "Info",     all && !dir },
         { "F3", "Find",     true },
         { "F4", "Unzip",    all && zip },
         { "F5", "To slot",  all && dsk },
+        { "F5", "Load tape", mp3 },
         { "F6", "Rename",   mng && !up },
         { "F7", "New dir",  mng },
         { "F8", "Delete",   mng && !up },
@@ -1040,8 +1044,11 @@ static string runLoop() {
                     return leave("M" + name);
                 }
             }
+            // F5 = the slot picker for a disk image, and "load as a tape" for an
+            // .mp3 (Enter plays it as music).
             if (all && k.vk == fabgl::VK_F5 && !onDir && s_visTotal
-                    && FileUtils::ifaceForExt(FileUtils::getLCaseExt(name)) != IFACE_NONE) {
+                    && (FileUtils::ifaceForExt(FileUtils::getLCaseExt(name)) != IFACE_NONE
+                        || FileUtils::getLCaseExt(name) == "mp3")) {
                 OSD::clickNoPause();
                 return leave("P" + name);
             }
@@ -1294,12 +1301,14 @@ static const NavVerb kNvLoc[]    = { { SYM_ENTER, "Open" } };
 static const NavVerb kNvHosts[]  = { { SYM_ENTER, "Connect" },
                                      { "F8", "Forget" } };
 static const NavVerb kNvRemote[] = { { SYM_ENTER, "Run / Open" },
-                                     { "F2", "Reload" },
+                                     { "F2", "Play" },
+                                     { "F3", "Reload" },
                                      { "F5", "Save to SD" },
                                      { "F7", "Upload" },
                                      { "F8", "Delete" } };
 static const NavVerb kNvWeb[]    = { { SYM_ENTER, "Run / Open" },
-                                     { "F2", "Reload" },
+                                     { "F2", "Play" },
+                                     { "F3", "Reload" },
                                      { "F5", "Save to SD" } };
 
 int browseIndexNav(const string& title, const string& subtitle, int side,
@@ -1311,8 +1320,8 @@ int browseIndexNav(const string& title, const string& subtitle, int side,
     const NavVerb* verbs; int nverbs;
     switch (side) {
         case OSD::FD_SIDE_HOSTS:  verbs = kNvHosts;  nverbs = 2; break;
-        case OSD::FD_SIDE_REMOTE: verbs = kNvRemote; nverbs = 5; break;
-        case OSD::FD_SIDE_WEB:    verbs = kNvWeb;    nverbs = 3; break;
+        case OSD::FD_SIDE_REMOTE: verbs = kNvRemote; nverbs = 6; break;
+        case OSD::FD_SIDE_WEB:    verbs = kNvWeb;    nverbs = 4; break;
         default:                  verbs = kNvLoc;    nverbs = 1; break;
     }
     const bool allowF2 = (side == OSD::FD_SIDE_REMOTE || side == OSD::FD_SIDE_WEB);
@@ -1399,6 +1408,17 @@ int browseIndexNav(const string& title, const string& subtitle, int side,
         y += 3;
         for (int i = 0; i < nverbs; i++) {
             if (y + lh > L.body_y + L.body_h) break;
+            // No player on this board: F2 stays "Reload" (OSDFile maps it so),
+            // and the separate F3 row would only repeat it.
+            if (!pp::available() && verbs[i].k[0] == 'F') {
+                if (verbs[i].k[1] == '3') continue;
+                if (verbs[i].k[1] == '2') {
+                    text(tx, y, "F2", C_TEXT_DIM);
+                    text(tx + textWidth("F2") + glyphW(), y, "Reload", C_TEXT);
+                    y += lh;
+                    continue;
+                }
+            }
             text(tx, y, verbs[i].k, C_TEXT_DIM);
             text(tx + textWidth(verbs[i].k) + glyphW(), y, verbs[i].what, C_TEXT);
             y += lh;
@@ -1469,6 +1489,9 @@ int browseIndexNav(const string& title, const string& subtitle, int side,
                 ret = -1; rkey = OSD::FDK_ESC; goto out;
             case fabgl::VK_F2:
                 if (allowF2) { ret = sel; rkey = OSD::FDK_F2; goto out; }
+                continue;
+            case fabgl::VK_F3:
+                if (allowF2) { ret = sel; rkey = OSD::FDK_F3; goto out; }
                 continue;
             case fabgl::VK_F5:
                 if (allowF5 && total > 0) { ret = sel; rkey = OSD::FDK_F5; goto out; }

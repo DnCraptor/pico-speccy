@@ -24,6 +24,7 @@
 #include "UiGfx.h"
 #include "UiFont.h"
 #include "UiRender.h"
+#include "UiNav.h"
 #include "ESPectrum.h"
 #include "Config.h"
 #include "Video.h"
@@ -33,6 +34,12 @@
 #include "Debug.h"
 #include "pwm_audio.h"
 #include "player/PicoPlayer.h"
+#if ZIFI_NET_CLIENT
+#include "RemoteFs.h"
+#include "OSDMain.h"
+bool osdPlayerHasLocations();       // OSDMain.cpp: the F5 location chooser
+bool osdPlayerLocations();
+#endif
 
 #include "ff.h"
 #include "pico/time.h"
@@ -58,6 +65,13 @@ static string  s_cur;                  // name of the current track (for re-entr
 static int     s_vol = 14;             // 0..20, 16 = 0 dB
 static bool    s_shuffle = false;
 static bool    s_auto = true;
+static bool    s_quitReq = false;      // the browser handed over to a network flow
+#if ZIFI_NET_CLIENT
+// Non-null while the playlist is a remote folder (Web catalog / FTP): entries
+// are "display\0basename\0" and each track is downloaded to /tmp before it
+// plays. Only for the length of one playerRemote() call.
+static RemoteFs* s_rfs = nullptr;
+#endif
 
 namespace {
 
@@ -90,6 +104,15 @@ struct Playlist {
     int       hist[HIST];
     int       nh = 0;
     const char* name(int i) const { return pool + off[i]; }
+    // The real file name (extension!) — differs from name() only for a remote
+    // playlist, whose display names come from the catalog without an extension.
+    const char* base(int i) const {
+        const char* n = pool + off[i];
+#if ZIFI_NET_CLIENT
+        if (s_rfs) return n + strlen(n) + 1;
+#endif
+        return n;
+    }
 };
 Playlist P;
 
@@ -132,7 +155,14 @@ void ringFlush()   { pcm_player_r = pcm_player_w; }
 bool engineStart() {
     E.frames = RING_FRAMES_BIG;
     const size_t tmpBytes = FEED * 4;
-    E.ring = (int16_t*)tryMalloc(E.frames * 4 + tmpBytes);
+    E.ring = nullptr;
+#if ZIFI_NET_CLIENT
+    // A remote playlist downloads every track over HTTPS, and mbedTLS wants its
+    // ~20 KB from the heap — leave the heap to it and put the ring in PSRAM.
+    if (s_rfs)
+        E.ring = (int16_t*)Buffer::palloc(E.frames * 4 + tmpBytes, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+#endif
+    if (!E.ring) E.ring = (int16_t*)tryMalloc(E.frames * 4 + tmpBytes);
     if (!E.ring) {
         E.frames = RING_FRAMES_SMALL;
         E.ring = (int16_t*)tryMalloc(E.frames * 4 + tmpBytes);
@@ -237,6 +267,48 @@ bool plBuild(const string& dir) {
     return true;
 }
 
+#if ZIFI_NET_CLIENT
+// Remote playlist: the playable files of the remote cwd, in the source's own
+// order (the catalog is pre-sorted; FTP/SFTP get a name sort).
+struct PlRemote { uint32_t used; };
+bool plBuildRemote(RemoteFs* fs) {
+    plFree();
+    P.pool = (char*)Buffer::palloc(NAME_POOL, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+    P.off  = (uint32_t*)Buffer::palloc(MAX_TRACKS * 4, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+    if (!P.pool || !P.off) { plFree(); return false; }
+    PlRemote R{ 0 };
+    fs->listFiles([](void* c, const char* disp, const char* base) {
+        PlRemote& R = *(PlRemote*)c;
+        if (P.n >= MAX_TRACKS) return;
+        if (!pp::playableExt(FileUtils::getLCaseExt(base))) return;
+        const uint32_t ld = (uint32_t)strlen(disp) + 1, lb = (uint32_t)strlen(base) + 1;
+        if (R.used + ld + lb > (uint32_t)NAME_POOL) return;
+        memcpy(P.pool + R.used, disp, ld);
+        memcpy(P.pool + R.used + ld, base, lb);
+        P.off[P.n++] = R.used;
+        R.used += ld + lb;
+        if ((P.n & 15) == 0) feed();
+    }, &R);
+    if (!fs->preSorted()) {
+        char* pool = P.pool;
+        std::sort(P.off, P.off + P.n, [pool](uint32_t a, uint32_t b) {
+            return strcasecmp(pool + a, pool + b) < 0;
+        });
+    }
+    Debug::log("Player: remote playlist %s: %d tracks", fs->cwdPath().c_str(), P.n);
+    return true;
+}
+#endif
+
+// A playlist entry as the UI font draws it: local names already are CP1251
+// (FatFs's code page), a catalog playlist carries UTF-8 display names.
+string dispName(int i) {
+#if ZIFI_NET_CLIENT
+    if (s_rfs && s_rfs->utf8Names()) return FileUtils::utf8ToCp1251(P.name(i));
+#endif
+    return P.name(i);
+}
+
 int plFind(const string& name) {
     for (int i = 0; i < P.n; i++) if (name == P.name(i)) return i;
     return -1;
@@ -310,7 +382,7 @@ void infoRow(int row, const char* label, const char* val) {
 
 void drawInfo() {
     const pp::Meta* mt = E.dec ? &E.dec->meta : nullptr;
-    infoRow(0, "File", P.cur >= 0 ? P.name(P.cur) : "-");
+    infoRow(0, "File", P.cur >= 0 ? dispName(P.cur).c_str() : "-");
     if (!s_msg.empty()) {
         infoRow(1, "Error", s_msg.c_str());
     } else {
@@ -428,7 +500,7 @@ void drawPlaylist() {
         const int x = L.m + 2 * L.sc;
         text(x, y, num, cur ? C_WHITE : C_TEXT_DIM);
         const int nx = x + textWidth(num);
-        textClip(nx, y, Sf.w - L.m - nx - 2 * L.sc, P.name(i), cur ? C_WHITE : C_TEXT);
+        textClip(nx, y, Sf.w - L.m - nx - 2 * L.sc, dispName(i).c_str(), cur ? C_WHITE : C_TEXT);
     }
 }
 
@@ -454,10 +526,24 @@ bool playIndex(int i) {
     if (i < 0 || i >= P.n) { P.cur = -1; return false; }
     P.cur = i;
     s_cur = P.name(i);
-    const string path = s_dir + P.name(i);
+    string path = s_dir + P.name(i);
+#if ZIFI_NET_CLIENT
+    if (s_rfs) {
+        // One fixed file per extension, overwritten track after track (the
+        // previous decoder is gone by now, so nothing holds it open).
+        infoRow(0, "File", dispName(i).c_str());
+        infoRow(1, "Format", "downloading...");
+        path = string("/tmp/_play.") + FileUtils::getLCaseExt(P.base(i));
+        if (!s_rfs->get(P.name(i), path, [](uint32_t, uint32_t) { return true; })) {
+            s_msg = "Download failed";
+            Debug::log("Player: download %s failed", P.name(i));
+            return false;
+        }
+    }
+#endif
     pp::Decoder* d = pp::createDecoder(FileUtils::getLCaseExt(path));
     if (!d) { s_msg = "Unsupported format"; return false; }
-    infoRow(0, "File", P.name(i));
+    infoRow(0, "File", dispName(i).c_str());
     infoRow(1, "Format", "opening...");   // a MIDI bank load from SD takes a moment
     if (!d->open(path.c_str())) {
         s_msg = d->err ? d->err : "Cannot play";
@@ -525,7 +611,33 @@ void drainKeys() {
 // Opens the file browser on the playlist folder; plays the pick.
 bool browse() {
     string dir = s_dir.empty() ? FileUtils::ALL_Path : s_dir;
-    const string r = browseFile(dir, TXT_PLAYER, DISK_MUSFILE);
+    string r;
+    for (;;) {
+#if ZIFI_NET_CLIENT
+        // ".." at a volume root leads to the F5 location chooser (SD / USB /
+        // Remote / Web Archives), as in the emulator's own browser.
+        const bool chooser = !s_rfs && osdPlayerHasLocations();
+        const bool prevRoot = OSD::fd_root_parent;
+        OSD::fd_root_parent = chooser;
+#endif
+        r = browseFile(dir, TXT_PLAYER, DISK_MUSFILE);
+#if ZIFI_NET_CLIENT
+        OSD::fd_root_parent = prevRoot;
+        if (r == "\x02UP") {
+            // A network flow plays in a player of its own: this one steps aside
+            // first, so there are never two engines on the output.
+            engineStop();
+            plFree();
+            const bool local = osdPlayerLocations();
+            gfxInstallPalette();
+            drainKeys();
+            if (!local || !engineStart()) { s_quitReq = true; return false; }
+            dir = FileUtils::ALL_Path;
+            continue;
+        }
+#endif
+        break;
+    }
     gfxInstallPalette();
     drainKeys();                   // the Enter that picked the file has a twin
     if (r.size() < 2 || (r[0] != 'R' && r[0] != 'M')) return false;
@@ -573,6 +685,7 @@ PlAct plAct(fabgl::VirtualKey vk) {
 // The page body. `startPath` (full path) starts that file; empty = resume the
 // session's folder, or open the browser when there is none.
 void run(const string& startPath) {
+    s_quitReq = false;
     layout();
     if (!engineStart()) {
         fill(0, 0, Sf.w, Sf.h, C_PANEL);
@@ -583,6 +696,14 @@ void run(const string& startPath) {
     drainKeys();
 
     bool ok = true;
+#if ZIFI_NET_CLIENT
+    if (s_rfs) {                           // remote folder; startPath = display name or ""
+        plBuildRemote(s_rfs);
+        drawAll();
+        const int i = startPath.empty() ? -1 : plFind(startPath);
+        playIndex(i >= 0 ? i : pickFirst());
+    } else
+#endif
     if (!startPath.empty() && startPath.back() == '/') {   // a whole folder
         s_dir = startPath;
         plBuild(s_dir);
@@ -645,7 +766,12 @@ void run(const string& startPath) {
                 case PA_LEFT:  failRun = 0; prev(); break;
                 case PA_HOME:  failRun = 0; pushHist(P.cur); playIndex(0); break;
                 case PA_END:   failRun = 0; pushHist(P.cur); playIndex(P.n - 1); break;
-                case PA_FILES: browse(); drawAll(); shownDec = E.dec; shownCur = P.cur; break;
+                case PA_FILES:
+#if ZIFI_NET_CLIENT
+                    if (s_rfs) { quit = true; break; }   // back to the catalog
+#endif
+                    browse();
+                    if (s_quitReq) { quit = true; break; } drawAll(); shownDec = E.dec; shownCur = P.cur; break;
                 default: break;
             }
             if (quit) break;
@@ -701,6 +827,12 @@ void run(const string& startPath) {
 void act_player() {
     gfxResumePalette();             // runModal suspended the UI palette
     run(string());
+#if ZIFI_NET_CLIENT
+    // A launch from Web Archives (reached through the player's F5) closes the menu.
+    if (OSD::net_launch_close) requestClose();
+    OSD::net_launch_close = false;
+    OSD::net_close_all = false;
+#endif
 }
 
 // F5 browser: play `path` (a full path). Owns its own gfx session, like the
@@ -711,5 +843,21 @@ void playerStandalone(const std::string& path) {
     gfxEnd();
     VIDEO::brdnextframe = true;
 }
+
+#if ZIFI_NET_CLIENT
+// Web catalog / FTP: play the remote cwd's playable files, starting at the entry
+// whose display name is `startDisp` ("" = first, or random in shuffle). The
+// local session (folder + track) is left as it was.
+void playerRemote(RemoteFs* fs, const std::string& startDisp) {
+    const string sd = s_dir, sc = s_cur;
+    s_rfs = fs;
+    gfxBegin();
+    run(startDisp);
+    gfxEnd();
+    s_rfs = nullptr;
+    s_dir = sd; s_cur = sc;
+    VIDEO::brdnextframe = true;
+}
+#endif
 
 } // namespace nm

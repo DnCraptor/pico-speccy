@@ -46,6 +46,15 @@ const char* ZipExtract::TEMP_FILE = "/tmp/.zip_extract";
 // archive.
 static const char* s_zip_err = nullptr;
 
+// ZIP entry names are CP866 (DOS / Windows packers) unless general-purpose flag
+// bit 11 says UTF-8; FatFs runs CP1251 (the UI font's encoding, ffconf.h). In
+// place: neither conversion ever makes the name longer.
+static void zipNameToFat(char* fn, uint16_t flags) {
+    const std::string in(fn);
+    const std::string out = (flags & 0x0800) ? FileUtils::utf8ToCp1251(in) : FileUtils::cp866ToCp1251(in);
+    memcpy(fn, out.c_str(), out.size() + 1);
+}
+
 const char* ZipExtract::errMsg() {
     return s_zip_err ? s_zip_err : OSD_ZIP_ERR;
 }
@@ -230,6 +239,7 @@ string ZipExtract::extract(const string& zipPath, uint8_t fileType) {
         // Read filename — use static buffer to save stack
         if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
         fn[hdr.nameLen] = 0;
+        zipNameToFat(fn, hdr.flags);
 
         // Skip extra field
         if (hdr.extraLen > 0)
@@ -686,6 +696,7 @@ void ZipExtract::viewInfo(const string& zipPath) {
 
         if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
         fn[hdr.nameLen] = 0;
+        zipNameToFat(fn, hdr.flags);
 
         if (hdr.extraLen > 0)
             f_lseek(&zipFile, f_tell(&zipFile) + hdr.extraLen);
@@ -821,6 +832,7 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir) {
 
         if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
         fn[hdr.nameLen] = 0;
+        zipNameToFat(fn, hdr.flags);
 
         if (hdr.extraLen > 0)
             f_lseek(&zipFile, f_tell(&zipFile) + hdr.extraLen);

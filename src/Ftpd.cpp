@@ -1,4 +1,5 @@
 #include "Ftpd.h"
+#include "FileUtils.h"
 
 #if ZIFI_NET_CLIENT
 
@@ -79,7 +80,12 @@ static void reply(int code, const char* text) {
 // Resolve an FTP path argument against the current dir into a normalised absolute
 // FatFS path. Handles leading '/', "." and "..". Result always starts with '/'
 // and has no trailing slash (except the bare root "/").
-static std::string resolve(const char* arg) {
+// Clients speak UTF-8 (OPTS UTF8 is acknowledged); the SD is CP1251 (FatFs's
+// code page, ffconf.h) — names are converted on the way in here and on the way
+// out through u8().
+static std::string resolve(const char* argRaw) {
+    const std::string a = argRaw ? FileUtils::utf8ToCp1251(argRaw) : std::string();
+    const char* arg = argRaw ? a.c_str() : nullptr;
     std::string in;
     if (!arg || !arg[0])       in = g_cwd;
     else if (arg[0] == '/')    in = arg;
@@ -128,6 +134,8 @@ static int openData() {
 static const char* const MON[12] =
     { "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec" };
 
+static std::string u8(const char* s) { return FileUtils::cp1251ToUtf8(s); }
+
 // Append one "ls -l"-style line for a FILINFO into `out`.
 static void fmtLsLine(const FILINFO& fi, std::string& out) {
     int month = (fi.fdate >> 5) & 0x0F; if (month < 1 || month > 12) month = 1;
@@ -137,7 +145,7 @@ static void fmtLsLine(const FILINFO& fi, std::string& out) {
     char* line = g_b->ls;
     snprintf(line, sizeof(g_b->ls), "%crw-r--r-- 1 ftp ftp %10lu %s %2d %02d:%02d %s\r\n",
              (fi.fattrib & AM_DIR) ? 'd' : '-', (unsigned long)fi.fsize,
-             MON[month - 1], day, hh, mm, fi.fname);
+             MON[month - 1], day, hh, mm, u8(fi.fname).c_str());
     out += line;
 }
 
@@ -157,10 +165,10 @@ static void fmtMlsdLine(const FILINFO& fi, std::string& out) {
     char mt[16]; fmtMtime(fi, mt, sizeof(mt));
     char* line = g_b->ls;
     if (fi.fattrib & AM_DIR)
-        snprintf(line, sizeof(g_b->ls), "type=dir;modify=%s; %s\r\n", mt, fi.fname);
+        snprintf(line, sizeof(g_b->ls), "type=dir;modify=%s; %s\r\n", mt, u8(fi.fname).c_str());
     else
         snprintf(line, sizeof(g_b->ls), "type=file;size=%lu;modify=%s; %s\r\n",
-                 (unsigned long)fi.fsize, mt, fi.fname);
+                 (unsigned long)fi.fsize, mt, u8(fi.fname).c_str());
     out += line;
 }
 
@@ -179,7 +187,7 @@ static void doList(const char* arg, int fmt) {
     bool ok = true;
     while (f_readdir(&dir, &fi) == FR_OK && fi.fname[0]) {
         if (!strcmp(fi.fname, ".") || !strcmp(fi.fname, "..")) continue;
-        if      (fmt == 1) { buf += fi.fname; buf += "\r\n"; }
+        if      (fmt == 1) { buf += u8(fi.fname); buf += "\r\n"; }
         else if (fmt == 2) fmtMlsdLine(fi, buf);
         else               fmtLsLine(fi, buf);
         if (buf.size() >= 1024) { // flush in chunks to bound RAM
@@ -365,12 +373,13 @@ static void doMlst(const char* arg) {
     if (isRoot) { isDir = true; sz = 0; snprintf(mt, sizeof(mt), "19800101000000"); }
     else { isDir = fi.fattrib & AM_DIR; sz = (unsigned long)fi.fsize; fmtMtime(fi, mt, sizeof(mt)); }
     char* buf = g_b->m;
+    const std::string up = u8(path.c_str());
     if (isDir)
         snprintf(buf, sizeof(g_b->m), "250-Listing %s\r\n type=dir;modify=%s; %s\r\n250 End\r\n",
-                 path.c_str(), mt, path.c_str());
+                 up.c_str(), mt, up.c_str());
     else
         snprintf(buf, sizeof(g_b->m), "250-Listing %s\r\n type=file;size=%lu;modify=%s; %s\r\n250 End\r\n",
-                 path.c_str(), sz, mt, path.c_str());
+                 up.c_str(), sz, mt, up.c_str());
     if (g_ctrl >= 0) ZiFiSock::sock_send(g_ctrl, (const uint8_t*)buf, strlen(buf), 8000);
     ftplog("< 250 MLST %s", path.c_str());
 }
@@ -405,7 +414,7 @@ static void handle(char* line) {
     else if (!strcmp(line, "MODE")) reply(200, "Mode S ok");
     else if (!strcmp(line, "STRU")) reply(200, "Structure F ok");
     else if (!strcmp(line, "PWD") || !strcmp(line, "XPWD")) {
-        char* m = g_b->m; snprintf(m, sizeof(g_b->m), "\"%s\" is the current directory", g_cwd.c_str());
+        char* m = g_b->m; snprintf(m, sizeof(g_b->m), "\"%s\" is the current directory", u8(g_cwd.c_str()).c_str());
         reply(257, m);
     }
     else if (!strcmp(line, "CWD") || !strcmp(line, "XCWD")) {
@@ -451,7 +460,7 @@ static void handle(char* line) {
     }
     else if (!strcmp(line, "MKD") || !strcmp(line, "XMKD")) {
         if (arg && f_mkdir(resolve(arg).c_str()) == FR_OK) {
-            char* m = g_b->m; snprintf(m, sizeof(g_b->m), "\"%s\" created", resolve(arg).c_str()); reply(257, m);
+            char* m = g_b->m; snprintf(m, sizeof(g_b->m), "\"%s\" created", u8(resolve(arg).c_str()).c_str()); reply(257, m);
         } else reply(550, "Create directory failed");
     }
     else if (!strcmp(line, "RNFR")) {

@@ -69,6 +69,7 @@ using namespace std;
 #include "PinSerialData_595.h"
 #if ZIFI_NET_CLIENT
 #include "RemoteFs.h"
+#include "player/PicoPlayer.h"
 #include "Snapshot.h"
 #endif
 
@@ -335,9 +336,11 @@ static string rfd_choose_file(const string& start) {
 // Every SD path built from a catalog name goes through this, or f_mkdir/f_open
 // fails and the whole download dies as a generic transfer error. Trailing
 // dots/spaces go too (FatFs strips them itself, silently renaming the dir the
-// rest of the copy then misses). UTF-8 continuation bytes (>= 0x80) pass.
-static std::string rfd_fat_name(const std::string& n) {
-    std::string s = n;
+// rest of the copy then misses). A UTF-8 source (the catalog) is converted to
+// CP1251, FatFs's code page — raw UTF-8 bytes would either be refused (0x98 is
+// undefined in 1251) or land as mojibake.
+static std::string rfd_fat_name(const std::string& n, bool utf8) {
+    std::string s = utf8 ? FileUtils::utf8ToCp1251(n) : n;
     for (char& c : s)
         if ((uint8_t)c < 0x20 || strchr("\\/:*?\"<>|", c)) c = '-';
     while (!s.empty() && (s.back() == ' ' || s.back() == '.')) s.pop_back();
@@ -377,7 +380,7 @@ static bool rfd_copy_tree(RemoteFs* fs, const std::string& destSd, int depth) {
     for (auto& rec : names) {
         bool isDir = (!rec.empty() && (uint8_t)rec[0] == DIR_MARKER);
         std::string nm = isDir ? rec.substr(1) : rec;
-        std::string dst = destSd + "/" + rfd_fat_name(nm);
+        std::string dst = destSd + "/" + rfd_fat_name(nm, fs->utf8Names());
         if (isDir) {
             if (!FileUtils::mkdirParents(dst.c_str())) return false;
             if (!fs->cwd(nm)) return false;
@@ -389,7 +392,7 @@ static bool rfd_copy_tree(RemoteFs* fs, const std::string& destSd, int depth) {
             // for FTP/SFTP downloadBasename() returns the name unchanged.
             std::string fbase = fs->downloadBasename(nm);
             if (fbase.empty()) fbase = nm;
-            std::string fdst = destSd + "/" + rfd_fat_name(fbase);
+            std::string fdst = destSd + "/" + rfd_fat_name(fbase, fs->utf8Names());
             rfd_xfer_title = MSG_NET_COPYING;
             OSD::progressDialog(rfd_xfer_title, nm, 0, 0, fs->utf8Names());
             bool got = fs->get(nm, fdst, rfd_progress);
@@ -673,8 +676,26 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
         while (!nm.empty() && (uint8_t)nm[0] == DIR_MARKER) nm.erase(0, 1); // strip 1-2 markers
         bool isDir = (nm.size() < rec.size());
 
-        if (outKey == FDK_F2) {           // F2 → force a re-fetch of the current dir
+        // F3 → force a re-fetch of the current dir (F2 did this before the player
+        // took it; boards without the player keep F2 = reload too).
+        if (outKey == FDK_F3 || (outKey == FDK_F2 && !pp::available())) {
             netSessForget(key); filenames.unlink(); netValWrite(key, "");
+            continue;
+        }
+        // F2 → Pico-Zx-Player, the local browser's scheme: on a folder play the
+        // whole folder, on a music file play from it (the rest of its folder is the
+        // playlist, so Auto/Shuffle work). Tracks are fetched to /tmp one by one.
+        if (outKey == FDK_F2) {
+            if (nm == "..") continue;
+            if (isDir) {
+                const string before = fs->cwdPath();
+                if (fs->cwd(nm)) {
+                    nm::playerRemote(fs, "");
+                    if (fs->cwdPath() != before) fs->cwd("..");
+                }
+            } else if (pp::playableExt(FileUtils::getLCaseExt(fs->downloadBasename(nm)))) {
+                nm::playerRemote(fs, nm);
+            }
             continue;
         }
         if (nm == "..") {                 // parent row — Enter goes up; from the top, exit
@@ -702,7 +723,7 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
                 Config::saveWifiConfig();
                 bool ok;
                 if (isDir) {                 // recursive folder copy (keep the dir name)
-                    string dst = destBase + (destBase.back() == '/' ? "" : "/") + rfd_fat_name(nm);
+                    string dst = destBase + (destBase.back() == '/' ? "" : "/") + rfd_fat_name(nm, fs->utf8Names());
                     ok = FileUtils::mkdirParents(dst.c_str());
                     if (ok) {
                         fs->cwd(nm);
@@ -715,7 +736,7 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
                     OSD::progressDialog(rfd_xfer_title, nm, 0, 0, fs->utf8Names()); // show first
                     string base = fs->downloadBasename(nm);   // (catalog: HTTP listing read)
                     if (base.empty()) base = nm;
-                    string dst = destBase + (destBase.back() == '/' ? "" : "/") + rfd_fat_name(base);
+                    string dst = destBase + (destBase.back() == '/' ? "" : "/") + rfd_fat_name(base, fs->utf8Names());
                     ok = fs->get(nm, dst, rfd_progress);
                     OSD::progressDialog("", "", 0, 2);
                     if (ok) rfd_gunzip_vgz(dst);   // .vgz → ready .vgm on the SD
@@ -756,6 +777,16 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
             string base = fs->downloadBasename(nm);
             size_t d2 = base.find_last_of('.');
             if (d2 != string::npos) ext = base.substr(d2);
+        }
+        // Music goes to the player (with the folder as its playlist) instead of
+        // "launch", .mp3 included — as in the local browser.
+        if (pp::available() && ext.size() > 1) {
+            const string lce = FileUtils::getLCaseExt(ext);
+            if (pp::playableExt(lce)) {
+                OSD::progressDialog("", "", 0, 2);
+                nm::playerRemote(fs, nm);
+                continue;
+            }
         }
         string tmpp = string("/tmp/_run") + ext;
         rfd_release_tmp(tmpp);   // free the fixed /tmp target if a prior launch still holds it

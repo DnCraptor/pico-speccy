@@ -84,7 +84,12 @@
 / Locale and Namespace Configurations
 /---------------------------------------------------------------------------*/
 
-#define FF_CODE_PAGE	866
+// pico-speccy: 1251, the UI font's own encoding (UiFont's Cyrillic range and the
+// classic Font6x8Cyr are CP1251). With 866 every Cyrillic long file name came out
+// in CP866 bytes and rendered as blanks / wrong letters in the browser, the player
+// and the OSD. Names from elsewhere are converted to it where they enter the SD:
+// ZIP entries (CP866 or UTF-8, ZipExtract) and catalog names (UTF-8, OSDFile).
+#define FF_CODE_PAGE	1251
 /* This option specifies the OEM code page to be used on the target system.
 /  Incorrect code page setting can cause a file open failure.
 /

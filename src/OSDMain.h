@@ -160,7 +160,7 @@ public:
     // saved-remotes list, and the remote/web file browser so they all look like the
     // SD browser. Rendered by the fullscreen browser (src/ui/UiBrowser.cpp).
     enum { FD_SIDE_LOCATIONS = 0, FD_SIDE_HOSTS, FD_SIDE_REMOTE, FD_SIDE_WEB };
-    enum { FDK_ENTER = 0, FDK_ALT, FDK_F2, FDK_F8, FDK_F5, FDK_F7, FDK_BACK, FDK_ESC };
+    enum { FDK_ENTER = 0, FDK_ALT, FDK_F2, FDK_F8, FDK_F5, FDK_F7, FDK_BACK, FDK_ESC, FDK_F3 };
     // Render the already-populated `filenames` index; returns the selected row (0-based)
     // or -1, with *outKey = FDK_*. Caller fills `filenames` (streamed) first. ioFocus/
     // ioBegin (if given) carry the cursor position in and out, so the caller can remember

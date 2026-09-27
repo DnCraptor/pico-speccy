@@ -41,6 +41,12 @@ void gameScwongStandalone();
 // Pico-Zx-Player on a music file picked in the F5 browser (full path). Only call
 // when pp::available().
 void playerStandalone(const std::string& path);
+#if ZIFI_NET_CLIENT
+}  // namespace nm (RemoteFs is global)
+class RemoteFs;
+namespace nm {
+void playerRemote(RemoteFs* fs, const std::string& startDisp);
+#endif
 
 // A yes/no question in THIS UI, asked from outside the menu while the machine
 // runs (the SD automount's "settings found on the card — reboot?"). Owns its

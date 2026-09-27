@@ -184,6 +184,11 @@ public:
     // passes through; Russian letters map to their CP1251 byte; other codepoints
     // become '?'; invalid sequences pass through unchanged.
     static string utf8ToCp1251(const string& s);
+    // CP866 (DOS Cyrillic) → CP1251 — ZIP entry names from DOS/Windows packers.
+    // Pseudographics, which a file name cannot display anyway, become '_'.
+    static string cp866ToCp1251(const string& s);
+    // CP1251 (FatFs's code page) → UTF-8, for protocols that speak UTF-8 (FTP).
+    static string cp1251ToUtf8(const string& s);
 
     static string MountPoint;
     static bool SDReady;

@@ -283,10 +283,15 @@ static bool readTsvCachedOrHttp(const std::string& cachePath, const std::string&
                                 void (*fn)(const char*, void*), void* arg) {
     FIL* f = fopen2(cachePath.c_str(), FA_READ);
     if (f) {
-        std::string line; UINT br; char c;
-        while (f_read(f, &c, 1, &br) == FR_OK && br) {
-            if (c == '\n') { fn(line.c_str(), arg); line.clear(); }
-            else if (c != '\r') line += c;
+        // 256-byte chunks: a big author folder is tens of KB, and one f_read per
+        // byte made every get() (and the player's playlist) pay for it.
+        std::string line; UINT br; char buf[256];
+        while (f_read(f, buf, sizeof(buf), &br) == FR_OK && br) {
+            for (UINT i = 0; i < br; i++) {
+                const char c = buf[i];
+                if (c == '\n') { fn(line.c_str(), arg); line.clear(); }
+                else if (c != '\r') line += c;
+            }
         }
         if (!line.empty()) fn(line.c_str(), arg);
         fclose2(f);
@@ -467,6 +472,38 @@ bool HttpCatalogFs::get(const std::string& remote, const std::string& localSdPat
 // catalog display names carry no extension — the real name lives in the locator's
 // last path segment, which is exactly what get() saves the file under. Used by the
 // Alt+Enter "download to /tmp and run" path. Falls back to the display name.
+// Static: every F-line as (name, basename of the 4th-column locator). A line
+// with no locator (not mirrored) is skipped — get() could not fetch it anyway.
+struct FilesCtx { RemoteFileCb cb; void* ctx; };
+static void files_line(const char* line, void* arg) {
+    FilesCtx* fc = (FilesCtx*)arg;
+    if (line[0] != 'F') return;
+    const char* t1 = strchr(line, '\t');        if (!t1) return;
+    const char* name = t1 + 1;
+    const char* t2 = strchr(name, '\t');         if (!t2) return;
+    const char* t3 = strchr(t2 + 1, '\t');       if (!t3) return;
+    const char* url = t3 + 1;
+    if (!*url) return;
+    const char* sl = strrchr(url, '/');
+    const char* base = sl ? sl + 1 : url;
+    if (!*base) return;
+    const std::string nm(name, t2 - name);
+    fc->cb(fc->ctx, nm.c_str(), base);
+}
+
+bool HttpCatalogFs::listFiles(RemoteFileCb cb, void* ctx) {
+    if (!isStaticBase()) return RemoteFs::listFiles(cb, ctx);
+    // A folder picked with F2 from its parent was never listed, so there is no
+    // .catv yet — list it once (that writes the cache get() will read), then
+    // walk the cache.
+    FIL* probe = fopen2(tsvCachePath().c_str(), FA_READ);
+    if (probe) fclose2(probe);
+    else if (!listStream("", [](void*, const char*, bool, uint32_t) {}, nullptr)) return false;
+    std::string listUrl = baseUrl() + "/" + site + "/" + slugPath(cur_path) + ".tsv";
+    FilesCtx fc = { cb, ctx };
+    return readTsvCachedOrHttp(tsvCachePath(), listUrl, files_line, &fc);
+}
+
 std::string HttpCatalogFs::downloadBasename(const std::string& displayName) {
     if (isStaticBase()) {
         std::string listUrl = baseUrl() + "/" + site + "/" + slugPath(cur_path) + ".tsv";

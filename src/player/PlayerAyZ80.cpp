@@ -269,7 +269,7 @@ void AyZ80Decoder::levels(uint8_t* out) {
 } // namespace
 
 Decoder* createAyZ80Decoder(const std::string& ext) {
-    const Kind k = ext == "pt2" ? K_PT2 : ext == "stc" ? K_STC : ext == "stp" ? K_STP : ext == "sqt" ? K_SQT : K_PT3;
+    const Kind k = ext == "pt2" ? K_PT2 : (ext == "stc" || ext == "zxs") ? K_STC : (ext == "stp" || ext == "stp2") ? K_STP : ext == "sqt" ? K_SQT : K_PT3;
     return new (std::nothrow) AyZ80Decoder(k);
 }
 

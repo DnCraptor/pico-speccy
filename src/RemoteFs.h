@@ -18,6 +18,10 @@ typedef void (*RemoteListCb)(void* ctx, const char* name, bool isDir, uint32_t s
 // false to abort the transfer (e.g. user pressed Esc).
 typedef bool (*XferProgressCb)(uint32_t done, uint32_t total);
 
+// Per-file callback for listFiles: the entry's display name (what get() takes)
+// and the basename get() would save it under (carries the real extension).
+typedef void (*RemoteFileCb)(void* ctx, const char* disp, const char* base);
+
 class RemoteFs {
 public:
     virtual ~RemoteFs() {}
@@ -83,6 +87,18 @@ public:
     // (with extension) to know both the saved path and the file type. Default:
     // echo the name (FTP/SFTP entry names already carry their extension).
     virtual std::string downloadBasename(const std::string& displayName) { return displayName; }
+
+    // Every FILE of the current directory as (display name, real basename), in
+    // one pass — the Pico-Zx-Player builds its playlist from this. A per-entry
+    // downloadBasename() would re-read the whole listing for each track. Default:
+    // the entry names already carry their extension (FTP/SFTP).
+    virtual bool listFiles(RemoteFileCb cb, void* ctx) {
+        struct A { RemoteFileCb cb; void* ctx; };
+        A a = { cb, ctx };
+        return listStream("", [](void* c, const char* name, bool isDir, uint32_t) {
+            if (!isDir) { A* p = (A*)c; p->cb(p->ctx, name, name); }
+        }, &a);
+    }
 
     // Upload SD file `localSdPath` to `remote`.
     virtual bool put(const std::string& localSdPath, const std::string& remote,

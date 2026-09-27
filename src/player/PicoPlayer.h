@@ -69,8 +69,9 @@ Decoder* createDecoder(const std::string& lcext);
 bool     available();
 
 // ── helpers shared by the decoders ──────────────────────────────────────────
-// Copies text into `dst` as printable ASCII: UTF-8 / CP1251 / UTF-16 Cyrillic is
-// transliterated (the UI font has no Cyrillic), anything else unprintable → '?'.
+// Copies text into `dst` for the UI font: printable ASCII, Cyrillic (from UTF-8 /
+// CP1251 / UTF-16) as CP1251 bytes — the font's own encoding — Latin-1 accents
+// folded to their base letter, anything else unprintable → '?'.
 enum TextEnc : uint8_t { TE_LATIN1, TE_UTF8, TE_CP1251, TE_UTF16LE, TE_UTF16BE };
 void     textCopy(char* dst, size_t cap, const uint8_t* src, size_t len, TextEnc enc);
 // Trims trailing blanks / NULs.

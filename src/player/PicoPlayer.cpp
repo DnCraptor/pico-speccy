@@ -24,7 +24,8 @@ static bool xmpExt(const std::string& e) {
 
 // AY tracker modules played by their Z80 replayer (PlayerAyZ80.cpp).
 static bool ayZ80Ext(const std::string& e) {
-    return e == "pt3" || e == "pt2" || e == "stc" || e == "stp" || e == "sqt";
+    return e == "pt3" || e == "pt2" || e == "stc" || e == "stp" || e == "sqt" ||
+           e == "zxs" || e == "stp2";      // AY-Player's names for STC / STP modules
 }
 
 // SAA1099 music driven by its Z80 replayer: E-Tracker modules + SAM compiled songs.
@@ -36,9 +37,13 @@ static bool midiExt(const std::string& e) {
     return e == "mid" || e == "midi" || e == "kar" || e == "rmi";
 }
 
+bool bulbaExt(const std::string& e);
+Decoder* createBulbaDecoder(const std::string& e);
+
 bool playableExt(const std::string& e) {
     return e == "mp3" || e == "vgm" || e == "vgz" || midiExt(e) || saaExt(e) ||
-           e == "tfc" || e == "tfd" || e == "tfe" || ayZ80Ext(e) || xmpExt(e) || e == "ay";
+           e == "tfc" || e == "tfd" || e == "tfe" || ayZ80Ext(e) || xmpExt(e) || e == "ay" ||
+           bulbaExt(e);
 }
 
 Decoder* createDecoder(const std::string& e) {
@@ -50,6 +55,7 @@ Decoder* createDecoder(const std::string& e) {
     if (ayZ80Ext(e))              return createAyZ80Decoder(e);
     if (xmpExt(e))                return createXmpDecoder();
     if (e == "ay")                return createAyFileDecoder();
+    if (bulbaExt(e))              return createBulbaDecoder(e);
     return nullptr;
 }
 
@@ -59,26 +65,14 @@ bool available() {
 
 // ── text ─────────────────────────────────────────────────────────────────────
 
-// Cyrillic U+0410..U+044F → Latin (GOST-ish, lower case kept lower case).
-static const char* const kCyrUp[32] = {
-    "A","B","V","G","D","E","Zh","Z","I","J","K","L","M","N","O","P",
-    "R","S","T","U","F","H","C","Ch","Sh","Sch","'","Y","'","E","Yu","Ya" };
-static const char* const kCyrLo[32] = {
-    "a","b","v","g","d","e","zh","z","i","j","k","l","m","n","o","p",
-    "r","s","t","u","f","h","c","ch","sh","sch","'","y","'","e","yu","ya" };
-
-static void putStr(char* dst, size_t cap, size_t& o, const char* s) {
-    while (*s && o + 1 < cap) dst[o++] = *s++;
-}
-
 static void putCode(char* dst, size_t cap, size_t& o, uint32_t cp) {
     if (o + 1 >= cap) return;
     if (cp == '\t' || cp == '\r' || cp == '\n') cp = ' ';
     if (cp >= 0x20 && cp < 0x7F) { dst[o++] = (char)cp; return; }
-    if (cp >= 0x410 && cp <= 0x42F) { putStr(dst, cap, o, kCyrUp[cp - 0x410]); return; }
-    if (cp >= 0x430 && cp <= 0x44F) { putStr(dst, cap, o, kCyrLo[cp - 0x430]); return; }
-    if (cp == 0x401) { putStr(dst, cap, o, "Yo"); return; }
-    if (cp == 0x451) { putStr(dst, cap, o, "yo"); return; }
+    // Cyrillic → CP1251, which the UI font draws (UiFont's 0x87..0xFF range).
+    if (cp >= 0x410 && cp <= 0x44F) { dst[o++] = (char)(0xC0 + (cp - 0x410)); return; }
+    if (cp == 0x401) { dst[o++] = (char)0xA8; return; }
+    if (cp == 0x451) { dst[o++] = (char)0xB8; return; }
     if (cp >= 0xC0 && cp <= 0xFF) {                 // Latin-1 accents → base letter
         static const char kL1[] =
             "AAAAAAACEEEEIIII" "DNOOOOOxOUUUUYPs"

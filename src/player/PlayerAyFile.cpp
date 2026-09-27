@@ -10,9 +10,17 @@
 // held for the first 32 T). OUT (#FFFD) / (#BFFD) drive a private AySound at the
 // ZX AY clock; an even port is the ULA, whose EAR/MIC bits are the BEEPER — a
 // good third of the archive is beeper music, integrated here per T-state over
-// every output sample (the emulator's own speaker_values levels). ZX Spectrum
-// songs only: CPC rips reach the AY through the PPI and come out silent, which
-// the silence cut-off then skips.
+// every output sample (the emulator's own speaker_values levels).
+//
+// AY writes are TIME-STAMPED within the frame and replayed at their own output
+// sample: "digital" songs play samples through hundreds of volume writes a
+// frame, and applying only the frame's last value (the frame is rendered after
+// the Z80 has run) wiped them out.
+//
+// Amstrad CPC rips: the AY sits behind the PPI (#F4xx = data, #F6xx bits 7-6 =
+// BDIR/BC1). As in Ay_Emul, the first real register write decides the machine —
+// a PPI write switches the song to CPC (AY clock 1 MHz, no ULA beeper, IN reads
+// an idle bus), a #FFFD/#BFFD one to ZX.
 //
 // Every sub-song plays in turn, starting at FirstSong; each lasts its own
 // SongLength (1/50 s), 3 minutes when it gives none, and is cut short after
@@ -43,6 +51,7 @@ namespace {
 #endif
 constexpr int32_t  FRAME_T = PP_AY_FRAME_T;
 constexpr int      FRAME = RATE / 50;                    // 625 samples
+static_assert(FRAME <= ESP_AUDIO_SAMPLES_PENTAGON, "a frame is rendered into AySound's buffer");
 constexpr uint32_t DEFAULT_MS = 3 * 60 * 1000;
 constexpr uint32_t MAX_FILE = 512 * 1024;
 constexpr int      SILENCE_FRAMES = 150;                 // 3 s
@@ -74,6 +83,16 @@ public:
     uint32_t beepToggles_ = 0;
     bool     ayVolHit_ = false;     // a non-zero volume was written this frame
     void beepAdvance(int32_t t);
+    // machine: decided by the first AY write (Ay_Emul's InitialOutProc)
+    enum : uint8_t { M_INIT, M_ZX, M_CPC } mach_ = M_INIT;
+    uint8_t  cpcData_ = 0, cpcSwitch_ = 0;
+    void ayWrite(uint8_t r, uint8_t v);
+    void toCpc();
+    // AY writes of the current frame, replayed at their sample when it renders
+    struct Ev { uint16_t smp; uint8_t r, v; };
+    static constexpr int EV_MAX = 4096;
+    Ev*      ev_ = nullptr;
+    int      nEv_ = 0;
 
 private:
     uint8_t* file_ = nullptr;
@@ -94,6 +113,7 @@ private:
     uint32_t beepAcc_ = 0;
 
     void close();
+    void renderFrameAy();
     bool startSong(int k);
     void runFrame();
 };
@@ -104,6 +124,7 @@ void   cbWrite(void* ctx, zuint16 a, zuint8 v) { ((AyFileDecoder*)ctx)->ram_[a] 
 // in the chip do read-modify-write); everything else is an idle bus.
 zuint8 ayRead(void* ctx, zuint16 port) {
     const AyFileDecoder* d = (const AyFileDecoder*)ctx;
+    if (d->mach_ == AyFileDecoder::M_CPC) return 0xFF;
     return ((port & 0xC002) == 0xC000 && d->sel_ < 14) ? d->reg_[d->sel_] : 0xFF;
 }
 #ifdef PP_AY_TRACE
@@ -115,16 +136,52 @@ zuint8 cbFetchOp(void* ctx, zuint16 a) { zuint8 v = ((AyFileDecoder*)ctx)->ram_[
 zuint8 cbIn(void* ctx, zuint16 port) { return ayRead(ctx, port); }
 #define cbFetchOp cbRead
 #endif
+// One register write: into the read-back shadow now, into the chip at its
+// sample (the frame renders once the Z80 has run it).
+void AyFileDecoder::ayWrite(uint8_t r, uint8_t v) {
+    reg_[r] = v & kAyMask[r];
+    if (r >= 8 && r <= 10 && (v & 0x1F)) ayVolHit_ = true;             // digitised drums
+    int32_t t = frameBase_ + (int32_t)cpu_.cycles;
+    if (t < 0) t = 0;
+    int smp = (int)((int64_t)t * FRAME / FRAME_T);
+    if (smp >= FRAME) smp = FRAME - 1;
+    if (ev_ && nEv_ < EV_MAX) {
+        ev_[nEv_].smp = (uint16_t)smp; ev_[nEv_].r = r; ev_[nEv_].v = v;
+        nEv_++;
+    } else {                                                            // overflow: apply at once
+        ay_->selectRegister(r);
+        ay_->setRegisterData(v);
+    }
+}
+
+void AyFileDecoder::toCpc() {
+    mach_ = M_CPC;
+    ay_->set_chip_freq(1000000);                  // the CPC's AY clock
+    ay_->prepare_generation();
+    beepLvl_ = 0;
+}
+
 void   cbOut(void* ctx, zuint16 port, zuint8 v) {
     AyFileDecoder* d = (AyFileDecoder*)ctx;
-    if ((port & 0xC002) == 0xC000) d->sel_ = v;                         // #FFFD
-    else if ((port & 0xC002) == 0x8000) {                               // #BFFD
-        if (d->sel_ < 14) {
-            d->reg_[d->sel_] = v & kAyMask[d->sel_];
-            if (d->sel_ >= 8 && d->sel_ <= 10 && (v & 0x1F)) d->ayVolHit_ = true;  // digitised drums
-            d->ay_->selectRegister(d->sel_);
-            d->ay_->setRegisterData(v);
+    const uint8_t hi = (uint8_t)(port >> 8);
+    if (d->mach_ != AyFileDecoder::M_ZX && (hi == 0xF4 || hi == 0xF6)) {   // CPC PPI
+        if (hi == 0xF4) { d->cpcData_ = v; return; }
+        const uint8_t b = v & 0xC0;
+        if (d->cpcSwitch_ == 0) d->cpcSwitch_ = b;
+        else if (b == 0) {
+            if (d->cpcSwitch_ == 0xC0) d->sel_ = d->cpcData_;
+            else if (d->cpcSwitch_ == 0x80 && d->sel_ < 14) {
+                if (d->mach_ == AyFileDecoder::M_INIT) d->toCpc();
+                d->ayWrite(d->sel_, d->cpcData_);
+            }
+            d->cpcSwitch_ = 0;
         }
+        return;
+    }
+    if (d->mach_ == AyFileDecoder::M_CPC) return;
+    if ((port & 0xC002) == 0xC000) { d->sel_ = v; d->mach_ = AyFileDecoder::M_ZX; }   // #FFFD
+    else if ((port & 0xC002) == 0x8000) {                               // #BFFD
+        if (d->sel_ < 14) { d->mach_ = AyFileDecoder::M_ZX; d->ayWrite(d->sel_, v); }
     } else if (!(port & 1)) {                                           // ULA
         const uint8_t lvl = kSpeaker[((v >> 2) & 4) | ((v >> 3) & 1)];
         if (lvl != d->beepLvl_) {
@@ -209,6 +266,7 @@ bool AyFileDecoder::open(const char* path) {
     relText(album_, sizeof(album_), file_, size_, 14);           // "Misc": usually the game
 
     ram_ = (uint8_t*)Buffer::palloc(0x10000, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+    ev_ = (Ev*)Buffer::palloc(EV_MAX * sizeof(Ev), Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
     void* a = tryMalloc(sizeof(AySound));
     if (!a) a = Buffer::palloc(sizeof(AySound), Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
     if (!ram_ || !a) { if (a) Buffer::pfree(a); err = "Out of memory"; return false; }
@@ -262,6 +320,9 @@ bool AyFileDecoder::startSong(int k) {
     }
 
     ay_->reset();
+    ay_->set_chip_freq(1773400);                  // a CPC song before may have changed it
+    ay_->prepare_generation();
+    mach_ = M_INIT; cpcData_ = 0; cpcSwitch_ = 0; nEv_ = 0;
     memset(reg_, 0, sizeof(reg_));
     reg_[7] = 0xFF;
     sel_ = 0;
@@ -294,6 +355,7 @@ bool AyFileDecoder::startSong(int k) {
 void AyFileDecoder::close() {
     if (ay_) { ay_->~AySound(); Buffer::pfree(ay_); ay_ = nullptr; }
     if (ram_) { Buffer::pfree(ram_); ram_ = nullptr; }
+    if (ev_) { Buffer::pfree(ev_); ev_ = nullptr; }
     if (file_) { Buffer::pfree(file_); file_ = nullptr; }
 }
 
@@ -306,6 +368,7 @@ void AyFileDecoder::runFrame() {
     pp_ay_trace_frame();
 #endif
     beepIdx_ = 0; beepLast_ = 0; beepAcc_ = 0;
+    nEv_ = 0;
     const uint32_t toggles0 = beepToggles_;
     ayVolHit_ = false;
     frameBase_ = over_;
@@ -316,6 +379,7 @@ void AyFileDecoder::runFrame() {
     over_ = frameBase_ - FRAME_T;
     frameBase_ = FRAME_T;
     beepAdvance(FRAME_T);
+    renderFrameAy();
 
     const bool beeping = beepToggles_ != toggles0;
     beepMeter_ = beeping ? 200 : (uint8_t)(beepMeter_ * 3 / 4);
@@ -323,6 +387,19 @@ void AyFileDecoder::runFrame() {
     for (int ch = 0; ch < 3; ch++)
         if ((reg_[8 + ch] & 0x1F) && (((reg_[7] >> ch) & 1) == 0 || ((reg_[7] >> (ch + 3)) & 1) == 0)) ayOn = true;
     silent_ = (beeping || ayOn) ? 0 : silent_ + 1;
+}
+
+// The frame's AY output, segment by segment between its writes.
+void AyFileDecoder::renderFrameAy() {
+    int pos = 0;
+    for (int i = 0; i < nEv_; i++) {
+        const int at = ev_[i].smp;
+        if (at > pos) { ay_->gen_sound(at - pos, pos); pos = at; }
+        ay_->selectRegister(ev_[i].r);
+        ay_->setRegisterData(ev_[i].v);
+    }
+    if (pos < FRAME) ay_->gen_sound(FRAME - pos, pos);
+    nEv_ = 0;
 }
 
 int AyFileDecoder::render(int16_t* lr, int n) {
@@ -342,10 +419,12 @@ int AyFileDecoder::render(int16_t* lr, int n) {
         int c = n - o;
         if (c > left_) c = left_;
         if (c > 256) c = 256;
-        const uint8_t* bp = beep_ + (FRAME - left_);
-        ay_->gen_sound(c, 0);
+        const int base = FRAME - left_;
+        const uint8_t* bp = beep_ + base;
+        const uint8_t* al = ay_->SamplebufAY_L + base;
+        const uint8_t* ar = ay_->SamplebufAY_R + base;
         for (int i = 0; i < c; i++) {
-            int32_t l = (int32_t)(ay_->SamplebufAY_L[i] + bp[i]) << 7, r = (int32_t)(ay_->SamplebufAY_R[i] + bp[i]) << 7;
+            int32_t l = (int32_t)(al[i] + bp[i]) << 7, r = (int32_t)(ar[i] + bp[i]) << 7;
             dcL_ += (int32_t)((((int64_t)l << 16) - dcL_) >> 9);
             dcR_ += (int32_t)((((int64_t)r << 16) - dcR_) >> 9);
             l -= dcL_ >> 16; r -= dcR_ >> 16;

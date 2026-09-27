@@ -83,14 +83,14 @@ DISK_FTYPE FileUtils::fileTypes[9] = {
     {".trd,.TRD,.scl,.SCL,.udi,.UDI,.fdi,.FDI,.td0,.TD0,.mbd,.MBD,.pro,.PRO,.dsk,.DSK,.zip,.ZIP",2,2,0,""},
     {".rom,.ROM,.bin,.BIN,.dck,.DCK,.zip,.ZIP",2,2,0,""},
     {".mmc,.MMC,.hdf,.HDF,.hdd,.HDD,.vhd,.VHD,.img,.IMG,.iso,.ISO,.zip,.ZIP",2,2,0,""},
-    {".sna,.SNA,.z80,.Z80,.p,.P,.spg,.SPG,.tap,.TAP,.tzx,.TZX,.pzx,.PZX,.wav,.WAV,.mp3,.MP3,.trd,.TRD,.scl,.SCL,.udi,.UDI,.fdi,.FDI,.td0,.TD0,.mbd,.MBD,.pro,.PRO,.dsk,.DSK,.mmc,.MMC,.hdf,.HDF,.vhd,.VHD,.hdd,.HDD,.img,.IMG,.rom,.ROM,.bin,.BIN,.dck,.DCK,.dls,.DLS,.vgm,.VGM,.vgz,.VGZ,.mid,.MID,.midi,.MIDI,.kar,.KAR,.rmi,.RMI,.etc,.ETC,.saa,.SAA,.cop,.COP,.sng,.SNG,.tfc,.TFC,.tfd,.TFD,.tfe,.TFE,.pt3,.PT3,.pt2,.PT2,.stc,.STC,.stp,.STP,.sqt,.SQT,.mod,.MOD,.s3m,.S3M,.xm,.XM,.it,.IT,.ay,.AY,.zip,.ZIP",2,2,0,""},
+    {".sna,.SNA,.z80,.Z80,.p,.P,.spg,.SPG,.tap,.TAP,.tzx,.TZX,.pzx,.PZX,.wav,.WAV,.mp3,.MP3,.trd,.TRD,.scl,.SCL,.udi,.UDI,.fdi,.FDI,.td0,.TD0,.mbd,.MBD,.pro,.PRO,.dsk,.DSK,.mmc,.MMC,.hdf,.HDF,.vhd,.VHD,.hdd,.HDD,.img,.IMG,.rom,.ROM,.bin,.BIN,.dck,.DCK,.dls,.DLS,.vgm,.VGM,.vgz,.VGZ,.mid,.MID,.midi,.MIDI,.kar,.KAR,.rmi,.RMI,.etc,.ETC,.saa,.SAA,.cop,.COP,.sng,.SNG,.tfc,.TFC,.tfd,.TFD,.tfe,.TFE,.pt3,.PT3,.pt2,.PT2,.stc,.STC,.stp,.STP,.sqt,.SQT,.zxs,.ZXS,.stp2,.STP2,.psc,.PSC,.pt1,.PT1,.asc,.ASC,.ftc,.FTC,.fls,.FLS,.gtr,.GTR,.fxm,.FXM,.psm,.PSM,.vtx,.VTX,.mod,.MOD,.s3m,.S3M,.xm,.XM,.it,.IT,.ay,.AY,.zip,.ZIP",2,2,0,""},
     {".dls,.DLS",2,2,0,""},  // DISK_DLSFILE (GM.DLS soundbank conversion)
     // DISK_CFGFILE (Debug > Config folders). No extension list on purpose: nothing
     // here is "of interest" over anything else, so an empty list means every name
     // draws as a normal entry (extMatches in UiBrowser.cpp).
     {"",2,2,0,""},
     // DISK_MUSFILE (Pico-Zx-Player). Keep in step with pp::playableExt().
-    {".mp3,.MP3,.vgm,.VGM,.vgz,.VGZ,.mid,.MID,.midi,.MIDI,.kar,.KAR,.rmi,.RMI,.etc,.ETC,.saa,.SAA,.cop,.COP,.sng,.SNG,.tfc,.TFC,.tfd,.TFD,.tfe,.TFE,.pt3,.PT3,.pt2,.PT2,.stc,.STC,.stp,.STP,.sqt,.SQT,.mod,.MOD,.s3m,.S3M,.xm,.XM,.it,.IT,.ay,.AY",2,2,0,""}
+    {".mp3,.MP3,.vgm,.VGM,.vgz,.VGZ,.mid,.MID,.midi,.MIDI,.kar,.KAR,.rmi,.RMI,.etc,.ETC,.saa,.SAA,.cop,.COP,.sng,.SNG,.tfc,.TFC,.tfd,.TFD,.tfe,.TFE,.pt3,.PT3,.pt2,.PT2,.stc,.STC,.stp,.STP,.sqt,.SQT,.zxs,.ZXS,.stp2,.STP2,.psc,.PSC,.pt1,.PT1,.asc,.ASC,.ftc,.FTC,.fls,.FLS,.gtr,.GTR,.fxm,.FXM,.psm,.PSM,.vtx,.VTX,.mod,.MOD,.s3m,.S3M,.xm,.XM,.it,.IT,.ay,.AY",2,2,0,""}
 };
 
 string toLower(const std::string& str) {
@@ -129,6 +129,37 @@ string FileUtils::utf8ToCp1251(const string& s) {
         if ((c & 0xF0) == 0xE0 && i + 2 < n) { out += '?'; i += 3; continue; } // other 3-byte
         if ((c & 0xF8) == 0xF0 && i + 3 < n) { out += '?'; i += 4; continue; } // 4-byte
         out += (char)c; i++; // lone high byte — not UTF-8, leave as-is
+    }
+    return out;
+}
+
+string FileUtils::cp866ToCp1251(const string& s) {
+    static const uint8_t kHi[16] = {                  // CP866 0xF0..0xFF
+        0xA8, 0xB8, 0xAA, 0xBA, 0xAF, 0xBF, 0xA1, 0xA2, 0xB0, 0x95, 0xB7, '_', 0xB9, 0xA4, '_', 0xA0 };
+    string out(s);
+    for (char& ch : out) {
+        const uint8_t c = (uint8_t)ch;
+        if (c < 0x80) continue;
+        if (c <= 0xAF) ch = (char)(c + 0x40);          // А-Я а-п
+        else if (c >= 0xE0 && c <= 0xEF) ch = (char)(c + 0x10);   // р-я
+        else if (c >= 0xF0) ch = (char)kHi[c - 0xF0];
+        else ch = '_';                                 // 0xB0-0xDF box drawing
+    }
+    return out;
+}
+
+string FileUtils::cp1251ToUtf8(const string& s) {
+    static const uint16_t kUc[64] = {                 // CP1251 0x80..0xBF
+        0x0402, 0x0403, 0x201A, 0x0453, 0x201E, 0x2026, 0x2020, 0x2021, 0x20AC, 0x2030, 0x0409, 0x2039, 0x040A, 0x040C, 0x040B, 0x040F,
+        0x0452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x003F, 0x2122, 0x0459, 0x203A, 0x045A, 0x045C, 0x045B, 0x045F,
+        0x00A0, 0x040E, 0x045E, 0x0408, 0x00A4, 0x0490, 0x00A6, 0x00A7, 0x0401, 0x00A9, 0x0404, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x0407,
+        0x00B0, 0x00B1, 0x0406, 0x0456, 0x0491, 0x00B5, 0x00B6, 0x00B7, 0x0451, 0x2116, 0x0454, 0x00BB, 0x0458, 0x0405, 0x0455, 0x0457 };
+    string out; out.reserve(s.size() * 2);
+    for (unsigned char c : s) {
+        if (c < 0x80) { out += (char)c; continue; }
+        const unsigned u = c >= 0xC0 ? 0x0410u + (c - 0xC0) : kUc[c - 0x80];
+        if (u < 0x800) { out += (char)(0xC0 | (u >> 6)); out += (char)(0x80 | (u & 0x3F)); }
+        else { out += (char)(0xE0 | (u >> 12)); out += (char)(0x80 | ((u >> 6) & 0x3F)); out += (char)(0x80 | (u & 0x3F)); }
     }
     return out;
 }
