@@ -821,6 +821,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         // here — see gmxRegisterLiveOverlay for the same rule.
         if (romSet == R_ATM1)       Atm::bindRoms(romSet, gb_rom_atm1_pages, 4);
         else if (romSet == R_ATM2X) Atm::bindRoms(romSet, gb_rom_atm2x_pages, 8);
+        else if (romSet == R_ATM2_106) Atm::bindRoms(romSet, gb_rom_atm2v106_pages, 4);
         else                        Atm::bindRoms(romSet, gb_rom_atm2_pages, 4);
         break;
     }

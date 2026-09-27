@@ -22,6 +22,7 @@ uint8_t g_atm_ro = 0;
 namespace Atm {
 
 bool     atm1 = false;
+bool     intGated = false;
 uint8_t  p7ffd = 0;
 uint8_t  aFE = 0x80, aFB = 0x80, pFDFD = 0;
 uint16_t a77 = 0;
@@ -48,6 +49,7 @@ uint8_t romPageCount() { return s_npages ? s_npages : 4; }
 
 void bindRoms(RomsetIdx rs, const atm_rom_page_t* pages, uint8_t n) {
     atm1 = isAtm1Romset(rs);
+    intGated = (rs == R_ATM2 || rs == R_ATM2X);
     if (s_tbl != pages) {
         s_tbl = pages;
         s_npages = n;

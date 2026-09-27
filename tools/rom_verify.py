@@ -194,6 +194,7 @@ def atm_sym(sym):
     return {'gb_rom_4_trdos_504t': base_trdos, 'gb_rom_0_pentagon_128k': base_pent,
             'gb_rom_1_sinclair_128k': s128_1, 'gb_rom_0_sinclair_48k': s48}[sym]
 for tag, src, crc in (('atm1', 'atm1_104rs.bin', 'A9BBF1C1'),
+                      ('atm2v106', 'atm2_10602.bin', 'D797436A'),
                       ('atm2', 'atm2_10713.bin', '34A91D53'),
                       ('atm2x', 'atm2_xbios137.bin', 'E5EF44D9')):
     body = atm_h.split('gb_rom_%s_pages[' % tag, 1)[1].split('};', 1)[0]

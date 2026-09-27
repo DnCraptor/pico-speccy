@@ -11,10 +11,13 @@
 extern "C" {
 extern const unsigned char gb_rom_atm1_p0[];
 extern const unsigned char gb_rom_atm2_p3[];
+extern const unsigned char gb_rom_atm2v106_p3[];
 extern const unsigned char gb_rom_atm_font[];
 extern const unsigned char gb_overlay_atm2x_p7[];
 extern const unsigned char gb_overlay_atm1_p1[];
 extern const unsigned char gb_overlay_atm1_p3[];
+extern const unsigned char gb_overlay_atm2v106_p0[];
+extern const unsigned char gb_overlay_atm2v106_p1[];
 extern const unsigned char gb_overlay_atm2_p0[];
 extern const unsigned char gb_overlay_atm2_p1[];
 extern const unsigned char gb_overlay_atm2x_p0[];
@@ -29,6 +32,12 @@ static const atm_rom_page_t gb_rom_atm1_pages[4] = {
     { gb_rom_4_trdos_504t, gb_overlay_atm1_p1 },   // page 1
     { gb_rom_0_pentagon_128k, nullptr },   // page 2
     { gb_rom_1_sinclair_128k, gb_overlay_atm1_p3 },   // page 3
+};
+static const atm_rom_page_t gb_rom_atm2v106_pages[4] = {
+    { gb_rom_1_sinclair_128k, gb_overlay_atm2v106_p0 },   // page 0
+    { gb_rom_4_trdos_504t, gb_overlay_atm2v106_p1 },   // page 1
+    { gb_rom_0_pentagon_128k, nullptr },   // page 2
+    { gb_rom_atm2v106_p3, nullptr },   // page 3
 };
 static const atm_rom_page_t gb_rom_atm2_pages[4] = {
     { gb_rom_1_sinclair_128k, gb_overlay_atm2_p0 },   // page 0

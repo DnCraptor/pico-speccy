@@ -75,7 +75,8 @@
     X(R_KAY256,         "Kay256",           "KAY256 Turbo")               \
     X(R_KAY1024,        "Kay1024",          "KAY1024")                    \
     X(R_KAY2010,        "Kay2010",          "KAY1024 v2010/v2018")        \
-    X(R_KAY2048,        "Kay2048",          "KAY2048 (ZXM-Phoenix)")
+    X(R_KAY2048,        "Kay2048",          "KAY2048 (ZXM-Phoenix)")      \
+    X(R_ATM2_106,       "ATM2v106",         "ATM-Turbo 2 (BIOS 1.06.02)")
 
 #define NM_X_IDX(id, str) id,
 #define NM_XR_IDX(id, str, ui) id,
@@ -254,5 +255,13 @@ inline bool isTsconfRomset(RomsetIdx r) {
 // ATM-Turbo 2+ (#xx77 system port, eight #xxF7 page registers, #FF palette). Both
 // boards share the 48K frame (224 T x 312 lines, uncontended) and the video modes;
 // see src/Atm.h. isAtm1Romset() is the one question that separates the two boards.
-inline bool isAtmRomset(RomsetIdx r)  { return r == R_ATM1 || r == R_ATM2 || r == R_ATM2X; }
+inline bool isAtmRomset(RomsetIdx r)  { return r == R_ATM1 || r == R_ATM2_106 || r == R_ATM2 || r == R_ATM2X; }
 inline bool isAtm1Romset(RomsetIdx r) { return r == R_ATM1; }
+// The on-board IDE (IDE::ATM) is a 2+ feature: the ATM1 has none, and neither does the
+// plain ATM-Turbo 2 (BIOS 1.06.02 carries no HDD code) — same #xx77/#xxF7 manager otherwise.
+inline bool atmHasIde(RomsetIdx r)    { return r == R_ATM2 || r == R_ATM2X; }
+// The plain ATM-Turbo 2 runs a 316-line frame (224 x 316 = 70784 T, the Scorpion Green
+// one): BIOS 1.06.02 times an INC HL / JR NC loop (18 T) between two frame INTs at
+// #3DBC and its boot menu's ISR (#813D) NOPs out the menu's exit (#80D9) unless the
+// count lands in #0F4B..#0F4F — i.e. a frame of ~70740..70800 T. 69888 gives #0F1C.
+inline bool atmFrame316(RomsetIdx r)  { return r == R_ATM2_106; }

@@ -747,7 +747,8 @@ IRAM_ATTR void Z80::check_trdos() {
     // ATM-Turbo: same shape — the memory manager owns every window (Atm::remap).
     if (Z80Ops::isAtm) {
         const uint16_t menuCall = Atm::atm1 ? Atm::kBios1MenuCall : Atm::kBiosMenuCall;
-        const uint16_t menuRet  = Atm::atm1 ? Atm::kBios1MenuRet  : Atm::kBiosMenuRet;
+        const uint16_t menuRet  = Atm::atm1 ? Atm::kBios1MenuRet
+                                : (Config::romSetAtm == R_ATM2_106 ? Atm::kBios106MenuRet : Atm::kBiosMenuRet);
         if (Atm::cpmBootArmed && REG_PC == menuCall && (g_atm_ro & 1)) {
             Atm::cpmBootArmed = false;
             const uint16_t ret = (uint16_t)(MemESP::readbyte(REG_SP) |
@@ -758,6 +759,12 @@ IRAM_ATTR void Z80::check_trdos() {
                 REG_SP += 2;
                 REG_PC = ret;
                 regA = 0;
+                // BIOS 1.06 also takes the menu's other outputs (menu #80E7-#80FD):
+                // D = TURBO (the menu starts ON), L = keyboard kind, 0 = ZX matrix /
+                // 1 = XT (#00D3 DEC L picks the driver at #145C or #1174). Left to
+                // chance, L = 1 installed the XT driver and the keyboard went dead.
+                // E (boot options) is returned unchanged by the menu, as here.
+                if (Config::romSetAtm == R_ATM2_106) { REG_D = 1; REG_L = 0; }
             }
         }
         if (Atm::trdosMenuArmed && REG_PC == Atm::k128MenuLoop && (g_atm_ro & 1)

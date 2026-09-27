@@ -155,7 +155,9 @@ void CPU::updateStatesInFrame() {
     } else if (Config::arch == A_ATM) {
         // ATM-Turbo: 312 lines x 224 T (Unreal atm.cpp: "the screen has 312 scan
         // lines of 224 T each"; MAME builds on spectrum_128's 312-line raster).
-        statesInFrame = TSTATES_PER_FRAME_48;
+        // (ATM-Turbo 2 on BIOS 1.06: 316 lines — atmFrame316, ArchRom.h.)
+        statesInFrame = atmFrame316(Config::romSetAtm) ? TSTATES_PER_FRAME_SCORPION_GR
+                                                       : TSTATES_PER_FRAME_48;
         IntStart = INT_START48;
         IntEnd = INT_END48;
     } else if (Config::arch == A_SCORP) {
@@ -326,7 +328,8 @@ void CPU::reset() {
         Z80Ops::is512 = false;
         Z80Ops::is1024 = false;
         Z80Ops::isProfi = false;
-        ESPectrum::target = MICROS_PER_FRAME_48;
+        ESPectrum::target = atmFrame316(Config::romSetAtm) ? MICROS_PER_FRAME_SCORPION_GR
+                                                           : MICROS_PER_FRAME_48;
     } else if (Config::arch == A_TSCONF) {
         // TS-Conf: Pentagon raster (224 T/line, 71680 T/frame), uncontended.
         Z80Ops::isByte = false;
@@ -409,7 +412,7 @@ void CPU::reset() {
     if (Z80Ops::isAtm) {
         if (Config::esxdos) Config::esxdos = 0;
         if (Config::mb02) Config::mb02 = false;
-        const bool atm2 = !isAtm1Romset(Config::romSetAtm);
+        const bool atm2 = atmHasIde(Config::romSetAtm);
         if (!atm2 && Config::ide_scheme == IDE::ATM) Config::ide_scheme = IDE::OFF;
         else if (atm2 && Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATM)
             Config::ide_scheme = IDE::ATM;

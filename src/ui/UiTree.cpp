@@ -636,10 +636,11 @@ static const Option opt_mach_tsconf[] = {
     { TXT_ROM_TSBIOS,      NM_MACH(A_TSCONF, R_TSCONF),      TXT_ROM_TSBIOS_S      },
     { TXT_ROM_TSBIOS_GLUK, NM_MACH(A_TSCONF, R_TSCONF_GLUK), TXT_ROM_TSBIOS_GLUK_S },
 };
-// Two boards, three BIOS images: ATM-Turbo 1 (512 KB, #FE address-latch paging)
-// and ATM-Turbo 2+ (1 MB, #xx77/#xxF7 memory manager) with either BIOS.
+// ATM-Turbo 1 (#FE address-latch paging), ATM-Turbo 2 (BIOS 1.06.02, the 2+'s memory
+// manager without the IDE) and ATM-Turbo 2+ (1 MB, #xx77/#xxF7) with either BIOS.
 static const Option opt_mach_atm[] = {
     { TXT_ROM_ATM1,  NM_MACH(A_ATM, R_ATM1),  TXT_ROM_ATM1_S  },
+    { TXT_ROM_ATM2V106, NM_MACH(A_ATM, R_ATM2_106), TXT_ROM_ATM2V106_S },
     { TXT_ROM_ATM2,  NM_MACH(A_ATM, R_ATM2),  TXT_ROM_ATM2_S  },
     { TXT_ROM_ATM2X, NM_MACH(A_ATM, R_ATM2X), TXT_ROM_ATM2X_S },
 };

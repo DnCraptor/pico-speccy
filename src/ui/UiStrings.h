@@ -231,6 +231,8 @@
 // bytes in both, so the label names the service ROM, not the BIOS.
 #define TXT_ROM_ATM1         "ATM-Turbo 1 (BIOS 1.04rs)"
 #define TXT_ROM_ATM1_S       "Turbo 1"
+#define TXT_ROM_ATM2V106     "ATM-Turbo 2 (BIOS 1.06.02)"
+#define TXT_ROM_ATM2V106_S   "Turbo 2"
 #define TXT_ROM_ATM2         "ATM-Turbo 2+ (BIOS 1.07.13)"
 #define TXT_ROM_ATM2_S       "Turbo 2+"
 #define TXT_ROM_ATM2X        "ATM-Turbo 2+ (xBIOS 1.37)"

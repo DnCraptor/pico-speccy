@@ -1015,9 +1015,9 @@ static void resolveConstraints(CommitReport& rep) {
         // ATM-Turbo: the memory manager rewires page 0 (MB-02+/esxDOS automap
         // would fight it), #FF is the Beta SYS register / ATM2 palette port
         // (Timex), and the frame is the plain 48K one (Murmuzavr is Pentagon-only).
-        // The IDE scheme follows the board: ATM2+ owns IDE::ATM, the ATM1 has none.
+        // The IDE scheme follows the board: ATM2+ owns IDE::ATM, the ATM1 and ATM2 have none.
         if (stagedIsAtm()) {
-            const bool atm1 = isAtm1Romset((RomsetIdx)(staged(SET_MACHINE) & 0xFF));
+            const bool noIde = !atmHasIde((RomsetIdx)(staged(SET_MACHINE) & 0xFF));
             if (staged(SET_TIMEX) != 0)
                 changed |= force(SET_TIMEX, 0, rep, "Timex is not available on ATM-Turbo");
             if (staged(SET_MB02))
@@ -1031,9 +1031,9 @@ static void resolveConstraints(CommitReport& rep) {
             if (!staged(SET_BETADISK))
                 changed |= force(SET_BETADISK, 1, rep, "Betadisk is part of ATM-Turbo");
             const int32_t sch = staged(SET_IDE_SCHEME);
-            if (atm1 && sch == IDE::ATM)
-                changed |= force(SET_IDE_SCHEME, 0, rep, "ATM-Turbo 1 has no IDE");
-            else if (!atm1 && sch != 0 && sch != IDE::ATM)
+            if (noIde && sch == IDE::ATM)
+                changed |= force(SET_IDE_SCHEME, 0, rep, "This ATM-Turbo has no IDE");
+            else if (!noIde && sch != 0 && sch != IDE::ATM)
                 changed |= force(SET_IDE_SCHEME, IDE::ATM, rep, "IDE: ATM-Turbo 2+ controller");
         } else if (staged(SET_IDE_SCHEME) == IDE::ATM) {
             changed |= force(SET_IDE_SCHEME, 0, rep, "ATM IDE needs an ATM-Turbo 2+");

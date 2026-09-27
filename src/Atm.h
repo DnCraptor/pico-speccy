@@ -86,7 +86,10 @@ namespace Atm {
     // decrypting CP/M into #C000 it does CALL #F864 at #1727, and A = 0 on return
     // (#172A) is again CP/M (#1733 OR A / JR Z -> ... JP #F85C); 1 TR-DOS, 2 128, else 48.
     extern bool cpmBootArmed;
+    // ATM-Turbo 2 (BIOS 1.06.02): the same CALL #8003, issued at #00C1 (A = 0 -> CP/M,
+    // #00ED OR A / JP NZ,#8000), so only the return address differs.
     constexpr uint16_t kBiosMenuCall = 0x8003, kBiosMenuRet = 0x00E4;     // ATM-Turbo 2+
+    constexpr uint16_t kBios106MenuRet = 0x00C4;                          // ATM-Turbo 2 1.06
     constexpr uint16_t kBios1MenuCall = 0xF864, kBios1MenuRet = 0x172A;   // ATM-Turbo 1
 
     // "Reset to TR-DOS" the way the 128 menu's TR-DOS entry does it: TR-DOS started
@@ -121,8 +124,11 @@ namespace Atm {
     // check_trdos replacement (Z80_JLS.cpp).
     void trdosTrap(uint8_t pcH);
 
-    // Frame INT gate (#xx77 D5 on the 2+; always open on the ATM1).
-    inline bool intEnabled() { return atm1 || (p77 & 0x20); }
+    // Frame INT gate: #xx77 D5 on the 2+; always open on the ATM1 AND on the plain
+    // ATM-Turbo 2 — BIOS 1.06.02 never sets D5 (every #77 write it makes is 00/06/0E)
+    // and waits in EI/HALT at #3DBC for the frame INT, so the gate is a 2+ addition.
+    extern bool     intGated;   // set by bindRoms
+    inline bool intEnabled() { return !intGated || (p77 & 0x20); }
 
     VMode videoMode();          // live mode from the latches
     uint8_t borderBright();     // 8 when the border is BRIGHT (A3 = 0 at the #FE write)

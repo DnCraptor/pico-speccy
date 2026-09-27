@@ -1057,6 +1057,8 @@ def pack_timex():
 #   atm2_10713.bin   ATM-Turbo 2+, BIOS 1.07.13 (MAME atmtb213, CRC 34A91D53) —
 #                    page order 48, TR-DOS, 128, SYS (Unreal MM_ATM710)
 #   atm2_xbios137.bin ATM-Turbo 2+, eXtra BIOS 1.37XT (MAME atmtb2x37xt, E5EF44D9)
+#   atm2_10602.bin   ATM-Turbo 2, BIOS 1.06.02 (speccy4ever ATM10602.ROM, D797436A) —
+#                    same page order as 1.07.13; page 2 = Pentagon ROM0 exactly
 #
 # Unlike every other family these pages can sit in ANY of the four CPU windows
 # (the 2+'s memory manager maps ROM anywhere, and at reset ALL four windows show
@@ -1069,6 +1071,7 @@ def pack_timex():
 ATM_IMAGES = [
     # file, crc32, tag, pages
     ('atm1_104rs.bin',    0xA9BBF1C1, 'atm1',  4),
+    ('atm2_10602.bin',    0xD797436A, 'atm2v106', 4),
     ('atm2_10713.bin',    0x34A91D53, 'atm2',  4),
     ('atm2_xbios137.bin', 0xE5EF44D9, 'atm2x', 8),
 ]
@@ -1099,7 +1102,7 @@ def pack_atm():
             order.append((tag, p))
     # The SYS pages first: they are raw by necessity, and later SYS revisions
     # overlay the earlier ones (xBIOS page 7 is BIOS 1.07.15, 184 B from 1.07.13).
-    sys_first = [('atm1', 0), ('atm2', 3), ('atm2x', 7)]
+    sys_first = [('atm1', 0), ('atm2', 3), ('atm2x', 7), ('atm2v106', 3)]
     order = sys_first + [k for k in order if k not in sys_first]
 
     raws, ovls, desc, seen = [], [], {}, {}

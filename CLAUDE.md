@@ -11820,6 +11820,29 @@ New arch `A_ATM` ("ATM") with three romsets: `R_ATM1` "ATM1" (ATM-Turbo 1, BIOS
 1.04rs, 1 MB — `#FDFD` D2..D0, Unreal's 1024K option, which UMT's "ATM4.5 (1024)"
 test expects and passes on hw 2026-09-26; on a stock v4.50 D2 selects the ROM disk, unused by this 27512 set), `R_ATM2` "ATM2" (ATM-Turbo 2+, BIOS 1.07.13, CRC 34A91D53, default)
 and `R_ATM2X` "ATM2x" (ATM-Turbo 2+ Dual eXtra BIOS 1.37XT, 128 KB, CRC E5EF44D9);
+**`R_ATM2_106` "ATM2v106" = ATM-Turbo 2 (no plus), BIOS 1.06.02** (speccy4ever
+`ATM10602.ROM`, CRC D797436A, 2026-09-27; hw-confirmed the same day: BIOS menu boots
+its entries with the D5 + 316-line fixes below — owner "работает", not itemised) — same MM_ATM710 model as
+the 2+ (Unreal loads any 64 KB ATM2 BIOS that way), listed between Turbo 1 and 2+ but
+APPENDED last in the romset X-macro (persisted by name). Differences: no IDE
+(`atmHasIde()` = R_ATM2/R_ATM2X only — 1.06 has no HDD code), and the Alt+F11 CP/M
+hook's return address is #00C4 (`kBios106MenuRet`; same CALL #8003, at #00C1). The hook must also
+return D = 1 (TURBO, the menu's default) and L = 0 (ZX keyboard; L = 1 = XT, and the
+BIOS installs the XT driver at #1174 — dead keyboard under CP/M, hw 2026-09-27).
+**No #77 D5 INT gate on the plain ATM2** (`Atm::intGated` = 2+ romsets only): BIOS
+1.06 never sets D5 and measures the CPU clock with EI/HALT at #3DBC — with the 2+'s
+gate modelled it hung there on a black screen (hw 2026-09-27, first boot).
+**...and it runs a 316-line frame** (`atmFrame316()`, 224 x 316 = 70784 T, the Scorpion
+Green frame + its audio set): that #3DBC HALT is a CPU-clock measurement (INC HL /
+JR NC = 18 T between two frame INTs, result at #5F8E, read by the menu as #1F8E), and
+the boot menu's ISR (#813D) NOPs out its own exit `JR NZ` at #80D9 unless the count is
+#0F4B..#0F4F. At 69888 T it read #0F1C, so every Enter toggled TURBO instead of booting
+(hw dump 2026-09-27). The window pins the frame to ~70740..70800 T; 316 x 224 is the only
+224-T raster in it. Derived, not documented — the 2+ romsets keep the 312-line frame.
+The 2+ BIOSes (1.07.13, xBIOS 1.37) carry neither the measurement nor the menu check
+(byte-scanned), which is why they never cared about the frame length.
+Pages: 0 = 48 BASIC (179 B overlay), 1 = TR-DOS (5064 B overlay), 2 = Pentagon ROM0
+exactly, 3 = BIOS raw — +21.6 KB in .psramroms (ATM ROMs now 78 938 B).
 `isAtmRomset`/`isAtm1Romset` (ArchRom.h), `Config::isAtm1()`. Machine → ATM-Turbo
 (`opt_mach_atm`, gated `p_showAtm` = VGA_HDMI + butter PSRAM ≥1 MB +
 `FlashRoms::romsUsable()`, the TS-Conf gate). The owner's link
