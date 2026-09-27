@@ -65,6 +65,8 @@ static string  s_cur;                  // name of the current track (for re-entr
 static int     s_vol = 14;             // 0..20, 16 = 0 dB
 static bool    s_shuffle = false;
 static bool    s_auto = true;
+static bool    s_repeat = false;       // replay the current track when it ends
+static string  s_curPath;              // file the current decoder was opened from
 static bool    s_quitReq = false;      // the browser handed over to a network flow
 #if ZIFI_NET_CLIENT
 // Non-null while the playlist is a remote folder (Web catalog / FTP): entries
@@ -93,6 +95,7 @@ struct Engine {
     bool         ended = false;          // decoder returned 0
     int32_t      gainQ8 = 256;
     bool         busy = false;           // re-entrancy guard (uiIdleHook)
+    int32_t      seekTo = -1;            // ms: a seek in progress (feed() stands aside)
 };
 Engine E;
 
@@ -123,7 +126,7 @@ int32_t volGain(int v) {
 
 // ── audio feeding ─────────────────────────────────────────────────────────────
 void feed() {
-    if (E.busy || !E.ring || !E.dec || E.paused || E.ended) return;
+    if (E.busy || !E.ring || !E.dec || E.paused || E.ended || E.seekTo >= 0) return;
     E.busy = true;
     uint32_t w = pcm_player_w;
     for (int guard = 0; guard < 64; guard++) {
@@ -315,8 +318,12 @@ int plFind(const string& name) {
 }
 
 // ── layout ────────────────────────────────────────────────────────────────────
+constexpr int kLegendCols = 13;       // key column 5 ("PgUp ") + the widest label ("Shuffle")
+
 struct Lay {
-    int sc, m, hdr_h, foot_h;
+    int sc, m, hdr_h;
+    int cw;            // content width: the hot-key legend column starts here
+    int lgY;           // first legend row
     int infoY;         // first info row
     int timeY;
     int grpY;          // group labels row
@@ -331,11 +338,13 @@ void layout() {
     L.sc = Sf.glyphScale;
     L.m = 4 * L.sc;
     L.hdr_h = UI_FONT_H + 6;
-    L.foot_h = UI_FONT_H + 4;
+    // Right-hand hot-key legend, like the F5 browser's info pane: "key  what".
+    L.cw = Sf.w - (kLegendCols * glyphW() + 3 * L.m);
+    L.lgY = L.hdr_h + 4;
     L.infoY = L.hdr_h + 4;
     L.timeY = L.infoY + 5 * UI_FONT_H + 2;
-    L.plRows = 4;
-    L.plY = Sf.h - L.foot_h - 2 - L.plRows * UI_FONT_H;
+    L.plRows = 5;
+    L.plY = Sf.h - 2 - L.plRows * UI_FONT_H;
     L.lblY = L.plY - 4 - UI_FONT_H;
     L.grpY = L.timeY + UI_FONT_H + 6;
     L.mtrY0 = L.grpY + UI_FONT_H;
@@ -352,13 +361,36 @@ uint32_t s_msgUntil = 0;
 
 const char* kTitle = "PICO-ZX-PLAYER";
 
-void drawFooter() {
-    const int y = Sf.h - L.foot_h;
-    fill(0, y, Sf.w, L.foot_h, C_FOOT_BG);
-    hline(0, y, Sf.w, C_SEP);
-    textClip(L.m, y + 3, Sf.w - 2 * L.m,
-             "Spc Pause  " SYM_LEFT SYM_RIGHT " Trk  " SYM_UP SYM_DOWN " Vol  M Mute  S Shuf  A Auto  F5 Files  Esc",
-             C_TEXT_DIM);
+// The legend: one row per key; a toggle's label is lit while it is on.
+void drawLegend() {
+    const int x = L.cw, w = Sf.w - x;
+    fill(x, L.hdr_h, w, Sf.h - L.hdr_h, C_PANEL);
+    vline(x, L.hdr_h + 2, Sf.h - L.hdr_h - 4, C_SEP);
+    struct Row { const char* k; const char* what; int on; };   // on: -1 = not a toggle
+    const Row rows[] = {
+        { "Spc",            "Pause",   E.paused ? 1 : 0 },
+        { SYM_LEFT SYM_RIGHT, "Seek",  -1 },
+        { "PgUp",           "Prev",    -1 },
+        { "PgDn",           "Next",    -1 },
+        { SYM_UP SYM_DOWN,  "Volume",  -1 },
+        { "M",              "Mute",    E.muted ? 1 : 0 },
+        { "S",              "Shuffle", s_shuffle ? 1 : 0 },
+        { "A",              "Auto",    s_auto ? 1 : 0 },
+        { "R",              "Repeat",  s_repeat ? 1 : 0 },
+        { "Hm",             "First",   -1 },
+        { "End",            "Last",    -1 },
+        { "F5",             "Files",   -1 },
+        { "Esc",            "Close",   -1 },
+    };
+    const int lh = UI_FONT_H + 2;
+    const int kx = x + 2 * L.m, vx = kx + 5 * glyphW();
+    int y = L.lgY;
+    for (const Row& r : rows) {
+        if (y + UI_FONT_H > Sf.h - 2) break;
+        text(kx, y, r.k, C_TEXT_DIM);
+        text(vx, y, r.what, r.on > 0 ? C_ACCENT : C_TEXT);
+        y += lh;
+    }
 }
 
 void drawHeader() {
@@ -367,17 +399,17 @@ void drawHeader() {
     char s[64];
     snprintf(s, sizeof(s), "%s%s%s%sVOL %d  %d/%d",
              E.muted ? "MUTE  " : "", E.paused ? "PAUSE  " : "",
-             s_shuffle ? "SHUF  " : "", s_auto ? "AUTO  " : "",
+             s_shuffle ? "SHUF  " : "", s_repeat ? "REP  " : s_auto ? "AUTO  " : "",
              s_vol, P.cur >= 0 ? P.cur + 1 : 0, P.n);
     text(Sf.w - L.m - textWidth(s), 3, s, C_TEXT);
 }
 
 void infoRow(int row, const char* label, const char* val) {
     const int y = L.infoY + row * UI_FONT_H;
-    fill(0, y, Sf.w, UI_FONT_H, C_PANEL);
+    fill(0, y, L.cw, UI_FONT_H, C_PANEL);
     text(L.m, y, label, C_TEXT_DIM);
     const int x = L.m + 7 * glyphW();
-    textClip(x, y, Sf.w - x - L.m, val, C_TEXT);
+    textClip(x, y, L.cw - x - L.m, val, C_TEXT);
 }
 
 void drawInfo() {
@@ -396,6 +428,12 @@ void drawInfo() {
     infoRow(4, "Album", a);
 }
 
+// The position shown: a seek in progress shows where it is going.
+uint32_t shownPosMs() {
+    if (!E.dec) return 0;
+    return E.seekTo >= 0 ? (uint32_t)E.seekTo : E.dec->posMs();
+}
+
 void fmtTime(char* s, size_t cap, uint32_t ms) {
     const uint32_t t = ms / 1000;
     snprintf(s, cap, "%u:%02u", (unsigned)(t / 60), (unsigned)(t % 60));
@@ -403,14 +441,14 @@ void fmtTime(char* s, size_t cap, uint32_t ms) {
 
 void drawTime() {
     const int y = L.timeY;
-    fill(0, y, Sf.w, UI_FONT_H, C_PANEL);
+    fill(0, y, L.cw, UI_FONT_H, C_PANEL);
     char a[16], b[16], s[40];
-    const uint32_t pos = E.dec ? E.dec->posMs() : 0, len = E.dec ? E.dec->lenMs() : 0;
+    const uint32_t pos = shownPosMs(), len = E.dec ? E.dec->lenMs() : 0;
     fmtTime(a, sizeof(a), pos);
     if (len) { fmtTime(b, sizeof(b), len); snprintf(s, sizeof(s), "%s / %s", a, b); }
     else snprintf(s, sizeof(s), "%s", a);
     text(L.m, y, s, C_WHITE);
-    const int bx = L.m + 14 * glyphW(), bw = Sf.w - bx - L.m;
+    const int bx = L.m + 14 * glyphW(), bw = L.cw - bx - L.m;
     if (bw > 8) {
         frame(bx, y + 2, bw, UI_FONT_H - 4, C_SEP);
         if (len) {
@@ -422,8 +460,8 @@ void drawTime() {
 
 void meterLayout() {
     s_nch = E.dec ? E.dec->channels() : 0;
-    const int avail = Sf.w - 2 * L.m;
-    fill(0, L.grpY, Sf.w, L.plY - L.grpY - 2, C_PANEL);
+    const int avail = L.cw - 2 * L.m;
+    fill(0, L.grpY, L.cw, L.plY - L.grpY - 2, C_PANEL);
     if (!s_nch) return;
     s_slot = avail / s_nch;
     const int maxSlot = 28 * L.sc;
@@ -486,8 +524,8 @@ void drawMeter() {
 
 void drawPlaylist() {
     const int y0 = L.plY;
-    fill(0, y0 - 1, Sf.w, L.plRows * UI_FONT_H + 1, C_PANEL);
-    hline(L.m, y0 - 2, Sf.w - 2 * L.m, C_SEP);
+    fill(0, y0 - 1, L.cw, L.plRows * UI_FONT_H + 1, C_PANEL);
+    hline(L.m, y0 - 2, L.cw - 2 * L.m, C_SEP);
     if (!P.n) { text(L.m, y0, "No music files in this folder or below", C_TEXT_DIM); return; }
     int first = P.cur - 1;
     if (first > P.n - L.plRows) first = P.n - L.plRows;
@@ -495,12 +533,12 @@ void drawPlaylist() {
     for (int r = 0; r < L.plRows && first + r < P.n; r++) {
         const int i = first + r, y = y0 + r * UI_FONT_H;
         const bool cur = i == P.cur;
-        if (cur) fill(L.m, y, Sf.w - 2 * L.m, UI_FONT_H, C_SEL_BG);
+        if (cur) fill(L.m, y, L.cw - 2 * L.m, UI_FONT_H, C_SEL_BG);
         char num[8]; snprintf(num, sizeof(num), "%3d ", i + 1);
         const int x = L.m + 2 * L.sc;
         text(x, y, num, cur ? C_WHITE : C_TEXT_DIM);
         const int nx = x + textWidth(num);
-        textClip(nx, y, Sf.w - L.m - nx - 2 * L.sc, dispName(i).c_str(), cur ? C_WHITE : C_TEXT);
+        textClip(nx, y, L.cw - L.m - nx - 2 * L.sc, dispName(i).c_str(), cur ? C_WHITE : C_TEXT);
     }
 }
 
@@ -512,12 +550,13 @@ void drawAll() {
     meterLayout();
     drawMeter();
     drawPlaylist();
-    drawFooter();
+    drawLegend();
 }
 
 // ── transport ─────────────────────────────────────────────────────────────────
 bool playIndex(int i) {
     ringFlush();
+    E.seekTo = -1;
     if (E.dec) { delete E.dec; E.dec = nullptr; }
     E.ended = false;
     E.paused = false;
@@ -553,9 +592,51 @@ bool playIndex(int i) {
         return false;
     }
     E.dec = d;
+    s_curPath = path;
     Debug::log("Player: %s [%s] free=%u", path.c_str(), d->meta.format, (unsigned)getFreeHeap());
     feed();
     return true;
+}
+
+// ── seeking ───────────────────────────────────────────────────────────────────
+// The decoders only render forward, so a seek is a fast silent render up to the
+// target; going back reopens the track (from the file it was opened from — for
+// a catalog track that is its /tmp copy, nothing is downloaded again) and then
+// renders forward. It runs in slices from the page loop, so a held arrow key
+// just moves the target and the UI keeps up.
+constexpr int SEEK_STEP_MS = 5000;
+constexpr uint32_t SEEK_SLICE_US = 15000;
+
+void seekBy(int delta) {
+    if (!E.dec || E.ended) return;
+    int64_t t = (int64_t)shownPosMs() + delta;
+    if (t < 0) t = 0;
+    const uint32_t len = E.dec->lenMs();
+    if (len && t >= (int64_t)len) t = len > 500 ? len - 500 : 0;
+    E.seekTo = (int32_t)t;
+    ringFlush();
+}
+
+void seekStep() {
+    if (E.seekTo < 0 || !E.dec) return;
+    const uint32_t target = (uint32_t)E.seekTo;
+    if (E.dec->posMs() > target + 50) {              // backwards: start the track again
+        pp::Decoder* d = pp::createDecoder(FileUtils::getLCaseExt(s_curPath));
+        if (!d || !d->open(s_curPath.c_str())) {
+            delete d;
+            E.seekTo = -1;
+            return;
+        }
+        delete E.dec;
+        E.dec = d;
+    }
+    const uint64_t t0 = time_us_64();
+    while (E.dec->posMs() < target) {
+        if (E.dec->render(E.tmp, FEED) <= 0) { E.ended = true; E.seekTo = -1; return; }
+        if (time_us_64() - t0 >= SEEK_SLICE_US) return;
+    }
+    E.seekTo = -1;
+    ringFlush();
 }
 
 void pushHist(int i) {
@@ -660,20 +741,23 @@ bool browse() {
 }
 
 enum PlAct : uint8_t { PA_NONE, PA_UP, PA_DOWN, PA_LEFT, PA_RIGHT, PA_PAUSE, PA_BACK,
-                       PA_MUTE, PA_SHUF, PA_AUTO, PA_FILES, PA_HOME, PA_END };
+                       PA_MUTE, PA_SHUF, PA_AUTO, PA_REPEAT, PA_SEEKB, PA_SEEKF, PA_FILES, PA_HOME, PA_END };
 
 PlAct plAct(fabgl::VirtualKey vk) {
     switch (vk) {
         case fabgl::VK_UP:    case fabgl::VK_MENU_UP:    case fabgl::VK_PLUS: case fabgl::VK_KP_PLUS: return PA_UP;
         case fabgl::VK_DOWN:  case fabgl::VK_MENU_DOWN:  case fabgl::VK_MINUS:                         return PA_DOWN;
-        case fabgl::VK_LEFT:  case fabgl::VK_MENU_LEFT:  case fabgl::VK_PAGEUP:                        return PA_LEFT;
-        case fabgl::VK_RIGHT: case fabgl::VK_MENU_RIGHT: case fabgl::VK_PAGEDOWN:                      return PA_RIGHT;
+        case fabgl::VK_LEFT:  case fabgl::VK_MENU_LEFT:                                               return PA_SEEKB;
+        case fabgl::VK_RIGHT: case fabgl::VK_MENU_RIGHT:                                              return PA_SEEKF;
+        case fabgl::VK_PAGEUP:                                                                        return PA_LEFT;
+        case fabgl::VK_PAGEDOWN:                                                                      return PA_RIGHT;
         case fabgl::VK_SPACE: case fabgl::VK_RETURN: case fabgl::VK_MENU_ENTER:
         case fabgl::VK_p: case fabgl::VK_P:                                                           return PA_PAUSE;
         case fabgl::VK_ESCAPE: case fabgl::VK_F1: case fabgl::VK_MENU_BS:                             return PA_BACK;
         case fabgl::VK_m: case fabgl::VK_M:                                                           return PA_MUTE;
         case fabgl::VK_s: case fabgl::VK_S:                                                           return PA_SHUF;
         case fabgl::VK_a: case fabgl::VK_A:                                                           return PA_AUTO;
+        case fabgl::VK_r: case fabgl::VK_R:                                                           return PA_REPEAT;
         case fabgl::VK_F5: case fabgl::VK_TAB: case fabgl::VK_f: case fabgl::VK_F:                   return PA_FILES;
         case fabgl::VK_HOME:                                                                          return PA_HOME;
         case fabgl::VK_END:                                                                           return PA_END;
@@ -740,6 +824,7 @@ void run(const string& startPath) {
     uint32_t lastSec = 0xFFFFFFFF, lastMetaSeq = E.dec ? E.dec->metaSeq : 0;
 
     while (true) {
+        seekStep();
         feed();
 
         // keys (verb-collapsed: arrows/Enter/Space arrive with a VK_MENU_* twin)
@@ -758,6 +843,9 @@ void run(const string& startPath) {
                 case PA_MUTE:  E.muted = !E.muted; hdr = true; break;
                 case PA_SHUF:  s_shuffle = !s_shuffle; hdr = true; break;
                 case PA_AUTO:  s_auto = !s_auto; hdr = true; break;
+                case PA_REPEAT: s_repeat = !s_repeat; hdr = true; break;
+                case PA_SEEKB: seekBy(-SEEK_STEP_MS); lastSec = 0xFFFFFFFF; break;
+                case PA_SEEKF: seekBy(SEEK_STEP_MS); lastSec = 0xFFFFFFFF; break;
                 case PA_PAUSE:
                     if (!E.dec) { failRun = 0; playIndex(P.cur >= 0 ? P.cur : 0); }
                     else { E.paused = !E.paused; if (E.paused) ringFlush(); }
@@ -780,7 +868,8 @@ void run(const string& startPath) {
 
         // end of track / failed track → autoplay
         if (E.dec && E.ended && ringDrained()) {
-            if (s_auto) next(false);
+            if (s_repeat) playIndex(P.cur);          // same track again
+            else if (s_auto) next(false);
             else { delete E.dec; E.dec = nullptr; }
         } else if (!E.dec && !s_msg.empty() && s_auto && P.n > 1 && failRun < (uint32_t)P.n) {
             // a file that would not open: show it briefly, then move on
@@ -804,13 +893,14 @@ void run(const string& startPath) {
         if (hdr || E.paused != lastPaused || E.muted != lastMuted) {
             lastPaused = E.paused; lastMuted = E.muted;
             drawHeader();
+            drawLegend();
         }
 
         const uint64_t now = time_us_64();
         if ((int64_t)(now - nextDraw) >= 0) {
             nextDraw = now + 40000;                       // 25 fps
             drawMeter();
-            const uint32_t sec = E.dec ? E.dec->posMs() / 1000 : 0;
+            const uint32_t sec = shownPosMs() / 1000;
             if (sec != lastSec) { lastSec = sec; drawTime(); }
         }
         uiIdle(2);
