@@ -255,6 +255,19 @@ bool TfmDecoder::open(const char* path) {
         if (!m) { err = "Out of memory"; return false; }
         tfe_ = new (m) TfeEngine();
     }
+    else if (memcmp(d_, "TFMcom", 6) && memcmp(d_, "TFMD", 4)) {
+        // "Player + module" exports (TFM Music Maker's compile-with-player) put the
+        // Z80 player first and the TFMcom module after it; its channel offsets are
+        // relative to the signature, so drop the player and parse what follows.
+        const uint32_t lim = n_ < 16384 ? n_ : 16384;
+        for (uint32_t o = 1; o + 6 <= lim; o++)
+            if (d_[o] == 'T' && !memcmp(d_ + o, "TFMcom", 6)) {
+                n_ -= o; memmove(d_, d_ + o, n_);
+                Debug::log("Player: TFC module at +%u (player stub skipped)", (unsigned)o);
+                break;
+            }
+    }
+    if (tfe_) {}
     else if (n_ >= 34 + 3 && !memcmp(d_, "TFMcom", 6)) tfc_ = true;
     else if (!memcmp(d_, "TFMD", 4)) tfc_ = false;
     else { err = "Not a TurboFM file"; return false; }
