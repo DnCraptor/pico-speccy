@@ -1188,6 +1188,19 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
   // ATM-Turbo: the ATM1's CPSYS read latch (any A2=0 read), the 2+'s IDE and its
   // INTRQ status port — cold flash dispatch (src/Atm.cpp), ahead of the ULA branch.
   if (Z80Ops::isAtm) {
+    if (DivMMC::zc_enabled && (uint8_t)address == 0x57) {   // see the output twin
+      LED::touchR(LED::ZCTRL); return DivMMC::zc_read_data();
+    }
+    // General Sound #B3/#BB ahead of the ATM decode: the 2+'s printer status
+    // (%nnnnn011) matches both and answered #7F — command bit stuck at 1, so every
+    // GS detect timed out (NedoOS gp.com). UnrealSpeccy decodes GS first of all.
+    if (GS::enabled && !DivMMC::divide_mode) {
+      const uint8_t a8 = (uint8_t)address;
+      if (a8 == 0xB3 || a8 == 0xBB) {
+        LED::touchR(LED::GS);
+        return (a8 == 0xB3) ? GS::hostReadB3() : GS::hostReadBB();
+      }
+    }
     uint8_t atmData;
     if (Atm::portRead(address, atmData)) return atmData;
   }
@@ -3210,7 +3223,24 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
   // ATM-Turbo system ports (#7FFD / #7DFD / #FDFD on the ATM1; #7FFD and the DOS-space
   // #xx77 / #xxF7 / IDE / #FF palette on the 2+) — cold flash dispatch (src/Atm.cpp),
   // placed before the ULA and #7FFD blocks for the same reasons as GMX's.
-  if (Z80Ops::isAtm && Atm::portWrite(address, data)) return;
+  // Z-Controller data #57 ahead of the ATM decode: the 2+'s DOS-space #xx77 family
+  // leaves A5 undecoded (%0nn101n1), so #57 would otherwise land in write77 and
+  // reprogram the memory map. UnrealSpeccy tests #57 first, before every DOS port.
+  if (Z80Ops::isAtm && DivMMC::zc_enabled && (uint8_t)address == 0x57) {
+    LED::touchW(LED::ZCTRL); DivMMC::zc_write_data(data); return;
+  }
+  // The VGM-card ports with A1=0 (#C0/#C1 OPLL, #C4/#C5 OPL3, #C9 SN) match the 2+'s
+  // loose #7FFD decode whenever the high byte (= the data byte of OUT (n),A) has
+  // A15=0 — i.e. every other register write would page memory. Same deliberate
+  // shared-bus deviation as on the Pentagon: while a chip is on, its ports skip the
+  // ATM decode and reach the chip blocks below.
+  if (Z80Ops::isAtm) {
+    const uint8_t lo = (uint8_t)address;
+    const bool vgm = (oplfm && (lo & 0xFC) == 0xC4) ||
+                     (opllfm && (lo == 0xC0 || lo == 0xC1)) ||
+                     (snChip && (lo == 0xC2 || lo == 0xC3 || lo == 0xC9));
+    if (!vgm && Atm::portWrite(address, data)) return;
+  }
   // MC146818 RTC (Pentagon/Profi "Mr Gluk" TimeKeeper):
   //   OUT (#DFF7), reg  → latch register index
   //   OUT (#BFF7), data → write selected register

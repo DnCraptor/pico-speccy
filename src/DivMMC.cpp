@@ -10,6 +10,7 @@
 #include "Debug.h"
 #include "FileUtils.h"
 #include "roms.h"
+#include "Z80_JLS/z80.h"
 extern "C" {
     #include "diskio.h"
 }
@@ -1574,6 +1575,11 @@ void DivMMC::zc_shutdown() {
 
 void DivMMC::zc_write_config(uint8_t value) {
     zc_config = value;
+    // ATM-Turbo 2+: #xx77 is the machine's own config port while DOS is up, so a
+    // driver cannot rely on reaching the card's CS through it. UnrealSpeccy (where
+    // NedoOS is developed) ignores ZC CS altogether; so do we on ATM — the card
+    // stays selected (zc_write_data/zc_read_data) and command framing comes from the bytes.
+    if (Z80Ops::isAtm) return;
     // Port 0x77 bit1 drives the SD CS pin directly; CS is active-low, so
     // bit1=0 means card selected. bit0 is SD power and is ignored here.
     bool new_cs = (value & 0x02) == 0;
@@ -1595,11 +1601,15 @@ uint8_t DivMMC::zc_read_status() {
 }
 
 void DivMMC::zc_write_data(uint8_t value) {
+    // ATM: CS is not modelled (see zc_write_config) — select once; mmc_cs resets
+    // the protocol state, so only on the edge.
+    if (Z80Ops::isAtm && !mmc_cs_active) mmc_cs(0x00);
     if (!mmc_cs_active) return;
     mmc_write(value);
 }
 
 uint8_t DivMMC::zc_read_data() {
+    if (Z80Ops::isAtm && !mmc_cs_active) mmc_cs(0x00);
     if (!mmc_cs_active) return 0xFF;
     return mmc_read();
 }
