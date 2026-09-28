@@ -66,6 +66,18 @@ void graphics_set_hdmi_clock_drive(bool soft);
 // already live. No-op on the other outputs.
 void graphics_update_mode_timing(void);
 
+// Vertical scaler in scanout: map[i] = the framebuffer row display line i shows
+// (i < n, n must equal the mode's v_active; the default is i/2). NULL restores the
+// default. Latched once per frame; every run of equal rows must be >= 2 lines (the
+// HDMI ping-pong constraint). graphics_vmap_supported() is false where the output
+// has no such scanout (TFT/TV/SOFTTV), graphics_vmap_latched() names the table the
+// scanout is using this frame, and a table may be freed only two
+// graphics_frame_count() wraps after it was replaced.
+bool graphics_vmap_supported(void);
+void graphics_set_vmap(const uint16_t *map, int n);
+const uint16_t *graphics_vmap_latched(void);
+uint32_t graphics_frame_count(void);
+
 // Profi DS80 "packed nibble" mode — HDMI path.
 // active=true: takes palette snapshot, then writes TMDS pairs for each (ink,paper) entry
 //   in pair_lut[ink*16+paper] → conv_color safe slot. Also sets slot 255 = (black,black).

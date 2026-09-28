@@ -34,6 +34,10 @@ extern enum graphics_mode_t graphics_mode;
 
 // Scanlines mode: when enabled, every other physical line is dark
 static bool hdmi_scanlines = false;
+// Vertical scaler table (hdmi_set_vmap) — requested and latched-per-frame copies.
+static const uint16_t * volatile hdmi_vmap_req = NULL;
+static volatile uint16_t hdmi_vmap_req_n = 0;
+static const uint16_t * volatile hdmi_vmap_cur = NULL;
 // Scanline brightness level: 0=off, 1=darkest .. 4=lightest. Level 2 is the
 // legacy 0x202020 look and the default. Drives the gray of IDX_SCANLINE.
 static uint8_t hdmi_scanline_level = 2;
@@ -416,7 +420,7 @@ static hdmi_word_t terc_lut_a1[16], terc_lut_a2[16], terc_lut_a3[16];
 static void __attribute__((noinline)) hdmi_audio_hw_init(void);
 #if HDMI_EXPANDER
 static bool hdmi_di_fill(uint32_t *chars, uint logical_line, bool vs);  // true = an AUDIO packet was written
-static void hdmi_isl_second_play(uint o);                       // refill a buffer's island for its 2nd play
+static void hdmi_isl_second_play(uint o, uint sl);                     // refill a buffer's island for its 2nd play
 static uint32_t *hdmi_isl_chars[2];                              // per line buffer: its island characters (or NULL),
 static bool hdmi_isl_audio[2];                                   //   whether they hold an AUDIO packet,
 static bool hdmi_isl_vs[2];                                      //   whether the line is inside vsync,
@@ -757,6 +761,23 @@ static volatile uint8_t hdmi_isr_was_blank = 0;
 volatile int32_t  hdmi_au_skip_off_w = 0;
 volatile uint32_t hdmi_au_skip_which = 0;
 
+// The vertical-map decision for ISR line `line` (see the body): bit 0 = render
+// line+1 (a new fb row), bit 1 = reload the island of the buffer playing now. It
+// also accrues the audio credit for this ONE line (the legacy path does two per
+// working ISR). Out of line, in main RAM: SCRATCH_X has no room for it.
+static uint __not_in_flash_func(hdmi_vmap_step)(const uint16_t *vm, uint line) __attribute__((noinline));
+static uint __not_in_flash_func(hdmi_vmap_step)(const uint16_t *vm, uint line) {
+    const uint q = line - 1;
+    const uint r = ((q == 0) || (vm[q] != vm[q - 1])) ? 1u : 0u;
+    const uint l = ((line == 1) || (line >= 3 && vm[line - 2] == vm[line - 3])) ? 2u : 0u;
+    if (hdmi_audio_enabled) {
+        hdmi_au_pos += ((aq_wr - aq_rd) > HDMI_AU_TARGET ? hdmi_au_spl24_hi
+                                                         : hdmi_au_spl24_lo);
+        if (hdmi_au_pos > hdmi_au_cap) hdmi_au_pos = hdmi_au_cap;
+    }
+    return r | l;
+}
+
 static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
     static uint32_t inx_buf_dma;
     static uint line = 0;
@@ -790,6 +811,10 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
     if (line >= modep->v_total ) {
         line = 0;
         hdmi_frame_ct++;
+        {
+            const uint16_t *m = hdmi_vmap_req;
+            hdmi_vmap_cur = (m && hdmi_vmap_req_n == modep->v_active && !hdmi_scanlines) ? m : NULL;
+        }
     } else {
         ++line;
     }
@@ -814,7 +839,24 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
     // буфер (адрес уже перезаряжен на прошлом IRQ), чётная — рендерится из FB.
     // Граничная line == v_active (чётная) — это первая строка blanking;
     // её надо пропустить, иначе получаем лишнюю активную строку (482).
-    if (line < modep->v_active) {
+    // With a vertical map (hdmi_vmap_cur, borderless) the active lines follow the
+    // table instead of the pair rule. ISR `line` sets the buffer for line `line`
+    // (done above) and prepares line+1, whose physical index is q = line-1 (the
+    // default map q>>1 gives exactly the old odd-line renders). Two things can be
+    // due: RENDER — line+1 starts a new fb row, draw it into the other buffer; and
+    // RELOAD — line `line` replays the buffer that is playing now, so its island
+    // set needs the packet for this line (the old "second play", now also a third).
+    // Every line therefore still gets exactly one island load. Blanking and the
+    // table-less case keep the old parity rule byte for byte.
+    const uint16_t *vm = hdmi_vmap_cur;
+    const bool vmode = vm && line >= 1 && line <= modep->v_active;
+    bool do_render = true, do_reload = true;
+    if (vmode) {
+        const uint st = hdmi_vmap_step(vm, line);
+        do_render = st & 1;
+        do_reload = (st & 2) != 0;
+        if (!st) return;
+    } else if (line < modep->v_active) {
         if (hdmi_scanlines) {
             if (line & 1) return;            // нечётные = серая, ничего не пишем
         } else {
@@ -823,7 +865,10 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
     } else {
         if (!(line & 1)) return;             // в blanking пропускаем чётные (включая v_active)
     }
-    inx_buf_dma++;
+    if (do_render) inx_buf_dma++;
+    // The buffer transmitting right now (and, on a reload, again on the next line).
+    const uint playing = do_render ? ((inx_buf_dma & 1) ^ 1) : (inx_buf_dma & 1);
+    (void)playing;
 
 #if HDMI_EXPANDER
     uint32_t *wbuf = dma_lines[inx_buf_dma & 1];
@@ -860,9 +905,11 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
         // rate. Cap (hdmi_au_cap) sized per mode to the longest no-pop run so
         // credit banked through the ACR/InfoFrame/vsync span is never clamped
         // away (that under-delivers and mutes the sink — 576p50 @48kHz).
-        hdmi_au_pos += ((aq_wr - aq_rd) > HDMI_AU_TARGET ? hdmi_au_spl24_hi
-                                                         : hdmi_au_spl24_lo) * 2;
-        if (hdmi_au_pos > hdmi_au_cap) hdmi_au_pos = hdmi_au_cap;
+        if (!vmode) {
+            hdmi_au_pos += ((aq_wr - aq_rd) > HDMI_AU_TARGET ? hdmi_au_spl24_hi
+                                                             : hdmi_au_spl24_lo) * 2;
+            if (hdmi_au_pos > hdmi_au_cap) hdmi_au_pos = hdmi_au_cap;
+        }
 #if HDMI_AUDIO_DEBUG_STAGES
         {
             const uint stage = (hdmi_dbg_frame_ct >> 10) & 3;
@@ -891,12 +938,12 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
         // it is HDMI_TL_DI_WORDS at the head of the list and the DMA clears it
         // inside ~1.2 us; the bound is the same one the PIO path spins on, and a
         // timeout simply falls through to the refusal that was there before.
-        if (!next_is_scanline) {
-            const uint32_t past = (uint32_t)dma_lines[b ^ 1] + 4u * HDMI_TL_DI_WORDS;
+        if (do_reload && !next_is_scanline) {
+            const uint32_t past = (uint32_t)dma_lines[playing] + 4u * HDMI_TL_DI_WORDS;
             while (dma_hw->ch[dma_chan].read_addr < past
                    && time_us_32() - isr_t0 < HDMI_AU_DI_GUARD_US)
                 tight_loop_contents();
-            hdmi_isl_second_play(b ^ 1);
+            hdmi_isl_second_play(playing, line - 1);
         }
 #else
         // Packet for the OTHER buffer's 2nd play (transmits on the next
@@ -908,10 +955,10 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
         // finish this write before the next line starts reading the set — a
         // torn packet has bad BCH and the sink mutes. Skip instead: the
         // previous packet repeats (valid, minor artifact, no mute).
-        if (au_ok_prev && !(hdmi_scanlines && (line + 1) <= modep->v_active)) {
+        if (do_reload && au_ok_prev && !(hdmi_scanlines && !vmode && (line + 1) <= modep->v_active)) {
             if (isr_gap < 45) {
                 while (time_us_32() - isr_t0 < HDMI_AU_DI_GUARD_US) tight_loop_contents();
-                hdmi_di_load(b ^ 1, line - 1);
+                hdmi_di_load(playing, line - 1);
             } else {
                 // The stale set transmits again. A repeated Null/ACR is free;
                 // a repeated AUDIO packet delivers 4 extra samples the pacing
@@ -921,7 +968,7 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
                 // so a future pop is deferred and long-run delivery stays at
                 // the credit rate exactly.
                 hdmi_au_skip_ct++;
-                if (aq_set_audio[b ^ 1]) {
+                if (aq_set_audio[playing]) {
                     hdmi_au_dup_ct++;
                     hdmi_au_pos = (hdmi_au_pos >= (4u << 24)) ? hdmi_au_pos - (4u << 24) : 0;
                 }
@@ -929,9 +976,10 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
         }
         // Packet for the just-rendered buffer's 1st play; its set was last
         // read at the start of the previous scanline — safe immediately.
-        if (au_ok_now) hdmi_di_load(b, line);
+        if (do_render && au_ok_now) hdmi_di_load(b, line);
 #endif // !HDMI_EXPANDER
     }
+    if (!do_render) return;   // a replay: nothing to draw, the island is done
 
     if (line < modep->v_active ) {
 #if HDMI_EXPANDER
@@ -942,7 +990,7 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
 #else
         uint8_t* output_buffer = activ_buf + h_sync + h_bp;
 #endif
-        int y = (line >> 1) + modep->v_offset;
+        int y = (vmode ? (int)vm[line - 1] : (int)(line >> 1)) + modep->v_offset;
         //область изображения
         uint8_t* input_buffer = getLineBuffer(y);
         if (!input_buffer) return;
@@ -1584,6 +1632,32 @@ void hdmi_update_mode_timing(void) {
         m.pio_clk_div  != hdmi_isr_mode.pio_clk_div) return;
     hdmi_isr_mode.v_total = m.v_total;
 }
+
+// ── Vertical scaler in scanout (graphics_set_vmap) ──────────────────────────
+// A table of v_active entries: display line -> framebuffer row, the value the
+// ISR otherwise derives as line/2. The borderless mode uses it to show the 192
+// paper lines at an exact x3 (576p) or an even 3,2,3,2 (480p) instead of the
+// 2,4 / 2,2,2,4 pattern a fb row pair gives. The ISR latches it once per frame
+// (at the line counter wrap), so a table swap can never start mid-frame; the
+// caller double-buffers and must not rewrite a table hdmi_vmap_in_use() returns.
+// Every run of equal rows must be at least 2 lines: the ping-pong line buffers
+// render the next row while the current one is still playing, so a row has to
+// play twice before the other buffer is free again. Ignored with scanlines on
+// (their gray line IS the second play of every pair).
+
+void hdmi_set_vmap(const uint16_t *map, int n) {
+    hdmi_vmap_req_n = 0;
+    __dmb();
+    hdmi_vmap_req = map;
+    __dmb();
+    hdmi_vmap_req_n = (uint16_t)(map ? n : 0);
+}
+
+// The table the scanout is running THIS frame (NULL = none). A caller that wants
+// to free a table sets NULL and waits two frame wraps (hdmi_frame_count): the ISR
+// may have sampled the old pointer an instant before the NULL landed.
+const uint16_t *hdmi_vmap_latched(void) { return hdmi_vmap_cur; }
+uint32_t hdmi_frame_count(void) { return hdmi_frame_ct; }
 
 // Write the TMDS pair for one palette slot. left888 is the first output pixel of
 // the pair, right888 the second. Both DS80 (two different source pixels) and the
@@ -2737,13 +2811,13 @@ static bool __not_in_flash_func(hdmi_di_fill)(uint32_t *chars, uint logical_line
 // does. With scanlines enabled the second play is the static gray buffer and carries
 // no island at all, so the caller skips this entirely — a packet popped there would
 // never be transmitted.
-static void __not_in_flash_func(hdmi_isl_second_play)(uint o) {
+static void __not_in_flash_func(hdmi_isl_second_play)(uint o, uint sl) {
     uint32_t *chars = hdmi_isl_chars[o];
     if (!chars) return;
     const uint32_t buf = (uint32_t)dma_lines[o];
     const uint32_t ra = dma_hw->ch[dma_chan].read_addr;
     if (ra >= buf + 4u * HDMI_TL_DI_WORDS && ra <= buf + 4u * HDMI_TL_MAX_WORDS) {
-        hdmi_isl_audio[o] = hdmi_di_fill(chars, hdmi_isl_line[o] + 1, hdmi_isl_vs[o]);
+        hdmi_isl_audio[o] = hdmi_di_fill(chars, sl, hdmi_isl_vs[o]);
 #if HDMI_LIVE_AUDIO_DIAG
         const uint32_t after = dma_hw->ch[dma_chan].read_addr;
         if (after < buf + 4u * HDMI_TL_DI_WORDS ||

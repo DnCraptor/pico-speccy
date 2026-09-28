@@ -174,7 +174,7 @@ static int32_t get_gsRam()          { return Config::gs_ram_size >= 3 ? 3 : (Con
 static void    put_gsRam(int32_t v) { Config::gs_ram_size = (uint8_t)v; }
 NM_BOOL_ACCESS(cobmect,   byte_cobmect_mode)
 NM_BOOL_ACCESS(paper,     render_paper)
-NM_BOOL_ACCESS(borderless, borderless)
+NM_BOOL_ACCESS(border, render_border)
 
 // ── TFT panel (ST7789 / ILI9341 builds) ────────────────────────────────────────
 // Not Config fields: the driver owns TFT_INVERSION and the MADCTL byte TFT_FLAGS, and
@@ -448,6 +448,21 @@ static bool hook_vgaDither(int32_t, int32_t) {
     // tsCramDirty re-arms the 16-colour ZX/16c path for the next EndFrame.
     VIDEO::applyCrtFilter();
     VIDEO::tsCramDirty = true;
+    return true;
+}
+// Video > VGA > PWM phase: rotate every pixel's four sub-samples so the point a
+// non-integrating monitor samples lands on a different phase (see Config.h).
+#if defined(VGA_HDMI)
+extern "C" void vga_set_pwm_phase(int n);
+#endif
+static int32_t get_vgaPwmPhase()          { return Config::vga_pwm_phase; }
+static void    put_vgaPwmPhase(int32_t v) { Config::vga_pwm_phase = (uint8_t)(v & 3); }
+static bool hook_vgaPwmPhase(int32_t nv, int32_t) {
+#if defined(VGA_HDMI)
+    vga_set_pwm_phase((int)nv);
+#else
+    (void)nv;
+#endif
     return true;
 }
 static bool hook_dither(int32_t nv, int32_t) {

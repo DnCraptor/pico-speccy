@@ -1664,6 +1664,7 @@ void ESPectrum::reset(uint8_t romInUse) {
   // for a user who forced the keys to the guest and wants the menu back).
   ZxEvoAvr::clearKeysOverride();
   VIDEO::timexHiresForceOff();// Timex hi-res 512x192: ditto (VIDEO::Reset zeroes timex_mode)
+  VIDEO::blPairForceOff();    // borderless pair scaler: blRecalc re-arms it
   // Timex TC2068 SCLD: HSR = 0 and DEC bit 7 = 0, i.e. the whole 64 KB is HOME
   // again. A plugged-in DOCK cartridge deliberately SURVIVES a machine reset —
   // that is what a cartridge does, and it is how the HOME ROM finds and starts

@@ -78,6 +78,7 @@
 #define TXT_VID_VGA         "VGA"
 #define TXT_VID_VGA_DITHER  "Colour depth"
 #define TXT_VID_VGA_PWM     "Colour"
+#define TXT_VID_VGA_PHASE   "PWM phase"
 
 // ── Audio ──────────────────────────────────────────────────────────────────────
 #define TXT_AUD_DRIVER      "Audio driver"
@@ -98,7 +99,7 @@
 #define TXT_AUD_BOOST       "Volume boost"
 #define TXT_VID_DMA         "DMA"
 #define TXT_VID_MODE        "Mode"
-#define TXT_VID_BORDERLESS  "Hide border"
+#define TXT_VID_BORDER      "Render border"
 #define TXT_VID_RENDER      "Render type"
 #define TXT_VID_GIGASCREEN  "Gigascreen"
 #define TXT_VID_ULAPLUS     "ULA+"

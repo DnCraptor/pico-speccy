@@ -196,7 +196,7 @@ uint8_t Config::scanlines = 0;
 uint8_t Config::crt_filter = 0;
 uint8_t Config::render = 0;
 bool Config::render_paper = true;
-bool Config::borderless = false;
+bool Config::render_border = true;
 uint8_t Config::persist_slot = 1;
 uint8_t Config::profile_slot = 0;
 
@@ -226,6 +226,8 @@ bool     Config::vga_pwm = false;
 // Published for vga.c, which is C and cannot see this header — the video_driver
 // pattern. Read once by vga_flags_init().
 extern "C" uint8_t vga_pwm_cfg = Config::vga_pwm ? 1 : 0;
+uint8_t  Config::vga_pwm_phase = 0;
+extern "C" uint8_t vga_pwm_phase_cfg = 0;      // same route, read by vga_flags_init()
 bool     Config::ui_vga_solid = true;
 bool     Config::ui_rounded = true;
 uint8_t  Config::ui_theme = 0;
@@ -1506,7 +1508,7 @@ void Config::load() {
         if (Config::crt_filter > 6) Config::crt_filter = 0;
         nvs_get_u8("render", Config::render, sts);
         nvs_get_b("render_paper", Config::render_paper, sts);
-        nvs_get_b("borderless", Config::borderless, sts);
+        nvs_get_b("render_border", Config::render_border, sts);
         nvs_get_b("TABasfire1", Config::TABasfire1, sts);
         nvs_get_sc("AudVolume", Config::aud_volume, sts);
         nvs_get_u8("AudBoost", Config::audio_boost, sts);
@@ -1572,6 +1574,9 @@ void Config::load() {
         nvs_get_b("vga_dither", vga_dither, sts);
         nvs_get_b("vga_pwm", vga_pwm, sts);
         vga_pwm_cfg = vga_pwm ? 1 : 0;
+        nvs_get_u8("vga_pwm_phase", vga_pwm_phase, sts);
+        vga_pwm_phase &= 3;
+        vga_pwm_phase_cfg = vga_pwm_phase;
         nvs_get_b("ui_vga_solid", ui_vga_solid, sts);
         nvs_get_b("ui_rounded", ui_rounded, sts);
         nvs_get_u8("ui_theme", ui_theme, sts);
@@ -1947,7 +1952,7 @@ void Config::save(const char* path, const char* profileName) {
     nvs_set_u8(buf,"crt_filter",Config::crt_filter);
     nvs_set_u8(buf,"render",Config::render);
     nvs_set_str(buf,"render_paper", Config::render_paper ? "true" : "false");
-    nvs_set_str(buf,"borderless", Config::borderless ? "true" : "false");
+    nvs_set_str(buf,"render_border", Config::render_border ? "true" : "false");
     nvs_set_str(buf,"TABasfire1", TABasfire1 ? "true" : "false");
     nvs_set_sc(buf,"AudVolume", ESPectrum::aud_volume);
     nvs_set_u8(buf,"AudBoost", Config::audio_boost);
@@ -1962,6 +1967,7 @@ void Config::save(const char* path, const char* profileName) {
     nvs_set_str(buf,"hdmi_snap", Config::hdmi_snap ? "true" : "false");
     nvs_set_str(buf,"vga_dither", Config::vga_dither ? "true" : "false");
     nvs_set_str(buf,"vga_pwm", Config::vga_pwm ? "true" : "false");
+    nvs_set_u8(buf,"vga_pwm_phase", Config::vga_pwm_phase);
     nvs_set_str(buf,"ui_vga_solid", Config::ui_vga_solid ? "true" : "false");
     nvs_set_str(buf,"ui_rounded", Config::ui_rounded ? "true" : "false");
     nvs_set_u8(buf,"ui_theme", Config::ui_theme);

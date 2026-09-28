@@ -107,6 +107,12 @@ extern volatile uint32_t hdmi_au_skip_which;
 // would need the PIO/DMA reprogrammed (that is reboot-class).
 void hdmi_update_mode_timing(void);
 
+// Vertical scaler in scanout (see the definition in hdmi.c): display line ->
+// framebuffer row for each of the v_active lines, latched once per frame.
+void hdmi_set_vmap(const uint16_t *map, int n);
+const uint16_t *hdmi_vmap_latched(void);
+uint32_t hdmi_frame_count(void);
+
 // For the Speed Test's SRAM row: which back-end drives the pins ("HDMI PIO", "HDMI
 // HSTX (raw words)", "HDMI HSTX (TMDS encoder)") and how many bytes the video DMA
 // moves per scanline, every channel together — the number that competes with the

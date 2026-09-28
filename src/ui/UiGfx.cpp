@@ -221,6 +221,7 @@ void gfxInstallPalette() {
 
 void gfxBegin() {
     VIDEO::tsRenderDrain();   // core1 may still be painting TS-Conf content rows
+    VIDEO::blVmapSuspend();   // borderless: show what is drawn over the fb row for row
     gfxComputeSurface();
     gfxInstallPalette();
 }

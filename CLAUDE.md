@@ -5989,6 +5989,59 @@ and the DMA sink differ.
   (84 MB/s of line DMA), scanlines, the CRT grille, DS80/GMX/Timex, and a machine
   switch between 640x480 and 720x576.
 
+### ...and 576p on m1p2 landed the sample point on the BRIGHT phase: Video > VGA > PWM phase (2026-09-28, NOT hw-tested)
+
+Owner, m1p2 (PIO VGA) with PWM on at **720x576**: vertical stripes, the monitor's
+Auto Adjust removes them, and then **every colour reads BRIGHT** — while 640x480 on
+the same board and monitor is right. This is the single-sample mechanism above
+playing out per MODE, not a table or divider bug: on that ladder + monitor the ADC
+takes one point per pixel, a non-BRIGHT ZX colour (0xCD -> 3,2,3,2 on the PIO's k=2
+table; 0xA2 -> 2,2,2,2 and BRIGHT -> 3,3,3,3 are invariant) reads 3 or 2 depending
+on which phase the point lands in, and Auto Adjust picks that point afresh for
+every video mode. At 480p it landed on a 2; at 576p on a 3. Nothing in the pattern
+can help a single sample read the mean, and the stripes before Auto Adjust are the
+same thing with the point drifting across the pixel.
+
+- **What differs between the two modes on the PIO, for the record**: the SM runs at
+  4x the pixel clock, so 480p is 84 MHz (clkdiv 3.0 at 252, 4.5 at 378) and 576p is
+  100.8 MHz (2.5 / 3.75). A FRACTIONAL divider makes the four phases UNEQUAL in
+  length — 2,3,2,3 sys cycles per pixel at 252 (7.9 / 11.9 ns), 4,4,4,3 at 378 — the
+  pattern repeats per pixel (4 SM cycles is a whole number of sys cycles in every
+  case), so it is stable, but a monitor's Auto Adjust plausibly settles on the
+  longest flat stretch, which is a different phase than at 480p. The k=2 table
+  assumes equal weights; the bias that costs is small (the sum moves by at most one
+  short phase) and is not what the owner saw.
+- **The knob: `Config::vga_pwm_phase` (NVS `vga_pwm_phase`, 0..3), `SET_VGA_PWM_PHASE`
+  AC_LIVE + F_PREVIEW, Video > VGA > PWM phase**, shown while PWM is staged on. It
+  rotates the WHOLE 32-bit word of every palette entry by that many phases
+  (`vga_pwm_rotr(w, 8 * phase)` in `vga_make_pair`); the sync/flat words are
+  rotation-invariant, so hsync/vsync and the templates are untouched, and every
+  pixel moves the same way — no stripe, unlike the hw-refuted per-pair offset. Live
+  via `vga_set_pwm_phase()` = one `vga_repack_palette()` (256 entries from the
+  recorded colours, no allocation); the DS80/GMX/Timex pair tables pick it up at
+  their next driver set, not at the keypress. The boot line prints `phase N`.
+- **What it does and does not buy**: on a non-integrating monitor one step turns
+  the 3 under the sample point into the 2 (or the reverse), i.e. the 16 ZX colours
+  come out at their intended levels again — but that monitor still only ever sees 4
+  levels per channel, so an arbitrary palette (TS-Conf 256c, ULA+) is quantised to
+  the 2:2:2 grid however the phase is set; Dither is the better pick there. On a
+  ladder that integrates (m2p2 HSTX) the rotation changes nothing visible.
+- The setting is ONE value: Auto Adjust's landing differs per mode, so a user who
+  switches 480p <-> 576p (a reboot anyway) may have to re-pick it. A per-mode value
+  was judged not worth a second row until someone actually switches modes often.
+- **Found while building it: the m2p2 HSTX (TMDS) image had overflowed the `.tsovl`
+  window by 48 B** — nothing to do with this change (vga.c, Config and the menu are
+  outside the window). Its `.tsovl_bss` is 9348 B against the PIO variant's 9036: the
+  expander's 240-slot ts256 pool grows the per-slot `TS_OVL_BSS` tables by ~312 B, and
+  the window had 264 B of slack. The AUTO block in CMakeLists now adds 512 B when
+  `HDMI_HSTX` is TMDS, or AUTO on PICO_PC/MURM2 (the same predicate `HDMI_HSTX_ON`
+  uses later — that variable is computed after the AUTO block). 23 088 of 23 552 B
+  there now; PIO variants unchanged (22 776 of 23 040 on m1p2).
+- **Hw check owed**: m1p2 at 576p, PWM on, Auto Adjust, then cycle PWM phase 0..3
+  with the 128 menu on screen — one value must give the normal white/paper, the
+  next the BRIGHT one; then 480p to confirm phase 0 is still right there (or which
+  one is); and that the row is absent with PWM off / on HDMI.
+
 ## VGA on HSTX (2026-09-23; hw-confirmed on m2p2 — and separately: re-timing on m1p2, transport on PCp2)
 
 The VGA half of the GPIO 12-19 boards runs off the same serializer as HDMI, with
@@ -7860,7 +7913,7 @@ for anything raised while the MENU owns the screen.
 
 ## Video > Hide border — the paper scaled to fill the screen (2026-09-27, NOT hw-tested)
 
-`Config::borderless` (NVS `borderless`, `SET_BORDERLESS`, AC_PURE) → `VIDEO::bl_live`,
+`Config::render_border` (NVS `render_border`, `SET_BORDERLESS`, AC_PURE) → `VIDEO::bl_live`,
 re-decided at EVERY EndFrame by `VIDEO::blRecalc()` (right after the DS80/GMX/Timex/
 TS-Conf mode applies, before `gigascreenModeGate`), so the menu only writes Config.
 
@@ -7894,6 +7947,54 @@ TS-Conf mode applies, before `gigascreenModeGate`), so the menu only writes Conf
   multicolour title; ULA+; snow (48K/128K); F8 stats, F9/F10 volume, FDD lamp, LED
   strip, notify banner over the picture (no blinking); toggling on/off; Gigascreen
   suspend/resume; Profi DS80 / GMX / TS-Conf mode switches in and out; FPS cost.
+
+### Hide border, stage 1: pair scaler + scanout line map (2026-09-27, NOT hw-tested)
+
+The 5/4 / 11/8 / 3/2 fb-level scaler above gives pixel widths 2,2,2,4 and line heights
+2,2,2,4 (480) / 2,4 (576) — uneven, visible in text. Two independent improvements, each
+falling back to the old path:
+
+- **Horizontal = packed-pair driver** (`VIDEO::bl_pair_live`, the Timex hi-res recipe:
+  the machine's own ZX palette through `profi_ds80_driver_set`). One fb byte = two
+  different output pixels, so the scale is in OUTPUT pixels: 640 wide x2.5 (3,2,3,2),
+  720 wide x2.75 = 704 px (3,3,3,2) + 8 px frame. `hsrcL/hsrcR` per content byte,
+  `profi_pair_lookup[left][right]`. Off (byte scaler) under ULA+, TS-Conf, ATM, Profi,
+  GMX machines and where there is no pair driver (TFT/TV/SOFTTV, refused snapshot).
+  Every pair-palette site that knew `timex_hires_live` now knows `bl_pair_live` too
+  (restoreUiDS80Palette, profiPaletteApplyPending, applyPalette, getBmpPalette).
+  `blPairForceOff()` in VIDEO::Reset and ESPectrum::reset (Reset rebuilds the driver
+  tables); blRecalc re-arms it at EndFrame. Turning it off never touches the driver when
+  another pair owner took over (foreignPair test in blRecalc).
+- **Vertical = scanout line map** `graphics_set_vmap(map, v_active)` (HDMI PIO/RAW,
+  HSTX TMDS expander, VGA; stub elsewhere). The content still goes into the fb rows as
+  before (so plain doubling shows the old picture), and the map re-points display lines:
+  576 = exact x3 (rows 3k,3k+2; 3k+1 is the dup), 480 = 3,2,3,2 (rows 5j,+1,+2,+4). The
+  map is in BLOCKS (6 lines / 3 rows at 576, 10 / 5 at 480) whose first and last rows
+  agree with plain doubling, so a block under an overlay (F8/volume box, notify, FDD
+  lamp, LED strip — `blOverlayRows`) falls back to doubling by itself. The whole map is
+  dropped by `VIDEO::blVmapSuspend()` in do_OSD / gfxBegin / osdCenteredMsg /
+  progressDialog and while CPU::paused; EndFrame re-publishes. Double-buffered; the
+  ISR latches it at the frame wrap; a table is freed only after 2 frame wraps
+  (`graphics_frame_count`). HDMI ignores it with scanlines on.
+- **HDMI ISR generalisation** (the risky part): ISR `line` sets the buffer of line
+  `line`, and with a map decides for q = line-1: RENDER when line+1 starts a new fb row
+  (into the other buffer), RELOAD when line `line` replays the playing buffer (its island
+  set / TMDS island refilled for this line — the old "second play", now also a third).
+  Every line still gets exactly one island load; the audio credit accrues one line per
+  ISR in map mode (`hdmi_vmap_step`, main RAM — SCRATCH_X had no room: the TMDS build
+  overflowed it by 8 bytes inline). Requires every run of equal rows >= 2 lines. Without
+  a map `do_render = do_reload = true` and `playing = b^1`: byte-for-byte the old path.
+  `hdmi_isl_second_play(o, sl)` takes the scheduling line explicitly now.
+  Host models (session scratch): table invariants + a timeline sim of the ISR (correct
+  row per line, never renders into the playing/next buffer, one island per line, legacy
+  equivalence) — two hand mutations of the formulas each fail it with 60k+ errors.
+- Cost: BlState heap 1.4 -> ~4.5 KB (two 576-entry maps). Test builds
+  `debug/{DVp2,PCp2-tmds,m1p2}-blscale-1.0.7.{elf,uf2}`.
+- **Hw check owed**: 640x480 and 720x576, HDMI PIO + HDMI audio (the island reloads —
+  listen for dropouts, Speed Test und/skip/dup), PCp2 TMDS, VGA; picture: even widths
+  and heights, no torn lines; F8 box / notify / FDD lamp / LED strip readable; menu over
+  the scaled picture; pause; ULA+ title (must drop to the byte scaler); Gigascreen;
+  HDMI scanlines on (map ignored, old heights).
 
 ## Debug > Paper (toggleable paper rendering, 2026-08-24, NOT hw-tested)
 

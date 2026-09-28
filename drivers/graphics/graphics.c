@@ -145,6 +145,20 @@ void graphics_set_hdmi_clock_drive(bool soft) {
 void graphics_update_mode_timing(void) {
     hdmi_update_mode_timing();
 }
+extern bool SELECT_VGA;
+extern void vga_set_vmap(const uint16_t *map, int n);
+extern const uint16_t *vga_vmap_latched(void);
+extern uint32_t vga_frame_count(void);
+bool graphics_vmap_supported(void) { return true; }
+void graphics_set_vmap(const uint16_t *map, int n) {
+    if (SELECT_VGA) vga_set_vmap(map, n); else hdmi_set_vmap(map, n);
+}
+const uint16_t *graphics_vmap_latched(void) {
+    return SELECT_VGA ? vga_vmap_latched() : hdmi_vmap_latched();
+}
+uint32_t graphics_frame_count(void) {
+    return SELECT_VGA ? vga_frame_count() : hdmi_frame_count();
+}
 #else
 void graphics_set_scanlines(uint8_t level) {
     (void)level;
@@ -166,6 +180,13 @@ void graphics_set_hdmi_clock_drive(bool soft) {
 void graphics_update_mode_timing(void) {
     hdmi_update_mode_timing();
 }
+extern void hdmi_set_vmap(const uint16_t *map, int n);
+extern const uint16_t *hdmi_vmap_latched(void);
+extern uint32_t hdmi_frame_count(void);
+bool graphics_vmap_supported(void) { return true; }
+void graphics_set_vmap(const uint16_t *map, int n) { hdmi_set_vmap(map, n); }
+const uint16_t *graphics_vmap_latched(void) { return hdmi_vmap_latched(); }
+uint32_t graphics_frame_count(void) { return hdmi_frame_count(); }
 #else
 void graphics_set_dither(bool enabled) {
     (void)enabled;
@@ -177,5 +198,9 @@ void graphics_set_hdmi_clock_drive(bool soft) {
 // output-fixed frame rate.
 void graphics_update_mode_timing(void) {
 }
+bool graphics_vmap_supported(void) { return false; }
+void graphics_set_vmap(const uint16_t *map, int n) { (void)map; (void)n; }
+const uint16_t *graphics_vmap_latched(void) { return 0; }
+uint32_t graphics_frame_count(void) { return 0; }
 #endif
 #endif

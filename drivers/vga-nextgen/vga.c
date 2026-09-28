@@ -7,6 +7,7 @@
 #include "hardware/dma.h"
 #include "hardware/irq.h"
 #include <string.h>
+#include "hardware/sync.h"
 #include <stdio.h>
 #include "hardware/pio.h"
 #include "pico/stdlib.h"
@@ -80,6 +81,10 @@ static inline void vga_fill_px(void *dst, uint8_t pixel_byte, int n) {
 // the palette tables and the line templates are sized, so the setting is
 // reboot-class and must not move under a running allocation.
 extern uint8_t vga_pwm_cfg;
+// Config::vga_pwm_phase, the same way: how many phases every pixel's four
+// sub-samples are rotated by.  Live (vga_set_pwm_phase), unlike the width.
+extern uint8_t vga_pwm_phase_cfg;
+static uint8_t vga_pwm_phase = 0;
 
 static bool vga_flags_done = false;
 
@@ -102,6 +107,7 @@ static void vga_flags_init(void) {
     if (vga_flags_done) return;
     vga_flags_done = true;
     vga_pwm_live = (vga_pwm_cfg != 0);
+    vga_pwm_phase = (uint8_t)(vga_pwm_phase_cfg & 3);
     // HSTX has no narrow shape: one pixel IS one 32-bit FIFO word, so the width is
     // pinned and the setting only chooses what those four bytes carry.
     vga_wide = VGA_HSTX ? true : vga_pwm_live;
@@ -208,6 +214,23 @@ int graphics_buffer_shift_y = 0;
 static bool is_flash_line = false;
 static bool is_flash_frame = false;
 bool vga_scanlines = false;
+
+// Vertical scaler in scanout — the VGA twin of hdmi_set_vmap(). Here every line
+// is rendered on its own, so any table works; it is latched once per frame all
+// the same, so a swap cannot tear the frame in two.
+static const uint16_t * volatile vga_vmap_req = NULL;
+static volatile uint16_t vga_vmap_req_n = 0;
+static const uint16_t * volatile vga_vmap_cur = NULL;
+static volatile uint32_t vga_frame_ct = 0;
+void vga_set_vmap(const uint16_t *map, int n) {
+    vga_vmap_req_n = 0;
+    __dmb();
+    vga_vmap_req = map;
+    __dmb();
+    vga_vmap_req_n = (uint16_t)(map ? n : 0);
+}
+const uint16_t *vga_vmap_latched(void) { return vga_vmap_cur; }
+uint32_t vga_frame_count(void) { return vga_frame_ct; }
 // Scanline brightness level: 0=off, 1=darkest .. 4=lightest. Level 2 is the
 // legacy ~50% look and the default. Drives dim_rgb888() when (re)building the
 // dimmed palette. vga_scanlines stays a fast on/off flag for the render path.
@@ -344,6 +367,18 @@ static void vga_repack_palette(void) {
     graphics_set_bgcolor(vga_bg888);
 }
 
+// Video > VGA > PWM phase, live: the phase rotation lives inside every packed
+// palette entry, so a change is one repack of the 256 entries from the recorded
+// colours (no allocation, no mode change).  A monitor that samples one point per
+// pixel then reads the next sub-sample of every pixel's pattern — the knob for
+// "Auto Adjust landed on the bright phase" (m1p2 at 576p, 2026-09-28).
+void vga_set_pwm_phase(int n) {
+    n &= 3;
+    if ((uint8_t)n == vga_pwm_phase) return;
+    vga_pwm_phase = (uint8_t)n;
+    if (vga_pwm_live) vga_repack_palette();
+}
+
 #if VGA_HSTX
 // Point the serializer at a mode's pixel clock and rebuild everything that depends
 // on it.  The PWM phase weights are a function of the cycles per pixel, so a mode
@@ -408,6 +443,11 @@ void __time_critical_func() dma_handler_VGA() {
     if (screen_line == v_total) {
         screen_line = 0;
         frame_number++;
+        vga_frame_ct = frame_number;
+        {
+            const uint16_t *m = vga_vmap_req;
+            vga_vmap_cur = (m && vga_vmap_req_n == (uint16_t)v_active) ? m : NULL;
+        }
         input_buffer = getLineBuffer(screen_line);
     }
 
@@ -453,7 +493,10 @@ void __time_critical_func() dma_handler_VGA() {
     uint32_t* * output_buffer = &lines_pattern[2 + (screen_line & 1)];
     switch (graphics_mode) {
         case GRAPHICSMODE_DEFAULT:
-            y = screen_line / 2 - graphics_buffer_shift_y;
+            {
+                const uint16_t *vm = vga_vmap_cur;
+                y = (vm ? (int)vm[screen_line] : (int)(screen_line / 2)) - graphics_buffer_shift_y;
+            }
             break;
 /**
         case TEXTMODE_160x100:
@@ -938,8 +981,13 @@ static inline vga_pairv_t vga_make_pair(uint32_t c_lo, uint32_t c_hi,
         // hw-REFUTED (2026-09-23) — it fixed the level but put a 1-pixel vertical
         // stripe on every colour whose adjacent phases differ, i.e. it traded the
         // error for the very dither PWM exists to remove.  See vga_pwm.h.
-        v.w[0] = vga_pwm_word(vga_pwm_tab, c_lo, sync);
-        v.w[1] = vga_pwm_word(vga_pwm_tab, c_hi, sync);
+        //
+        // A rotation of the WHOLE word by vga_pwm_phase phases is a different thing
+        // and is deliberately allowed: every pixel moves the same way, so no two
+        // neighbours differ by it and no stripe appears — it only changes which
+        // sub-sample sits under a monitor's fixed sample point (Config::vga_pwm_phase).
+        v.w[0] = vga_pwm_rotr(vga_pwm_word(vga_pwm_tab, c_lo, sync), 8 * vga_pwm_phase);
+        v.w[1] = vga_pwm_rotr(vga_pwm_word(vga_pwm_tab, c_hi, sync), 8 * vga_pwm_phase);
     } else {
         // Wide but not PWM: the same byte in all four phases, i.e. byte for byte
         // what the narrow path would have driven.  Only reachable on HSTX, where
@@ -1212,10 +1260,11 @@ void graphics_init() {
         return;
     }
     vga_flags_init();
-    printf("vga: %s pixels, %s (%d bytes/pixel, %d levels/channel)\n",
+    printf("vga: %s pixels, %s (%d bytes/pixel, %d levels/channel, phase %d)\n",
            vga_wide ? "wide" : "narrow",
            vga_pwm_live ? "per-pixel PWM" : "Bayer 2x2 dither / solid",
-           vga_px_bytes(), vga_pwm_live ? vga_pwm_maxsum(vga_pwm_tab->k) + 1 : 13);
+           vga_px_bytes(), vga_pwm_live ? vga_pwm_maxsum(vga_pwm_tab->k) + 1 : 13,
+           vga_pwm_live ? vga_pwm_phase : 0);
     //инициализация палитры по умолчанию
     //текстовая палитра
     for (int i = 0; i < 16; i++) {

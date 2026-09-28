@@ -473,6 +473,15 @@ public:
   enum { BL_CARVE_LAMP = 0, BL_CARVE_LED, BL_CARVE_N };
   static void blSetCarve(int id, int x0, int y0, int x1, int y1);
   static void blClearCarve(int id);
+  // Borderless pair scaler: the paper in OUTPUT pixels through the packed-pair
+  // driver (the ZX palette, like Timex hi-res). Off under ULA+ / TS-Conf / ATM /
+  // Profi / GMX, and wherever the output has no pair driver.
+  static bool bl_pair_live;
+  static void blPairRefresh();      // the ZX palette changed: re-push the pair tables
+  static void blPairForceOff();     // machine reset: blRecalc re-arms it at EndFrame
+  // A menu or dialog is about to draw over the framebuffer: drop the scanout
+  // line map until the next EndFrame, so what it draws is shown row for row.
+  static void blVmapSuspend();
   static uint32_t lastBrdTstate;
 
   static uint8_t tStatesPerLine;

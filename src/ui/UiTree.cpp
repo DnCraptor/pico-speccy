@@ -1046,8 +1046,22 @@ static const Option opt_vga_pwm[] = {
     { "PWM (per pixel)",    1, "PWM" },
     { "Dither (2x2 block)", 0, "Dither" },
 };
+// Which of the four sub-samples of a pixel comes first. Only matters on a ladder +
+// monitor pair that does NOT integrate the phases (the monitor's ADC samples one
+// point per pixel and reads whichever phase it lands on, which its Auto Adjust
+// decides per video mode): a 3,2,3,2 pixel then reads BRIGHT or normal depending
+// on that point, and one step here moves it. Live — cycle it while looking at
+// the picture. Shown with PWM staged on (its twin p_vgaDither hides with it).
+static const Option opt_vga_pwm_phase[] = {
+    { "0", 0, nullptr }, { "1", 1, nullptr }, { "2", 2, nullptr }, { "3", 3, nullptr },
+};
+static bool p_vgaPwmPhase() {
+    if (!p_vgaOut()) return false;
+    return Stage::get(SET_VGA_PWM) != 0;
+}
 static const Node kVga[] = {
     NM_RADIO(TXT_VID_VGA_PWM,    SET_VGA_PWM,    opt_vga_pwm,    p_vgaOut),
+    NM_RADIO(NM_IND TXT_VID_VGA_PHASE,  SET_VGA_PWM_PHASE, opt_vga_pwm_phase, p_vgaPwmPhase),
     NM_RADIO(NM_IND TXT_VID_VGA_DITHER, SET_VGA_DITHER, opt_vga_dither, p_vgaDither),
 };
 
@@ -1055,7 +1069,11 @@ static const Node kVideo[] = {
     NM_RADIO_D(TXT_VID_MODE,     SET_VIDEO_MODE, video_modeOpts, nullptr),
     NM_SUB  (TXT_VID_HDMI,       kHdmi,          p_hdmiOut),
     NM_SUB  (TXT_VID_VGA,        kVga,           p_vgaOut),
-    NM_BOOL (TXT_VID_BORDERLESS, SET_BORDERLESS, nullptr),
+    NM_BOOL (TXT_VID_BORDER,     SET_BORDER,     nullptr),
+    // Border-timing aid: No = the paper area is not rendered; the border state
+    // machine paints through it, showing the border colour "under" the paper as
+    // it would run on the raster (per-T-state — multicolour effects included).
+    NM_BOOL  (TXT_DBG_PAPER,     SET_PAPER,      nullptr),
     NM_RADIO(TXT_VID_PALETTE,    SET_PALETTE,    opt_palette,    nullptr),
     NM_RADIO(TXT_VID_RENDER,     SET_RENDER,     opt_render,     nullptr),
     NM_RADIO(TXT_VID_SCANLINES,  SET_SCANLINES,  opt_scanlines,  nullptr),
@@ -1464,10 +1482,6 @@ static const Node kDebug[] = {
     NM_ACTION(TXT_DBG_FOLDERS, act_configFolders, p_hasSD),
     // Testing aid: run the firmware as if the board had no PSRAM (see SET_PSRAM_ON).
     NM_BOOL  (TXT_DBG_PSRAM,  SET_PSRAM_ON,    p_psramChip),
-    // Border-timing aid: No = the paper area is not rendered; the border state
-    // machine paints through it, showing the border colour "under" the paper as
-    // it would run on the raster (per-T-state — multicolour effects included).
-    NM_BOOL  (TXT_DBG_PAPER,  SET_PAPER,       nullptr),
     NM_RADIO (TXT_DBG_TEMPOFF, SET_TEMP_OFFSET, opt_tempOffset, nullptr)
 };
 

@@ -380,7 +380,7 @@ public:
     // Video > Hide border: the 256x192 paper is scaled up to fill the framebuffer
     // (5/4 at 640x480, 11/8 x 5/4 or 3/2 with an 8-px frame at 720-wide) and the
     // border machine is parked. Applied at the next EndFrame (VIDEO::blRecalc).
-    static bool borderless;
+    static bool render_border;
     static uint8_t persist_slot;
     // Options > Save/Load my settings: the profile slot this config was last
     // saved to or loaded from (1..CONFIG_PROFILE_SLOTS; 0 = none). Shown on both
@@ -576,6 +576,15 @@ public:
     // block can fail on a thin heap — graphics_set_mode() drops the width rather
     // than the picture when it does.
     static bool vga_pwm;
+    // Video > VGA > PWM phase (0..3): rotate the four sub-samples of every pixel by
+    // that many phases. For a ladder + monitor that do NOT integrate the phases (the
+    // monitor's ADC takes one point per pixel and reads whichever sub-sample it
+    // lands on — m1p2, 2026-09-23/28) this moves the sample point onto a different
+    // phase of the same pattern: it is what turns "every colour BRIGHT" (the sample
+    // sits on a 3 of a 3,2,3,2 pixel) into the intended level. Where the sample
+    // point lands depends on the mode's pixel clock and the monitor's Auto Adjust,
+    // so it is a user knob, not a derivation. Live (a palette repack), VGA only.
+    static uint8_t vga_pwm_phase;
     // New-menu look preferences. ui_vga_solid: on VGA output the menu uses its on-grid
     // 2:2:2 palette twin (solid fills, no Bayer texture); off = the full-depth scheme,
     // dithered. ui_rounded: window/dialog corners rounded vs square.

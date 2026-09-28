@@ -76,6 +76,10 @@ extern "C" void graphics_set_scanlines(uint8_t level);
 extern "C" void graphics_set_crt(uint8_t level);
 extern "C" void graphics_set_dither(bool enabled);
 extern "C" void graphics_update_mode_timing(void);
+extern "C" bool graphics_vmap_supported(void);
+extern "C" void graphics_set_vmap(const uint16_t *map, int n);
+extern "C" const uint16_t *graphics_vmap_latched(void);
+extern "C" uint32_t graphics_frame_count(void);
 // graphics.h is a C header this TU does not include; see the note there. Returns
 // the 37.8 MHz twin of a standard video_mode[] index (the 90/75 Hz set).
 extern "C" int  graphics_fast_mode(int mode);
@@ -337,6 +341,7 @@ void VIDEO::restoreUiDS80Palette() {
         // palette, not from profi_palette_live (which exists because DS80 has a
         // guest palette port) — hand the guest ITS colours back, not Profi's.
         if (timex_hires_live) timexHiresRefresh();
+        else if (bl_pair_live) blPairRefresh();
         else profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
         rebuildDS80ColorLut();
     }
@@ -369,7 +374,7 @@ void VIDEO::profiPaletteApplyPending() {
     // Timex hi-res raises profi_ds80_active but is NOT driven by the Profi
     // palette port — refreshing from profi_palette_live here would replace the
     // machine's own ZX palette with Profi's.
-    if (timex_hires_live) { profi_palette_dirty = false; return; }
+    if (timex_hires_live || bl_pair_live) { profi_palette_dirty = false; return; }
     if (profi_palette_dirty && profi_ds80_active
         && !profi_ds80_activate_pending && !profi_ds80_deactivate_pending) {
         profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
@@ -2061,6 +2066,7 @@ void VIDEO::applyPalette() {
     // menu has swapped the UI block into profi_palette_live, which is then what
     // the driver is running and what has to come back.
     if (timex_hires_live && !profi_palette_ui_saved_valid) timexHiresRefresh();
+    else if (bl_pair_live && !profi_palette_ui_saved_valid) blPairRefresh();
     else if (profi_ds80_active) {
         profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
         profi_palette_dirty = false;
@@ -3395,7 +3401,7 @@ void VIDEO::getBmpPalette(uint8_t* out) {
         // ... except Timex hi-res, whose 16 are the machine's own ZX palette
         // (preset included) — unless a full-screen menu has swapped the UI block
         // into profi_palette_live, which is then what the driver is running.
-        const bool tmx = timex_hires_live && !profi_palette_ui_saved_valid;
+        const bool tmx = (timex_hires_live || bl_pair_live) && !profi_palette_ui_saved_valid;
         for (int i = 0; i < 16; i++) {
             uint32_t src = tmx ? paletteTransform(spectrum_rgb888[i]) : profi_palette_live[i];
             uint32_t c = Config::crt_filter ? crtTransform(src) : src;
@@ -4743,6 +4749,7 @@ void VIDEO::Reset() {
     // palette below, so a live packed-pair mode has to go first.  timex_mode was
     // zeroed at the top of Reset, so there is nothing to re-request.
     timexHiresForceOff();
+    blPairForceOff();   // borderless pair scaler: same rule, re-armed at EndFrame
 
     if (Config::arch == A_PROFI || g_scorp_gmx || Config::arch == A_TSCONF || Config::arch == A_ATM) {
         // Build pair_lookup every reset (palette may change). Cheap — 16×16 = 256 iters.
@@ -6003,25 +6010,54 @@ IRAM_ATTR void VIDEO::tsBandRow(uint32_t row) {
 // ts_band_slot[] is stale (a mode change, a held re-index, a skipped frame) and
 // the flat fill is the right thing to leave standing.
 // ─── Borderless mode ────────────────────────────────────────────────────────
-// The 256x192 paper scaled to fill the framebuffer, integer-patterned so every
-// character cell is distorted the same way (never a drifting nearest-neighbour):
-//   320x240 (640x480)       5/4 x 5/4   → 320x240, no frame
-//   360x240 (720x480)      11/8 x 5/4   → 352x240 + 4-byte frame each side
-//   360x288 (720x576)      11/8 x 3/2   → 352x288 + 4-byte frame each side
-// The frame is painted per line with the border colour at line end, so it still
-// carries a (coarse) border effect. Everything the scaler needs lives in ONE heap
-// block that exists only while the mode is live.
+// The 256x192 paper scaled to fill the screen. Two independent halves, each
+// with a fallback that is the pre-2026-09-27 scaler:
+//
+// HORIZONTAL. Where the output has a packed-pair driver (HDMI PIO/HSTX, VGA) and
+// the picture is the plain 16-colour ZX palette, a framebuffer byte is a PAIR
+// slot — two different output pixels — so the scale is taken in OUTPUT pixels:
+//   640 wide  x2.5  = 640 px, widths 3,2,3,2           (no frame)
+//   720 wide  x2.75 = 704 px, widths 3,3,3,2           + 8 px frame each side
+// Otherwise (ULA+, TS-Conf CRAM, ATM/Profi/GMX palettes, TFT/TV) one fb byte is
+// one doubled pixel and the scale is 5/4 or 11/8 of fb bytes — widths 2,2,2,4.
+//
+// VERTICAL. The content goes into the framebuffer rows exactly as before (5/4
+// into 240 rows, 3/2 into 288), which is what a plain doubling scanout shows —
+// 2,2,2,4 / 2,4 lines. On top, a scanout table (graphics_set_vmap) re-maps the
+// display lines to those rows so each paper line gets 3,2,3,2 (480) or exactly
+// 3 (576) lines. The table is organised in BLOCKS (10 lines = 5 rows at 480,
+// 6 lines = 3 rows at 576) whose first and last rows agree between the two
+// mappings, so any block can drop back to the plain doubling by itself: that is
+// done under every overlay (F8 box, notify banner, FDD lamp, LED strip), whose
+// rows must all be shown, and the whole table is dropped while a menu or dialog
+// owns the framebuffer (blVmapSuspend). Every run is >= 2 lines in both
+// mappings, which the HDMI ping-pong requires.
+//
+// Everything lives in ONE heap block that exists only while the mode is live.
 static constexpr int BL_MAX_X = 360;                       // widest fb row we scale into
+static constexpr int BL_MAX_LINES = 576;                   // display lines of the tallest mode
+static constexpr int BL_MAX_BLOCKS = 96;                   // 576 / 6
 static constexpr int BL_CARVE_MAX_RECTS = VIDEO::BL_CARVE_N + 2;   // + stats box + notify banner
 struct BlState {
     uint32_t stage[64];          // one paper line, fb layout (logical px p at byte p^2)
     uint32_t out[BL_MAX_X / 4];  // the scaled line, fb layout, pads included
-    uint8_t  hsrc[BL_MAX_X];     // content byte q of the scaled line ← stage byte hsrc[q]
+    uint8_t  hsrc[BL_MAX_X];     // byte mode: content byte q ← stage byte hsrc[q]
+    uint8_t  hsrcL[BL_MAX_X];    // pair mode: left / right pixel of content byte q
+    uint8_t  hsrcR[BL_MAX_X];
     uint16_t vrow[192];          // first fb row of paper line c; bit 15 = also the next row
-    uint16_t cw, pad;            // content bytes, pad bytes on EACH side
+    uint16_t vmap[2][BL_MAX_LINES];   // scanout tables, double-buffered
+    uint8_t  blkStd[BL_MAX_BLOCKS];   // block uses the plain doubling (last published)
+    uint16_t cw, pad;            // content bytes, pad bytes on EACH side (byte mode)
+    uint16_t pcw, ppad;          // the same for pair mode
+    uint16_t lines;              // display lines (2 * yres)
+    uint8_t  blkLines, blkRows;  // 10/5 at 480, 6/3 at 576
+    int8_t   vpub;               // table last handed to the driver, -1 = none
+    bool     vsus;               // a menu/dialog owns the fb: no table until EndFrame
+    bool     vever;              // a table was ever handed over (free must wait)
     int16_t  carve[VIDEO::BL_CARVE_N][4];   // x0, y0, x1, y1 (y1 <= y0 = unused)
 };
 static BlState* bl = nullptr;
+bool VIDEO::bl_pair_live = false;
 
 static bool blGeometryOk() {
     const int xr = (int)VIDEO::vga.xres, yr = (int)VIDEO::vga.yres;
@@ -6030,8 +6066,8 @@ static bool blGeometryOk() {
 
 static void blBuildTables() {
     const int xr = (int)VIDEO::vga.xres, yr = (int)VIDEO::vga.yres;
-    // Horizontal: one period = one pattern group, the duplicated source pixels
-    // spread over it (5/4: the 3rd of every 4; 11/8: the 2nd, 5th and 7th of 8).
+    // Horizontal, byte mode: one period = one pattern group, the duplicated source
+    // pixels spread over it (5/4: the 3rd of every 4; 11/8: the 2nd, 5th and 7th).
     static const uint8_t k54[5]  = { 0, 1, 2, 2, 3 };
     static const uint8_t k118[11] = { 0, 1, 1, 2, 3, 4, 4, 5, 6, 6, 7 };
     const bool wide = (xr == 360);
@@ -6042,15 +6078,165 @@ static void blBuildTables() {
         const int sx = wide ? (x / 11) * 8 + k118[x % 11] : (x / 5) * 4 + k54[x % 5];
         bl->hsrc[q] = (uint8_t)(sx ^ 2);         // its source pixel, at stage byte sx^2
     }
-    // Vertical: 5/4 (192 → 240) or 3/2 (192 → 288), the doubled line spread the
-    // same way.
+    // Horizontal, pair mode: in OUTPUT pixels (two per fb byte). x2.5 = widths
+    // 3,2 per two paper pixels; x2.75 = 3,3,3,2 per four.
+    static const uint8_t k52[5]  = { 0, 0, 0, 1, 1 };
+    static const uint8_t k114[11] = { 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3 };
+    bl->pcw  = wide ? 352 : 320;                 // 704 / 640 output pixels
+    bl->ppad = (uint16_t)((xr - bl->pcw) / 2);
+    for (int q = 0; q < bl->pcw; q++) {
+        const int i = q ^ 2;                     // logical content byte at physical q
+        for (int h = 0; h < 2; h++) {
+            const int x = 2 * i + h;             // output pixel
+            const int sx = wide ? (x / 11) * 4 + k114[x % 11] : (x / 5) * 2 + k52[x % 5];
+            (h ? bl->hsrcR : bl->hsrcL)[q] = (uint8_t)(sx ^ 2);
+        }
+    }
+    // Vertical, fb rows: 5/4 (192 → 240) or 3/2 (192 → 288), the doubled line
+    // spread the same way.
     for (int c = 0; c < 192; c++) {
         uint16_t row, dup;
         if (yr == 288) { row = (uint16_t)((c >> 1) * 3 + (c & 1 ? 2 : 0)); dup = !(c & 1); }
         else           { const int r = c & 3; row = (uint16_t)((c >> 2) * 5 + (r <= 2 ? r : r + 1)); dup = (r == 2); }
         bl->vrow[c] = (uint16_t)(row | (dup ? 0x8000u : 0));
     }
+    bl->lines    = (uint16_t)(yr * 2);
+    bl->blkLines = (yr == 288) ? 6 : 10;
+    bl->blkRows  = (yr == 288) ? 3 : 5;
+    bl->vpub = -1;
+    bl->vsus = false;
+    bl->vever = false;
+    memset(bl->blkStd, 0xFF, sizeof(bl->blkStd));   // force the first publish
 }
+
+// Display line r of a block → the fb row inside it (first row of the block = 0).
+// Scaled: 576 = 3,3 lines on rows 0,2 (row 1 = the dup, not shown); 480 =
+// 3,2,3,2 lines on rows 0,1,2,4 (row 3 = the dup). Plain doubling: r / 2.
+static inline uint16_t blBlockRow(int r, bool std, bool tall) {
+    if (std) return (uint16_t)(r >> 1);
+    if (tall) return (uint16_t)(r < 3 ? 0 : 2);
+    return (uint16_t)(r < 3 ? 0 : r < 5 ? 1 : r < 8 ? 2 : 4);
+}
+
+// Does fb row range [y0,y1) hold an overlay that must be shown row for row?
+static int blOverlayRows(int rects[][2]) {
+    int n = 0;
+    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    if (VIDEO::OSD & 0x07) { rects[n][0] = cy0; rects[n][1] = cy0 + 16; n++; }
+    if (ts_notice_y1 > ts_notice_y0) { rects[n][0] = ts_notice_y0; rects[n][1] = ts_notice_y1; n++; }
+    for (int i = 0; i < VIDEO::BL_CARVE_N; i++) {
+        const int16_t* r = bl->carve[i];
+        if (r[3] > r[1]) { rects[n][0] = r[1]; rects[n][1] = r[3]; n++; }
+    }
+    return n;
+}
+
+// Once per frame (EndFrame, through blRecalc): hand the driver a table that
+// matches the overlays that are up. A new table is built only when the block
+// pattern changed, into the half the scanout is not using.
+static void blVmapUpdate() {
+    if (!bl || !graphics_vmap_supported() || bl->vsus) return;
+    const int nblk = bl->lines / bl->blkLines;
+    int rects[BL_CARVE_MAX_RECTS][2];
+    const int nr = blOverlayRows(rects);
+    uint8_t want[BL_MAX_BLOCKS];
+    bool changed = (bl->vpub < 0);
+    for (int b = 0; b < nblk; b++) {
+        const int y0 = b * bl->blkRows, y1 = y0 + bl->blkRows;
+        uint8_t s = 0;
+        for (int i = 0; i < nr; i++) if (rects[i][0] < y1 && rects[i][1] > y0) { s = 1; break; }
+        want[b] = s;
+        if (s != bl->blkStd[b]) changed = true;
+    }
+    if (!changed) return;
+    const int t = (bl->vpub < 0) ? 0 : (bl->vpub ^ 1);
+    if (graphics_vmap_latched() == bl->vmap[t]) return;   // still on screen: next frame
+    const bool tall = (bl->blkLines == 6);
+    uint16_t* m = bl->vmap[t];
+    for (int b = 0; b < nblk; b++) {
+        const uint16_t base = (uint16_t)(b * bl->blkRows);
+        for (int r = 0; r < bl->blkLines; r++)
+            m[b * bl->blkLines + r] = (uint16_t)(base + blBlockRow(r, want[b], tall));
+        bl->blkStd[b] = want[b];
+    }
+    graphics_set_vmap(m, bl->lines);
+    bl->vpub = (int8_t)t;
+    bl->vever = true;
+}
+
+void VIDEO::blVmapSuspend() {
+    if (!bl || bl->vsus) return;
+    bl->vsus = true;
+    if (bl->vpub >= 0) { graphics_set_vmap(nullptr, 0); bl->vpub = -1; }
+}
+
+// Drop the table and wait until the scanout cannot be reading it (two frame
+// wraps: the ISR may have sampled the old pointer just before the NULL landed).
+static void blVmapRelease() {
+    if (!bl || !bl->vever) return;
+    graphics_set_vmap(nullptr, 0);
+    bl->vpub = -1;
+    const uint32_t f0 = graphics_frame_count();
+    const uint64_t t0 = time_us_64();
+    while (graphics_frame_count() - f0 < 2 && time_us_64() - t0 < 100000) tight_loop_contents();
+    bl->vever = false;
+}
+
+// ── Pair mode ─────────────────────────────────────────────────────────────────
+// Another packed-pair owner (DS80, GMX 640x200, Timex hi-res, TS-Conf TEXT) keeps
+// the driver; ours only ever releases what it armed.
+static bool blPairWanted() {
+    return !VIDEO::ulaplus_enabled && !Z80Ops::isTsconf && !Z80Ops::isAtm
+        && Config::arch != A_PROFI && !g_scorp_gmx;
+}
+
+static void blPairDriverPalette() {
+    // The machine's own ZX palette, as Timex hi-res uses it: paletteTransform here,
+    // crtTransform inside profi_ds80_driver_set.
+    uint32_t pal[16];
+    for (int i = 0; i < 16; i++) pal[i] = paletteTransform(spectrum_rgb888[i]) & 0x00FFFFFF;
+    profi_ds80_driver_set(true, pal, &VIDEO::profi_pair_lookup[0][0]);
+}
+
+static void blClearFb() {
+    if (!VIDEO::vga.frameBuffer) return;
+    for (int y = 0; y < (int)VIDEO::vga.yres; y++)
+        if (VIDEO::vga.frameBuffer[y]) memset(VIDEO::vga.frameBuffer[y], 0, VIDEO::vga.xres);
+}
+
+static void blPairOn() {
+    init_profi_pair_lookup();
+    blPairDriverPalette();
+    if (!profi_ds80_active) {        // no pair driver here, or its snapshot did not fit
+        static bool warned = false;
+        if (!warned) { warned = true; Debug::log("[VID] borderless: no packed-pair driver, byte scaler"); }
+        return;
+    }
+    VIDEO::rebuildDS80ColorLut();
+    Graphics8BitPalette::ds80_active = true;
+    VIDEO::bl_pair_live = true;
+    blClearFb();
+    VIDEO::brdChange = VIDEO::brdnextframe = true;
+    Debug::log("[VID] borderless: pair scaler on");
+}
+
+static void blPairOff() {
+    if (!VIDEO::bl_pair_live) return;
+    VIDEO::bl_pair_live = false;
+    profi_ds80_driver_set(false, nullptr, nullptr);
+    Graphics8BitPalette::ds80_active = false;
+    blClearFb();
+    VIDEO::brdChange = VIDEO::brdnextframe = true;
+    Debug::log("[VID] borderless: pair scaler off");
+}
+
+void VIDEO::blPairRefresh() {
+    if (bl_pair_live) blPairDriverPalette();
+}
+
+// A machine reset rebuilds the standard driver tables under us: leave pair mode
+// now, blRecalc re-arms it at the next EndFrame.
+void VIDEO::blPairForceOff() { blPairOff(); }
 
 void VIDEO::blSetCarve(int id, int x0, int y0, int x1, int y1) {
     if (!bl || id < 0 || id >= BL_CARVE_N) return;
@@ -6066,39 +6252,55 @@ void VIDEO::blClearCarve(int id) {
 
 void VIDEO::blRecalc() {
     // The scaler only runs under the standard beam renderer: the pair-slot modes
-    // (profi_ds80_active also covers GMX 640x200 and Timex hi-res) and the TS-Conf
-    // whole-line renderer own their own geometry.
-    const bool want = Config::borderless && vga.frameBuffer && blGeometryOk()
-                      && !profi_ds80_active && !gmx_ext_live && !ts_render_live && !timex_hires_live;
-    if (want == bl_live) return;
-    if (want) {
-        static bool warned = false;
-        BlState* st = (BlState*)tryMalloc(sizeof(BlState));
-        if (!st) {
-            if (!warned) { warned = true; Debug::log("[VID] borderless: no heap for %u B, staying bordered", (unsigned)sizeof(BlState)); }
+    // (profi_ds80_active also covers GMX 640x200 and Timex hi-res — but not our own
+    // pair scaler) and the TS-Conf whole-line renderer own their own geometry.
+    const bool foreignPair = profi_ds80_active && !bl_pair_live;
+    const bool want = !Config::render_border && vga.frameBuffer && blGeometryOk()
+                      && !foreignPair && !gmx_ext_live && !ts_render_live && !timex_hires_live;
+    if (want != bl_live) {
+        if (want) {
+            static bool warned = false;
+            BlState* st = (BlState*)tryMalloc(sizeof(BlState));
+            if (!st) {
+                if (!warned) { warned = true; Debug::log("[VID] borderless: no heap for %u B, staying bordered", (unsigned)sizeof(BlState)); }
+                return;
+            }
+            memset(st, 0, sizeof(BlState));
+            bl = st;
+            blBuildTables();
+            bl_stage_ptr = bl->stage;
+            bl_line_done = false;
+            bl_live = true;
+            DrawBorder = &Border_Blank;
+            brdChange = false;
+            Debug::log("[VID] borderless on: %dx%d, content %u + 2x%u pad, vmap %s", (int)vga.xres, (int)vga.yres,
+                       (unsigned)bl->cw, (unsigned)bl->pad, graphics_vmap_supported() ? "yes" : "no");
+        } else {
+            blPairOff();
+            blVmapRelease();
+            bl_live = false;
+            bl_line_done = false;
+            bl_stage_ptr = nullptr;
+            free(bl);
+            bl = nullptr;
+            // Hand the rows back: the border machine repaints them next frame, the
+            // paper renderer re-renders its window.
+            brdChange = true;
+            brdnextframe = true;
+            Debug::log("[VID] borderless off");
             return;
         }
-        memset(st, 0, sizeof(BlState));
-        bl = st;
-        blBuildTables();
-        bl_stage_ptr = bl->stage;
-        bl_line_done = false;
-        bl_live = true;
-        DrawBorder = &Border_Blank;
-        brdChange = false;
-        Debug::log("[VID] borderless on: %dx%d, content %u + 2x%u pad", (int)vga.xres, (int)vga.yres, (unsigned)bl->cw, (unsigned)bl->pad);
-    } else {
-        bl_live = false;
-        bl_line_done = false;
-        bl_stage_ptr = nullptr;
-        free(bl);
-        bl = nullptr;
-        // Hand the rows back: the border machine repaints them next frame, the
-        // paper renderer re-renders its window.
-        brdChange = true;
-        brdnextframe = true;
-        Debug::log("[VID] borderless off");
     }
+    if (!bl_live) return;
+    // Pair scaler follows the palette source live (ULA+ can come and go).
+    const bool wantPair = blPairWanted();
+    if (wantPair && !bl_pair_live && !profi_ds80_active) blPairOn();
+    else if (!wantPair && bl_pair_live) blPairOff();
+    // EndFrame runs: no menu/dialog owns the framebuffer — except PAUSE, where the
+    // loop still reaches EndFrame with the badge / pause box drawn over the paper.
+    if (CPU::paused) { blVmapSuspend(); return; }
+    bl->vsus = false;
+    blVmapUpdate();
 }
 
 // Copy the scaled line into one fb row, leaving the overlay rectangles alone.
@@ -6132,16 +6334,33 @@ static IRAM_ATTR __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-
 IRAM_ATTR __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void VIDEO::blExpandLine(uint32_t line) {
     if (!bl || line >= 192 || !vga.frameBuffer) return;
     const uint8_t* src = (const uint8_t*)bl->stage;
-    const uint8_t* t = bl->hsrc;
-    const int padw = bl->pad >> 2, cww = bl->cw >> 2;
     uint32_t* o = bl->out;
-    const uint32_t b32 = (uint8_t)brd * 0x01010101u;
-    for (int i = 0; i < padw; i++) o[i] = b32;
-    uint32_t* c = o + padw;
-    for (int w = 0; w < cww; w++, t += 4)
-        c[w] = (uint32_t)src[t[0]] | ((uint32_t)src[t[1]] << 8)
-             | ((uint32_t)src[t[2]] << 16) | ((uint32_t)src[t[3]] << 24);
-    for (int i = 0; i < padw; i++) c[cww + i] = b32;
+    if (bl_pair_live) {
+        const uint8_t (*pl)[16] = profi_pair_lookup;
+        const uint8_t pb = pl[brd & 15][brd & 15];
+        const uint32_t b32 = (uint32_t)pb * 0x01010101u;
+        const int padw = bl->ppad >> 2, cww = bl->pcw >> 2;
+        const uint8_t* tl = bl->hsrcL;
+        const uint8_t* tr = bl->hsrcR;
+        for (int i = 0; i < padw; i++) o[i] = b32;
+        uint32_t* c = o + padw;
+        for (int w = 0; w < cww; w++, tl += 4, tr += 4)
+            c[w] = (uint32_t)pl[src[tl[0]] & 15][src[tr[0]] & 15]
+                 | ((uint32_t)pl[src[tl[1]] & 15][src[tr[1]] & 15] << 8)
+                 | ((uint32_t)pl[src[tl[2]] & 15][src[tr[2]] & 15] << 16)
+                 | ((uint32_t)pl[src[tl[3]] & 15][src[tr[3]] & 15] << 24);
+        for (int i = 0; i < padw; i++) c[cww + i] = b32;
+    } else {
+        const uint8_t* t = bl->hsrc;
+        const int padw = bl->pad >> 2, cww = bl->cw >> 2;
+        const uint32_t b32 = (uint8_t)brd * 0x01010101u;
+        for (int i = 0; i < padw; i++) o[i] = b32;
+        uint32_t* c = o + padw;
+        for (int w = 0; w < cww; w++, t += 4)
+            c[w] = (uint32_t)src[t[0]] | ((uint32_t)src[t[1]] << 8)
+                 | ((uint32_t)src[t[2]] << 16) | ((uint32_t)src[t[3]] << 24);
+        for (int i = 0; i < padw; i++) c[cww + i] = b32;
+    }
     const uint16_t v = bl->vrow[line];
     const int row = v & 0x7FFF;
     if (row < (int)vga.yres) blPutRow(row);
