@@ -2497,7 +2497,7 @@ uint8_t Ports::kay7FFDd7 = 0;
 static inline uint32_t scorpionC000Page(uint32_t low3) {
   if (g_scorp_kay) {
     // Nemo KAY (UnrealSpeccy MM_KAY, z00m128/kay1024 README): 7FFD 0-2, then
-    // 1FFD D4 = +8 (256K), 1FFD D7 = +16 (512K), 7FFD D7 = +32 (1024K). KAY2048
+    // 1FFD D4 = +8 (256K), 1FFD D7 = +16 (512K), 7FFD D7 = +32 (1024K). Phoenix
     // (ZXM-Phoenix, Unreal MM_PHOENIX) orders them differently and adds 1FFD D6:
     // 7FFD D7 -> bit 3, 1FFD D4 -> bit 4, 1FFD D7 -> bit 5, 1FFD D6 -> bit 6 (2 MB).
     uint32_t page = low3;
@@ -2558,7 +2558,7 @@ void Ports::scorpionRomUpdate() {
   // MM_KAY: rom1 = (1ffd >> 2) & 2; if (TRDOS) rom1 ^= 2). So D3 with DOS off shows
   // service/TR-DOS, D3 with DOS on shows 128/48; the BASIC-128 reset patch uses
   // exactly that for its Caps Shift "service" and Symbol Shift "TR-DOS" boots.
-  // KAY2048 (Phoenix) adds the Scorpion's D1 override on top (Unreal MM_PHOENIX).
+  // ZXM-Phoenix adds the Scorpion's D1 override on top (Unreal MM_PHOENIX).
   uint8_t bank = (g_scorp_kay == 4 && (port1FFD & 0x02)) ? 2
                : g_scorp_kay
                ? (uint8_t)((((port1FFD & 0x08) ? 2 : 0) ^ (ESPectrum::trdos ? 2 : 0)) | MemESP::romLatch)
@@ -2584,7 +2584,7 @@ void Ports::scorpionRomUpdate() {
 // A session at 3.5 MHz stays at 3.5 whatever the ROM writes — every KAY ROM
 // writes #1FFD at boot with D2 clear, which on a board with JP1 on means 7 MHz.
 void Ports::kayTurboUpdate() {
-  // (KAY2048 / Phoenix: Unreal models no turbo line on #1FFD.)
+  // (ZXM-Phoenix: Unreal models no turbo line on #1FFD.)
   if ((g_scorp_kay != 2 && g_scorp_kay != 3) || !ESPectrum::multUser) return;
   const uint8_t want = (port1FFD & 0x04) ? 0 : ESPectrum::multUser;
   if (want != ESPectrum::multiplicator) {
@@ -4609,7 +4609,7 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
   // Nemo KAY #1FFD = 00xxxxxx xxxxxx01 (A15=A14=0, A1=0, A0=1 — UnrealSpeccy's
   // (port & 0xC003) == 0x0001 for MM_KAY; the board's README says the same). D0 RAM
   // page 0 at 0x0000, D2 turbo OFF (JP3 closed), D3 ROM pair, D4/D7 page bits; D1,
-  // D5, D6 are Centronics lines (KAY2048: D1 service page, D6 a page bit). Not gated
+  // D5, D6 are Centronics lines (Phoenix: D1 service page, D6 a page bit). Not gated
   // by the 7FFD lock (Unreal).
   if (Z80Ops::isScorpion && g_scorp_kay && ((address & 0xC003) == 0x0001)) {
     LED::touchW(LED::RAM);

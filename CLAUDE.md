@@ -12122,10 +12122,14 @@ and a disassembly of MSD888's test ROM, which agree.
   (#BF read-back, "Всего найдено рабочих страниц" = 256, #x7F7 deep RAM test, ROM page
   switch 0-7, extended palette ramps, DOSEN via #3Dxx), ATM IDE.
 
-## Nemo KAY 256 Turbo / 1024 / 1024 v2010-v2018 / KAY2048 = ZXM-Phoenix (2026-09-26, NOT hw-tested)
+## Nemo KAY 256 Turbo / 1024 / 1024 v2010-v2018 + ZXM-Phoenix 2 MB (2026-09-26, NOT hw-tested)
 
 Four romsets of the **Scorpion arch**, not an arch of their own: `R_KAY256` "Kay256",
-`R_KAY1024` "Kay1024", `R_KAY2010` "Kay2010", `R_KAY2048` "Kay2048" (ZXM-Phoenix);
+`R_KAY1024` "Kay1024", `R_KAY2010` "Kay2010", `R_PHOENIX` "Phoenix" (ZXM-Phoenix 2 MB —
+**there was never a "KAY2048"**: it was mis-filed under that name until 2026-09-29 (no alias kept —
+a saved "Kay2048" falls back to the default romset), and it is listed under
+**Machine → Other**, not the Kay row; it stays in `isKayRomset` because it IS that
+paging family);
 `isKayRomset()` (ArchRom.h), `g_scorp_kay` (CPU.h: 0 none / 2 = 256 / 3 = 1024 /
 4 = Phoenix). Machine → KAY (`opt_mach_kay`, UiTree.cpp, behind `p_extRam`). A KAY128
 row existed for a few hours and was REMOVED on the owner's call (2026-09-26) — no ROM of
@@ -12193,7 +12197,7 @@ speccy4ever.speccy.org/_KA.htm (`curl -sk -A Mozilla`).
   used to re-register that pointer live, a latent bug for GMX and ProfROM too. Also
   fixed on the way: the Pentagon bind never cleared an overlay a Scorpion/KAY left on
   `gb_rom_1_sinclair_128k`.
-- **KAY2048 = ZXM-Phoenix** (UnrealSpeccy `MM_PHOENIX`, micklab.ru/file/
+- **ZXM-Phoenix** (R_PHOENIX, UnrealSpeccy `MM_PHOENIX`, micklab.ru/file/
   zxm_bios_5_04t.rar, CRC32 ABD2459C, Nemo page order): page = 7FFD 0-2 | 7FFD D7->bit 3
   | 1FFD D4->bit 4 | 1FFD D7->bit 5 | 1FFD D6->bit 6 = **2 MB**, so `Config::wantedPages`
   raises the strip to 128 pages (SD-swap backing is enough — no butter requirement,

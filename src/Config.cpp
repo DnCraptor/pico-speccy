@@ -765,11 +765,11 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             // firmware ships raw (tools/rom_pack.py pack_kay). The four roles
             // overlay four DIFFERENT bases, so a static registration per bank is
             // exact — and it must register nullptr for a raw bank too, to clear
-            // whatever a previous romset left on that pointer. KAY2048 is the
-            // ZXM-Phoenix (its empty service page is an overlay over the KAY one).
+            // whatever a previous romset left on that pointer. The ZXM-Phoenix
+            // shares the table shape (its empty service page overlays the KAY one).
             const kay_rom_bank_t* tbl = (romSet == R_KAY1024) ? gb_rom_kay1024_banks
                                       : (romSet == R_KAY2010) ? gb_rom_kay2010_banks
-                                      : (romSet == R_KAY2048) ? gb_rom_kay2048_banks
+                                      : (romSet == R_PHOENIX) ? gb_rom_phoenix_banks
                                                               : gb_rom_kay256_banks;
             for (int i = 0; i < 4; ++i) {
                 MemESP::rom[i].assign_rom(tbl[i].data);

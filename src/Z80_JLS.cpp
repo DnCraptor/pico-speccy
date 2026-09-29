@@ -930,7 +930,7 @@ IRAM_ATTR void Z80::check_trdos() {
                     MemESP::romInUse = g_scorp_kay
                         // Nemo KAY: 1FFD D3 picks the ROM pair, DOS off (Ports.cpp
                         // scorpionRomUpdate)
-                        // (KAY2048 / Phoenix: 1FFD D1 forces the service page)
+                        // (ZXM-Phoenix: 1FFD D1 forces the service page)
                         ? ((g_scorp_kay == 4 && (Ports::port1FFD & 0x02)) ? (uint8_t)2
                            : (uint8_t)(((Ports::port1FFD & 0x08) ? 2 : 0) | MemESP::romLatch))
                         : (uint8_t)(((Ports::port1FFD & 0x02) ? 2 : MemESP::romLatch)

@@ -131,7 +131,7 @@ extern bool g_scorp_banked;
 // always-false global test on the peek8/fetchOpcode hot paths.
 extern bool g_gmx_tap;
 // Nemo KAY romset live (isKayRomset): 0 = not a KAY, else which board — 2 = KAY256
-// (+1FFD D4), 3 = KAY1024 (+1FFD D7 and 7FFD D7), 4 = KAY2048 / ZXM-Phoenix (2 MB,
+// (+1FFD D4), 3 = KAY1024 (+1FFD D7 and 7FFD D7), 4 = ZXM-Phoenix (2 MB,
 // Unreal MM_PHOENIX page order, 1FFD D1 = service page, no turbo line). Gates the KAY #1FFD decode, its ROM select (1FFD D3 XORs
 // the DOS bit), the page bits and the 1FFD D2 turbo-off line (Ports.cpp).
 extern uint8_t g_scorp_kay;

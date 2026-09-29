@@ -75,7 +75,7 @@
     X(R_KAY256,         "Kay256",           "KAY256 Turbo")               \
     X(R_KAY1024,        "Kay1024",          "KAY1024")                    \
     X(R_KAY2010,        "Kay2010",          "KAY1024 v2010/v2018")        \
-    X(R_KAY2048,        "Kay2048",          "KAY2048 (ZXM-Phoenix)")      \
+    X(R_PHOENIX,        "Phoenix",          "ZXM-Phoenix 2 MB")           \
     X(R_ATM2_106,       "ATM2v106",         "ATM-Turbo 2 (BIOS 1.06.02)") \
     X(R_ATM3,           "ATM3",             "ATM-Turbo 3 (xBIOS 1.37 + test)") \
     X(R_ATM3_107,       "ATM3v107",         "ATM-Turbo 3 (BIOS 1.07.13EC)")
@@ -213,10 +213,11 @@ inline bool isScorpGmxRomset(RomsetIdx r) {
 // (00xxxxxx xxxxxx01), the ROM select (1FFD D3 XORs the DOS bit instead of D1
 // overriding it), the page bits (1FFD D4 = 256K, D7 = 512K, 7FFD D7 = 1 MB) and
 // 1FFD D2 = turbo off. UnrealSpeccy MM_KAY; github.com/z00m128/kay1024. The ZXM-Phoenix
-// (R_KAY2048, UnrealSpeccy MM_PHOENIX) is the same board family grown to 2 MB: two more
+// (R_PHOENIX, UnrealSpeccy MM_PHOENIX) — not a KAY, there was never a "KAY2048", but the
+// same paging family grown to 2 MB, hence modelled here (menu: Machine > Other): two more
 // page bits (1FFD D6, and the order moves) and 1FFD D1 forcing the service page.
 inline bool isKayRomset(RomsetIdx r) {
-    return r == R_KAY256 || r == R_KAY1024 || r == R_KAY2010 || r == R_KAY2048;
+    return r == R_KAY256 || r == R_KAY1024 || r == R_KAY2010 || r == R_PHOENIX;
 }
 // The Yellow-PCB frame (224 T x 312 lines = 69888 T): plain Scorpion and every KAY.
 // Green / GMX / 1024 / ProfROM take the 316-line Turbo+ frame.

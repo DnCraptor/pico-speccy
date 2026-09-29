@@ -214,7 +214,7 @@ void CPU::reset() {
     // Nemo KAY: its own #1FFD (turbo is 1FFD D2 there, not a port read).
     g_scorp_kay = !Z80Ops::isScorpion ? 0
                 : Config::romSetScorp == R_KAY256 ? 2
-                : Config::romSetScorp == R_KAY2048 ? 4
+                : Config::romSetScorp == R_PHOENIX ? 4
                 : (Config::romSetScorp == R_KAY1024 || Config::romSetScorp == R_KAY2010) ? 3 : 0;
     g_gmx_tap = false;   // re-armed by Ports::scorpionRomUpdate once paging settles
     // The +2A/+3 is the R_P3 romset of the 128K arch (the way +2 is). It shares the

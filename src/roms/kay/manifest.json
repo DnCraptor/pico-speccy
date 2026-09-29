@@ -75,7 +75,7 @@
       "diff_bytes": 3343
     },
     {
-      "sym": "gb_overlay_kay2048_128",
+      "sym": "gb_overlay_phoenix_128",
       "base": "gb_rom_0_pentagon_128k",
       "len": 524,
       "runs": 25,

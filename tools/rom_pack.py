@@ -1182,7 +1182,7 @@ def pack_atm():
         print("    %-24s over %-24s %6d B" % (o[0], o[2], len(o[1])))
 
 # ---------------------------------------------------------------- Nemo KAY
-# KAY256 Turbo / KAY1024 / KAY1024 v2010-v2018 / KAY2048 (ZXM-Phoenix) — romsets of the Scorpion
+# KAY256 Turbo / KAY1024 / KAY1024 v2010-v2018 + ZXM-Phoenix (not a KAY; same paging family) — romsets of the Scorpion
 # arch (Ports.cpp g_scorp_kay). Every KAY image is the same four ROLES the Scorpion
 # has, in rom[] order 0 = BASIC-128, 1 = BASIC-48, 2 = service, 3 = TR-DOS: the
 # board's ROM A15 is (1FFD D3 ^ DOS) and A14 is 7FFD D4 (UnrealSpeccy MM_KAY). The
@@ -1211,7 +1211,7 @@ KAY_ROMSETS = [
     ('kay256',  [('kay256.bin', 0), ('kay256.bin', 1), ('kay256.bin', 3), ('kay256.bin', 2)]),
     ('kay2010', [('kay1024_2002las.bin', 0), ('kay1024_2002las.bin', 1),
                  ('kay_service02d.bin', 0), ('kay1024_2002las.bin', 3)]),
-    ('kay2048', [('zxm_phoenix_504t.bin', 2), ('zxm_phoenix_504t.bin', 3),
+    ('phoenix', [('zxm_phoenix_504t.bin', 2), ('zxm_phoenix_504t.bin', 3),
                  ('zxm_phoenix_504t.bin', 0), ('zxm_phoenix_504t.bin', 1)]),
 ]
 KAY_RAW_MAX = 12288

@@ -2419,7 +2419,7 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                         // cold boot with 1FFD D3 set (DOS off -> the service page at
                         // 0x0000), which is what the BASIC-128 reset patch does itself
                         // when Caps Shift is held (OUT #1FFD,#08 then JP 0). (On the
-                        // KAY-256 and the KAY2048 / Phoenix there is no service ROM,
+                        // KAY-256 and the ZXM-Phoenix there is no service ROM,
                         // so their menu has no Service row and the options shift by one.)
                         if (g_scorp_kay != 3) ++opt;
                         if (opt == 1) {

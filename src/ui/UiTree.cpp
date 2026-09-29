@@ -616,13 +616,18 @@ static const Option* mach_scorpOpts(uint8_t& cnt) {
     cnt = n;
     return opts;
 }
-// Nemo KAY + ZXM-Phoenix. Static: every board pages RAM above 128K, so the whole row
+// Nemo KAY. Static: every board pages RAM above 128K, so the whole row
 // sits behind p_extRam(), the Scorpion row's own gate.
 static const Option opt_mach_kay[] = {
     { TXT_ROM_KAY256,  NM_MACH(A_SCORP, R_KAY256),  TXT_ROM_KAY256_S  },
     { TXT_ROM_KAY1024, NM_MACH(A_SCORP, R_KAY1024), TXT_ROM_KAY1024_S },
     { TXT_ROM_KAY2010, NM_MACH(A_SCORP, R_KAY2010), TXT_ROM_KAY2010_S },
-    { TXT_ROM_KAY2048, NM_MACH(A_SCORP, R_KAY2048), TXT_ROM_KAY2048_S },
+};
+// Machine > Other: boards that fit no family row. The ZXM-Phoenix is modelled on the
+// Scorpion arch (the KAY paging family, ArchRom.h isKayRomset) but is not a KAY. Its
+// 2 MB comes from SD swap at worst, so it needs only the extended-RAM gate.
+static const Option opt_mach_other[] = {
+    { TXT_ROM_PHOENIX, NM_MACH(A_SCORP, R_PHOENIX), TXT_ROM_PHOENIX_S },
 };
 static const Option opt_mach_alf[] = {
     { TXT_ROM_ALF,        NM_MACH(A_ALF, R_ALF1) },
@@ -723,6 +728,7 @@ static const Node kMachine[] = {
     NM_RADIO(TXT_MACH_TSCONF, SET_MACHINE, opt_mach_tsconf, p_showTsconf),
     NM_SUB  (NM_IND TXT_MACH_TSCONF_OPTS, kTsconf, p_tsconfActive),
     NM_RADIO(TXT_MACH_ALF,   SET_MACHINE, opt_mach_alf,   nullptr),
+    NM_RADIO(TXT_MACH_OTHER, SET_MACHINE, opt_mach_other, p_extRam),
     // Not a machine, but it lives with them by request: the built-in game — the
     // one "machine" that needs neither ROM nor SD card. Also reachable by
     // holding S during the boot R/M probe window.
