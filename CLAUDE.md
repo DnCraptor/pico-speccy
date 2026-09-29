@@ -12176,9 +12176,13 @@ speccy4ever.speccy.org/_KA.htm (`curl -sk -A Mozilla`).
   role): per romset four (file, page) roles, because the images come in different page
   orders (JP5 "LAS" 128/48/service/TR-DOS, "Nemo" service/TR-DOS/128/48, and the 2000
   image with TR-DOS and service swapped — Unreal's ini names roles, not pages).
-  KAY256 = `kay256.bin` (1994 NEMO KAY-256, TR-DOS 5.04T +1 byte); KAY1024 =
-  JV Kramis V0.3 2000; v2010/v2018 = Reset Service V0.2d (2015) + the 2002 LAS
-  BASIC-128/48/TR-DOS. The "Kramis" service page is shared by 256/1024. Packed: 2 raw 16K
+  KAY256 = `kay256.bin` = the three genuine 1994 NEMO KAY-256 ROMs
+  (speccy4ever `KAY256_0_128` / `_1_48` / `_2_DOS.ROM`) + an EMPTY 0xFF page: the
+  board has no service ROM and its 128 ROM never writes #1FFD. (Until 2026-09-29 the
+  image carried the KAY-1024's Kramis V0.3 page there — wrong, owner caught it.)
+  Alt+F11 therefore offers no Service row on KAY-256 and Phoenix
+  (`MENU_RESETTO_KAY_NOSVC`). KAY1024 = JV Kramis V0.3 2000; v2010/v2018 = Reset
+  Service V0.2d (2015) + the 2002 LAS BASIC-128/48/TR-DOS. Packed: 2 raw 16K
   service pages + 10 overlays over Pentagon ROM0 / Sinclair 128K half 1 / TR-DOS 5.04T /
   the Kramis page = **47 468 B**, ordinary flash (not .psramroms — KAY needs no butter PSRAM). The four
   roles overlay four DIFFERENT bases, so requestMachine registers them statically,

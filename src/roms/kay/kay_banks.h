@@ -8,32 +8,32 @@
 #include <stdint.h>
 struct kay_rom_bank_t { const uint8_t* data; const uint8_t* overlay; };
 extern "C" {
-extern const unsigned char gb_rom_kay256_svc[];
+extern const unsigned char gb_rom_kay1024_svc[];
 extern const unsigned char gb_rom_kay2010_svc[];
-extern const unsigned char gb_overlay_kay256_128[];
-extern const unsigned char gb_overlay_kay256_48[];
-extern const unsigned char gb_overlay_kay256_dos[];
 extern const unsigned char gb_overlay_kay1024_128[];
 extern const unsigned char gb_overlay_kay1024_48[];
 extern const unsigned char gb_overlay_kay1024_dos[];
+extern const unsigned char gb_overlay_kay256_128[];
+extern const unsigned char gb_overlay_kay256_48[];
+extern const unsigned char gb_overlay_kay256_svc[];
+extern const unsigned char gb_overlay_kay256_dos[];
 extern const unsigned char gb_overlay_kay2010_128[];
 extern const unsigned char gb_overlay_kay2010_dos[];
 extern const unsigned char gb_overlay_kay2048_128[];
-extern const unsigned char gb_overlay_kay2048_svc[];
 }
-// rom[] order: 0 BASIC-128, 1 BASIC-48, 2 service, 3 TR-DOS
-static const kay_rom_bank_t gb_rom_kay256_banks[4] = {
-    { gb_rom_0_pentagon_128k, gb_overlay_kay256_128 },   // 128
-    { gb_rom_1_sinclair_128k, gb_overlay_kay256_48 },   // 48
-    { gb_rom_kay256_svc, nullptr },   // svc
-    { gb_rom_4_trdos_504t, gb_overlay_kay256_dos },   // dos
-};
 // rom[] order: 0 BASIC-128, 1 BASIC-48, 2 service, 3 TR-DOS
 static const kay_rom_bank_t gb_rom_kay1024_banks[4] = {
     { gb_rom_0_pentagon_128k, gb_overlay_kay1024_128 },   // 128
     { gb_rom_1_sinclair_128k, gb_overlay_kay1024_48 },   // 48
-    { gb_rom_kay256_svc, nullptr },   // svc
+    { gb_rom_kay1024_svc, nullptr },   // svc
     { gb_rom_4_trdos_504t, gb_overlay_kay1024_dos },   // dos
+};
+// rom[] order: 0 BASIC-128, 1 BASIC-48, 2 service, 3 TR-DOS
+static const kay_rom_bank_t gb_rom_kay256_banks[4] = {
+    { gb_rom_0_pentagon_128k, gb_overlay_kay256_128 },   // 128
+    { gb_rom_1_sinclair_128k, gb_overlay_kay256_48 },   // 48
+    { gb_rom_kay1024_svc, gb_overlay_kay256_svc },   // svc
+    { gb_rom_4_trdos_504t, gb_overlay_kay256_dos },   // dos
 };
 // rom[] order: 0 BASIC-128, 1 BASIC-48, 2 service, 3 TR-DOS
 static const kay_rom_bank_t gb_rom_kay2010_banks[4] = {
@@ -46,6 +46,6 @@ static const kay_rom_bank_t gb_rom_kay2010_banks[4] = {
 static const kay_rom_bank_t gb_rom_kay2048_banks[4] = {
     { gb_rom_0_pentagon_128k, gb_overlay_kay2048_128 },   // 128
     { gb_rom_1_sinclair_128k, nullptr },   // 48
-    { gb_rom_kay256_svc, gb_overlay_kay2048_svc },   // svc
+    { gb_rom_kay1024_svc, gb_overlay_kay256_svc },   // svc
     { gb_rom_4_trdos_504t, gb_overlay_kay1024_dos },   // dos
 };

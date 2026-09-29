@@ -1191,9 +1191,13 @@ def pack_atm():
 # (file, page). Sources: github.com/z00m128/kay1024 firmware/rom and
 # speccy4ever.speccy.org/_KA.htm; the Phoenix BIOS from micklab.ru/file/
 # zxm_bios_5_04t.rar (Nemo layout, its service page is empty 0xFF as shipped).
+# KAY-256 (1994 Nemo) shipped THREE ROMs and no service page at all
+# (speccy4ever KAY256_0_128 / _1_48 / _2_DOS.ROM; its 128 ROM never writes #1FFD),
+# so kay256.bin is those three + an empty 0xFF page. An earlier image carried the
+# Kramis V0.3 2000 service page in slot 3, which belongs to the KAY-1024.
 KAY_IMAGES = [
     # file, crc32
-    ('kay256.bin',          0x8FEA97CF),  # 1994 NEMO KAY-256: 128 / 48 / TR-DOS 5.04T / Kramis
+    ('kay256.bin',          0x44BE3B9E),  # 1994 NEMO KAY-256: 128 / 48 / TR-DOS / (empty)
     ('kay1024_2000.bin',    0x67351CAA),  # JV Kramis V0.3 2000: 128 / 48 / TR-DOS / Kramis
     ('kay1024_2002las.bin', 0x878B4D9C),  # JV Kramis V0.3 2002 LAS: 128 / 48 / Kramis / TR-DOS
     ('kay_service02d.bin',  0x430DC4EF),  # Reset Service V0.2d (2015), one 16K page
@@ -1201,9 +1205,10 @@ KAY_IMAGES = [
 ]
 KAY_ROMSETS = [
     # tag, [(file, page) for roles 128, 48, service, TR-DOS]
-    ('kay256',  [('kay256.bin', 0), ('kay256.bin', 1), ('kay256.bin', 3), ('kay256.bin', 2)]),
+    # kay1024 first: its Kramis service page is the raw base the empty pages overlay
     ('kay1024', [('kay1024_2000.bin', 0), ('kay1024_2000.bin', 1),
                  ('kay1024_2000.bin', 3), ('kay1024_2000.bin', 2)]),
+    ('kay256',  [('kay256.bin', 0), ('kay256.bin', 1), ('kay256.bin', 3), ('kay256.bin', 2)]),
     ('kay2010', [('kay1024_2002las.bin', 0), ('kay1024_2002las.bin', 1),
                  ('kay_service02d.bin', 0), ('kay1024_2002las.bin', 3)]),
     ('kay2048', [('zxm_phoenix_504t.bin', 2), ('zxm_phoenix_504t.bin', 3),
