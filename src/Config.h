@@ -198,6 +198,9 @@ public:
         // through the ordinary page machinery, so SD-swap backing is enough.
         if (a == A_SCORP && (rs == R_NONE ? romSetScorp : rs) == R_KAY2048 && n < 128)
             n = 128;
+        // ATM-Turbo 3: 4 MB = 256 pages (#x7F7 takes a full 8-bit page number).
+        if (a == A_ATM && isAtm3Romset(rs == R_NONE ? romSetAtm : rs) && n < 256)
+            n = 256;
         return n;
     }
     static bool     rtc_enabled;  // Pentagon/Profi Mr Gluk MC146818 RTC + CMOS NVRAM (RP2350)

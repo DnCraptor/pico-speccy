@@ -1074,6 +1074,15 @@ ATM_IMAGES = [
     ('atm2_10602.bin',    0xD797436A, 'atm2v106', 4),
     ('atm2_10713.bin',    0x34A91D53, 'atm2',  4),
     ('atm2_xbios137.bin', 0xE5EF44D9, 'atm2x', 8),
+    # ATM-Turbo 3 v8.0 (NedoPC, 4 MB), 27C020 image ATM3TEST_XBIOS137XT.020: pages
+    # 0-7 = MSD888's "Test v1.4 for ATM-Turbo 3.0" (page 7; pages 0-6 are the ROM
+    # page-switch test targets — 0xFF plus a page number and a key-wait stub),
+    # pages 8-15 = xBIOS 1.37 byte for byte (its self-references are pages 56-63).
+    ('atm3_test_xbios137.bin', 0x024411F9, 'atm3', 16),
+    # ATM-Turbo 3, MicroART BIOS 1.07.13EC (atmturbo.nedopc.com bios10713ec.zip,
+    # Maksagor 2015): 1.07.13 with its #xFF7 manager writes made A11-safe, 71 bytes
+    # off (pages 1 and 3) — same page order as 1.07.13.
+    ('atm3_10713ec.bin',  0xFB547227, 'atm3v107', 4),
 ]
 ATM_RAW_MAX = 12288   # an overlay bigger than this ships the page raw instead
 

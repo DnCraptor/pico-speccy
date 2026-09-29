@@ -944,6 +944,50 @@ void Ports::ideTraceFlush() {
 #endif
 }
 
+
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+// ATM port trace (ZC_PORT_TRACE builds): writes to the ATM3 paging / DOS ports and
+// every Z-Controller #xx57 access, runs of the same (dir, port, value) collapsed.
+static void atmPortTrace(char dir, uint16_t address, uint8_t v) {
+  static uint16_t n = 0, lastA = 0; static uint8_t lastV = 0; static char lastD = 0;
+  static uint32_t rep = 0;
+  if (n >= 800) return;
+  if (dir == lastD && address == lastA && v == lastV) { rep++; return; }
+  if (rep) { Debug::log("[ATMP] ... x%lu", (unsigned long)rep); rep = 0; n++; }
+  lastD = dir; lastA = address; lastV = v;
+  Debug::log("[ATMP] %c %04X=%02X pc=%04X dos=%d", dir, address, v, Z80::getRegPC(),
+             (int)ESPectrum::trdos);
+  n++;
+}
+static inline bool atmPortTraced(uint16_t a) {
+  const uint8_t lo = (uint8_t)a;
+  // #xxF7 page writes are left out: FatFs copies every sector between pages and
+  // they flooded the UART (2026-09-28 capture).
+  return lo == 0x57 || lo == 0xBF || lo == 0xBE;
+}
+// The last 16 ATM paging writes (#xxF7, #xxFD, #xx77), kept for the RST-38 trace in
+// Z80_JLS.cpp — a jump into an untouched page is a paging mistake, and the writes
+// that led there are the whole question.
+uint16_t g_atm_pg_port[16], g_atm_pg_pc[16];
+uint8_t  g_atm_pg_val[16], g_atm_pg_i = 0;
+bool g_atm_trace_armed = false;   // set by the page-table write trace (CPU.cpp)
+static inline void atmPageTrace(uint16_t address, uint8_t v) {
+  const uint8_t lo = (uint8_t)address;
+  // Window 0 page registers (A15..A14 = 0), #7FFD outside the IM1 handler (#003F/#0041
+  // are the user kernel's INT entry, two lines per frame), #xx77, #xxE7, #BF.
+  const bool w0 = (lo == 0xF7 || lo == 0xE7) && (address >> 14) == 0;
+  const bool fd = lo == 0xFD && Z80::getRegPC() != 0x003F && Z80::getRegPC() != 0x0041;
+  if (g_atm_trace_armed && (w0 || fd || lo == 0x77 || lo == 0xBF)) {
+    static uint16_t n = 0;
+    if (n < 200) { n++;
+      Debug::log("[ATMARM] %04X=%02X pc=%04X 7ffd=%02X s0w0=%03X s1w0=%03X", address, v,
+                 Z80::getRegPC(), Atm::p7ffd, Atm::pF7[0], Atm::pF7[4]); }
+  }
+  if (lo != 0xF7 && lo != 0xFD && lo != 0x77) return;
+  const uint8_t k = g_atm_pg_i++ & 15;
+  g_atm_pg_port[k] = address; g_atm_pg_val[k] = v; g_atm_pg_pc[k] = Z80::getRegPC();
+}
+#endif
 IRAM_ATTR uint8_t Ports::input(uint16_t address) {
   uint8_t data;
 #if SND_PORT_TRACE
@@ -1142,7 +1186,7 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
   // via A0 latch. Authentic NEMO is mapped outside TR-DOS; on Profi the SYSEN
   // line keeps ESPectrum::trdos permanently asserted (not real TR-DOS paging),
   // so the !trdos rule is bypassed there.
-  if (IDE::portScheme == IDE::NEMO && !(address & 6) && (Z80Ops::isProfi || !ESPectrum::trdos)) {
+  if (IDE::portScheme == IDE::NEMO && !(address & 6) && (Z80Ops::isProfi || (Z80Ops::isAtm && Atm::atm3) || !ESPectrum::trdos)) {
     if (address & 1) { LED::touchR(LED::IDE); return IDE::read_latch(); } // A0=1: high-byte latch
     if ((address & 0x18) == 0x08 && (address & 0xE0) == 0xC0) {          // control / alt-status
       LED::touchR(LED::IDE); return IDE::read8(8);
@@ -1189,7 +1233,11 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
   // INTRQ status port — cold flash dispatch (src/Atm.cpp), ahead of the ULA branch.
   if (Z80Ops::isAtm) {
     if (DivMMC::zc_enabled && (uint8_t)address == 0x57) {   // see the output twin
-      LED::touchR(LED::ZCTRL); return DivMMC::zc_read_data();
+      LED::touchR(LED::ZCTRL);
+#if ZC_PORT_TRACE
+      { const uint8_t v = DivMMC::zc_read_data(); atmPortTrace('R', address, v); return v; }
+#endif
+      return DivMMC::zc_read_data();
     }
     // General Sound #B3/#BB ahead of the ATM decode: the 2+'s printer status
     // (%nnnnn011) matches both and answered #7F — command bit stuck at 1, so every
@@ -1731,7 +1779,8 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
     // `IN A,(#1F); AND #E0; JR Z` never exits (hw dump 2026-08-30: PC=0237 in
     // bank2, romInUse=2, romLatch=1).
     // (Nemo KAY: 1FFD D1 is the Centronics /Q8 line, not SYSEN.)
-    bool scorp_sysen = Z80Ops::isScorpion && !g_scorp_kay && (port1FFD & 0x02);
+    bool scorp_sysen = (Z80Ops::isScorpion && !g_scorp_kay && (port1FFD & 0x02))
+                    || (Z80Ops::isAtm && Atm::shaden);   // ATM3 #BF D0: DOS ports without DOS ROM
     // skip_real_fdc: bypass real WD1793 during Profi SYS ROM boot ONLY when
     // no disk is mounted at all.  With any disk (TRD/SCL/FDI/...), let the
     // real FDC handle it so the SYS ROM disk probe can succeed.
@@ -3226,6 +3275,12 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
   // Z-Controller data #57 ahead of the ATM decode: the 2+'s DOS-space #xx77 family
   // leaves A5 undecoded (%0nn101n1), so #57 would otherwise land in write77 and
   // reprogram the memory map. UnrealSpeccy tests #57 first, before every DOS port.
+#if ZC_PORT_TRACE
+  if (Z80Ops::isAtm && atmPortTraced(address)) atmPortTrace('W', address, data);
+#endif
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+  if (Z80Ops::isAtm) atmPageTrace(address, data);
+#endif
   if (Z80Ops::isAtm && DivMMC::zc_enabled && (uint8_t)address == 0x57) {
     LED::touchW(LED::ZCTRL); DivMMC::zc_write_data(data); return;
   }
@@ -3492,7 +3547,7 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
   // (NEMO register ports have A0=0). 16-bit data via A0 latch. On Profi the
   // SYSEN line keeps ESPectrum::trdos permanently asserted, so the !trdos rule
   // (authentic NEMO is outside TR-DOS) is bypassed there.
-  if (IDE::portScheme == IDE::NEMO && !(address & 6) && (Z80Ops::isProfi || !ESPectrum::trdos)) {
+  if (IDE::portScheme == IDE::NEMO && !(address & 6) && (Z80Ops::isProfi || (Z80Ops::isAtm && Atm::atm3) || !ESPectrum::trdos)) {
     if (address & 1) { LED::touchW(LED::IDE); IDE::write_latch(data); return; } // A0=1: high latch
     if ((address & 0x18) == 0x08 && (address & 0xE0) == 0xC0) {                // control
       LED::touchW(LED::IDE); IDE::write8(8, data); return;
@@ -4249,7 +4304,8 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
     // matching read-side comment (ZXMAK2: "Ports active when DOSEN=1 or
     // SYSEN=1").
     if (ESPectrum::trdos || out_has_raw_disk ||
-        (Z80Ops::isScorpion && !g_scorp_kay && (port1FFD & 0x02))) {
+        (Z80Ops::isScorpion && !g_scorp_kay && (port1FFD & 0x02)) ||
+        (Z80Ops::isAtm && Atm::shaden)) {   // ATM3 #BF D0
 
       // Profi CP/M mode: FDC data registers shift to 0x83/0xA3/0xC3/0xE3
       // UnrealSpeccy decode: (addr & 0x9F) == 0x83 → reg index = (addr >> 5) & 3

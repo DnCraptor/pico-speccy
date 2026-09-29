@@ -238,6 +238,10 @@
 #define TXT_ROM_ATM2_S       "Turbo 2+"
 #define TXT_ROM_ATM2X        "ATM-Turbo 2+ (xBIOS 1.37)"
 #define TXT_ROM_ATM2X_S      "Turbo 2+ xBIOS"
+#define TXT_ROM_ATM3V107     "ATM-Turbo 3 (BIOS 1.07.13EC)"
+#define TXT_ROM_ATM3V107_S   "Turbo 3"
+#define TXT_ROM_ATM3         "ATM-Turbo 3 (xBIOS 1.37)"
+#define TXT_ROM_ATM3_S       "Turbo 3 xBIOS"
 #define TXT_ROM_TSBIOS       "TS-BIOS + 128"
 #define TXT_ROM_TSBIOS_S     "128"            // left-column short form (Option::slabel)
 #define TXT_ROM_TSBIOS_GLUK  "TS-BIOS + Mr Gluk"

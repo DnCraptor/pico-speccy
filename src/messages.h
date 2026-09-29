@@ -147,6 +147,9 @@ visit https://zxespectrum.speccy.org/contacto
 // ATM-Turbo 1 / 2+: BIOS=1 (plain reset), CP/M=2 (the BIOS with its menu answered
 // "CP/M" — Atm::cpmBootArmed), then the ROMs directly (Atm::bootRom).
 #define MENU_RESETTO_ATM "Reset to\n" "BIOS\n" "CP/M\n" "TR-DOS\n" "128K\n" "48K\n"
+// ATM-Turbo 3: the same five, plus the board test in the lower 128 KB of its ROM
+// (Atm::bootTest).
+#define MENU_RESETTO_ATM3 "Reset to\n" "BIOS\n" "CP/M\n" "TR-DOS\n" "128K\n" "48K\n" "ATM3 test\n"
 // TS-Conf: TS-BIOS Setup=1 (the one entry that still goes through the BIOS —
 // it samples Symbol Shift at START), then one entry per ROM page of the
 // selected BIOS set, cold-booted directly like the Pentagon/Scorpion entries.

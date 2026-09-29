@@ -2314,7 +2314,7 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                 if (Config::arch == A_PROFI) {
                     reset_menu = MENU_RESETTO_PROFI;
                 } else if (Z80Ops::isAtm) {
-                    reset_menu = MENU_RESETTO_ATM;
+                    reset_menu = (Config::romSetAtm == R_ATM3) ? MENU_RESETTO_ATM3 : MENU_RESETTO_ATM;
                 } else if (Config::arch == A_SCORP && g_scorp_kay) {
                     reset_menu = MENU_RESETTO_KAY;
                 } else if (Config::arch == A_SCORP) {
@@ -2340,9 +2340,10 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                     Config::last_ram_file = NO_RAM_FILE;
 
                     if (Z80Ops::isAtm) {
-                        // BIOS=1, CP/M=2, TR-DOS=3, 128K=4, 48K=5
+                        // BIOS=1, CP/M=2, TR-DOS=3, 128K=4, 48K=5, ATM3 test=6
                         ESPectrum::reset();
                         if (opt == 2)      Atm::cpmBootArmed = true;
+                        else if (opt == 6) Atm::bootTest();
                         else if (opt == 3) Atm::bootRom(Atm::BOOT_TRDOS);
                         else if (opt == 4) Atm::bootRom(Atm::BOOT_128);
                         else if (opt == 5) Atm::bootRom(Atm::BOOT_48);

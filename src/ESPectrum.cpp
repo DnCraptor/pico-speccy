@@ -980,8 +980,9 @@ void ESPectrum::setup() {
     }
     const bool atm2 = atmHasIde(Config::romSet);
     if (!atm2 && Config::ide_scheme == IDE::ATM) Config::ide_scheme = IDE::OFF;
-    else if (atm2 && Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATM)
-      Config::ide_scheme = IDE::ATM;
+    else if (atm2 && Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATM &&
+             !(isAtm3Romset(Config::romSet) && Config::ide_scheme == IDE::NEMO))
+      Config::ide_scheme = IDE::ATM;   // (ATM3 also takes a NEMO card — NedoOS)
   } else if (Config::ide_scheme == IDE::ATM) {
     Config::ide_scheme = IDE::OFF;
   }

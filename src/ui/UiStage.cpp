@@ -1030,7 +1030,8 @@ static void resolveConstraints(CommitReport& rep) {
         // ATM-Turbo: the memory manager rewires page 0 (MB-02+/esxDOS automap
         // would fight it), #FF is the Beta SYS register / ATM2 palette port
         // (Timex), and the frame is the plain 48K one (Murmuzavr is Pentagon-only).
-        // The IDE scheme follows the board: ATM2+ owns IDE::ATM, the ATM1 and ATM2 have none.
+        // The IDE scheme follows the board: ATM2+ owns IDE::ATM, the ATM1 and ATM2 have none;
+        // the ATM3 takes ATM or a NEMO card (NedoOS for ATM3 is built with NEMOIDE=1).
         if (stagedIsAtm()) {
             const bool noIde = !atmHasIde((RomsetIdx)(staged(SET_MACHINE) & 0xFF));
             if (staged(SET_TIMEX) != 0)
@@ -1048,8 +1049,9 @@ static void resolveConstraints(CommitReport& rep) {
             const int32_t sch = staged(SET_IDE_SCHEME);
             if (noIde && sch == IDE::ATM)
                 changed |= force(SET_IDE_SCHEME, 0, rep, "This ATM-Turbo has no IDE");
-            else if (!noIde && sch != 0 && sch != IDE::ATM)
-                changed |= force(SET_IDE_SCHEME, IDE::ATM, rep, "IDE: ATM-Turbo 2+ controller");
+            else if (!noIde && sch != 0 && sch != IDE::ATM &&
+                     !(isAtm3Romset((RomsetIdx)(staged(SET_MACHINE) & 0xFF)) && sch == IDE::NEMO))
+                changed |= force(SET_IDE_SCHEME, IDE::ATM, rep, "IDE: ATM-Turbo controller");
         } else if (staged(SET_IDE_SCHEME) == IDE::ATM) {
             changed |= force(SET_IDE_SCHEME, 0, rep, "ATM IDE needs an ATM-Turbo 2+");
         }

@@ -18,23 +18,35 @@
 #include "Z80_JLS/z80.h"
 
 uint8_t g_atm_ro = 0;
+#if ATM_PAGE_TRACE
+extern bool g_atm_trace_armed;   // Ports.cpp
+#endif
 
 namespace Atm {
 
 bool     atm1 = false;
+bool     atm3 = false;
 bool     intGated = false;
 uint8_t  p7ffd = 0;
 uint8_t  aFE = 0x80, aFB = 0x80, pFDFD = 0;
 uint16_t a77 = 0;
 uint8_t  p77 = 0;
-uint8_t  pF7[8] = { 0 };
+uint16_t pF7[8] = { 0 };
+uint8_t  pBF = 0;
+bool     shaden = false;
+bool     testBoot = false;
+// ATM-Turbo 3 with MicroART BIOS 1.07.13EC: the 4 MB ports (#x7F7 = #xxF7 with A11 = 0,
+// and #xxE7) are only taken from code running in RAM or with #BF D0 set; see the
+// #xxE7 / #x7F7 decode below.
+static bool s_atm3Bios107 = false;
 uint8_t  pal[16] = { 0 };
+uint8_t  palHi[16] = { 0 };
 bool     beta = false;
 bool     palDirty = false;
 
 static const atm_rom_page_t* s_tbl = nullptr;   // bound romset's page table
 static uint8_t  s_npages = 0;
-static const uint8_t* s_rom[8] = { nullptr };  // resolved pages (flash or PSRAM)
+static const uint8_t* s_rom[16] = { nullptr }; // resolved pages (flash or PSRAM); 16 = ATM3
 static uint8_t* s_flat = nullptr;              // PSRAM block holding the flattened pages
 static RomsetIdx s_flat_rs = R_NONE;           // romset s_flat currently holds
 static bool     s_flat_warned = false;
@@ -47,13 +59,22 @@ static const uint8_t kFF[16] __attribute__((aligned(4))) = {
 
 uint8_t romPageCount() { return s_npages ? s_npages : 4; }
 
+// #xFF7 data byte -> the pFFF7 form (Unreal io.cpp): D7 = low bits from #7FFD,
+// D6 = RAM, D5..D0 = page inverted.
+static inline uint16_t f7enc(uint8_t v) {
+    return (uint16_t)((((v & 0xC0) << 2) | (v & 0x3F)) ^ 0x33F);
+}
+
 void bindRoms(RomsetIdx rs, const atm_rom_page_t* pages, uint8_t n) {
+    if (n > sizeof s_rom / sizeof s_rom[0]) n = sizeof s_rom / sizeof s_rom[0];
     atm1 = isAtm1Romset(rs);
-    intGated = (rs == R_ATM2 || rs == R_ATM2X);
+    atm3 = isAtm3Romset(rs);
+    intGated = (rs == R_ATM2 || rs == R_ATM2X || isAtm3Romset(rs));
+    s_atm3Bios107 = (rs == R_ATM3_107);
     if (s_tbl != pages) {
         s_tbl = pages;
         s_npages = n;
-        for (int i = 0; i < 8; i++) s_rom[i] = nullptr;
+        for (int i = 0; i < 16; i++) s_rom[i] = nullptr;
     }
     (void)rs;
 }
@@ -113,6 +134,8 @@ static void resolveRoms() {
 // (atmdscr.htm, ATM-turbo 1): its BIOS drives the FDC from the SYSTEM ROM after a
 // CALL into #3Dxx (see trdosTrap).
 static inline bool cpmOn() { return !atm1 && !(a77 & 0x200); }
+// The shadow (DOS) PORTS, not the DOS ROM: TR-DOS / CP/M, or the ATM3's #BF D0.
+static inline bool dosPorts() { return ESPectrum::trdos || shaden; }
 
 static void dosRecalc() {
     ESPectrum::trdos = beta || cpmOn();
@@ -121,6 +144,21 @@ static void dosRecalc() {
 // ---------------------------------------------------------------------- paging --
 
 static uint8_t s_ro;
+
+// BIOS 1.07.13 is a 2+ BIOS: it writes the #xxF7 page registers with A11 = 0 (SYS page
+// #02B6, the reset page-table set-up: LD BC,#00F7 / OUT (C),A, B = #00/#40/#80/#C0 —
+// the EC build fixed only the OUTI loops) and its boot menu, copied to RAM at #8000,
+// floods #xxE7 with #FF (#80AD: LD BC,#00E7 / OUT (C),A / DJNZ). Taken as the ATM3's
+// 4 MB ports that remapped every window to RAM under the menu (hw dump 2026-09-29).
+// Two rules, one per port. #xxE7: #BF D0 only (Maksagor's rule) — the flood comes from
+// RAM, so a "runs from RAM" test cannot catch it. #x7F7: #BF D0, or a writer running
+// from RAM — BIOS ROM code (#02B6) gets the 2+ #xxF7, while NedoOS's kernel (pages 4 MB
+// through #37F7 with #BF = #20) and the menu's RAM copy (which only uses A11 = 1) work.
+static inline bool atm3E7Port()  { return !s_atm3Bios107 || (pBF & 1); }
+static inline bool atm3X7F7Port() {
+    if (!s_atm3Bios107 || (pBF & 1)) return true;
+    return !(s_ro & (1u << (Z80::getRegPC() >> 14)));
+}
 
 static inline void mapRom(int w, uint8_t page) {
     const uint8_t n = romPageCount();
@@ -162,20 +200,23 @@ void remap() {
         mapRam(3, pg3);
         MemESP::bankLatch = pg3 & (MEM_PG_CNT - 1);
     } else if (!(a77 & 0x100)) {
-        // PEN = 0: the last ROM page (the BIOS) in every window.
-        for (int w = 0; w < 4; w++) mapRom(w, (uint8_t)(n - 1));
+        // PEN = 0: the last ROM page (the BIOS) in every window. The ATM3 test boot
+        // takes the last page of the LOWER 128 KB instead (the test's own page 7),
+        // as a board with the ROM's A17 held low would.
+        const uint8_t last = (atm3 && testBoot && n > 8) ? (uint8_t)(n / 2 - 1) : (uint8_t)(n - 1);
+        for (int w = 0; w < 4; w++) mapRom(w, last);
         MemESP::bankLatch = p7ffd & 7;
     } else {
         const int set = (p7ffd & 0x10) ? 4 : 0;
         const uint8_t dos = ESPectrum::trdos ? 1 : 0;
         for (int w = 0; w < 4; w++) {
-            const uint8_t v = pF7[set + w];
-            const uint8_t page = (uint8_t)(~v & 0x3F);
-            switch (v & 0xC0) {
-                case 0xC0: mapRam(w, (page & ~7u) | (p7ffd & 7)); break;   // RAM, low bits from #7FFD
-                case 0x40: mapRam(w, page); break;                         // RAM from the register
-                case 0x80: mapRom(w, (uint8_t)((page & 0xFE) | dos)); break; // ROM, bit 0 = DOS
-                default:   mapRom(w, page); break;                         // ROM from the register
+            const uint16_t v = pF7[set + w];
+            const uint8_t page = (uint8_t)v;
+            switch (v & 0x300) {
+                case 0x000: mapRam(w, (page & 0xF8u) | (p7ffd & 7)); break;  // RAM, low bits from #7FFD
+                case 0x200: mapRam(w, page); break;                          // RAM from the register
+                case 0x100: mapRom(w, (uint8_t)((page & 0xFE) | dos)); break; // ROM, bit 0 = DOS
+                default:    mapRom(w, page); break;                          // ROM from the register
             }
         }
         MemESP::bankLatch = p7ffd & 7;
@@ -203,6 +244,11 @@ void reset() {
     resolveRoms();
     p7ffd = 0;
     beta = false;
+    // ATM3 #BF: every bit 0 after a reset (no priority shadow ports, #xxE7 = #xFF7,
+    // standard 64-colour palette).
+    pBF = 0;
+    shaden = false;
+    testBoot = false;
     if (atm1) {
         // BIOS 1.03/1.04 keeps the CP/M body XOR-ed at #22B9 with a key read off the
         // #FE bit-7 "Z" signal (#2024: 16 samples after a delay). It first counts the
@@ -261,7 +307,7 @@ void bootRom(BootTarget t) {
                                     (uint8_t)(0x40 | (~2 & 0x3F)), 0xFF };
         for (int s = 0; s < 2; s++)
             for (int w = 0; w < 4; w++)
-                pF7[s * 4 + w] = w ? tbl[w] : (s ? w0set1 : w0set0);
+                pF7[s * 4 + w] = f7enc(w ? tbl[w] : (s ? w0set1 : w0set0));
     }
     switch (t) {
         case BOOT_TRDOS: p7ffd = 0x00; beta = false; trdosMenuArmed = true;
@@ -290,14 +336,37 @@ void bootRom(BootTarget t) {
     VIDEO::atmVideoModeChanged();
 }
 
+// ATM-Turbo 3 test ROM: the reset state with the lower 128 KB of the ROM chip in
+// place of xBIOS — PEN = 0 then maps page 7 (MSD888's test) into every window and
+// the test starts at #0000 by itself (DI / OUT #7FFD / #xFF7 set-up / #xx77).
+// Cleared by the next machine reset, which brings xBIOS back.
+void bootTest() {
+    if (!atm3) return;
+    testBoot = true;
+    remap();
+}
+
 // ------------------------------------------------------------------ palette --
 
 // ATM-Turbo 2+: data bits (inverted) grbG--RB -> 2 bits per channel.
 // ATM-Turbo 1:  --grbGRB. Unreal atm_zc_tables(); MAME atm_port_ff_w agrees for the 2+.
+// ATM-Turbo 3 with #BF D5: 16 of 4096 colours. The data byte keeps the two HIGH bits
+// of each channel exactly as above and the address byte A15..A8 of the same #xxFF
+// write carries the two LOW bits in the same layout — the test ROM's own ramps
+// (page 7 #0120/#0140/#0160: data/high pairs DE/DE, DE/FE, DE/DF, DE/FF, FE/DE ...)
+// only descend monotonically read that way.
 uint32_t palRgb(uint8_t i) {
     const uint8_t v = (uint8_t)~pal[i & 15];
     uint8_t R, G, B;
-    if (atm1) {
+    if (atm3 && (pBF & 0x20)) {
+        const uint8_t h = (uint8_t)~palHi[i & 15];
+        auto ch = [v, h](int hi, int lo) -> uint8_t {
+            const int c = (((v >> hi) & 1) << 3) | (((v >> lo) & 1) << 2) |
+                          (((h >> hi) & 1) << 1) |  ((h >> lo) & 1);
+            return (uint8_t)(c * 0x11);
+        };
+        R = ch(1, 6); G = ch(4, 7); B = ch(0, 5);
+    } else if (atm1) {
         R = (uint8_t)(((v >> 1) & 1) * 0xAA + ((v >> 4) & 1) * 0x55);
         G = (uint8_t)(((v >> 2) & 1) * 0xAA + ((v >> 5) & 1) * 0x55);
         B = (uint8_t)(((v >> 0) & 1) * 0xAA + ((v >> 3) & 1) * 0x55);
@@ -309,10 +378,11 @@ uint32_t palRgb(uint8_t i) {
     return ((uint32_t)R << 16) | ((uint32_t)G << 8) | B;
 }
 
-static void palWrite(uint8_t data) {
+static void palWrite(uint8_t data, uint8_t hi = 0xFF) {
     const uint8_t idx = VIDEO::borderColor & 15;
-    if (pal[idx] != data) {
+    if (pal[idx] != data || palHi[idx] != hi) {
         pal[idx] = data;
+        palHi[idx] = hi;
         palDirty = true;
         VIDEO::atmPaletteChanged();
     }
@@ -405,14 +475,102 @@ bool portWrite(uint16_t address, uint8_t data) {
         }
         return false;
     }
-    // ATM-Turbo 2+
-    if (!(address & 0x8002)) { write7ffd(data); return true; }                    // #7FFD
-    if (!ESPectrum::trdos) return false;
+    // ATM-Turbo 3 #BF (open port, any mode — "доступный как на чтение, так и на
+    // запись"): D0 = priority shadow ports without the TR-DOS ROM, D1 = #xxE7 works as
+    // #x7F7 (else as #xFF7), D5 = the 4096-colour palette. D2-D4, D6, D7 unused.
+    // Taken ahead of the #FF palette family, which #BF would otherwise match.
+    if (atm3 && lo == 0xBF) {
+        const uint8_t old = pBF;
+        pBF = data & 0x23;
+        shaden = (pBF & 1) != 0;
+        if ((old ^ pBF) & 0x20) { palDirty = true; VIDEO::atmPaletteChanged(); }
+        return true;
+    }
+    // ZX-128 #7FFD. ATM-Turbo 2+: the loose decode (A15 = 0, A1 = 0). ATM-Turbo 3:
+    // low byte #FD and A15 = 0, so a NEMO IDE card fits beside it — NedoOS for ATM3 is
+    // built with NEMOIDE=1 (src.r2698 _sdk/config/atm3*), and its driver writes #E0
+    // (LBA, master) to the head register with LD BC,#00D0 : OUT (C),A, which the loose
+    // decode took as #7FFD: paging locked (D5), register set flipped (D4) under the
+    // kernel, FatFs never ran (hw 2026-09-28, p7ffd=E0; again 2026-09-29 once the loose
+    // decode came back with the port rework).
+    if (atm3 ? (lo == 0xFD && !(address & 0x8000)) : !(address & 0x8002)) {
+        write7ffd(data);
+        return true;
+    }
+    // ATM-Turbo 3: the NEMO IDE decode (loa[2:0] = 0 and loa[3] != loa[4]; plus #11,
+    // the high-byte latch). With a NEMO image mounted Ports.cpp answers it; without one
+    // the writes must still not fall through to the A0 = 0 ULA decode and repaint the
+    // border / click the beeper.
+    if (atm3 && IDE::portScheme != IDE::NEMO &&
+        (((lo & 7) == 0 && (((lo >> 3) ^ (lo >> 4)) & 1)) || lo == 0x11))
+        return true;
+    if (!dosPorts()) return false;
+    const uint8_t sel = (uint8_t)(((p7ffd & 0x10) >> 2) | (address >> 14));
+    // ATM-Turbo 3 #xxE7 (#FFE7/#FEE7, A8 ignored, window = A15..A14): a second page
+    // port on the short decode — #xFF7 while #BF D1 = 0, #x7F7 (8-bit RAM page,
+    // inverted) while D1 = 1.
+    if (atm3 && lo == 0xE7 && atm3E7Port()) {
+        pF7[sel] = (pBF & 2) ? (uint16_t)((pF7[sel] & ~0x1FFu) | (uint8_t)(data ^ 0xFF))
+                             : f7enc(data);
+        remap();
+        LED::touchW(LED::RAM);
+        return true;
+    }
     // %nXnnnnXX 0nn101n1 / 1nn101n1: A6, A5, A1 are not decoded.
     if ((lo & 0x9D) == 0x15) { write77(address, data); return true; }
     if ((lo & 0x9D) == 0x95) {
-        pF7[((p7ffd & 0x10) >> 2) | (address >> 14)] = data;
+        // ATM-Turbo 3: A11 = 0 is #x7F7 (the 4 MB manager: 8-bit RAM page, inverted),
+        // #xFF7 needs A11 = 1 — whenever the shadow ports are open, TR-DOS included.
+        // DEVIATION from Maksagor's 2017 article, which has #x7F7 visible only through
+        // #BF D0: NedoOS for ATM3 (osatm3sd.trd) enters DOS with JP #3D2F, never sets
+        // #BF D0 (it writes #20) and pages 4 MB through #37F7/#B7F7/#F7F7 — with the
+        // article's rule it hung at start (hw 2026-09-29). xBIOS 1.37 and the ATM3 test
+        // ROM address #xFF7 with A11 = 1 throughout (#3FF7/#7FFx/#BFF7/#FFF7/#0EF7), so
+        // they do not notice; only software doing OUT (#F7) with A11 = 0 in A would.
+        if (atm3 && !(address & 0x0800) && atm3X7F7Port()) {
+            pF7[sel] = (uint16_t)((pF7[sel] & ~0x1FFu) | (uint8_t)(data ^ 0xFF));
+#if ATM_PAGE_TRACE
+            // x7F7 into a register still in "low bits from #7FFD" mode: the page the
+            // guest asked for is not the page it gets.
+            if (!(pF7[sel] & 0x200)) {
+                static uint16_t n = 0;
+                if (n < 40) { n++;
+                    Debug::log("[ATMX] x7F7 %04X=%02X set%d w%d in 7FFD mode -> pg %02X pc=%04X",
+                               address, data, sel >> 2, sel & 3,
+                               (unsigned)(((data ^ 0xFF) & 0xF8) | (p7ffd & 7)), Z80::getRegPC()); }
+            }
+#endif
+        } else {
+            pF7[sel] = f7enc(data);
+#if ATM_PAGE_TRACE
+            if (atm3) {
+                static uint16_t n = 0;
+                if (n < 80) { n++;
+                    Debug::log("[ATMX] xFF7 %04X=%02X set%d w%d -> %03X pc=%04X",
+                               address, data, sel >> 2, sel & 3, pF7[sel], Z80::getRegPC()); }
+            }
+#endif
+        }
         remap();
+#if ATM_PAGE_TRACE
+        {   // NedoOS init_resident: the #C000 page load at #0055 is followed by
+            // POP DE / POP BC / POP AF / RET — log where that RET goes.
+            static uint16_t n = 0;
+            const uint16_t pc = Z80::getRegPC();
+            if (::g_atm_trace_armed && (pc == 0x0055 || pc == 0x004F || pc == 0x0049) && n < 60) {
+                n++;
+                const uint16_t sp = Z80::getRegSP();
+                auto rd = [](uint16_t a) -> uint8_t { return MemESP::ramCurrent[a >> 14][a & 0x3FFF]; };
+                const uint8_t* z = MemESP::ramCurrent[0];
+                Debug::log("[ATMINIT]   w0[00..0F]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                           z[0],z[1],z[2],z[3],z[4],z[5],z[6],z[7],z[8],z[9],z[10],z[11],z[12],z[13],z[14],z[15]);
+                Debug::log("[ATMINIT] %04X=%02X pc=%04X sp=%04X ret=%02X%02X w=%p %p %p %p",
+                           address, data, pc, sp, rd((uint16_t)(sp + 7)), rd((uint16_t)(sp + 6)),
+                           (void*)MemESP::ramCurrent[0], (void*)MemESP::ramCurrent[1],
+                           (void*)MemESP::ramCurrent[2], (void*)MemESP::ramCurrent[3]);
+            }
+        }
+#endif
         LED::touchW(LED::RAM);
         return true;
     }
@@ -427,7 +585,7 @@ bool portWrite(uint16_t address, uint8_t data) {
     }
     // #FF family with /PEN2 = 0: palette. NOT consumed — Unreal also hands the byte
     // to the Beta-128 system register ("don't return").
-    if ((lo & 0x9F) == 0x9F && !(a77 & 0x4000)) palWrite(data);
+    if ((lo & 0x9F) == 0x9F && !(a77 & 0x4000)) palWrite(data, (uint8_t)(address >> 8));
     return false;
 }
 
@@ -455,7 +613,8 @@ bool portRead(uint16_t address, uint8_t& v) {
         if ((address & 0x05) == 0x00) { v = 0xFF; return true; }
         return false;
     }
-    if (ESPectrum::trdos && ideLive(address)) {
+    if (atm3 && (uint8_t)address == 0xBF) { v = pBF; return true; }   // unused bits read 0
+    if (dosPorts() && ideLive(address)) {
         LED::touchR(LED::IDE);
         if (address & 0x100) v = IDE::read_latch();
         else {
@@ -470,13 +629,13 @@ bool portRead(uint16_t address, uint8_t& v) {
     if ((address & 0x07) == 0x03) { v = 0x7F; return true; }
     // #FF outside DOS: the attribute port the ATM1 lacked ("порт атрибутов"), i.e.
     // what the video controller is fetching — the 48K floating bus (same frame).
-    if ((address & 0xFF) == 0xFF && !ESPectrum::trdos) { v = Ports::getFloatBusData48(); return true; }
+    if ((address & 0xFF) == 0xFF && !dosPorts()) { v = Ports::getFloatBusData48(); return true; }
     // A15 = 0, A9 = 1, A1 = 0: the IDE INTRQ / DAC status port — D6 = INTRQ.
     // Below the DOS ports, as in Unreal (in(): the CF_DOSPORTS block returns first):
     // `IN A,(#FF)` puts A on A8-A15, so with DOS up a Beta register read can match
     // this decode and must still reach the WD1793 (the CP/M BIOS polls INTRQ/DRQ
     // that way).
-    if (ESPectrum::trdos && (address & 0x1F) == 0x1F) return false;
+    if (dosPorts() && (address & 0x1F) == 0x1F) return false;
     if ((address & 0x8202) == 0x0200) {
         v = 0x3F | 0x40;
         return true;

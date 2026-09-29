@@ -107,6 +107,7 @@ option(GS_DEBUG_TRACE "Enable General Sound port-IO trace ring + auto-dumps (~50
 option(NGS_TRACE "Enable NeoGS 1 Hz health line (GS-Z80 PC / SD counters; ~2-4 ms UART stall per line)" OFF)
 option(NGS_SD_TRACE "Also log every guest SD command (NGS_TRACE level 2; thousands of lines per directory scan)" OFF)
 option(ZC_PORT_TRACE "Enable Z-Controller/DivSD SPI-SD command tracing (CS edges + command frames)" OFF)
+option(ATM_PAGE_TRACE "ATM-Turbo paging trace only: page-register ring + page-table writes + RST #38 alarm (no SD flood)" OFF)
 option(NEO8_TRAP "Wild-jump hunter: log PC history + frame snapshot when execution enters screen memory (per-instruction hook; debug builds only)" OFF)
 option(ZIFI_TRACE "Enable ZiFi (ESP-01S WiFi NIC) port/UART tracing" OFF)
 option(HID_TRACE "Enable the periodic 'HID kbd:' USB-keyboard health line (stuck-key / dead-endpoint diagnosis)" OFF)
@@ -1066,6 +1067,9 @@ else ()
 endif ()
 
 # Z-Controller/DivSD SPI-SD command tracing (DivMMC.cpp mmc engine).
+if (ATM_PAGE_TRACE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ATM_PAGE_TRACE=1)
+endif()
 if (ZC_PORT_TRACE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE ZC_PORT_TRACE=1)
 else ()

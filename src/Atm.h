@@ -34,6 +34,22 @@
 //     RAM (1) / ROM (0), D5..D0 = page number INVERTED.
 //   PEN = 0 puts the LAST ROM page (the BIOS) in all four windows — the reset state.
 //   IDE on the xx0F family (A7..A5 = register, A8 = the 16-bit high-byte latch).
+//
+// ATM-Turbo 3 v8.0 (NedoPC / Zorel + Maksagor, 2017), 4 MB — the full ATM-Turbo 2+
+// (ATM IDE, printer, the lot) plus, per Maksagor's "Обзор нового компьютера
+// ATM-turbo 3 версии 8.0" (Info Guide #12, zxpress.ru) and MSD888's test ROM:
+//   #BF (open port, read = the written value, unused bits 0, reset 0): D0 = DOSEN2,
+//     the shadow ports without the TR-DOS ROM; D1 = PGSN, #xxE7 works as #x7F7 (else
+//     as #xFF7); D5 = EXT_PAL, 16 of 4096 colours. D2-D4, D6, D7 unused.
+//   #x7F7 (the F7 family with A11 = 0, shadow ports): page register, 8-bit RAM page
+//     inverted (4 MB); #xFF7 needs A11 = 1. The article has #x7F7 only behind #BF D0;
+//     NedoOS pages through it from plain TR-DOS, so it is decoded whenever the shadow
+//     ports are open (see Atm.cpp).
+//   #xxE7 (#FFE7/#FEE7 — A8 ignored, window = A15..A14, shadow ports): a second page
+//     port on the short decode, in the #xFF7 or the #x7F7 format by #BF D1.
+//   EXT_PAL: #xxFF — data = the two high bits per channel (grbG--RB inverted, as on
+//     the 2+), A15..A8 = the two low bits in the same layout.
+// ROM: 256 KB, ATM3TEST_XBIOS137XT.020 — pages 0-7 the test (page 7), 8-15 xBIOS 1.37.
 #pragma once
 
 #include <stdint.h>
@@ -43,7 +59,7 @@
 // base == nullptr is the all-0xFF page; overlay == nullptr means "base as is".
 struct atm_rom_page_t { const unsigned char* base; const unsigned char* overlay; };
 
-// Bit n set = CPU window n shows ROM: writes are dropped there (the pages may be
+// Bit n (0..3) set = CPU window n shows ROM: writes are dropped there (the pages may be
 // flattened into butter PSRAM, which MemESP::writebyte's flash-pointer filter does
 // not cover). Tested predicted-not-taken in the CPU write funnel (CPU.cpp
 // gsDmaPoke8) — zero on every other machine.
@@ -53,13 +69,21 @@ namespace Atm {
     enum VMode : uint8_t { VM_ZX = 0, VM_EGA = 1, VM_HIRES = 2, VM_TEXT = 3 };
 
     extern bool     atm1;       // ATM-Turbo 1 board (else 2+), set by bindRoms
+    extern bool     atm3;       // ATM-Turbo 3 (4 MB + #BF / #x7F7 / #xxE7), set by bindRoms
     extern uint8_t  p7ffd;
     // ATM-Turbo 1
     extern uint8_t  aFE, aFB, pFDFD;
     // ATM-Turbo 2+
     extern uint16_t a77;
     extern uint8_t  p77;
-    extern uint8_t  pF7[8];
+    // Page registers in Unreal's pFFF7 form: bits 7..0 page (not inverted), bit 8 =
+    // ROM, bit 9 = take the page from the register (0 = low bits from #7FFD).
+    extern uint16_t pF7[8];
+    // ATM-Turbo 3
+    extern uint8_t  pBF;        // #BF: D0 DOSEN2, D1 PGSN, D5 EXT_PAL
+    extern bool     shaden;     // pBF D0: shadow ports open outside TR-DOS (Ports.cpp FDC gate)
+    extern bool     testBoot;   // PEN = 0 shows the lower 128 KB (the test ROM); bootTest()
+    extern uint8_t  palHi[16];  // EXT_PAL: A15..A8 of each palette write
     extern uint8_t  pal[16];    // raw palette bytes as written (read back on ATM 2+ via #BF)
     extern bool     beta;       // the Beta-128 trap signal (DOSEN), separate from /CPM
     extern bool     palDirty;   // palette changed — applied at EndFrame
@@ -123,6 +147,9 @@ namespace Atm {
 
     // check_trdos replacement (Z80_JLS.cpp).
     void trdosTrap(uint8_t pcH);
+
+    // ATM-Turbo 3: after reset(), start the test ROM (Alt+F11 "ATM3 test").
+    void bootTest();
 
     // Frame INT gate: #xx77 D5 on the 2+; always open on the ATM1 AND on the plain
     // ATM-Turbo 2 — BIOS 1.06.02 never sets D5 (every #77 write it makes is 00/06/0E)

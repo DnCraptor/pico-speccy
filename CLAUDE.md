@@ -12026,6 +12026,102 @@ MM_ATM450 / MM_ATM710, io.cpp, atm.cpp, drawers.cpp) and **MAME sinclair/atm.cpp
   text screens (CP/M, ATM2 text), the palette, ATM1 boot (CPSYS/SYS ROM, #FDFD pages),
   IDE on the 2+, and xBIOS 1.37.
 
+### ATM-Turbo 3 v8.0 (R_ATM3, 2026-09-29, NOT hw-tested)
+
+Fifth ATM romset, "ATM-Turbo 3 (4 MB)". **The model is the REAL NedoPC board, not
+UnrealSpeccy's `MM_ATM3`** — Unreal's is the ATM-compatible mode of the ZX-Evo (its ini
+loads `zxevo.rom` there): Evo #BF bits, NMI into RAM page #FF, #BE read-back, Gluk CMOS,
+and #x7F7 decoded in every DOS entry, which is exactly why xBIOS cannot run on an Evo.
+A first cut (2026-09-28) followed Unreal and was replaced the next day. Sources: Maksagor,
+"Обзор нового компьютера ATM-turbo 3 версии 8.0" (Info Guide #12, zxpress.ru, Dec 2017)
+and a disassembly of MSD888's test ROM, which agree.
+- The whole ATM-Turbo 2+ stays (#xx77, #xxF7, ATM IDE on xx0F — `atmHasIde`
+  includes R_ATM3, printer #FB, #FF palette), 7 MHz max, 256 pages
+  (`wantedPages`). Page registers in Unreal's pFFF7 form for every 2+ board (`f7enc`).
+- `#BF` (open port, any mode, read = written value, unused bits 0, reset 0): D0 DOSEN2 =
+  shadow ports without the TR-DOS ROM (`Atm::shaden`, joined to the Scorpion SYSEN gate
+  in Ports.cpp for the FDC), D1 PGSN = #xxE7 in #x7F7 format, D5 EXT_PAL. The test
+  writes #23 and expects to read `00100011`.
+- `#x7F7` = the F7 family with A11 = 0 (8-bit RAM page, inverted); #xFF7 needs A11 =
+  1 — whenever the shadow ports are open, TR-DOS included. **Deliberate deviation from
+  the article**, which has #x7F7 only behind #BF D0: NedoOS (`debug/NedoOS/osatm3sd.trd`)
+  enters DOS through `JP #3D2F`, writes `#BF = #20` (D0 clear) and pages 4 MB through
+  `#37F7`/`#B7F7`/`#F7F7`; with the article's rule it hung at start (hw 2026-09-29,
+  windows 0/2/3 all on one page in the dump). xBIOS 1.37 and the test ROM always
+  address #xFF7 with A11 = 1, so they are unaffected.
+- `#xxE7` (#FFE7/#FEE7, A8 ignored, window = A15..A14, shadow ports): #xFF7 format
+  with D1 = 0, #x7F7 format with D1 = 1. The test's 1 MB scan writes `page XOR #7F`
+  to #FEE7 at #BF = 0/1 and `CPL page` at #BF = 3.
+- EXT_PAL: the article gives no bit layout; the test ROM's own ramps (page 7 #0120/
+  #0140/#0160, data/A15..A8 pairs) settle it: each channel 4 bits = data's 2 bits
+  (grbG--RB inverted, as on the 2+, the #AA-weight bit high) then A15..A8's 2 bits in
+  the same layout. `Atm::palHi[]`, `palRgb`.
+- ROM = `ATM3TEST_XBIOS137XT.020` (27C020, CRC32 024411F9): pages 8-15 = xBIOS 1.37
+  byte for byte (its page self-references are 56-63, i.e. mod 16 = 8-15, so PEN = 0
+  and `bootRom`'s `n - 4` land right), page 7 = "Test v1.4 for ATM-Turbo 3.0" by
+  MSD888, pages 0-6 = 0xFF + page number at #0007 + a key-wait stub at #3FE6 (the ROM
+  page-switch test's targets). Packed: one 16 KB raw page + 7 x 51 B overlays, the
+  xBIOS pages shared with R_ATM2X. The 256 KB flattened block is butter PSRAM.
+- **Alt+F11 -> "ATM3 test"** (`Atm::bootTest`, `MENU_RESETTO_ATM3`): the test runs
+  from address 0 with PEN = 0 and expects to be the LAST page (it maps itself as
+  page 7), so `testBoot` makes PEN = 0 show the last page of the LOWER 128 KB — a
+  board with ROM A17 held low. The next machine reset clears it (xBIOS again).
+- **Second ATM3 romset `R_ATM3_107` "ATM3v107" = MicroART BIOS 1.07.13EC** (2026-09-29,
+  hw-confirmed on `debug/DVp2-atm3bios4-1.0.7.elf`: BIOS menu, CP/M / TR-DOS / 128 / 48,
+  NedoOS and Golden Axe all run; atmturbo.nedopc.com `bios10713ec.zip`, CRC32 FB547227, Maksagor 2015).
+  "Evo Compatible": stock 1.07.13 initialises the #xFF7 manager with OUTI through short
+  addresses (A11 floating), which our always-on #x7F7 decode would take as the 4 MB
+  port; EC fixes exactly that — 71 bytes off stock 1.07.13, all in pages 1/3 (paging
+  code + banner). Same page order as 1.07.13, 4 pages (`page % n`), CP/M hook = the 2+'s
+  (#00E1, untouched by the patch). Costs +5.2 KB (page 1 over TR-DOS 5.04T, page 3 110 B
+  over the 2+ SYS page, pages 0/2 shared). The Alt+F11 "ATM3 test" row is R_ATM3 only.
+  Menu labels now mirror the 2+: "ATM-Turbo 3 (BIOS 1.07.13EC)" / "(xBIOS 1.37)".
+  **First runs: no BIOS menu.** The EC patch fixed only the OUTI loops. The SYS page's
+  reset page-table set-up (#02B6: `LD BC,#00F7 / OUT (C),A`, B = #00/#40/#80/#C0) still
+  writes #xxF7 with A11 = 0, and the boot menu — COPIED TO RAM at #8000 — floods #xxE7
+  with #FF (#80AD, `LD BC,#00E7 / OUT (C),A / DJNZ`); as 4 MB ports both remapped every
+  window to RAM (dump: `ro=00`, #0000 zeroed, PC in the #8000 menu). For R_ATM3_107 only
+  (Atm.cpp): #xxE7 needs #BF D0; #x7F7 needs #BF D0 or a writer running from RAM (NedoOS's
+  kernel, #37F7 with #BF = #20 — owner: NedoOS from this BIOS works). A "from RAM" test
+  alone was hw-refuted: the BIOS menu itself runs from RAM.
+  R_ATM3 (xBIOS + test) is unchanged — the test ROM writes #FEE7 from ROM at #BF = 0.
+- Deliberately NOT modelled: the NMI changes the article only mentions in passing, the
+  on-board Kempston mouse/joystick beyond what the machine already has, the RTC/COM
+  behind the keyboard controller (no Gluk ports on this board), SD, flash rewrite.
+  Dropped from the Unreal cut: font RAM, NMI page #FF, #BE, #2F-#8F shadows, Gluk CMOS.
+- **Kept from it, for NedoOS: strict #7FFD (low byte #FD, A15 = 0) and the NEMO IDE
+  decode.** NedoOS for ATM3 is the ZX-Evo kernel (`src.r2698/kernel/main.asm`: `atm != 2`
+  -> `memport0000=0x37f7`, `pagexor=0xff`; every `_sdk/config/atm3*` has `NEMOIDE=1`), and
+  its NEMO driver's `LD BC,#00D0 : OUT (C),A` is a #7FFD write to the ATM2+'s loose decode
+  (p7ffd=E0: paging locked, register set flipped — "Drive A-D mounted", then nothing;
+  hit twice, 2026-09-28 and again 2026-09-29 when the port rework restored the loose
+  decode). Without a NEMO image the NEMO ports are swallowed (not the ULA); with one,
+  Ports.cpp's NEMO block answers them in DOS mode too on ATM3, and the IDE-scheme rule
+  (menu, CPU::reset, setup) accepts NEMO beside ATM there.
+- **NedoOS's own ATM3 kernels (r2698 osatm3sd/atm3/atm3hd/pe26sd) are BROKEN — not us.**
+  The user-kernel template `wasuserkernel` (copied into every new app's page 0) lands at
+  #3A00 in those builds, exactly on FatFs's hard-wired `pathbuf` (`fatfs4os/ff.c`:
+  `#define pathbuf ((unsigned char *) 0x3a00)`). The first path op (`BDOS_setsysdrv ->
+  setpath -> strcpy_usp2lib`, pc #2CC2) writes "bin" then "term.com" over it, so `term`
+  is created with "term.com" over its #0005 system-call entry: every BDOS call falls
+  through to getchar (`pc=#000D`), GETMAINPAGES never runs, term pages 0 into #4000 and
+  runs into the DRAM pattern at #206D. ATM2 (#3000) and Evo (#3700) builds are clear,
+  which is why NedoOS runs on the 2+. Proof: stock atm3sd built from `debug/NedoOS/
+  src.r2698` is byte-identical to the release (unpacked syscode), wasuserkernel #3A00;
+  upstream (alfishe/NedoOS, r2698, 2026-09-27) is unchanged. Workaround shipped in
+  `debug/NedoOS/osatm3sd_nonet.trd` (+ .txt): same kernel with `INETDRV=0` (no Wiznet),
+  template at #3100. **Hw 2026-09-29, owner: NedoOS starts with it** (on
+  `debug/DVp2-atm3v8-1.0.7.elf`) — which also confirms the diagnosis: same emulator,
+  only the kernel's layout changed. Found over eight `-DATM_PAGE_TRACE=ON` rounds (build-atmtrace/):
+  `[ATMPT]/[ATMRD]` page-table writes/reads, `[ATMARM]` window-0 + #7FFD after the second
+  app's creation, `[ATMINIT]` init_resident's RET target + first 16 bytes, `[ATMTPL]`
+  every write into the template. Kernel listing: `sjasmplus --lst` on a copy of the tree
+  with `_sdk/config/atm3sd/syssets.asm` + `atm2clock=0` in `_sdk/syssets.asm`. A
+  32-T-INT-in-turbo change tried on the way was a wrong theory and was reverted.
+- Hw check owed: xBIOS boot, TR-DOS / 128 / CP/M via Alt+F11, the ATM3 test end to end
+  (#BF read-back, "Всего найдено рабочих страниц" = 256, #x7F7 deep RAM test, ROM page
+  switch 0-7, extended palette ramps, DOSEN via #3Dxx), ATM IDE.
+
 ## Nemo KAY 256 Turbo / 1024 / 1024 v2010-v2018 / KAY2048 = ZXM-Phoenix (2026-09-26, NOT hw-tested)
 
 Four romsets of the **Scorpion arch**, not an arch of their own: `R_KAY256` "Kay256",

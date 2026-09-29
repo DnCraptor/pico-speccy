@@ -643,6 +643,8 @@ static const Option opt_mach_atm[] = {
     { TXT_ROM_ATM2V106, NM_MACH(A_ATM, R_ATM2_106), TXT_ROM_ATM2V106_S },
     { TXT_ROM_ATM2,  NM_MACH(A_ATM, R_ATM2),  TXT_ROM_ATM2_S  },
     { TXT_ROM_ATM2X, NM_MACH(A_ATM, R_ATM2X), TXT_ROM_ATM2X_S },
+    { TXT_ROM_ATM3V107, NM_MACH(A_ATM, R_ATM3_107), TXT_ROM_ATM3V107_S },
+    { TXT_ROM_ATM3,  NM_MACH(A_ATM, R_ATM3),  TXT_ROM_ATM3_S  },
 };
 // Ceiling for the guest's SysConfig ZCLK (a 14 MHz Z80 costs ~4x a 3.5 MHz frame
 // of core0 time — TS titles that ask for 14 MHz can be pinned to 7 here; the

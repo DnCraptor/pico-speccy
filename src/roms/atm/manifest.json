@@ -14,6 +14,10 @@
       "len": 16384
     },
     {
+      "sym": "gb_rom_atm3_p7",
+      "len": 16384
+    },
+    {
       "sym": "gb_rom_atm_font",
       "len": 2048
     }
@@ -109,7 +113,70 @@
       "len": 510,
       "runs": 23,
       "diff_bytes": 360
+    },
+    {
+      "sym": "gb_overlay_atm3_p0",
+      "base": "nullptr",
+      "len": 51,
+      "runs": 2,
+      "diff_bytes": 27
+    },
+    {
+      "sym": "gb_overlay_atm3_p1",
+      "base": "nullptr",
+      "len": 51,
+      "runs": 2,
+      "diff_bytes": 27
+    },
+    {
+      "sym": "gb_overlay_atm3_p2",
+      "base": "nullptr",
+      "len": 51,
+      "runs": 2,
+      "diff_bytes": 27
+    },
+    {
+      "sym": "gb_overlay_atm3_p3",
+      "base": "nullptr",
+      "len": 51,
+      "runs": 2,
+      "diff_bytes": 27
+    },
+    {
+      "sym": "gb_overlay_atm3_p4",
+      "base": "nullptr",
+      "len": 51,
+      "runs": 2,
+      "diff_bytes": 27
+    },
+    {
+      "sym": "gb_overlay_atm3_p5",
+      "base": "nullptr",
+      "len": 51,
+      "runs": 2,
+      "diff_bytes": 27
+    },
+    {
+      "sym": "gb_overlay_atm3_p6",
+      "base": "nullptr",
+      "len": 51,
+      "runs": 2,
+      "diff_bytes": 27
+    },
+    {
+      "sym": "gb_overlay_atm3v107_p1",
+      "base": "gb_rom_4_trdos_504t",
+      "len": 5057,
+      "runs": 47,
+      "diff_bytes": 4763
+    },
+    {
+      "sym": "gb_overlay_atm3v107_p3",
+      "base": "gb_rom_atm2_p3",
+      "len": 110,
+      "runs": 8,
+      "diff_bytes": 50
     }
   ],
-  "flash_bytes": 78938
+  "flash_bytes": 100846
 }

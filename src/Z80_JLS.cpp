@@ -1012,6 +1012,16 @@ IRAM_ATTR void Z80::check_trdos() {
  *      M4: 3 T-Estados -> leer byte bajo del vector de INT
  *      M5: 3 T-Estados -> leer byte alto y saltar a la rutina de INT
  */
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+// ATM EI trace (ZC_PORT_TRACE builds): the last 8 EIs with the pages in windows 0/1,
+// dumped when an IM1 interrupt is taken INSIDE the NedoOS sys_sysint handler
+// (#0909-#0950) — i.e. something re-enabled interrupts under the handler.
+static uint16_t s_ei_pc[8];
+static const void* s_ei_w0[8];
+static const void* s_ei_w1[8];
+static uint8_t s_ei_i = 0;
+static uint16_t s_nest_logged = 0;
+#endif
 void Z80::interrupt(void) {
 #if PERF_TRACE
     g_frm_int_taken++;   // machine-independent: was an interrupt taken this frame at all
@@ -1040,6 +1050,17 @@ void Z80::interrupt(void) {
     ffIFF1 = ffIFF2 = false;
 #if PAGE_TRACE
     const uint16_t pgIntPC = REG_PC;   // interrupted address, for the alarm below
+#endif
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+    if (Z80Ops::isAtm && REG_PC >= 0x0909 && REG_PC < 0x0951 && s_nest_logged < 20) {
+        s_nest_logged++;
+        Debug::log("[ATMEI] INT taken at pc=%04X sp=%04X w0=%p w1=%p", REG_PC, REG_SP,
+                   (const void*)MemESP::ramCurrent[0], (const void*)MemESP::ramCurrent[1]);
+        for (int j = 0; j < 8; j++) {
+            const uint8_t k = (uint8_t)(s_ei_i - 8 + j) & 7;
+            Debug::log("[ATMEI]   EI#%d pc=%04X w0=%p w1=%p", j, s_ei_pc[k], s_ei_w0[k], s_ei_w1[k]);
+        }
+    }
 #endif
     push(REG_PC); // el push añadirá 6 t-estados (+contended si toca)
     if (modeINT == IntMode::IM2) {
@@ -2352,6 +2373,14 @@ void Z80::decodeOpcodef9() /* LD SP,HL */
 
 void Z80::decodeOpcodefb() /* EI */
 {
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+    if (Z80Ops::isAtm) {
+        const uint8_t k = s_ei_i++ & 7;
+        s_ei_pc[k] = (uint16_t)(REG_PC - 1);
+        s_ei_w0[k] = MemESP::ramCurrent[0];
+        s_ei_w1[k] = MemESP::ramCurrent[1];
+    }
+#endif
     ffIFF1 = ffIFF2 = true;
     pendingEI = true;
     if (Z80Ops::isTsconf) TsConf::intEnableHook();
@@ -2556,6 +2585,38 @@ void Z80::decodeCALLcc() { /* CALL cc,nn */
 }
 
 void Z80::decodeRST() {    /* RST p */
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+    // ATM: an RST #38 executed with interrupts ENABLED enters the IM1 handler without
+    // the IFF1 clear an accepted INT does — the NedoOS sys_sysint nesting (2026-09-28).
+    {
+        static uint16_t n = 0;
+        if (Z80Ops::isAtm && opCode == 0xFF && ffIFF1 && n < 30) {
+            n++;
+            const uint16_t at = (uint16_t)(REG_PC - 1);
+            Debug::log("[ATMRST] RST38 at %04X sp=%04X [sp]=%04X w=%p %p %p %p", at, REG_SP,
+                       Z80Ops::peek16(REG_SP),
+                       (const void*)MemESP::ramCurrent[0], (const void*)MemESP::ramCurrent[1],
+                       (const void*)MemESP::ramCurrent[2], (const void*)MemESP::ramCurrent[3]);
+            if (n <= 2) {
+                const uint8_t* w0 = MemESP::ramCurrent[0];
+                Debug::log("[ATMRST]   w0[40..57]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                           w0[0x40],w0[0x41],w0[0x42],w0[0x43],w0[0x44],w0[0x45],w0[0x46],w0[0x47],
+                           w0[0x48],w0[0x49],w0[0x4A],w0[0x4B],w0[0x4C],w0[0x4D],w0[0x4E],w0[0x4F],
+                           w0[0x50],w0[0x51],w0[0x52],w0[0x53],w0[0x54],w0[0x55],w0[0x56],w0[0x57]);
+                Debug::log("[ATMRST]   pF7=%03X %03X %03X %03X | %03X %03X %03X %03X p7ffd=%02X",
+                           Atm::pF7[0], Atm::pF7[1], Atm::pF7[2], Atm::pF7[3],
+                           Atm::pF7[4], Atm::pF7[5], Atm::pF7[6], Atm::pF7[7], Atm::p7ffd);
+                extern uint16_t g_atm_pg_port[16], g_atm_pg_pc[16];
+                extern uint8_t g_atm_pg_val[16], g_atm_pg_i;
+                for (int j = 0; j < 16; j++) {
+                    const uint8_t k = (uint8_t)(g_atm_pg_i - 16 + j) & 15;
+                    Debug::log("[ATMRST]   pg#%02d %04X=%02X pc=%04X", j, g_atm_pg_port[k],
+                               g_atm_pg_val[k], g_atm_pg_pc[k]);
+                }
+            }
+        }
+    }
+#endif
     Z80Ops::addressOnBus(getPairIR().word, 1);
     push(REG_PC);
     REG_PC = REG_WZ = opCode & 0x38;

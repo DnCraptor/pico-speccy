@@ -414,8 +414,9 @@ void CPU::reset() {
         if (Config::mb02) Config::mb02 = false;
         const bool atm2 = atmHasIde(Config::romSetAtm);
         if (!atm2 && Config::ide_scheme == IDE::ATM) Config::ide_scheme = IDE::OFF;
-        else if (atm2 && Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATM)
-            Config::ide_scheme = IDE::ATM;
+        else if (atm2 && Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATM &&
+                 !(isAtm3Romset(Config::romSetAtm) && Config::ide_scheme == IDE::NEMO))
+            Config::ide_scheme = IDE::ATM;   // (ATM3 also takes a NEMO card — NedoOS)
     } else if (Config::ide_scheme == IDE::ATM) {
         Config::ide_scheme = IDE::OFF;
     }
@@ -828,7 +829,24 @@ static IRAM_ATTR __attribute__((noinline)) uint8_t timexPeek8(uint16_t address) 
                                : p[address & 0x1FFF];
 }
 
+#if ATM_PAGE_TRACE
+// ATM trace: CPU reads of #C044/#C04A/#C050 — NedoOS BDOS_getmainpages reading an
+// app's page table through window 3 — with the page they hit and the byte returned.
+static __attribute__((noinline)) void atmPgTableReadTrace(uint16_t address) {
+    static uint16_t n = 0;
+    if (n >= 120) return;
+    n++;
+    const uint8_t* pg = MemESP::ramCurrent[3];
+    Debug::log("[ATMRD] rd %04X=%02X pc=%04X page=%p 7ffd=%02X F7w3=%03X/%03X", address,
+               pg[address & 0x3FFF], Z80::getRegPC(), (const void*)pg, Atm::p7ffd,
+               Atm::pF7[3], Atm::pF7[7]);
+}
+#endif
 static inline uint8_t gsDmaPeek8(uint16_t address) {
+#if ATM_PAGE_TRACE
+    if (Z80Ops::isAtm && (address == 0xC044 || address == 0xC04A || address == 0xC050))
+        atmPgTableReadTrace(address);
+#endif
     if (__builtin_expect(g_timex_mmu != 0, 0) && Timex::rd[address >> 13])
         return timexPeek8(address);
     if (__builtin_expect(g_ngs_zxdma != 0, 0) && address < 0x4000
@@ -837,7 +855,57 @@ static inline uint8_t gsDmaPeek8(uint16_t address) {
     return MemESP::readbyte(address);
 }
 
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+// ATM trace: every CPU write to offset #0044 / #004A / #0050 of any window — the
+// NedoOS user-kernel page table (curpg16k/32klow/32khigh) — with the page pointer
+// the write lands in. The 2026-09-28 NedoOS ATM3 capture showed term.com reading
+// 00/FB/FB out of a table sys_newapp had just written F2/F1/F0 into.
+extern bool g_atm_trace_armed;   // Ports.cpp
+static void atmPgTableWriteTrace(uint16_t address, uint8_t value) {
+    // Arm the port trace at the second app's page table (NedoOS term: C050=F0).
+    if (address == 0xC050 && value == 0xF0) g_atm_trace_armed = true;
+    static uint16_t n = 0;
+    if (n >= 200) return;
+    n++;
+    Debug::log("[ATMPT] wr %04X=%02X pc=%04X page=%p 7ffd=%02X", address, value, Z80::getRegPC(),
+               (const void*)MemESP::ramCurrent[address >> 14], Atm::p7ffd);
+}
+#endif
 static inline void gsDmaPoke8(uint16_t address, uint8_t value) {
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+    if (Z80Ops::isAtm) {
+        const uint16_t off = address & 0x3FFF;
+        // Watch the NedoOS user-kernel TEMPLATE: its physical address is the LDIR
+        // source at the first template write (C044=FB from pc #4A39/#4A3A).
+        static const uint8_t* s_tpl = nullptr;
+        if (!s_tpl && address == 0xC044 && value == 0xFB) {
+            const uint16_t hl = Z80::getRegHL();
+            for (int d = 0x43; d <= 0x46; d++) {
+                const uint16_t src = (uint16_t)(hl - d);
+                const uint8_t* p = MemESP::ramCurrent[src >> 14] + (src & 0x3FFF);
+                if (p[0] == 0x3E && p[2] == 0xD3 && p[3] == 0xFD) { s_tpl = p;
+                    Debug::log("[ATMTPL] template at %04X phys=%p (hl=%04X)", src, (const void*)p, hl); break; }
+            }
+        }
+        if (s_tpl) {
+            const uint8_t* ph = MemESP::ramCurrent[address >> 14] + (address & 0x3FFF);
+            if (ph >= s_tpl && ph < s_tpl + 16) {
+                static uint16_t n = 0;
+                if (n < 80) { n++;
+                    Debug::log("[ATMTPL] wr %04X=%02X pc=%04X +%d 7ffd=%02X de=%04X hl=%04X bc=%04X",
+                               address, value, Z80::getRegPC(), (int)(ph - s_tpl), Atm::p7ffd,
+                               Z80::getRegDE(), Z80::getRegHL(), Z80::getRegBC()); }
+            }
+        }
+        if (off == 0x0044 || off == 0x004A || off == 0x0050) atmPgTableWriteTrace(address, value);
+        else if (off >= 0x0005 && off <= 0x0008 && g_atm_trace_armed) {
+            static uint16_t n = 0;
+            if (n < 80) { n++;
+                Debug::log("[ATMK] wr %04X=%02X pc=%04X page=%p 7ffd=%02X", address, value,
+                           Z80::getRegPC(), (const void*)MemESP::ramCurrent[address >> 14], Atm::p7ffd); }
+        }
+    }
+#endif
     if (__builtin_expect(g_timex_mmu != 0, 0) && Timex::rd[address >> 13]) {
         // A mapped slot swallows the write: a ROM cartridge chunk and the EX-ROM
         // drop it, a RAM chunk takes it. Either way it must NOT fall through to

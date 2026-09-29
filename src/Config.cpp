@@ -824,6 +824,8 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         if (romSet == R_ATM1)       Atm::bindRoms(romSet, gb_rom_atm1_pages, 4);
         else if (romSet == R_ATM2X) Atm::bindRoms(romSet, gb_rom_atm2x_pages, 8);
         else if (romSet == R_ATM2_106) Atm::bindRoms(romSet, gb_rom_atm2v106_pages, 4);
+        else if (romSet == R_ATM3)  Atm::bindRoms(romSet, gb_rom_atm3_pages, 16);
+        else if (romSet == R_ATM3_107) Atm::bindRoms(romSet, gb_rom_atm3v107_pages, 4);
         else                        Atm::bindRoms(romSet, gb_rom_atm2_pages, 4);
         break;
     }
