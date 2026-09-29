@@ -13,6 +13,13 @@
 //  * STC / STP / SQT — mborik/ayplayers (ayplayers_bin.h)
 // All of them report the loop point in bit 7 of a status byte; that ends the track.
 //
+// Track length: none of these formats stores one. AyTime.h (Ay_Emul's GetTime
+// routines) walks the pattern data at open and gets it in microseconds; it
+// matches this replayer to the frame on 1033 of 1041 local modules
+// (tools/aytime_test.cpp). Only when it rejects a module does open() fall back to
+// a SILENT second copy of the replayer (own 64 KB, no AY chips) that render()
+// advances ~2 ms per call until the loop flag; lenMs() is 0 until then.
+//
 // Memory: 64 KB of Z80 RAM in butter PSRAM; the call trampoline at #EFF0. Most
 // players live at #F000 with the module at #0100 (up to ~60 KB); SQT relocates
 // its module in place and wants it right behind the player (#4000 / #45C7).
@@ -25,12 +32,14 @@
 #include "TryAlloc.h"
 #include "Debug.h"
 #include "AySound.h"
+#include "AyTime.h"
 
 #include "ff.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <new>
+#include "pico/time.h"
 
 namespace pp {
 
@@ -72,6 +81,7 @@ public:
     const char* groupName(int i) const override { return i == 0 ? (ts_ ? "AY1" : "AY") : i == 3 ? "AY2" : nullptr; }
     void levels(uint8_t* out) override;
     uint32_t posMs() const override { return (uint32_t)((uint64_t)outFrames_ * 1000 / RATE); }
+    uint32_t lenMs() const override { return lenFrames_ * 20; }
 
     uint8_t* ram_ = nullptr;
     Z80      cpu_;
@@ -80,6 +90,7 @@ public:
     int      chip_ = 0;                // TurboSound select (#FF = chip 0, #FE = chip 1)
     uint8_t  sel_ = 0, reg_[2][16] = {};
     bool     ts_ = false;
+    bool     silent_ = false;          // length scanner: no AY chips, OUTs ignored
 
 private:
     Kind     kind_;
@@ -89,7 +100,15 @@ private:
     bool     ended_ = false;
     int32_t  dcL_ = 0, dcR_ = 0;
 
+    AyZ80Decoder* scan_ = nullptr;     // silent copy running ahead to find the loop
+    uint32_t scanFrames_ = 0;
+    uint32_t lenFrames_ = 0;           // 0 = not known (yet)
+
     bool call(uint16_t addr, uint16_t hl, uint16_t de = 0);
+    // Scanner side: plays frames silently until the loop flag, the cap or the
+    // time budget. Returns true when finished; *frames = length or 0 if none.
+    bool scanStep(uint64_t deadline, uint32_t* frames);
+    void scanAdvance();
     uint32_t size_ = 0;
     void close();
 };
@@ -104,6 +123,7 @@ zuint8 cbFetchOp(void* ctx, zuint16 a) {
 zuint8 cbIn(void*, zuint16) { return 0xFF; }
 void   cbOut(void* ctx, zuint16 port, zuint8 v) {
     AyZ80Decoder* d = (AyZ80Decoder*)ctx;
+    if (d->silent_) return;
     if ((port & 0xC002) == 0xC000) {                                    // #FFFD
         if (v >= 0xF8) d->chip_ = (v & 1) ? 0 : 1;                        // TurboSound select
         else d->sel_ = v;
@@ -176,8 +196,19 @@ bool AyZ80Decoder::open(const char* path) {
         snprintf(meta.format, sizeof(meta.format), "%s (AY)", p_->name);
     }
 
+    if (!silent_) {                                    // length by pattern walk
+        static const aytime::Fmt kFmt[] = { aytime::PT3, aytime::PT2, aytime::STC, aytime::STP, aytime::SQT };
+        uint8_t* w = (uint8_t*)Buffer::palloc(0x10000 + 16, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        if (w) {
+            memset(w, 0, 0x10000 + 16);
+            memcpy(w, m, size_);
+            const long fr = aytime::frames(kFmt[kind_], w);
+            Buffer::pfree(w);
+            if (fr > 0) lenFrames_ = fr < (long)(MAX_MS / 20) ? (uint32_t)fr : MAX_MS / 20;
+        }
+    }
     memcpy(ram_ + p_->org, p_->bin, p_->size);
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < 2 && !silent_; k++) {
         void* a = tryMalloc(sizeof(AySound));
         if (!a) a = Buffer::palloc(sizeof(AySound), Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         if (!a) { err = "Out of memory"; return false; }
@@ -216,15 +247,44 @@ bool AyZ80Decoder::open(const char* path) {
         ts_ = true;
         snprintf(meta.format, sizeof(meta.format), "PT3 TurboSound (2 x AY)");
     }
+    if (!silent_ && !lenFrames_) {                     // walker failed: scan instead
+        scan_ = new (std::nothrow) AyZ80Decoder(kind_);
+        if (scan_) {
+            scan_->silent_ = true;
+            if (!scan_->open(path)) { delete scan_; scan_ = nullptr; }
+        }
+    }
     return true;
 }
 
+bool AyZ80Decoder::scanStep(uint64_t deadline, uint32_t* frames) {
+    const uint32_t cap = MAX_MS / 20;
+    for (;;) {
+        if (scanFrames_ >= cap || !call(p_->play, 0)) { *frames = 0; return true; }
+        if (ram_[p_->setup] & 0x80) { *frames = scanFrames_; return true; }
+        scanFrames_++;
+        if ((scanFrames_ & 7) == 0 && time_us_64() >= deadline) return false;
+    }
+}
+
+void AyZ80Decoder::scanAdvance() {
+    if (!scan_) return;
+    uint32_t f = 0;
+    if (scan_->scanStep(time_us_64() + 2000, &f)) {
+        lenFrames_ = f;
+        delete scan_;
+        scan_ = nullptr;
+    }
+}
+
 void AyZ80Decoder::close() {
+    if (scan_) { delete scan_; scan_ = nullptr; }
     for (auto& a : ay_) if (a) { a->~AySound(); Buffer::pfree(a); a = nullptr; }
     if (ram_) { Buffer::pfree(ram_); ram_ = nullptr; }
 }
 
 int AyZ80Decoder::render(int16_t* lr, int n) {
+    scanAdvance();
     int o = 0;
     while (o < n) {
         if (left_ == 0) {
