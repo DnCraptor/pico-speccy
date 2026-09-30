@@ -269,7 +269,10 @@ void VIDEO::rebuildDS80ColorLut() {
 // there is no DS80 output path, so this is a no-op for those builds.
 static inline uint32_t crtTransform(uint32_t rgb);   // CRT filter colour stage, defined below
 
-static inline void profi_ds80_driver_set(bool active, const uint32_t *palette16, const uint8_t *pair_lut) {
+// noinline = FLASH: it is called on a mode switch, never per line, but it is reached
+// from the RAM-resident EndFrame; inlined there it dragged crtTransform's powf chain
+// into SRAM (~1 KB of EndFrame growth on the HSTX build in 1.0.8).
+static __attribute__((noinline)) void profi_ds80_driver_set(bool active, const uint32_t *palette16, const uint8_t *pair_lut) {
 #ifdef VGA_HDMI
     extern bool SELECT_VGA;
     // Run the DS80 palette through the CRT colour stage here rather than at the
@@ -1467,7 +1470,9 @@ void precalcborder32()
     }
 }
 
-void VIDEO::updateBorderBrd() {
+// noinline: a flash function, but EndFrame (RAM) calls it on mode edges and GCC
+// would otherwise inline copies of it into SRAM.
+__attribute__((noinline)) void VIDEO::updateBorderBrd() {
     if (timex_hires_live) {
         // Hi-res border = the PAPER colour, bright, as a solid pair slot.  The
         // 48K/128K (Update_Border_Pair) and Pentagon (Update_Border_XOR) border
@@ -4980,7 +4985,9 @@ static bool bl_line_done = false;
 #define BL_FLUSH() do { if (__builtin_expect(bl_line_done, 0)) { bl_line_done = false; VIDEO::blExpandLine(curline); } } while (0)
 
 //  VIDEO DRAW FUNCTIONS
-IRAM_ATTR void VIDEO::MainScreen_Blank(unsigned int statestoadd, bool contended) {    
+// noinline: MainScreen_Blank_Opcode is a one-line forwarder; letting GCC inline this
+// body there doubles ~580 B of RAM-resident code for the cost of one tail branch.
+IRAM_ATTR __attribute__((noinline)) void VIDEO::MainScreen_Blank(unsigned int statestoadd, bool contended) {    
     
     CPU::tstates += statestoadd;
 
@@ -6304,7 +6311,12 @@ void VIDEO::blRecalc() {
 }
 
 // Copy the scaled line into one fb row, leaving the overlay rectangles alone.
-static IRAM_ATTR __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void blPutRow(int row) {
+// blPutRow and blExpandLine are in FLASH, not RAM: they run only while Hide border
+// is live (BL_FLUSH is gated on bl_line_done, which only bl_live sets), so as RAM
+// code they cost every session ~0.9 KB of heap for a mode most never turn on. The
+// ~0.9 KB stays resident in the 16 KB XIP cache while the mode runs (~192 calls a
+// frame). The optimize() pair keeps them from growing flash memcpy/memset calls.
+static __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void blPutRow(int row) {
     uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
     if (!dst) return;
     const int words = (int)VIDEO::vga.xres >> 2;
@@ -6320,8 +6332,7 @@ static IRAM_ATTR __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-
         const int16_t* r = bl->carve[i];
         if (row >= r[1] && row < r[3]) { cx[n][0] = r[0]; cx[n][1] = r[2]; n++; }
     }
-    // Plain word loops, not memcpy: libc's lives in flash, and this runs ~240
-    // times a frame from the RAM-resident renderer (the XIP-contention rule).
+    // Plain word loops, not memcpy (a libc call per row buys nothing here).
     if (!n) { for (int w = 0; w < words; w++) dst[w] = bl->out[w]; return; }
     for (int w = 0; w < words; w++) {
         const int x = w << 2;
@@ -6331,7 +6342,7 @@ static IRAM_ATTR __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-
     }
 }
 
-IRAM_ATTR __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void VIDEO::blExpandLine(uint32_t line) {
+__attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void VIDEO::blExpandLine(uint32_t line) {
     if (!bl || line >= 192 || !vga.frameBuffer) return;
     const uint8_t* src = (const uint8_t*)bl->stage;
     uint32_t* o = bl->out;

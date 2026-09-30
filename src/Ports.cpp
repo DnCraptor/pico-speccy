@@ -988,6 +988,31 @@ static inline void atmPageTrace(uint16_t address, uint8_t v) {
   g_atm_pg_port[k] = address; g_atm_pg_val[k] = v; g_atm_pg_pc[k] = Z80::getRegPC();
 }
 #endif
+// ATM-Turbo reads that must come ahead of the generic decode (ZC #57, GS #B3/#BB,
+// then the ATM system ports). FLASH, not RAM: reached only while Z80Ops::isAtm,
+// so the RAM-resident input() keeps one test and a call for every other machine.
+static __attribute__((noinline)) bool atmPortReadEarly(uint16_t address, uint8_t* out) {
+  if (DivMMC::zc_enabled && (uint8_t)address == 0x57) {   // see the output twin
+    LED::touchR(LED::ZCTRL);
+#if ZC_PORT_TRACE
+    { const uint8_t v = DivMMC::zc_read_data(); atmPortTrace('R', address, v); *out = v; return true; }
+#endif
+    *out = DivMMC::zc_read_data(); return true;
+  }
+  // General Sound #B3/#BB ahead of the ATM decode: the 2+'s printer status
+  // (%nnnnn011) matches both and answered #7F — command bit stuck at 1, so every
+  // GS detect timed out (NedoOS gp.com). UnrealSpeccy decodes GS first of all.
+  if (GS::enabled && !DivMMC::divide_mode) {
+    const uint8_t a8 = (uint8_t)address;
+    if (a8 == 0xB3 || a8 == 0xBB) {
+      LED::touchR(LED::GS);
+      *out = (a8 == 0xB3) ? GS::hostReadB3() : GS::hostReadBB();
+      return true;
+    }
+  }
+  return Atm::portRead(address, *out);
+}
+
 IRAM_ATTR uint8_t Ports::input(uint16_t address) {
   uint8_t data;
 #if SND_PORT_TRACE
@@ -1232,25 +1257,8 @@ IRAM_ATTR uint8_t Ports::input(uint16_t address) {
   // ATM-Turbo: the ATM1's CPSYS read latch (any A2=0 read), the 2+'s IDE and its
   // INTRQ status port — cold flash dispatch (src/Atm.cpp), ahead of the ULA branch.
   if (Z80Ops::isAtm) {
-    if (DivMMC::zc_enabled && (uint8_t)address == 0x57) {   // see the output twin
-      LED::touchR(LED::ZCTRL);
-#if ZC_PORT_TRACE
-      { const uint8_t v = DivMMC::zc_read_data(); atmPortTrace('R', address, v); return v; }
-#endif
-      return DivMMC::zc_read_data();
-    }
-    // General Sound #B3/#BB ahead of the ATM decode: the 2+'s printer status
-    // (%nnnnn011) matches both and answered #7F — command bit stuck at 1, so every
-    // GS detect timed out (NedoOS gp.com). UnrealSpeccy decodes GS first of all.
-    if (GS::enabled && !DivMMC::divide_mode) {
-      const uint8_t a8 = (uint8_t)address;
-      if (a8 == 0xB3 || a8 == 0xBB) {
-        LED::touchR(LED::GS);
-        return (a8 == 0xB3) ? GS::hostReadB3() : GS::hostReadBB();
-      }
-    }
     uint8_t atmData;
-    if (Atm::portRead(address, atmData)) return atmData;
+    if (atmPortReadEarly(address, &atmData)) return atmData;
   }
   // Scorpion Turbo+ speed toggle. The clock is switched by READING a port, not by
   // writing one: MAME's scorpiontb_state::scorpion_io installs
@@ -2494,7 +2502,10 @@ static inline void gmxTapUpdate() {
 // latches do not already keep. Cleared with port1FFD on every machine reset.
 uint8_t Ports::kay7FFDd7 = 0;
 
-static inline uint32_t scorpionC000Page(uint32_t low3) {
+// Flash, not RAM: Scorpion-family paging only (Scorpion/GMX/ProfROM/KAY/Phoenix),
+// called from the RAM-resident output() on a paging write — inlined there it cost
+// every machine the KAY and GMX arithmetic in SRAM.
+static __attribute__((noinline)) uint32_t scorpionC000Page(uint32_t low3) {
   if (g_scorp_kay) {
     // Nemo KAY (UnrealSpeccy MM_KAY, z00m128/kay1024 README): 7FFD 0-2, then
     // 1FFD D4 = +8 (256K), 1FFD D7 = +16 (512K), 7FFD D7 = +32 (1024K). Phoenix
@@ -3084,6 +3095,47 @@ bool Ports::gmxPortRead(uint16_t address, uint8_t* out) {
   return false;
 }
 
+// ATM-Turbo writes that must come ahead of the generic decode (see output()).
+// FLASH, not RAM — reached only while Z80Ops::isAtm. true = the write was taken.
+static __attribute__((noinline)) bool atmPortWriteEarly(uint16_t address, uint8_t data) {
+#if ZC_PORT_TRACE
+  if (atmPortTraced(address)) atmPortTrace('W', address, data);
+#endif
+#if ZC_PORT_TRACE || ATM_PAGE_TRACE
+  atmPageTrace(address, data);
+#endif
+  if (DivMMC::zc_enabled && (uint8_t)address == 0x57) {
+    LED::touchW(LED::ZCTRL); DivMMC::zc_write_data(data); return true;
+  }
+  // The VGM-card ports with A1=0 (#C0/#C1 OPLL, #C4/#C5 OPL3, #C9 SN) match the 2+'s
+  // loose #7FFD decode whenever the high byte (= the data byte of OUT (n),A) has
+  // A15=0 — i.e. every other register write would page memory. Same deliberate
+  // shared-bus deviation as on the Pentagon: while a chip is on, its ports skip the
+  // ATM decode and reach the chip blocks below.
+  {
+    const uint8_t lo = (uint8_t)address;
+    const bool vgm = (oplfm && (lo & 0xFC) == 0xC4) ||
+                     (opllfm && (lo == 0xC0 || lo == 0xC1)) ||
+                     (snChip && (lo == 0xC2 || lo == 0xC3 || lo == 0xC9));
+    return !vgm && Atm::portWrite(address, data);
+  }
+}
+
+// Nemo KAY / ZXM-Phoenix #1FFD write (decode in output()). FLASH, not RAM.
+static __attribute__((noinline)) void kay1FFDWrite(uint8_t data) {
+  LED::touchW(LED::RAM);
+  Ports::port1FFD = data;
+  uint32_t page = scorpionC000Page(MemESP::bankLatch & 0x07);
+  if (page != MemESP::bankLatch) {
+    MemESP::bankLatch = page;
+    MemESP::ramContended[3] = false;
+    MemESP::ramCurrent[3] = MemESP::ram[page].sync(3);
+  }
+  MemESP::page0ram = data & 0x01;
+  Ports::kayTurboUpdate();
+  Ports::scorpionRomUpdate();
+}
+
 IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
 #if SCORP_FF_TRACE
   if (Z80Ops::isScorpion) {
@@ -3275,27 +3327,7 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
   // Z-Controller data #57 ahead of the ATM decode: the 2+'s DOS-space #xx77 family
   // leaves A5 undecoded (%0nn101n1), so #57 would otherwise land in write77 and
   // reprogram the memory map. UnrealSpeccy tests #57 first, before every DOS port.
-#if ZC_PORT_TRACE
-  if (Z80Ops::isAtm && atmPortTraced(address)) atmPortTrace('W', address, data);
-#endif
-#if ZC_PORT_TRACE || ATM_PAGE_TRACE
-  if (Z80Ops::isAtm) atmPageTrace(address, data);
-#endif
-  if (Z80Ops::isAtm && DivMMC::zc_enabled && (uint8_t)address == 0x57) {
-    LED::touchW(LED::ZCTRL); DivMMC::zc_write_data(data); return;
-  }
-  // The VGM-card ports with A1=0 (#C0/#C1 OPLL, #C4/#C5 OPL3, #C9 SN) match the 2+'s
-  // loose #7FFD decode whenever the high byte (= the data byte of OUT (n),A) has
-  // A15=0 — i.e. every other register write would page memory. Same deliberate
-  // shared-bus deviation as on the Pentagon: while a chip is on, its ports skip the
-  // ATM decode and reach the chip blocks below.
-  if (Z80Ops::isAtm) {
-    const uint8_t lo = (uint8_t)address;
-    const bool vgm = (oplfm && (lo & 0xFC) == 0xC4) ||
-                     (opllfm && (lo == 0xC0 || lo == 0xC1)) ||
-                     (snChip && (lo == 0xC2 || lo == 0xC3 || lo == 0xC9));
-    if (!vgm && Atm::portWrite(address, data)) return;
-  }
+  if (Z80Ops::isAtm && atmPortWriteEarly(address, data)) return;
   // MC146818 RTC (Pentagon/Profi "Mr Gluk" TimeKeeper):
   //   OUT (#DFF7), reg  → latch register index
   //   OUT (#BFF7), data → write selected register
@@ -4612,17 +4644,7 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
   // D5, D6 are Centronics lines (Phoenix: D1 service page, D6 a page bit). Not gated
   // by the 7FFD lock (Unreal).
   if (Z80Ops::isScorpion && g_scorp_kay && ((address & 0xC003) == 0x0001)) {
-    LED::touchW(LED::RAM);
-    port1FFD = data;
-    uint32_t page = scorpionC000Page(MemESP::bankLatch & 0x07);
-    if (page != MemESP::bankLatch) {
-      MemESP::bankLatch = page;
-      MemESP::ramContended[3] = false;
-      MemESP::ramCurrent[3] = MemESP::ram[page].sync(3);
-    }
-    MemESP::page0ram = data & 0x01;
-    kayTurboUpdate();
-    scorpionRomUpdate();
+    kay1FFDWrite(data);
     return;
   }
   if (Z80Ops::isScorpion && !g_scorp_kay && ((address & 0xC002) == 0) && (address & 0x0020)) {
