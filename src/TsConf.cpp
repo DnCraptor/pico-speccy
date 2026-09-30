@@ -1341,8 +1341,11 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
                     sfileGen++;
                     break;
                 case M_SPIRAM: {               // Zc.Rd(0x10057) x2, low byte first
-                    uint16_t v = DivMMC::zc_read_data();
-                    v |= (uint16_t)DivMMC::zc_read_data() << 8;
+                    uint16_t v;
+                    if (!DivMMC::zc_read_word(v)) {
+                        v = DivMMC::zc_read_data();
+                        v |= (uint16_t)DivMMC::zc_read_data() << 8;
+                    }
                     dst.wr(dd, v);
                     break;
                 }

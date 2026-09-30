@@ -38,6 +38,8 @@ visit https://zxespectrum.speccy.org/contacto
 #include "hardware/regs/addressmap.h"
 #endif
 #include "Video.h"
+#include "PerfScope.h"
+#include "DivMMC.h"
 #include <math.h>       // powf() — CRT filter gamma curve (cold path, init only)
 #include "ui/UiGfx.h"   // uiPalette() for BMP capture of the new menu
 #include "Debug.h"
@@ -3438,6 +3440,7 @@ static void tsReindexRelease(bool beamOut) {
 }
 
 void VIDEO::tsPalettePoll(bool force) {
+    PERF_BUCKET_SCOPE(PB_PALPOLL);
     const int beam0 = displayBeamRow();
 #if TSPAL_DBG
     if (ts_pal256_live) tsPalScanBeam(beam0);
@@ -6647,6 +6650,7 @@ void VIDEO::tsBandReplay() {
 }
 
 IRAM_ATTR void VIDEO::tsDrawTick() {
+    PERF_BUCKET_SCOPE(PB_DRAWTICK);
     const uint32_t rows = vga.yres;
     TsConf::dmaLineTick();   // a queued DMA whose DMA_ACT has dropped must be complete before the guest goes on
     if (__builtin_expect(tsCramDirty, 0)) {
@@ -7994,6 +7998,7 @@ void VIDEO::gmxBorderFrame(bool skipFrame) {
 
 
 IRAM_ATTR void VIDEO::EndFrame() {
+    PERF_BUCKET_SCOPE(PB_ENDFRAME);
 
     // Console drain, once per frame. Debug::log lands in a 4 KB ring that
     // pumpUart() empties into the 32-byte UART FIFO, and until 2026-09-09 the
@@ -8365,6 +8370,29 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
                         Debug::log("[PERF] dma dst %u w/frame:%s", (unsigned)(dtot / (10 * 60)), line);
                         for (int i = 0; i < 257; i++) ts_page_hist[i] = 0;
                         for (int i = 0; i < 256; i++) ts_dma_src_hist[i] = ts_dma_dst_hist[i] = 0;
+                    }
+                    {   // host time inside CPU::loop: ports by low byte, then the big buckets
+                        const double fr = 10.0 * 60.0;
+                        int p = 0; uint8_t used[512] = {0};
+                        uint64_t ptot = 0; for (int i = 0; i < 512; i++) ptot += perf_port_us[i];
+                        for (int j = 0; j < 8 && p < (int)sizeof(line) - 28; j++) {
+                            int best = -1; uint32_t bv = 0;
+                            for (int i = 0; i < 512; i++) if (!used[i] && perf_port_us[i] > bv) { bv = perf_port_us[i]; best = i; }
+                            if (best < 0) break;
+                            used[best] = 1;
+                            p += snprintf(line + p, sizeof(line) - p, " %s%02X:%.2fms/%u",
+                                          best >= 256 ? "o" : "i", best & 0xFF, bv / fr / 1000.0,
+                                          (unsigned)(perf_port_n[best] / fr));
+                        }
+                        Debug::log("[PERF] ports: %.2fms/f total:%s", ptot / fr / 1000.0, line);
+                        Debug::log("[PERF] host: halt=%.2fms/%u drawtick=%.2fms/%u palpoll=%.2fms/%u endframe=%.2fms (per frame)",
+                            perf_bucket_us[PB_HALT] / fr / 1000.0, (unsigned)(perf_bucket_n[PB_HALT] / fr),
+                            perf_bucket_us[PB_DRAWTICK] / fr / 1000.0, (unsigned)(perf_bucket_n[PB_DRAWTICK] / fr),
+                            perf_bucket_us[PB_PALPOLL] / fr / 1000.0, (unsigned)(perf_bucket_n[PB_PALPOLL] / fr),
+                            perf_bucket_us[PB_ENDFRAME] / fr / 1000.0);
+                        DivMMC::perfDump((float)fr);
+                        for (int i = 0; i < 512; i++) perf_port_us[i] = perf_port_n[i] = 0;
+                        for (int i = 0; i < PB_N; i++) perf_bucket_us[i] = perf_bucket_n[i] = 0;
                     }
                     hist_cpu_us = 0; hist_windows = 0;
                 }

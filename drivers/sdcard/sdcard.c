@@ -756,6 +756,11 @@ int xmit_datablock (	/* 1:OK, 0:Error */
 /* Write sector(s)                                                       */
 /*-----------------------------------------------------------------------*/
 
+/* Bumped by every sector write on either volume. DivMMC's CMD18 read-ahead
+   keeps sectors across guest commands and drops them when this moves, so a
+   write by the host (config, NVRAM, logs) can never be served back stale. */
+volatile uint32_t g_disk_write_gen = 0;
+
 DRESULT disk_write (
 	BYTE drv,			/* Physical drive number (0) */
 	const BYTE *buff,	/* Ponter to the data to write */
@@ -763,6 +768,7 @@ DRESULT disk_write (
 	UINT count			/* Number of sectors to write (1..128) */
 )
 {
+	g_disk_write_gen++;
 	if (drv == 1) return usb_disk_write(buff, sector, count);
 	if (drv || !count) return RES_PARERR;		/* Check parameter */
 	if (Stat & STA_NOINIT) return RES_NOTRDY;	/* Check drive status */

@@ -54,6 +54,7 @@ bool g_brd_first_set = false;
 #include "AlfCart.h"
 #include "Tape.h"
 #include "Video.h"
+#include "PerfScope.h"
 #include "Z80_JLS/z80.h"
 #include "pwm_audio.h"
 #include "roms.h"
@@ -989,6 +990,7 @@ static inline void atmPageTrace(uint16_t address, uint8_t v) {
 }
 #endif
 IRAM_ATTR uint8_t Ports::input(uint16_t address) {
+  PERF_PORT_SCOPE(address & 0xFF);
   uint8_t data;
 #if SND_PORT_TRACE
   sndTraceRd[address & 0xFF]++;
@@ -3085,6 +3087,7 @@ bool Ports::gmxPortRead(uint16_t address, uint8_t* out) {
 }
 
 IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
+  PERF_PORT_SCOPE(256 + (address & 0xFF));
 #if SCORP_FF_TRACE
   if (Z80Ops::isScorpion) {
     static uint32_t outN=0; outN++;

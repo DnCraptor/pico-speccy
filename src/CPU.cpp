@@ -40,6 +40,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "hardconfig.h"
 #include "Config.h"
 #include "Video.h"
+#include "PerfScope.h"
 #include "Z80_JLS/z80.h"
 #include "psram_spi.h"
 #include "Debug.h"
@@ -57,6 +58,8 @@ visit https://zxespectrum.speccy.org/contacto
 // bank is mapped to), fetch + peek8 + poke8. Tells which pages a title hammers,
 // i.e. what an SRAM page policy would have to hold. Dumped by the [PERF] block.
 uint32_t ts_page_hist[257];   // [256] = bank-0 ROM
+uint32_t perf_port_us[512], perf_port_n[512];      // PerfScope.h
+uint32_t perf_bucket_us[PB_N], perf_bucket_n[PB_N];
 #define TS_PAGE_HIT(addr) do { if (Z80Ops::isTsconf) ts_page_hist[TsConf::r.page[(addr) >> 14]]++; } while (0)
 #else
 #define TS_PAGE_HIT(addr) do {} while (0)
@@ -739,6 +742,7 @@ IRAM_ATTR void CPU::FlushOnHalt() {
 // needed). Unlike FlushOnHaltTo this does NOT flush the rest of the frame's
 // video, so rendering stays in step with register writes made after the wake.
 IRAM_ATTR void CPU::haltAdvanceTo(uint32_t stEnd) {
+    PERF_BUCKET_SCOPE(PB_HALT);
     tstates_active = tstates;
     const uint32_t pre = tstates;
     while (tstates < stEnd) {
