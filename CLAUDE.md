@@ -7407,6 +7407,24 @@ MinSizeRel, against the build before it:
   MP3, ZP4, TheLink with ZX-DMA, NEO8), classic GS (a MOD player), GS off, and the
   boot log's `[OVL] NeoGS ... code resident` / `window to the heap` lines.
 
+## WD1793 in flash by default (`WD1793_IN_RAM=OFF`, 2026-09-30; hw: owner "все работает", not measured)
+
+Step 2 of the shared-SRAM plan. `_do`, `_end`, `rvmWD1793Step/Read/Write` and
+`rvmwdDiskStep` were `__not_in_flash("wd1793")` since the initial commit (pico-spec
+heritage), on the strength of a MURM2 measurement: ~10.5 us per cold call, ~6.5 ms per
+frame during CP/M disk-to-disk copies (one step call per byte, ~624/frame). That was
+taken while the 43 KB Z80 core itself lived in flash and churned the XIP cache between
+calls; the core is in SRAM now. CMake `WD1793_IN_RAM` (default **OFF**) puts them in
+flash: **-6848 B of static SRAM on every board and every machine** (DVp2 PERF build
+170240 -> 163392 B), only 8-byte veneers stay in RAM. Test ELFs
+`debug/DVp2-wd-{ram,flash}-perf-1.0.8.elf`. The owner ran the flash build ("работает")
+and chose OFF without taking the `[PERF] 60f: fdd_step= / fdd_ports=` numbers — so
+**if disk loading (Profi CP/M copies especially, or TS-Conf + NeoGS where butter PSRAM
+also churns XIP) ever gets slow or the audio stutters during disk I/O, compare those two
+fields with `-DWD1793_IN_RAM=ON` first.** An overlay window was considered and rejected:
+Beta is forced on Pentagon/Profi/Scorpion/ATM/TS-Conf, so it would only have freed the
+6.8 KB on 48K/128K-without-Beta, +3, Timex and ALF.
+
 ## SRAM optimisation pass, branch drew-sram-opt (2026-09-21/22; every step hw-confirmed on DVp2)
 
 The target session was 720x576 + TS-Conf + NeoGS + HDMI audio + Covox + TSFM, which booted

@@ -128,6 +128,7 @@ option(ZIFI_NET_VERBOSE "Per-packet trace of the ZiFi net client (+IPD/chanSend)
 # initial value of the runtime flag ts_c1_enabled, which tsC1PlacementPoll()
 # already drives (core0 sync while a NeoGS is playing, core1 queue otherwise).
 # The queue is started lazily and only on TS-Conf, so there was nothing to gate.
+option(WD1793_IN_RAM "WD1793: keep the FDC step/read/write/_do code in SRAM (~6.8 KB). OFF since 2026-09-30: flash is fast enough now that the Z80 core is in SRAM" OFF)
 option(TSCONF_HOT_IN_RAM "TS-Conf: keep the #nnAF port / DMA / INT-source code in SRAM (~4 KB; ~0.8 ms/frame on port-heavy titles)" ON)
 option(TSCONF_RENDER_IN_RAM "TS-Conf: keep the whole-line renderer (tsRenderExec + tsuComposeLine) in SRAM (~10 KB)" ON)
 
@@ -1029,6 +1030,11 @@ endif()
 # light enough for the 720x576 video-mode gate (FB grow 26.9 KB + 10 KB margin).
 set(TS_INT_RING_N "512" CACHE STRING "PERF_TRACE: TS-Conf INT-accept ring entries (power of two)")
 target_compile_definitions(${PROJECT_NAME} PRIVATE TS_INT_RING_N=${TS_INT_RING_N})
+if(WD1793_IN_RAM)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE WD1793_IN_RAM=1)
+else()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE WD1793_IN_RAM=0)
+endif()
 if(TSCONF_HOT_IN_RAM)
     target_compile_definitions(${PROJECT_NAME} PRIVATE TSCONF_HOT_IN_RAM=1)
 else()

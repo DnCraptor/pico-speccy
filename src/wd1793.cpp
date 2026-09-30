@@ -184,8 +184,12 @@ static const uint16_t sectdatapos[16]= { 162,554,946,1338,1730,2122,2514,2906,32
 // (~10.5 µs measured on MURM2, ~6.5 ms/frame during CP/M disk transfers).
 // Covers _end/_do/rvmWD1793Step/Read/Write/rvmwdDiskStep (~6.5 KB of .data);
 // the track LOADERS stay in flash — they run in the frame's idle window.
+// CMake WD1793_IN_RAM: default OFF since 2026-09-30 (flash; the note above predates
+// the Z80 core moving to SRAM, and the hw run on flash was clean). ON restores SRAM.
 #undef IRAM_ATTR
+#if defined(WD1793_IN_RAM) && WD1793_IN_RAM
 #define IRAM_ATTR __not_in_flash("wd1793")
+#endif
 #ifndef IRAM_ATTR
 #define IRAM_ATTR
 #endif
