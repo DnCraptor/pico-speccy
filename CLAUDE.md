@@ -10953,6 +10953,54 @@ holds MISO low (0x00) while it programs, then 0xFF.
   before touching this area again; the file itself cannot be host-compiled (it
   pulls FatFs and the SDK).
 
+### ...and the CMD18 gap byte: WC's DMA sector reader hung on a 0x00 (2026-09-30, NOT hw-tested)
+
+"TGV video does not play under WC" (VIDEO_PL.WMF v0.71, `debug/TGV/`, `debug/WC/`).
+VDAC2 is not involved: the player is TS-Conf-only. What it does, from its
+disassembly (`debug/WC/WC/VIDEO_PL_disasm.txt`, real address = listed - 0x200):
+a TGV is a 512-byte header (`TGA Video v0.1/v0.2`, +0x10 = MP3 sectors, +0x20 =
+2 x sectors per frame), then in v0.2 the MP3 whole (3931 sectors in
+`RUNNINGM.TGV`), then frames of 73 sectors = 1 CRAM palette sector + 72 data
+sectors. Video = 256c at RRES 256x192 (`VConfig 02` via WC API #42), 256x144
+picture, four 16-page frame buffers at pages 0x20/0x30/0x40/0x50 flipped every
+3rd INT from WC's INT hook (API #56), palette through the FMAddr window
+(`OUT (#15AF),#10` + 512 LDI). The 256-byte rows land on the 512-byte row
+stride by the DMA itself: the driver reads a sector as TWO 128-word bursts with
+`D_ALGN` + ASZ 512 (`ctrl 5A`, `len 7F`, `num 1`), so each half sector starts
+its own 512-byte window. Sound = the GS Player detect, then a 1 KB card-side
+program uploaded with `#14`/`#13` and THE WHOLE MP3 pushed through `#B3` byte by
+byte before playback ("Please Wait..." with a progress bar); the card program
+feeds MD_SEND from a 32 KB-page ring on MDDRQ. `binary.tgv` (v0.1, MP3 field 0)
+never touches the NeoGS at all, which is what made it the bisect.
+
+- **The hang**: `binary.tgv` sat in "Please Wait...". Dump: `PC=3A14 BC=0057
+  A=00 HL=C400`, TS-Conf `dma: daddr=080400 ctrl=5A` — one sector into page
+  0x20, hung on the second. WC unpacks its SD driver into RAM at 0x3800 (it is
+  packed inside boot.$C, so read it OUT OF THE DUMP: `picospec_mem0.bin` +
+  `tools/z80disasm.py --org 0x3800`). Its DMA reader (`0x3815`, WC API #3C —
+  used by VIDEO_PL, TAPM, BMPV, TXTEDIT; GSPLAYER/MOUNTER/the panels read
+  through `0x380F` and never hit it) sends CMD18, then per sector: wait for the
+  first non-0xFF byte on `#57` and `CP 0xFE / JR NZ,$` — **a deliberate hang on
+  anything but the data token** — DMA the 512 bytes, read 2 CRC bytes, loop.
+  Our `DivMMC::mmc_read` CMD18 case restarted at the R1 slot for every block,
+  i.e. put a `0x00` between a block's CRC and the next token where a real card
+  (and Unreal's `sdcard.cpp`, which streams `FE data CRC CRC FE ...`) sends only
+  0xFF. Fixed: `mmc_read_cont` — R1 once per command, two explicit CRC bytes,
+  0xFF gap slots on every continuation. The UFO2 author's note ("CMD18 +
+  DMA SPI->RAM with a DMAStatus poll, the volume silently fails to mount") is
+  the same reader shape and should be re-tried on this fix.
+- **Not the DMA**: DMACtrl here is b7 R/W, b5 SALGN, b4 DALGN, b3 ASZ, b2..0
+  DDEV (`dmaStart`), so `5A` = SPI->RAM, DALGN, 512-byte windows — exactly the
+  row spreading above; the `DivMMC::zc_read_data` path behind it is the one WC
+  boots through.
+- Test ELF `debug/DVp2-tgv-cmd18-1.0.8.elf` (+ .uf2, plain main). **Hw owed**:
+  `binary.tgv` (video only), then `RUNNINGM.TGV` with NeoGS on (the 2 MB
+  byte-by-byte upload, then MP3 + video), TAPM / BMPV loads (same reader), and
+  the ZC card still mounting under TS-BIOS / WC / esxDOS (the R1 slot moved).
+  Diagnostic build that exists for this: `debug/DVp2-tgv-zctrace-1.0.8.elf`
+  (`TS_VIDEO_TRACE` + `ZC_PORT_TRACE`, built with `-DTSOVL_WIN_SIZE=28672`
+  because that pair alone overflows the AUTO TS overlay window).
+
 ### What Wild Commander still needs from us — CLOSED (analysed and finished 2026-09-18)
 
 The gap list is done. **VDOS / FDDVirt**, **TSU over TEXT** and **SMUC** were

@@ -136,6 +136,7 @@ uint8_t DivMMC::mmc_r1 = 0;
 bool DivMMC::mmc_cs_active = false;
 
 int DivMMC::mmc_read_index = -1;
+static bool mmc_read_cont = false;   // CMD18: past the first block (no R1 in the gap)
 int DivMMC::mmc_write_index = -1;
 int DivMMC::mmc_csd_index = -1;
 int DivMMC::mmc_cid_index = -1;
@@ -943,21 +944,35 @@ uint8_t DivMMC::mmc_read() {
             return 0xFF;
 
         case 0x52: // CMD18 READ_MULTIPLE_BLOCK
+                   // Stream: NCR, R1, then per block: token 0xFE, 512 data
+                   // bytes, 2 CRC bytes, and ONLY 0xFF between a block's CRC
+                   // and the next token (the card's Nac gap). This case used to
+                   // restart at the R1 slot for every block, i.e. it put a 0x00
+                   // into that gap. Wild Commander's DMA sector reader (the one
+                   // its Video Player, TAPM, BMPV and TXTEDIT load through)
+                   // waits for the first non-0xFF byte after the CRC and then
+                   // does `CP 0xFE / JR NZ,$` — a deliberate hang on anything
+                   // else — so the first multi-sector read froze the machine on
+                   // its second sector (dump: A=00, one sector landed, 2026-09-30).
+                   // A real card and Unreal's model both never emit that byte.
             if (mmc_read_index >= 0) {
-                if (mmc_read_index == 0) value = 0xFF;
-                if (mmc_read_index == 1) value = 0;
-                if (mmc_read_index == 2) value = 0xFE;
+                if (mmc_read_index == 0) value = 0xFF;                       // NCR / gap
+                if (mmc_read_index == 1) value = mmc_read_cont ? 0xFF : 0;   // R1 once per command
+                if (mmc_read_index == 2) value = 0xFE;                       // data token
                 if (mmc_read_index >= 3 && mmc_read_index <= 514) {
                     if (sdhc_mode)
                         value = mmc_sector_buf[mmc_read_index - 3];
                     else
                         value = readByte(mmc_read_address + mmc_read_index - 3);
                 }
+                if (mmc_read_index == 515 || mmc_read_index == 516)
+                    value = 0xFF; // CRC
                 mmc_read_index++;
-                if (mmc_read_index == 516) mmc_read_index = -1;
-                // Auto-advance to next sector
-                if (mmc_read_index == -1) {
+                // Auto-advance to the next block: the stream continues at the
+                // gap slots (0xFF, 0xFF) and the next token.
+                if (mmc_read_index == 517) {
                     mmc_read_index = 0;
+                    mmc_read_cont = true;
                     mmc_read_address += sdhc_mode ? 1 : 512;
                     if (sdhc_mode) {
                         loadSector(mmc_read_address);
@@ -1193,6 +1208,7 @@ void DivMMC::mmc_write(uint8_t value) {
                     mmc_sector_buf_addr = mmc_read_address;
                 }
                 mmc_read_index = 0;
+                mmc_read_cont = false;
             }
             break;
 
