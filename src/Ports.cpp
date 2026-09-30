@@ -2185,10 +2185,7 @@ static inline void gmxTapUpdate() {
       } }
 #endif
   }
-#if PROFROM_IN_FLASH
   if (g_scorp_prof) profRegisterLiveOverlay(MemESP::romInUse);
-#endif
-#if GMX_IN_FLASH
   // GMX banks are stored deduplicated + as overlays over ROMs already in flash
   // (scorpion_gmx_banks.h). MemESP's overlay registry keys ONE overlay per base
   // pointer, and several GMX banks derive from the SAME base (plane 1 and plane 4
@@ -2199,7 +2196,6 @@ static inline void gmxTapUpdate() {
   // For a raw bank this registers nullptr — a no-op. The table itself must be
   // touched only from Config.cpp (see gmxRegisterLiveOverlay's comment).
   if (g_scorp_gmx) gmxRegisterLiveOverlay(MemESP::romInUse);
-#endif
 }
 
 // The 0xC000 RAM page from all three latches: 7FFD bits 0-2 (low3), 1FFD D4 (+8),

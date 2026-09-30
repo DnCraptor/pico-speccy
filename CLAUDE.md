@@ -1,5 +1,15 @@
 # pico-speccy Project Memory
 
+**Build files (split 2026-09-30):** `CMakeLists.txt` is the skeleton (SDK, target,
+link libs, PORT_VERSION — release scripts grep it there); the rest is `cmake/*.cmake`,
+each `include()`d at its old position: `options` (boards, displays, features), `trace` (every XXX_TRACE / debug option), `board`
+(board pick, PICO_BOARD, BOARD_TAG), `source-flags` (per-file -O), `wifi`,
+`memory-layout` (linker script, overlay windows + their AUTO sizes, GM.DLS floor),
+`debug-defines`, `board-pins` (per-board GPIO defines), `display` (incl.
+HDMI_HSTX), `build-name`. "CMakeLists" below usually means one of these.
+`GMX_IN_FLASH` / `PROFROM_IN_FLASH` / `PLUS3DIV_IN_FLASH` are GONE (2026-09-30):
+every ROM set is always in flash; notes below that call them an escape hatch are history.
+
 **Scope (rebrand, 2026-07-25):** RP2350 only — RP2040 support, the ZERO and
 MURM*_P1 board targets, and the Spanish UI (all `*_ES` strings, `Config::lang`,
 the Language menu) were removed. Firmware names are `<board>-speccy-...`

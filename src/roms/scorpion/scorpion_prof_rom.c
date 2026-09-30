@@ -5,7 +5,6 @@
 // tools/rom_pack.py. 230634 B in flash instead of 262144.
 // Regenerate: python3 tools/rom_pack.py prof
 #include <stdint.h>
-#if PROFROM_IN_FLASH
 
 __attribute__((aligned(4))) const unsigned char gb_rom_scorpion_prof_p0b2[] = {
     0x37,0xCB,0x7C,0xC3,0xEF,0x06,0x18,0x61,0xC3,0x1D,0x35,0xED,0x51,0xC3,0x98,0x00,
@@ -14471,4 +14470,3 @@ __attribute__((aligned(4))) const unsigned char gb_overlay_scorpion_prof_p0b1[] 
     0xD0,0xCF,0x14,0xC3,0x98,0x3C,
 };
 
-#endif // PROFROM_IN_FLASH

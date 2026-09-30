@@ -10,7 +10,7 @@
 // of anything derived from a .bin are how the v2.94 monitor survived the v2.95 swap.
 #include "scorpion_banks.h"
 // Scorpion GMX 512 KB boot ROM (8 ProfROM planes x 4 x 16K banks), embedded in
-// flash on every board (GMX_IN_FLASH=1 in CMakeLists; =0 is an escape hatch) —
+// flash on every board —
 // QSPI (butter) PSRAM is a property of the plugged-in Pico module, so GMX is
 // gated at RUNTIME by the butter probe, not per board. The linker shrinks the
 // GM.DLS bank region, which is simply what is left above the firmware (rp2350-memmap.ld). Stored deduplicated (6 banks are
@@ -20,7 +20,6 @@
 // gmx` (scorpion_gmx_rom.c + scorpion_gmx_banks.h); this include must stay
 // AFTER roms.h has declared the base ROMs (Pentagon ROM0, Sinclair 128K rom[1],
 // trdos 5.04T) the table points into.
-#if GMX_IN_FLASH
 #include "scorpion_gmx_banks.h"
 // Re-registers the live GMX bank's overlay (defined in Config.cpp — the ONLY TU
 // that may reference gb_rom_scorpion_gmx_banks: the Sinclair 128K bases inside
@@ -28,7 +27,6 @@
 // embeds 32 KB of private copies whose addresses the overlay registry can never
 // match). Called from gmxTapUpdate (Ports.cpp) on every GMX romInUse change.
 void gmxRegisterLiveOverlay(uint8_t bank);
-#endif
 // Scorpion PROF-ROM v4.44s (romset R_SCORP_PROF) — 256 KB, 4 planes x 4 banks,
 // stored deduplicated + partly as overlays (~225 KB; tools/rom_pack.py prof).
 // The MOA Shadow Service Monitor as maintained by PLM (build 9643, 2025), for a
@@ -37,10 +35,8 @@ void gmxRegisterLiveOverlay(uint8_t bank);
 // which is why the SMUC model needs no rework). Like the
 // GMX table, the {data, overlay} pairs are bound by Config::requestMachine and
 // the LIVE bank's overlay is re-registered on every romInUse change.
-#if PROFROM_IN_FLASH
 #include "scorpion_prof_banks.h"
 // Defined in Config.cpp — the ONLY TU that may reference the bank table (same
 // internal-linkage trap as the GMX one above). Called from gmxTapUpdate.
 void profRegisterLiveOverlay(uint8_t bank);
-#endif
 #include "scorpion_overlays.h"

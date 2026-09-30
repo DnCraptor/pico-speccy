@@ -27,8 +27,8 @@
 
 namespace FlashRoms {
 
-// Base and size of the overlay region itself (0 size when the ROMs were compiled
-// out, e.g. GMX_IN_FLASH=0 — then there is nothing to trade).
+// Base and size of the overlay region itself (0 size if it is ever empty — then
+// there is nothing to trade).
 const uint8_t* regionStart();
 size_t         regionSize();
 

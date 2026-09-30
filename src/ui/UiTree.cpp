@@ -519,12 +519,9 @@ static const Option opt_mach_spectrum[] = {
     // replacement ROM, which carries IDEDOS and an 8-bit IDE interface on #xxEF.
     { TXT_ROM_P3E,        NM_MACH(A_128K, R_P3E),       TXT_ROM_P3E_S },
 #if !NO_SPAIN_ROM_128k
-#if PLUS3DIV_IN_FLASH
     // ...and the same IDEDOS ROM built for a divIDE card instead (16-bit bus, ports
-    // #A3..#BF). Conditional because that image is not redistributable and has to be
-    // packed locally — see tools/rom_pack.py plus3div.
+    // #A3..#BF).
     { TXT_ROM_P3DIV,      NM_MACH(A_128K, R_P3DIV), TXT_ROM_P3DIV_S },
-#endif
     { TXT_ROM_ZX81P,      NM_MACH(A_128K, R_ZX81P)    },
 #endif
     // Two rows because they are two different flash images — see UiStrings.h.
@@ -597,23 +594,18 @@ static const Option opt_mach_karabas[] = {
 // menu that refuses its own row (owner, 2026-09-08). Same shape as gs_modeOpts and
 // NeoGS below. The runtime fallbacks stay as the backstop for a pick that arrives
 // from NVS written on a board that HAS the chip (requestMachine + bootNotice).
-// `#if GMX_IN_FLASH` is still the build escape hatch that drops the ROM entirely.
 static const Option* mach_scorpOpts(uint8_t& cnt) {
     static Option opts[5];
     static uint8_t n = 0;
     if (!n) {
         opts[n++] = { TXT_ROM_SCORP,      NM_MACH(A_SCORP, R_SCORP),      TXT_ROM_SCORP_S      };
         opts[n++] = { TXT_ROM_SCORP_GR,   NM_MACH(A_SCORP, R_SCORP_GR),   TXT_ROM_SCORP_GR_S   };
-#if GMX_IN_FLASH
         // butter PSRAM is what GMX needs; romsUsable() is whether its ROM is still
         // in flash at all (FlashRoms.h — the GM.DLS bank may have been given it).
         if (butter_psram_size() && FlashRoms::romsUsable())
             opts[n++] = { TXT_ROM_SCORP_GMX, NM_MACH(A_SCORP, R_SCORP_GMX), TXT_ROM_SCORP_GMX_S };
-#endif
         opts[n++] = { TXT_ROM_SCORP_1024, NM_MACH(A_SCORP, R_SCORP_1024), TXT_ROM_SCORP_1024_S };
-#if PROFROM_IN_FLASH
         opts[n++] = { TXT_ROM_SCORP_PROF, NM_MACH(A_SCORP, R_SCORP_PROF), TXT_ROM_SCORP_PROF_S };
-#endif
     }
     cnt = n;
     return opts;
@@ -1311,11 +1303,7 @@ static const Option opt_pref48[] = {
 #else
 #  define P128_P3 1
 #endif
-#if PLUS3DIV_IN_FLASH
-#  define P128_CS (P128_P3 + 3)
-#else
-#  define P128_CS (P128_P3 + 2)
-#endif
+#define P128_CS (P128_P3 + 3)
 static const Option opt_pref128[] = {
     { TXT_ROM_128K,     0 },
 #if !NO_SPAIN_ROM_128k
@@ -1326,9 +1314,7 @@ static const Option opt_pref128[] = {
 #endif
     { TXT_ROM_P3,       P128_P3     },
     { TXT_ROM_P3E,      P128_P3 + 1 },
-#if PLUS3DIV_IN_FLASH
     { TXT_ROM_P3DIV,    P128_P3 + 2 },
-#endif
     { TXT_ROM_CUSTOM,   P128_CS     },
     { TXT_ROM_LAST,     P128_CS + 1 },
 };
@@ -1351,13 +1337,9 @@ static const Option* pref_scorpOpts(uint8_t& cnt) {
         opts[n++] = { TXT_ROM_SCORP_GR,   1, TXT_ROM_SCORP_GR_S   };
         opts[n++] = { TXT_ROM_SCORP_1024, 2, TXT_ROM_SCORP_1024_S };
         opts[n++] = { TXT_ROM_SCORP_PROF, 3, TXT_ROM_SCORP_PROF_S };
-#if GMX_IN_FLASH
         if (butter_psram_size() && FlashRoms::romsUsable())
             opts[n++] = { TXT_ROM_SCORP_GMX, 4, TXT_ROM_SCORP_GMX_S };
         opts[n++] = { TXT_ROM_LAST,       5, nullptr };
-#else
-        opts[n++] = { TXT_ROM_LAST,       4, nullptr };
-#endif
     }
     cnt = n;
     return opts;

@@ -382,9 +382,8 @@ SECTIONS
      *     AFTER a variant had already overflowed — and each time the slack between the
      *     firmware end and the base (4-12 KB) was simply lost.
      *   - on a 16 MB board (MURM_W) a fixed 1.59 MB was absurd. The bank now takes the
-     *     whole tail with no board branch, and the GMX_IN_FLASH=0 escape hatch gets its
-     *     bigger region for free — its ternary (and the __gmx_rom_in_flash defsym that
-     *     selected it) are gone.
+     *     whole tail with no board branch (the old GMX_IN_FLASH ternary and its
+     *     __gmx_rom_in_flash defsym are gone).
      * The cost: the base moves with code size, so a bank already programmed into flash
      * does not survive a firmware update — gm_bank_view() fails the header check at the
      * new base and the bank re-provisions from SD. That was already true every time the
@@ -433,7 +432,7 @@ SECTIONS
     ASSERT(__gm_bank_start <= __gm_bank_end,
         "ERROR: firmware filled the whole flash - nothing left for the GM.DLS bank")
     ASSERT(__gm_bank_end - __psramrom_start >= __gm_bank_hard_min,
-        "ERROR: even after trading the GMX + TS-Conf ROM overlay the GM.DLS bank could not hold a stock gm.dls - the firmware must give back flash (GMX_IN_FLASH / PROFROM_IN_FLASH are the two biggest switches)")
+        "ERROR: even after trading the GMX + TS-Conf ROM overlay the GM.DLS bank could not hold a stock gm.dls - the firmware must give back flash (the GMX and ProfROM images are the two biggest ROMs)")
     ASSERT(__gm_bank_size >= __gm_bank_min,
         "ERROR: the GM.DLS bank region fell below GM_BANK_MIN_KB - shrink the firmware, or lower GM_BANK_MIN_KB (read the comment beside it in rp2350-memmap.ld first), or use a bigger flash")
 

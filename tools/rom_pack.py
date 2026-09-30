@@ -413,8 +413,8 @@ def pack_plus3e_raw():
 #               else its own overlay over that same half
 #
 # The ROM image is NOT in this repository (it is not redistributable): drop the four
-# 16 KB banks into src/roms/plus3div/src/rom{0,1,2,3}.bin and run this. Without them the
-# romset is simply not built (PLUS3DIV_IN_FLASH, CMakeLists.txt).
+# 16 KB banks into src/roms/plus3div/src/rom{0,1,2,3}.bin and run this. The firmware
+# includes the generated plus3div_roms.h unconditionally.
 PLUS3DIV_OVL_DIFF_MAX = 12288   # past this an overlay is not worth it against 16 KB raw
 
 def pack_plus3div():
@@ -694,14 +694,11 @@ def pack_gmx():
                '// tools/rom_pack.py.',
                '// %d B in flash instead of %d.' % (total, len(images) * GMX_BANKS * GMX_BANK_SZ),
                '// Regenerate: python3 tools/rom_pack.py gmx']
-    c = banner + ['#include <stdint.h>',
-                  '#if GMX_IN_FLASH',
-                  '']
+    c = banner + ['#include <stdint.h>', '']
     for sym, data in raws:
         c.append(_c_array(sym, data)); c.append('')
     for sym, blob, _, _, _ in novls:
         c.append(_c_array(sym, blob)); c.append('')
-    c.append('#endif // GMX_IN_FLASH')
     open(os.path.join(out_dir, 'scorpion_gmx_rom.c'), 'w').write("\n".join(c) + "\n")
 
     # The binding tables live in a C++ header (included via romScorpion.h AFTER the
@@ -871,9 +868,9 @@ def pack_tsconf():
 # byte identical and a swap there was free; across generations it is not.
 #
 # Deliberately NOT packed against the GMX banks, even though that would save
-# flash: the GMX raw arrays only exist under GMX_IN_FLASH, so keying ProfROM to
-# them would give the generator two output variants and make one romset's flash
-# layout depend on another's build switch. Bases are the ROMs every build ships
+# flash: keying ProfROM to the GMX raw arrays would make one romset's flash layout
+# depend on another romset's image (a GMX swap would re-pack ProfROM). Bases are the
+# ROMs that are not tied to any one romset
 # (Pentagon ROM0, the Sinclair 128K halves, TR-DOS 5.04T, the v2.95 raw banks)
 # plus ProfROM's OWN raw banks. Only planes 0 banks 0/1 (the 128 and 48 BASIC
 # ROMs) are close enough to anything to become overlays; the other 14 banks are
@@ -955,14 +952,11 @@ def pack_prof():
               '// the firmware already ships — see the pack_prof comment in',
               '// tools/rom_pack.py. %d B in flash instead of 262144.' % total,
               '// Regenerate: python3 tools/rom_pack.py prof']
-    c = banner + ['#include <stdint.h>',
-                  '#if PROFROM_IN_FLASH',
-                  '']
+    c = banner + ['#include <stdint.h>', '']
     for sym, data in raws:
         c.append(_c_array(sym, data)); c.append('')
     for sym, blob, _, _, _ in novls:
         c.append(_c_array(sym, blob)); c.append('')
-    c.append('#endif // PROFROM_IN_FLASH')
     open(os.path.join(out_dir, 'scorpion_prof_rom.c'), 'w').write("\n".join(c) + "\n")
 
     h = banner + ['// Include via romScorpion.h only (needs the base ROM symbols in scope).',

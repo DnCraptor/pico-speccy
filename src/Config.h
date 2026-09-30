@@ -187,13 +187,11 @@ public:
         if (a == A_TSCONF) return TSCONF_PAGES;
         uint32_t n = mem_pg_cnt;
         if (n > 64 && !(a == A_PENT || a == A_P512 || a == A_P1024)) n = 64;
-#if GMX_IN_FLASH
         // GMX requires live QSPI (butter) PSRAM — without it requestMachine falls
         // the pick back to Yellow, so the strip must not grow either.
         if (a == A_SCORP && isScorpGmxRomset(rs == R_NONE ? romSetScorp : rs) &&
             n < 128 && butter_psram_size() > 0)
             n = 128;
-#endif
         // ZXM-Phoenix pages 2 MB = 128 pages. Unlike GMX it reads them only
         // through the ordinary page machinery, so SD-swap backing is enough.
         if (a == A_SCORP && (rs == R_NONE ? romSetScorp : rs) == R_PHOENIX && n < 128)

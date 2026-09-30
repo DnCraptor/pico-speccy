@@ -1011,7 +1011,6 @@ void ESPectrum::setup() {
     Debug::log2SD("setup: MEM_PG_CNT %u -> 64 (arch=%s, Murmuzavr is Pentagon-only)",
                   (unsigned)Config::mem_pg_cnt, archToStr(Config::arch));
   }
-#if GMX_IN_FLASH
   // Scorpion GMX is a 2 MB machine (7-bit page: DFFD<<4 | 1FFD.D4<<3 | 7FFD 0-2)
   // AND its 640x200 mode reads attributes from bitmap-page+64 (pages 121/123) —
   // both need the full 128-page strip regardless of the Murmuzavr pick. GMX
@@ -1020,7 +1019,6 @@ void ESPectrum::setup() {
   if (Config::arch == A_SCORP && isScorpGmxRomset(Config::romSetScorp) && MEM_PG_CNT < 128 &&
       butter_psram_size() > 0)
     MEM_PG_CNT = 128;
-#endif
 
   //=======================================================================================
   // INIT PS/2 KEYBOARD

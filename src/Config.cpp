@@ -280,7 +280,6 @@ void Config::initHotkeys() {
 
 extern std::string g_snapshot_loading_path;  // Snapshot.cpp — snapshot mid-load
 
-#if GMX_IN_FLASH
 // Register the overlay of the GMX bank now live at 0x0000. Called from
 // gmxTapUpdate (Ports.cpp) on every romInUse change while GMX is active —
 // several GMX banks patch the SAME base pointer, so a one-time registration at
@@ -305,9 +304,7 @@ void gmxRegisterLiveOverlay(uint8_t bank) {
     const scorpion_gmx_bank_t& bk = gmxLiveBankTable()[bank & 31];
     MemESP::registerOverlay(bk.data, bk.overlay);
 }
-#endif
 
-#if PROFROM_IN_FLASH
 // Same job for the ProfROM bank table (16 banks), and here for the same
 // reason: plane 3's banks all overlay plane 3 bank 0, and plane 0's two halves
 // overlay the Sinclair 128K arrays this TU owns. See gmxRegisterLiveOverlay.
@@ -315,7 +312,6 @@ void profRegisterLiveOverlay(uint8_t bank) {
     const scorpion_prof_bank_t& bk = gb_rom_scorpion_prof_banks[bank & 15];
     MemESP::registerOverlay(bk.data, bk.overlay);
 }
-#endif
 
 // The running machine keeps its own TR-DOS as an overlay on the SHARED 5.04T base
 // (Scorpion GMX / ProfROM plane banks, every Nemo KAY's bank 3), so the user's TR-DOS
@@ -505,12 +501,6 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
     }
     case A_128K: {
         romSet = (newRomSet == R_NONE) ? R_128K : newRomSet;
-#if !PLUS3DIV_IN_FLASH
-        // This build carries no +3 divIDE ROM (see CMakeLists / tools/rom_pack.py
-        // plus3div) — an NVS card written by a build that did picks the stock +3,
-        // which is the same machine without IDEDOS.
-        if (romSet == R_P3DIV) romSet = R_P3;
-#endif
         romSet128 = romSet;
         switch (romSet128) {
         case R_128K_CS:
@@ -559,9 +549,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             break;
         case R_P3:
         case R_P3E:
-#if PLUS3DIV_IN_FLASH
         case R_P3DIV:
-#endif
         {
             // +2A/+3: FOUR ROMs, selected by (1FFD.D2 << 1) | 7FFD.D4 —
             //   0 editor/menu   1 syntax checker   2 +3DOS   3 48 BASIC
@@ -593,7 +581,6 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
                 ovl0 = gb_overlay_plus3e_rom0;
                 ovl1 = gb_overlay_plus3e_rom1;
             }
-#if PLUS3DIV_IN_FLASH
             else if (romSet128 == R_P3DIV) {
                 rom2 = PLUS3DIV_ROM2_BASE;
                 ovl0 = PLUS3DIV_ROM0_OVL;
@@ -601,7 +588,6 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
                 ovl2 = PLUS3DIV_ROM2_OVL;
                 ovl3 = PLUS3DIV_ROM3_OVL;
             }
-#endif
             MemESP::rom[0].assign_rom(gb_rom_0_plus3);
             MemESP::rom[1].assign_rom(gb_rom_1_plus3);
             MemESP::rom[2].assign_rom(rom2);
@@ -697,15 +683,13 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
         // The GMX romsets instead map a flash-embedded GMX boot ROM (stored
         // deduplicated + overlaid, scorpion_gmx_banks.h): 8 ProfROM planes x 4
         // banks into rom[0..31], romInUse = (plane << 2) | slot (Ports::gmx*).
-        // The ROM is in flash on EVERY board (GMX_IN_FLASH — the escape hatch
-        // is off by default); what gates GMX is the RUNTIME butter probe: QSPI
+        // The ROM is in flash on EVERY board; what gates GMX is the RUNTIME butter probe: QSPI
         // PSRAM is a property of the plugged-in Pico module (a Murmulator 1
         // takes a CS1-PSRAM module fine), and the 2 MB page strip + the
         // 640x200 attr pages need it live — a disabled/absent chip falls the
         // pick back to Yellow (mid-session the menu retargets it earlier, in
         // resolveConstraints, where the note is actually visible).
         romSet = (newRomSet == R_NONE) ? R_SCORP : newRomSet;
-#if GMX_IN_FLASH
         if (isScorpGmxRomset(romSet) && butter_psram_size() == 0) {
             OSD::bootNotice("GMX needs QSPI PSRAM - using Yellow PCB");
             Debug::log("[GMX] butter PSRAM off/absent - falling back to Yellow");
@@ -718,18 +702,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             Debug::log("[FlashRoms] GMX unavailable (overlay traded) - Yellow");
             romSet = R_SCORP;
         }
-#else
-        // This build carries no GMX ROM (e.g. an NVS card written by another
-        // board's firmware picked it) — quiet fallback.
-        if (isScorpGmxRomset(romSet)) romSet = R_SCORP;
-#endif
-#if !PROFROM_IN_FLASH
-        // This build carries no ProfROM image — quiet fallback to the plain
-        // ZS-1024 (same paging and timing, stock v2.95 ROM).
-        if (romSet == R_SCORP_PROF) romSet = R_SCORP_1024;
-#endif
         romSetScorp = romSet;
-#if PROFROM_IN_FLASH
         if (romSet == R_SCORP_PROF) {
             // ProfROM: 4 planes x 4 banks into rom[0..15], romInUse =
             // (plane << 2) | bank, plane switched by the 0x0100-0x010F read tap
@@ -744,8 +717,6 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             // goes through gmxTapUpdate.
             profRegisterLiveOverlay(0);
         } else
-#endif
-#if GMX_IN_FLASH
         if (isScorpGmxRomset(romSet)) {
             // Deduplicated bank table (rom_pack.py pack_gmx): .data is either a raw
             // GMX bank or a base ROM already in flash; a non-NULL .overlay supplies
@@ -758,7 +729,6 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             for (int i = 0; i < 32; ++i)
                 MemESP::rom[i].assign_rom(tbl[i].data);
         } else
-#endif
         if (isKayRomset(romSet)) {
             // Nemo KAY: the same four roles as the Scorpion (rom[] 0 BASIC-128,
             // 1 BASIC-48, 2 service, 3 TR-DOS), stored as overlays over ROMs the
