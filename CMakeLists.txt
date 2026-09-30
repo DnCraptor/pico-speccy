@@ -619,6 +619,7 @@ option(AY_STEREO_SLOT "AY: share one SRAM slot between the four stereo mixers in
 # `arm-none-eabi-size -A <elf> | grep -E '\.(ts|gs)ovl'`.
 set(TSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the TS-Conf code overlay window, or AUTO (rp2350-memmap.ld)")
 set(GSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the GS/NeoGS code overlay window, or AUTO (rp2350-memmap.ld)")
+set(NGSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the NeoGS-only code overlay window, or AUTO (rp2350-memmap.ld)")
 set(DMAOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the Z80 DMA code overlay window, or AUTO (rp2350-memmap.ld)")
 
 if (TSOVL_WIN_SIZE STREQUAL "AUTO")
@@ -685,7 +686,12 @@ if (NOT TSCONF_CODE_OVERLAY)
 endif()
 
 if (GSOVL_WIN_SIZE STREQUAL "AUTO")
-    set(_GSOVL_BYTES 27648)   # 27 KB: 26 936 B measured 2026-09-21 (plain DVp2; NGS_TRACE adds the +6144 below) + ~0.7 KB slack
+    # 2026-09-30 (m2p2, both HDMI back-ends): .gsovl 21 280 B of code + .gsovl_bss
+    # 1 500 B (GS_OVL_BSS: host/g2h/cmd FIFOs, s_cpu, the bank tables) = 22 780,
+    # + 260 B slack — tight on purpose: on a NeoGS boot both GS windows are
+    # resident and every byte of slack in either is heap that session loses.
+    # The NeoGS-only code and data moved to .ngsovl (below).
+    set(_GSOVL_BYTES 23040)
     # The GS trace options add code to the same objects (counters, the handshake
     # ring writer, the per-command SD log), so the window has to grow with them.
     if (GS_PERF_TRACE OR NGS_TRACE OR NGS_SD_TRACE OR GS_DEBUG_TRACE)
@@ -697,6 +703,23 @@ else()
 endif()
 if (NOT GS_CODE_OVERLAY)
     set(GSOVL_WIN_SIZE_EFFECTIVE 0)
+endif()
+
+if (NGSOVL_WIN_SIZE STREQUAL "AUTO")
+    # 2026-09-30 (m2p2): .ngsovl 5 704 B of code (NgsSd/NgsMp3 .time_critical +
+    # GS.cpp's ngs_cb_in/out, ngs_rebuild_map, ngs_map_half16, ngs_warm_reset,
+    # zxDmaRead/Write) + .ngsovl_bss 1 352 B (the card SD state, the MP3 SCI file)
+    # = 7 056, + 112 B slack (see the .gsovl note on why tight). Loaded only on a
+    # NeoGS boot.
+    set(NGSOVL_WIN_SIZE_EFFECTIVE 7168)
+    if (GS_PERF_TRACE OR NGS_TRACE OR NGS_SD_TRACE OR GS_DEBUG_TRACE)
+        math(EXPR NGSOVL_WIN_SIZE_EFFECTIVE "${NGSOVL_WIN_SIZE_EFFECTIVE} + 2048")
+    endif()
+else()
+    set(NGSOVL_WIN_SIZE_EFFECTIVE ${NGSOVL_WIN_SIZE})
+endif()
+if (NOT GS_CODE_OVERLAY)
+    set(NGSOVL_WIN_SIZE_EFFECTIVE 0)
 endif()
 
 if (DMAOVL_WIN_SIZE STREQUAL "AUTO")
@@ -759,18 +782,46 @@ if (GS_CODE_OVERLAY)
         __gsovl_start = .;\n\
         *GS.cpp.o(.time_critical*)\n\
         *Z80_redcode.c.o(.time_critical*)\n\
-        *NgsSd.cpp.o(.time_critical*)\n\
-        *NgsMp3.cpp.o(.time_critical*)\n\
         . = ALIGN(4);\n\
         __gsovl_end = .;\n\
     } AT > FLASH\n\
-    __gsovl_source = LOADADDR(.gsovl);\n")
+    __gsovl_source = LOADADDR(.gsovl);\n\
+    .gsovl_bss __gsovl_end (NOLOAD) : {\n\
+        __gsovl_bss_start = .;\n\
+        *(.gsovl_bss .gsovl_bss.*)\n\
+        . = ALIGN(4);\n\
+        __gsovl_bss_end = .;\n\
+    }\n")
+    set(NGSOVL_SECTION "\
+    .ngsovl __ngsovl_win_start : {\n\
+        __ngsovl_start = .;\n\
+        *NgsSd.cpp.o(.time_critical*)\n\
+        *NgsMp3.cpp.o(.time_critical*)\n\
+        *(.ngsovl .ngsovl.*)\n\
+        . = ALIGN(4);\n\
+        __ngsovl_end = .;\n\
+    } AT > FLASH\n\
+    __ngsovl_source = LOADADDR(.ngsovl);\n\
+    .ngsovl_bss __ngsovl_end (NOLOAD) : {\n\
+        __ngsovl_bss_start = .;\n\
+        *(.ngsovl_bss .ngsovl_bss.*)\n\
+        . = ALIGN(4);\n\
+        __ngsovl_bss_end = .;\n\
+    }\n")
 else()
     target_compile_definitions(${PROJECT_NAME} PRIVATE GS_CODE_OVERLAY=0)
     set(GSOVL_SECTION "\
     PROVIDE(__gsovl_start  = __gsovl_win_start);\n\
     PROVIDE(__gsovl_end    = __gsovl_win_start);\n\
-    PROVIDE(__gsovl_source = __gsovl_win_start);\n")
+    PROVIDE(__gsovl_source = __gsovl_win_start);\n\
+    PROVIDE(__gsovl_bss_start = __gsovl_win_start);\n\
+    PROVIDE(__gsovl_bss_end   = __gsovl_win_start);\n")
+    set(NGSOVL_SECTION "\
+    PROVIDE(__ngsovl_start  = __ngsovl_win_start);\n\
+    PROVIDE(__ngsovl_end    = __ngsovl_win_start);\n\
+    PROVIDE(__ngsovl_source = __ngsovl_win_start);\n\
+    PROVIDE(__ngsovl_bss_start = __ngsovl_win_start);\n\
+    PROVIDE(__ngsovl_bss_end   = __ngsovl_win_start);\n")
 endif()
 
 if (DMA_CODE_OVERLAY)
@@ -830,7 +881,7 @@ else()
     target_compile_definitions(${PROJECT_NAME} PRIVATE AY_STEREO_SLOT=0)
     set(AYOVL_SECTION "")
 endif()
-message(STATUS "Code overlays: .tsovl ${TSOVL_WIN_SIZE_EFFECTIVE} B, .dmaovl ${DMAOVL_WIN_SIZE_EFFECTIVE} B, .gsovl ${GSOVL_WIN_SIZE_EFFECTIVE} B")
+message(STATUS "Code overlays: .tsovl ${TSOVL_WIN_SIZE_EFFECTIVE} B, .dmaovl ${DMAOVL_WIN_SIZE_EFFECTIVE} B, .ngsovl ${NGSOVL_WIN_SIZE_EFFECTIVE} B, .gsovl ${GSOVL_WIN_SIZE_EFFECTIVE} B")
 
 
 # The GM.DLS bank is everything above the firmware, to the top of flash — a dynamic

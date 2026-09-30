@@ -7364,6 +7364,49 @@ chained through their own first 8 bytes instead of a 96-entry pointer table
 TS-Conf + NeoGS, VGA) coming up again; the per-machine XIP costs listed above
 (Profi DS80/CP/M FPS, ATM/KAY, borderless) were not itemised and are still owed.
 
+## GS/NeoGS split into two windows + GS data in the window tail (2026-09-30; hw-confirmed the same day, owner: "все работает" — not itemised)
+
+Step 1 of the "machine and device code out of shared SRAM" plan (the full per-file
+measurement is in the section above; wd1793 — 6.8 KB of RAM code, Beta off only on
++3 / Timex / ALF — is on the list for a later step). Heap per session, m2p2
+MinSizeRel, against the build before it:
+
+| session | before | after |
+|---|---|---|
+| GS off (any machine) | 234 568 | 237 424 (+2 856) |
+| classic GS | 206 920 | 214 384 (+7 464) |
+| NeoGS | 206 920 | 207 216 (+296) |
+| TS-Conf + NeoGS | 182 856 | 183 152 (+296) |
+
+- **`.ngsovl`** (new window, between `.dmaovl` and `.gsovl`), loaded only when the
+  boot comes up with `Config::gs_enabled == 2` (`CodeOverlay::apply`'s new `ngs`
+  argument; `SET_GS_MODE` is AC_REBOOT, so there is no mid-session claim). Holds
+  NgsSd/NgsMp3 `.time_critical` (by object file) plus `NGS_OVL_CODE` functions of
+  GS.cpp: `ngs_cb_in/out`, `ngs_rebuild_map`, `ngs_map_half16`, `ngs_warm_reset`,
+  `GS::zxDmaRead/Write` — all `noinline`, reached only through `s_ngs` /
+  `g_ngs_zxdma`. `ngs_cb_in` used to be inlined into `gs_cb_in`; it is a call now
+  (one extra `bl` per NeoGS port access — watch the GS-Z80 MHz on a heavy module).
+- **`.gsovl_bss` / `.ngsovl_bss`** (NOLOAD window tails, zeroed by `loadWindow`):
+  `GS_OVL_BSS` on the host/g2h/cmd FIFOs, `s_cpu` and the bank tables; `NGS_OVL_BSS`
+  on NgsSd's cache/secbuf/cmd history/CSD/resp and GS.cpp's `s_mp3_reg`. **Only
+  arrays whose every accessor runs behind GS::enabled / GS::neogs / s_ngs** — the
+  audit found every external entry gated (Ports, pwm_audio, main.cpp, the reset in
+  ESPectrum, Hardware Info, memdump.gdb). NOT moved, on purpose: `GS::enabled`,
+  `GS::neogs`, the `reg_*`, `g_ngs_zxdma` (read on every machine) and the scalars
+  that `GS::pollPerf()` (called every frame, ungated) and `hook_gsClock` →
+  `GS::setClock()` touch. Adding a variable to either tail needs the same audit.
+- Window sizes are TIGHT (260 B / 112 B slack): on a NeoGS boot both are resident
+  and slack is heap that session loses. Measured content `.gsovl` 21 280 + 1 500,
+  `.ngsovl` 5 704 + 1 352; `NGS_TRACE` build 21 808 / 6 368 (the trace terms cover it).
+- Left for later, the risky half: NeoGS is still WOVEN through the shared GS-Z80
+  callbacks (`gs_cb_read/fetch/write/in`): a classic-only compile of GS.cpp's hot
+  code is 8 360 B against 15 320, a NeoGS-only one 10 152 — compiling them twice
+  (the Profi template trick) would give each mode another ~5 KB. That is the most
+  hw-debugged code in the tree; not without a reason.
+- Test ELFs `debug/{m2p2,m2p2-hstx}-sram4-1.0.8`. **Hw check owed**: NeoGS (NPL MOD +
+  MP3, ZP4, TheLink with ZX-DMA, NEO8), classic GS (a MOD player), GS off, and the
+  boot log's `[OVL] NeoGS ... code resident` / `window to the heap` lines.
+
 ## SRAM optimisation pass, branch drew-sram-opt (2026-09-21/22; every step hw-confirmed on DVp2)
 
 The target session was 720x576 + TS-Conf + NeoGS + HDMI audio + Covox + TSFM, which booted

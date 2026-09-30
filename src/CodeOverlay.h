@@ -21,7 +21,9 @@
 // the released windows above it when a request no longer fits below — newlib's
 // dlmalloc was built for a non-contiguous MORECORE (it fences the old top and
 // frees it). So every released window reaches the heap whatever is resident:
-// Layout, heap at the bottom: [heap ...][.tsovl][.dmaovl][.gsovl][stack].
+// Layout, heap at the bottom: [heap ...][.tsovl][.dmaovl][.ngsovl][.gsovl][stack]
+// (.ngsovl = the NeoGS-only half of GS, 2026-09-30: never resident without .gsovl,
+// so it never splits a run of released windows).
 //   nothing on             -> one region, heap gains all three
 //   GS on, TS+DMA off      -> one region, heap gains .tsovl + .dmaovl
 //   TS on, GS off          -> two regions: base + [.dmaovl .gsovl] (32 KB)
@@ -77,7 +79,25 @@
 #define TS_OVL_DATA
 #endif
 
-// The GS family needs NO source annotation: its whole directory (src/GS/) is
+#if GS_CODE_OVERLAY
+// Zero-initialised GS DATA in the tail of the GS window (.gsovl_bss, NOLOAD,
+// zeroed by CodeOverlay when the window is loaded): heap on every session with
+// General Sound off. Only arrays whose EVERY accessor runs behind GS::enabled /
+// GS::neogs / s_ngs, i.e. only when apply() has loaded the window — never a
+// variable read by code outside src/GS/ (GS::enabled, g_ngs_zxdma, the reg_*).
+#define GS_OVL_BSS   __attribute__((section(".gsovl_bss")))
+// NeoGS-only code and data: the .ngsovl window, loaded only when the boot comes
+// up with Config::gs_enabled == 2, heap otherwise (classic GS included). Code
+// here must be reachable only through s_ngs / GS::neogs / g_ngs_zxdma.
+// NgsSd.cpp and NgsMp3.cpp are collected by object file, like .gsovl.
+#define NGS_OVL_CODE __attribute__((section(".ngsovl")))
+#define NGS_OVL_BSS  __attribute__((section(".ngsovl_bss")))
+#else
+#define GS_OVL_BSS
+#define NGS_OVL_CODE __not_in_flash("ngs")
+#define NGS_OVL_BSS
+#endif
+// The GS family needs NO source annotation for its CODE: its whole directory (src/GS/) is
 // GS-only, so rp2350-memmap.ld collects .gsovl BY OBJECT FILE — the pattern
 // Z80_CORE_IN_RAM already uses — and the same objects are excluded from .data's
 // .time_critical sweep. That is deliberately not a macro: per-function marks
@@ -91,7 +111,7 @@ namespace CodeOverlay {
 // condition that gates the single GS::init() call site, which is why the GS
 // window needs no runtime claim: Audio > General Sound is AC_REBOOT, so a guest
 // can never bring the card up on a session that released its window.
-void apply(bool tsconf, bool gs, bool dma);
+void apply(bool tsconf, bool gs, bool dma, bool ngs);
 
 // Enabling a feature OUTSIDE that window: load its overlay if the window is
 // still untouched (the heap grows upward and rarely reaches the top tens of KB,
@@ -104,7 +124,7 @@ bool claimForDma();
 
 // Diagnostics for Hardware/Memory Info: window size, bytes used by the content,
 // and whether the window is currently code (true) or heap (false).
-enum Which { WIN_TS = 0, WIN_DMA, WIN_GS };
+enum Which { WIN_TS = 0, WIN_DMA, WIN_GS, WIN_NGS };
 unsigned windowBytes(Which w);
 unsigned contentBytes(Which w);
 bool     loaded(Which w);

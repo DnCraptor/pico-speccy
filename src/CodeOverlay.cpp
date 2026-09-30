@@ -18,6 +18,10 @@ extern char __dmaovl_win_start[], __dmaovl_win_end[];
 extern char __dmaovl_start[], __dmaovl_end[], __dmaovl_source[];
 extern char __gsovl_win_start[], __gsovl_win_end[];
 extern char __gsovl_start[], __gsovl_end[], __gsovl_source[];
+extern char __gsovl_bss_start[], __gsovl_bss_end[];
+extern char __ngsovl_win_start[], __ngsovl_win_end[];
+extern char __ngsovl_start[], __ngsovl_end[], __ngsovl_source[];
+extern char __ngsovl_bss_start[], __ngsovl_bss_end[];
 extern char __StackLimit[];
 extern char __end__[];          // heap start (the linker also aliases it as `end`,
                                 // which cannot be used here: <string> drags in
@@ -27,8 +31,9 @@ extern char __end__[];          // heap start (the linker also aliases it as `en
 // The heap is a LIST OF REGIONS, not one ceiling. Every window this boot does
 // not load is heap; a window that IS loaded splits the heap around it. So the
 // regions are: the base [__end__, first loaded window) and then every run of
-// released windows between/above loaded ones — at most two regions with the
-// three windows laid out [.tsovl][.dmaovl][.gsovl] under the stack.
+// released windows between/above loaded ones — at most three regions with the
+// four windows laid out [.tsovl][.dmaovl][.ngsovl][.gsovl] under the stack
+// (.ngsovl is never resident without .gsovl, so it never splits a run).
 //
 // Our _sbrk grows the heap inside the current region and, when a request does
 // not fit, JUMPS to the next region that can take it. newlib's malloc is
@@ -52,14 +57,16 @@ static HeapRegions s_hr = { { { __end__, __tsovl_win_start, __end__ } }, 1, 0, n
 static bool  s_ts_loaded = false;
 static bool  s_dma_loaded = false;
 static bool  s_gs_loaded = false;
+static bool  s_ngs_loaded = false;
 
 static void regionsRebuild() {
-    const HrWindow w[3] = {
+    const HrWindow w[4] = {
         { __tsovl_win_start,  __tsovl_win_end,  s_ts_loaded  },
         { __dmaovl_win_start, __dmaovl_win_end, s_dma_loaded },
+        { __ngsovl_win_start, __ngsovl_win_end, s_ngs_loaded },
         { __gsovl_win_start,  __gsovl_win_end,  s_gs_loaded  },
     };
-    hr_rebuild(&s_hr, __end__, w, 3, __StackLimit);
+    hr_rebuild(&s_hr, __end__, w, 4, __StackLimit);
 }
 
 // Replaces the SDK's __weak _sbrk (pico_clib_interface/newlib_interface.c),
@@ -92,6 +99,11 @@ static void loadWindow(char* dst, const char* src, size_t n) {
     // it (it is not .bss), and the heap may have used the bytes before a
     // mid-session claim.
     if (dst == __tsovl_start) memset(__tsovl_bss_start, 0, (size_t)(__tsovl_bss_end - __tsovl_bss_start));
+    // The GS and NeoGS windows carry the same kind of tail (GS_OVL_BSS /
+    // NGS_OVL_BSS): loaded once at boot, over bytes nothing has used yet, but
+    // .bss semantics are "zero" and nothing else provides it.
+    if (dst == __gsovl_start)  memset(__gsovl_bss_start,  0, (size_t)(__gsovl_bss_end  - __gsovl_bss_start));
+    if (dst == __ngsovl_start) memset(__ngsovl_bss_start, 0, (size_t)(__ngsovl_bss_end - __ngsovl_bss_start));
     // The RP2350's Cortex-M33 has no instruction cache over SRAM (only the XIP
     // cache, and this is not XIP), so ordering the stores before the first fetch
     // is all that is needed. Nothing runs from a window yet either way: core1 is
@@ -100,12 +112,13 @@ static void loadWindow(char* dst, const char* src, size_t n) {
     __isb();
 }
 
-void CodeOverlay::apply(bool tsconf, bool gs, bool dma) {
+void CodeOverlay::apply(bool tsconf, bool gs, bool dma, bool ngs) {
     struct W { const char* name; char* ws; char* we; char* cs; char* ce; char* src; bool want; bool* got; };
-    W w[3] = {
-        { "TS-Conf", __tsovl_win_start,  __tsovl_win_end,  __tsovl_start,  __tsovl_end,  __tsovl_source,  tsconf, &s_ts_loaded  },
-        { "Z80 DMA", __dmaovl_win_start, __dmaovl_win_end, __dmaovl_start, __dmaovl_end, __dmaovl_source, dma,    &s_dma_loaded },
-        { "GS/NeoGS",__gsovl_win_start,  __gsovl_win_end,  __gsovl_start,  __gsovl_end,  __gsovl_source,  gs,     &s_gs_loaded  },
+    W w[4] = {
+        { "TS-Conf", __tsovl_win_start,  __tsovl_win_end,  __tsovl_start,  __tsovl_end,  __tsovl_source,  tsconf,     &s_ts_loaded  },
+        { "Z80 DMA", __dmaovl_win_start, __dmaovl_win_end, __dmaovl_start, __dmaovl_end, __dmaovl_source, dma,        &s_dma_loaded },
+        { "NeoGS",   __ngsovl_win_start, __ngsovl_win_end, __ngsovl_start, __ngsovl_end, __ngsovl_source, gs && ngs,  &s_ngs_loaded },
+        { "GS",      __gsovl_win_start,  __gsovl_win_end,  __gsovl_start,  __gsovl_end,  __gsovl_source,  gs,         &s_gs_loaded  },
     };
     for (auto& x : w) {
         const unsigned win = (unsigned)(x.we - x.ws);
@@ -114,7 +127,9 @@ void CodeOverlay::apply(bool tsconf, bool gs, bool dma) {
         Debug::log("[OVL] %s %s: %u of %u B window @%08lX%s", x.name,
                    *x.got ? "code resident" : "window to the heap",
                    (unsigned)(x.ce - x.cs), win, (unsigned long)(uintptr_t)x.ws,
-                   (x.cs == __tsovl_start && __tsovl_bss_end > __tsovl_bss_start) ? " (+data tail)" : "");
+                   ((x.cs == __tsovl_start && __tsovl_bss_end > __tsovl_bss_start) ||
+                    (x.cs == __gsovl_start && __gsovl_bss_end > __gsovl_bss_start) ||
+                    (x.cs == __ngsovl_start && __ngsovl_bss_end > __ngsovl_bss_start)) ? " (+data tail)" : "");
     }
     regionsRebuild();
     Debug::log("[OVL] heap ceiling %08lX (+%u B over all windows reserved, +%u B stranded above a resident window)",
@@ -162,16 +177,19 @@ bool CodeOverlay::claimForDma() {
 
 unsigned CodeOverlay::windowBytes(Which x) {
     switch (x) { case WIN_GS:  return (unsigned)(__gsovl_win_end - __gsovl_win_start);
+                 case WIN_NGS: return (unsigned)(__ngsovl_win_end - __ngsovl_win_start);
                  case WIN_DMA: return (unsigned)(__dmaovl_win_end - __dmaovl_win_start);
                  default:      return (unsigned)(__tsovl_win_end - __tsovl_win_start); }
 }
 unsigned CodeOverlay::contentBytes(Which x) {
     switch (x) { case WIN_GS:  return (unsigned)(__gsovl_end - __gsovl_start);
+                 case WIN_NGS: return (unsigned)(__ngsovl_end - __ngsovl_start);
                  case WIN_DMA: return (unsigned)(__dmaovl_end - __dmaovl_start);
                  default:      return (unsigned)(__tsovl_end - __tsovl_start); }
 }
 bool CodeOverlay::loaded(Which x) {
-    switch (x) { case WIN_GS: return s_gs_loaded; case WIN_DMA: return s_dma_loaded; default: return s_ts_loaded; }
+    switch (x) { case WIN_GS: return s_gs_loaded; case WIN_NGS: return s_ngs_loaded;
+                 case WIN_DMA: return s_dma_loaded; default: return s_ts_loaded; }
 }
 
 #else  // no overlay at all
@@ -181,7 +199,7 @@ extern "C" char* heap_ceiling_now() { return __HeapLimit; }
 extern "C" size_t heap_stranded_bytes()   { return 0; }
 extern "C" size_t heap_stranded_largest() { return 0; }
 
-void CodeOverlay::apply(bool, bool, bool)         {}
+void CodeOverlay::apply(bool, bool, bool, bool)   {}
 bool CodeOverlay::claimForTsconf()                { return true; }
 bool CodeOverlay::claimForDma()                   { return true; }
 unsigned CodeOverlay::windowBytes(Which)          { return 0; }

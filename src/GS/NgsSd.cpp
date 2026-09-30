@@ -5,6 +5,7 @@
 #include "pico.h"
 #include "hardware/sync.h"
 #include <string.h>
+#include "../CodeOverlay.h"   // NGS_OVL_BSS: the whole card SD state is NeoGS-only
 
 extern "C" {
     #include "ff.h"       // BYTE/DWORD for diskio.h
@@ -22,7 +23,7 @@ extern "C" {
 
 // Card geometry, probed on core0 in reset(). 0 = no card.
 static uint32_t s_sector_count = 0;
-static uint8_t  s_csd[16];
+static NGS_OVL_BSS uint8_t  s_csd[16];
 static uint8_t  s_cid[16] = { 0x01, 'P','I','C','O','S','P','C','N','G','S',
                               0x10, 0x00, 0x00, 0x01, 0x00 };
 
@@ -42,7 +43,7 @@ static volatile uint8_t  s_req_op = REQ_NONE;
 static volatile uint32_t s_req_sector = 0;
 static volatile uint32_t s_req_gen = 0;
 static volatile bool     s_req_ok = false;
-static uint8_t           s_secbuf[512];
+static NGS_OVL_BSS uint8_t           s_secbuf[512];
 
 // ── Read-ahead cache ────────────────────────────────────────────────────────
 // A mailbox round-trip costs the guest a WAIT spin until core0 next runs
@@ -66,7 +67,7 @@ static uint8_t           s_secbuf[512];
 // re-enable only with a test that reads a non-sequential sector after a
 // sequential burst.
 #define SD_CACHE_SECTORS 1
-static uint8_t  s_cache[SD_CACHE_SECTORS][512];
+static NGS_OVL_BSS uint8_t  s_cache[SD_CACHE_SECTORS][512];
 static uint32_t s_cache_base  = 0xFFFFFFFFu;   // first sector held, or ~0
 static uint32_t s_cache_count = 0;             // valid sectors from base
 static const uint8_t* s_rd_buf = nullptr;      // data source for the sector in flight
@@ -94,8 +95,8 @@ static uint32_t s_st_xfers = 0, s_st_reads = 0, s_st_writes = 0, s_st_errors = 0
 // mangled (our frame-parser desync). Negligible cost: two stores per command.
 // volatile: the only reader is the debug probe — without it the compiler
 // dead-store-eliminates the whole ring.
-static volatile uint32_t s_cmd_hist_arg[32];
-static volatile uint32_t s_cmd_hist_cmd[32];
+static NGS_OVL_BSS volatile uint32_t s_cmd_hist_arg[32];
+static NGS_OVL_BSS volatile uint32_t s_cmd_hist_cmd[32];
 static volatile uint32_t s_cmd_hist_pos = 0;
 
 // Post-mortem ring of the last N sectors served before the first out-of-range
@@ -159,7 +160,7 @@ static bool    s_idle = true;           // SPI-mode idle state: CMD0 → set, AC
 static uint8_t s_rx = 0xFF;             // last MISO byte (SD_READ latch)
 static uint8_t s_cmd[6];
 static int     s_cmd_idx = 0;           // command frame assembly
-static uint8_t s_resp[24];
+static NGS_OVL_BSS uint8_t s_resp[24];
 static int     s_resp_len = 0, s_resp_pos = 0;
 static int     s_rd_idx = -1;           // CMD17/18 stream position (0 = token next)
 static bool    s_rd_zero = false;       // out-of-range read: serve zeros, no disk I/O

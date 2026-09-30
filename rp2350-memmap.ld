@@ -299,19 +299,27 @@ SECTIONS
      * content symbols are PROVIDEd equal to its base so CodeOverlay's arithmetic
      * comes out zero. */
     __gsovl_win_size   = @GSOVL_WIN_SIZE_EFFECTIVE@;
+    __ngsovl_win_size  = @NGSOVL_WIN_SIZE_EFFECTIVE@;
     __dmaovl_win_size  = @DMAOVL_WIN_SIZE_EFFECTIVE@;
     __tsovl_win_size   = @TSOVL_WIN_SIZE_EFFECTIVE@;
     __gsovl_win_start  = ORIGIN(RAM) + LENGTH(RAM) - __mos_mailbox - SIZEOF(.stack_dummy) - __gsovl_win_size;
     __gsovl_win_end    = __gsovl_win_start + __gsovl_win_size;
-    __dmaovl_win_start = __gsovl_win_start - __dmaovl_win_size;
+    /* NeoGS-only window directly under .gsovl: a classic-GS or GS-off boot
+       releases it together with whatever is released below it (.dmaovl). */
+    __ngsovl_win_start = __gsovl_win_start - __ngsovl_win_size;
+    __ngsovl_win_end   = __ngsovl_win_start + __ngsovl_win_size;
+    __dmaovl_win_start = __ngsovl_win_start - __dmaovl_win_size;
     __dmaovl_win_end   = __dmaovl_win_start + __dmaovl_win_size;
     __tsovl_win_start  = __dmaovl_win_start - __tsovl_win_size;
     __tsovl_win_end    = __tsovl_win_start + __tsovl_win_size;
 
 @GSOVL_SECTION@
+@NGSOVL_SECTION@
 @DMAOVL_SECTION@
 @TSOVL_SECTION@
-    ASSERT(__gsovl_end <= __gsovl_win_end,
+    ASSERT(__ngsovl_bss_end <= __ngsovl_win_end,
+        "ERROR: .ngsovl overflowed the NeoGS overlay window. Re-link with -DNGSOVL_WIN_SIZE=16384, read the real size from `arm-none-eabi-size -A <elf> | grep ngsovl`, then fix the AUTO arithmetic in CMakeLists.txt")
+    ASSERT(__gsovl_bss_end <= __gsovl_win_end,
         "ERROR: .gsovl overflowed the GS code overlay window. Re-link with -DGSOVL_WIN_SIZE=40960, read the real size from `arm-none-eabi-size -A <elf> | grep .gsovl`, then fix the AUTO arithmetic in CMakeLists.txt")
     ASSERT(__dmaovl_end <= __dmaovl_win_end,
         "ERROR: .dmaovl overflowed the Z80 DMA overlay window. Re-link with -DDMAOVL_WIN_SIZE=12288, read the real size from `arm-none-eabi-size -A <elf> | grep .dmaovl`, then fix the AUTO arithmetic in CMakeLists.txt")

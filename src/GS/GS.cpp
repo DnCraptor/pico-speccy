@@ -17,6 +17,7 @@ extern "C" {
 #include "hardware/sync.h"
 #include "hardware/clocks.h"   // clock_get_hz for the PERF line's config self-id
 #include <string.h>
+#include "../CodeOverlay.h"   // GS_OVL_BSS / NGS_OVL_CODE / NGS_OVL_BSS
 
 // Atomic byte OR/AND via GCC __atomic builtins — compile to LDREXB/STREXB on
 // ARM Cortex-M33, which is safe across both RP2350 cores sharing the AHB bus.
@@ -75,7 +76,7 @@ static inline void gs_status_and(volatile uint8_t* p, uint8_t mask) {
 // flags=01, host parked at ret=8B9D). 512 leaves 2x margin over the worst case.
 #define GS_G2H_SIZE 512
 #define GS_G2H_MASK (GS_G2H_SIZE - 1)
-static volatile uint8_t  s_g2h_buf[GS_G2H_SIZE];
+static GS_OVL_BSS volatile uint8_t  s_g2h_buf[GS_G2H_SIZE];
 static volatile uint32_t s_g2h_w = 0, s_g2h_r = 0;
 static inline bool gs_g2h_empty() { return s_g2h_w == s_g2h_r; }
 
@@ -294,7 +295,7 @@ uint8_t  GS::reg_vol[8]    = {0,0,0,0,0,0,0,0};
 uint8_t  GS::reg_ch[8]     = {0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80};
 volatile uint32_t GS::int_count = 0;
 
-static Z80      s_cpu;
+static GS_OVL_BSS Z80 s_cpu;
 static uint8_t* s_gs_ram      = nullptr;
 static uint32_t s_gs_ram_mask = 0;
 static uint32_t s_int_timer_ts = 0;
@@ -567,7 +568,7 @@ static Buffer s_workRamBuf, s_ringLBuf, s_ringRBuf;
 // size with mask wrapping; volatile uint32_t pos atomic on ARM.
 #define GS_HOST_FIFO_SIZE 512
 #define GS_HOST_FIFO_MASK (GS_HOST_FIFO_SIZE - 1)
-static uint8_t s_host_fifo[GS_HOST_FIFO_SIZE];
+static GS_OVL_BSS uint8_t s_host_fifo[GS_HOST_FIFO_SIZE];
 static volatile uint32_t s_host_fifo_w = 0;
 static volatile uint32_t s_host_fifo_r = 0;
 // REAL consumption counter (core1 pops only). The pacing/rot logic below must
@@ -585,7 +586,7 @@ static volatile uint32_t s_h2c_pops = 0;
 // the firmware sees every command in order.
 #define GS_CMD_FIFO_SIZE 256
 #define GS_CMD_FIFO_MASK (GS_CMD_FIFO_SIZE - 1)
-static uint8_t s_cmd_fifo[GS_CMD_FIFO_SIZE];
+static GS_OVL_BSS uint8_t s_cmd_fifo[GS_CMD_FIFO_SIZE];
 static volatile uint32_t s_cmd_fifo_w = 0;
 static volatile uint32_t s_cmd_fifo_r = 0;
 // Card-side activity counters for the stale-command flush in hostReadBB: reads
@@ -748,10 +749,10 @@ static uint32_t       s_ngs_ram_total = 0;   // full RAM incl. the 64 KB low par
 // address − 0x10000), valid only where s_fetch_page[slot] == nullptr.
 // s_bank_woff mirrors it for the write path; NGS_BANK_NONE = not writable.
 #define NGS_BANK_NONE 0xFFFFFFFFu
-static uint32_t s_bank_off[8];
+static GS_OVL_BSS uint32_t s_bank_off[8];
 static uint32_t s_bank_woff[8] = {NGS_BANK_NONE, NGS_BANK_NONE, NGS_BANK_NONE, NGS_BANK_NONE,
                                   NGS_BANK_NONE, NGS_BANK_NONE, NGS_BANK_NONE, NGS_BANK_NONE};
-static uint8_t* s_write_page[8];
+static GS_OVL_BSS uint8_t* s_write_page[8];
 
 // Private SRAM cache for PSRAM (banked sample pages). XIP cache on RP2350 is
 // shared between cores — core0 video rendering evicts lines we need. A small
@@ -843,7 +844,7 @@ static inline zuint8 __not_in_flash_func(gs_pc_read)(uint32_t psram_off) {
 // NOROM/MPAG/MPAGEX/EXPAG (ngs_rebuild_map), leaving nullptr only where a
 // window maps PSRAM-resident RAM (physical pages >= 2) — those reads go
 // through s_bank_off + the SRAM prefetch cache.
-static const uint8_t* s_fetch_page[8];
+static GS_OVL_BSS const uint8_t* s_fetch_page[8];
 
 static inline zuint8 __not_in_flash_func(gs_mem_raw_read)(zuint16 address) {
     const uint8_t* base = s_fetch_page[address >> 13];
@@ -980,7 +981,7 @@ static void __not_in_flash_func(ngs_dma_poke)(uint32_t phys, uint8_t v) {
     }
 }
 
-uint8_t __not_in_flash_func(GS::zxDmaRead)() {
+NGS_OVL_CODE uint8_t GS::zxDmaRead() {
     uint8_t v = s_ngs_dma_pre;                    // pipeline latch (first read = junk)
     s_ngs_dma_pre = ngs_dma_peek(s_ngs_dma_pos);
     s_ngs_dma_pos = (s_ngs_dma_pos + 1) & 0x3FFFFFu;
@@ -988,7 +989,7 @@ uint8_t __not_in_flash_func(GS::zxDmaRead)() {
     return v;
 }
 
-void __not_in_flash_func(GS::zxDmaWrite)(uint8_t data) {
+NGS_OVL_CODE void GS::zxDmaWrite(uint8_t data) {
     ngs_dma_poke(s_ngs_dma_pos, data);
     s_ngs_dma_pos = (s_ngs_dma_pos + 1) & 0x3FFFFFu;
     s_ngs_dma_wr++;
@@ -1417,7 +1418,7 @@ static inline const uint8_t* ngs_rom_slot(uint32_t phys) {
 // window to ROM or RAM. RAM physical addresses wrap at the installed size —
 // that's what lets fw 1.11 size the memory (512K/2M/4M) by writing high pages
 // and checking for aliasing.
-static void __not_in_flash_func(ngs_map_half16)(int slot, uint32_t page, uint32_t half,
+static NGS_OVL_CODE __attribute__((noinline)) void ngs_map_half16(int slot, uint32_t page, uint32_t half,
                                                 bool rom, bool ramro) {
     for (int i = 0; i < 2; i++) {
         uint32_t phys = page * 0x8000u + half * 0x4000u + (uint32_t)i * 0x2000u;
@@ -1470,7 +1471,7 @@ static void __not_in_flash_func(ngs_map_half16)(int slot, uint32_t page, uint32_
 // Rebuild all 8 slots from NOROM/RAMRO/EXPAG + MPAG/MPAGEX. Called on writes
 // to MPAG/MPAGEX/GSCFG0 (the firmware's mixer does this per channel per INT,
 // so it must stay cheap) and from init/reset.
-static void __not_in_flash_func(ngs_rebuild_map)() {
+static NGS_OVL_CODE __attribute__((noinline)) void ngs_rebuild_map() {
     bool norom = s_ngs_cfg0 & 0x01;
     bool ramro = s_ngs_cfg0 & 0x02;
     bool expag = s_ngs_cfg0 & 0x08;
@@ -1519,7 +1520,7 @@ static void __not_in_flash_func(ngs_rebuild_map)() {
 // SCTRL b1) implements the register file: STATUS identifies a VS1011,
 // DECODE_TIME advances with the MP3 byte stream at a nominal 128 kbit/s.
 // ---------------------------------------------------------------
-static uint16_t s_mp3_reg[16];
+static NGS_OVL_BSS uint16_t s_mp3_reg[16];
 static uint8_t  s_mp3_sci[2];      // op, addr of the current SCI frame
 static int      s_mp3_sci_idx = 0;
 static uint8_t  s_mp3_rx = 0xFF;   // byte "received" during the last MC_SEND
@@ -1645,7 +1646,7 @@ static void ngs_reset_regs() {
 // Warm reset (host GSCTR C_GRST, executed on core1 from step()): registers
 // and CPU restart from ROM, RAM contents survive — like the real card's
 // reset without FPGA reconfiguration.
-static void __not_in_flash_func(ngs_warm_reset)() {
+static NGS_OVL_CODE __attribute__((noinline)) void ngs_warm_reset() {
     ngs_reset_regs();
     // The host handshake SURVIVES a C_GRST. top.v routes the $33 reset into
     // `internal_reset_n` — "internal reset for everything": ports (GSCFG0 back
@@ -1680,7 +1681,7 @@ static void __not_in_flash_func(ngs_warm_reset)() {
     z80_instant_reset(&s_cpu);
 }
 
-static zuint8 __not_in_flash_func(ngs_cb_in)(void* ctx, zuint16 port) {
+static NGS_OVL_CODE __attribute__((noinline)) zuint8 ngs_cb_in(void* ctx, zuint16 port) {
     (void)ctx;
     uint8_t v;
     switch (port & 0xFF) {
@@ -1762,7 +1763,7 @@ static zuint8 __not_in_flash_func(ngs_cb_in)(void* ctx, zuint16 port) {
     return v;
 }
 
-static void __not_in_flash_func(ngs_cb_out)(void* ctx, zuint16 port, zuint8 value) {
+static NGS_OVL_CODE __attribute__((noinline)) void ngs_cb_out(void* ctx, zuint16 port, zuint8 value) {
     (void)ctx;
     switch (port & 0xFF) {
         case 0x00:  // MPAG
