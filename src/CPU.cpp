@@ -52,6 +52,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "Timex.h"      // g_timex_mmu + Timex::rd/wr (TC2068 SCLD horizontal MMU)
 #include "Atm.h"        // g_atm_ro (ATM-Turbo ROM windows) + Atm::reset/intEnabled
 #include "TsFastMem.h"
+#include "CodeOverlay.h" // TS_OVL_CODE (CPU::tsFrameLoop)
 #if PERF_TRACE && PERF_HIST
 // TS-Conf guest-memory access histogram by PHYSICAL page (the page each CPU
 // bank is mapped to), fetch + peek8 + poke8. Tells which pages a title hammers,
@@ -478,6 +479,153 @@ IRAM_ATTR void CPU::step() {
 static uint32_t ts_halt_phase = 0;
 static bool     ts_halt_phase_set = false;
 
+// The TS-Conf frame ("Stage D", see the comment at its call site in CPU::loop).
+// TS_OVL_CODE: it lives in the TS-Conf code overlay window, so on every other
+// machine its ~0.7 KB of SRAM is heap. Reachable only under Z80Ops::isTsconf, the
+// same gate that already reaches TsConf::portRead/trdosTrap in that window.
+// BREAKPOINTS returns from HERE; CPU::loop returns right after the call anyway.
+TS_OVL_CODE void CPU::tsFrameLoop(uint64_t _loop_t0, bool pbbp, int nbp, uint32_t zifi_pump_due) {
+    // Stage D: the whole TS-Conf frame, event-driven.
+    uint32_t ts_idle = 0;   // T-states slept in HALT this frame (several sleeps per frame with a raster split)
+    while (tstates < statesInFrame) {
+        if (Z80::isHalted()) {
+            TsConf::workHalt();   // PERF_TRACE: close the frame-work measurement
+#if PERF_TRACE
+            { extern uint32_t g_halt_t; extern bool g_halt_set;
+              if (!g_halt_set) { g_halt_t = CPU::tstates; g_halt_set = true; } }
+#endif
+            // A HALTed CPU leaves HALT only on an interrupt, so sleep straight
+            // to the next T-state where the INT line can rise (frame end with
+            // interrupts disabled) instead of stepping 4 T per execute(): with
+            // LINE INT armed at 14 MHz that was ~72k execute() calls of pure
+            // spinning per frame (TMNT: a flat 43 ms/frame, hw 2026-09-06).
+            // The video machine is walked line by line, not flushed, so a
+            // per-line effect programmed after the wake still renders right.
+            uint32_t wake = Z80::isIFF1() ? TsConf::nextIntEvent() : statesInFrame;
+            if (wake > statesInFrame) wake = statesInFrame;
+            // A HALTed Z80 samples INT only on its own 4 T NOP grid, and that
+            // grid is anchored where it ENTERED HALT — not on the raster. So
+            // sleeping straight to the event accepts up to 3 T early, and the
+            // error is the guest's HALT phase, which is why it moves from
+            // scene to scene and no raster constant can absorb it.
+            //
+            // Snapping the wake back onto the grid is what makes TS-Conf agree
+            // with Pentagon in EVERY frame: the distance from the HALT to the
+            // interrupt is a property of the guest, identical on both machines,
+            // so both then accept at the same offset past their own interrupt.
+            // Without it TS-Conf accepts exactly AT its window (offset 0) while
+            // Pentagon accepts p = (halt T) mod 4 past its own — measured on
+            // "Across the Edge" (hw 2026-09-12): Pentagon's intT read 0, 1 and 3
+            // in consecutive windows of one scene while TS-Conf sat pinned at 2,
+            // and its border effect came out exactly p columns left of
+            // Pentagon's (2 px per column).
+            //
+            // An earlier attempt on 2026-09-09 was reverted as "moved the
+            // border but did not fix it" — it predates both the INT-at-the-
+            // boundary fix and the +2 raster anchor, either of which alone
+            // leaves the border in the wrong place anyway.
+            if (!ts_halt_phase_set) { ts_halt_phase = tstates & 3u; ts_halt_phase_set = true; }
+            if (wake < statesInFrame) {
+                // statesInFrame is a multiple of 4, so the phase survives the
+                // frame wrap; never round past the frame end, where the loop
+                // would exit with the interrupt unhandled.
+                uint32_t d = (wake - ts_halt_phase) & 3u;
+                if (d) { uint32_t w2 = wake + (4u - d); if (w2 < statesInFrame) wake = w2; }
+            }
+            if (wake > tstates) { ts_idle += wake - tstates; haltAdvanceTo(wake); continue; }
+        } else ts_halt_phase_set = false;   // re-taken at the next HALT
+        if (Z80::isIFF1() && TsConf::intLine()) {
+            // The INT line is up and, prefixes aside, we are AT an
+            // instruction boundary: every way into this test lands on one
+            // (a HALT sleep that stopped exactly on the event,
+            // exec_nocheck's slice end, or a completed execute()). A Z80
+            // samples INT at that boundary, so take it HERE.
+            //
+            // This used to call Z80::execute(), which FETCHES AND RUNS a
+            // whole instruction and only checks the line at its END — 4 T
+            // late out of HALT (the fetch of a NOP the CPU never had to
+            // execute), one full instruction late otherwise. Every other
+            // machine gets the boundary for free: its checked loop reaches
+            // the window from the PREVIOUS frame's tail, where the wrap in
+            // Z80Ops::isActiveINT already has the line up, so the INT is
+            // taken at the frame-end overshoot itself. That is why the same
+            // demo read intT = 0..3 on Pentagon and 6..9 on TS-Conf, and
+            // why its border split landed right of Pentagon's (hw
+            // 2026-09-09). The other 2 T of that delta are the window
+            // legitimately opening at hsint=2, and the raster anchor
+            // carries them (TS_SCREEN_TSCONF, Video.h).
+            //
+            // ...unless a DD/FD/ED/CB prefix byte has been fetched and the
+            // instruction is unfinished — execute()/exec_nocheck() can both
+            // return in that state, and a Z80 never samples INT there.
+            if (Z80::atInstrBoundary()) Z80::checkINT();
+            // Not taken means pendingEI (an EI defers the interrupt by
+            // exactly one instruction) or a half-decoded prefix: either way
+            // run the instruction and let its own checkINT() take it.
+            // (checkINT clears IFF1 when it fires, so this doubles as the
+            // "was it taken" test.)
+            if (Z80::isIFF1()) Z80::execute();
+        } else {
+            // Nothing can interrupt before the next INT event (frame end
+            // while interrupts are disabled — EI/RETN/RETI re-enabling them
+            // end the slice through TsConf::intEnableHook, as do INTMask
+            // and DMACtrl writes through tsWakeLoop), so run unchecked to
+            // it. Per-instruction execute() here was 3x the cost of
+            // exec_nocheck() on TMNT (100% of its frame ran checked).
+            uint32_t next = Z80::isIFF1() ? TsConf::nextIntEvent() : statesInFrame;
+            if (next <= tstates) next = tstates + 1;
+            stFrame = next;
+            Z80::exec_nocheck();
+            if (stFrame == 0) continue;           // HALTed: the sleep above takes over
+            // The INT is accepted after the instruction that crossed the
+            // event boundary — same sampling point as execute(). The slice
+            // can end on a fetched prefix byte, though (exec_nocheck's
+            // `else continue` path), and that is mid-instruction: leave it
+            // to the next iteration, which finishes the instruction first.
+            if (Z80::atInstrBoundary()) Z80::checkINT();
+        }
+        if (Config::dma_mode) Z80DMA::handleDMA();
+        if (ZiFi::cdcNicActive && tstates >= zifi_pump_due) {
+            zifi_pump_due = tstates + 3500;
+            ZiFi::cdcPump();
+        }
+        BREAKPOINTS
+    }
+    TsConf::endFrame();
+    // Frame tail — a faithful copy of the shared tail below (kept
+    // duplicated so the hot path of every other machine stays textually
+    // untouched).
+    {
+        uint64_t _ef_t0 = time_us_64();
+        VIDEO::EndFrame();
+        endframe_us = (uint32_t)(time_us_64() - _ef_t0);
+    }
+    CPU::tstates_diff += CPU::tstates - CPU::prev_tstates;
+    if ((ESPectrum::fdd.control & (kRVMWD177XHLD | kRVMWD177XHLT)) != 0)
+    {
+        uint64_t _fdd_t0 = time_us_64();
+        rvmWD1793Step(&ESPectrum::fdd, CPU::tstates_diff / WD177XSTEPSTATES); // FDD
+        fdd_step_us += (uint32_t)(time_us_64() - _fdd_t0);
+    }
+    CPU::tstates_diff = CPU::tstates_diff % WD177XSTEPSTATES;
+    cpu_frame_us += (uint32_t)(time_us_64() - _loop_t0);
+#if PERF_TRACE
+    { extern uint32_t g_frm_int_taken, g_frm_int_miss;
+      if (!g_frm_int_taken) g_frm_int_miss++;   // no interrupt reached the guest this whole frame
+      g_frm_int_taken = 0;
+      extern uint32_t g_brd_first_t, g_brd_min, g_brd_max; extern bool g_brd_first_set;
+      if (g_brd_first_set) { if (g_brd_first_t < g_brd_min) g_brd_min = g_brd_first_t;
+                             if (g_brd_first_t > g_brd_max) g_brd_max = g_brd_first_t; }
+      g_brd_first_set = false; { extern bool g_halt_set; g_halt_set = false; } }
+#endif
+    global_tstates += statesInFrame;
+    tstates_frame = tstates;
+    tstates_active = tstates_frame - ts_idle;   // load = frame minus the HALT sleeps (haltAdvanceTo's own stamp is per sleep)
+    tstates -= statesInFrame;
+    CPU::prev_tstates = tstates;
+    return;
+}
+
 IRAM_ATTR void CPU::loop() {
     uint64_t _loop_t0 = time_us_64();
     bool pbbp = CPU::portBasedBP;
@@ -517,147 +665,7 @@ IRAM_ATTR void CPU::loop() {
     // showed the level's first frame on every other frame. A window written
     // mid-slice ends the slice through tsWakeLoop (frameIntRecalc), exactly
     // like an INTMask/DMACtrl write.
-    if (Z80Ops::isTsconf) {
-        // Stage D: the whole TS-Conf frame, event-driven.
-        uint32_t ts_idle = 0;   // T-states slept in HALT this frame (several sleeps per frame with a raster split)
-        while (tstates < statesInFrame) {
-            if (Z80::isHalted()) {
-                TsConf::workHalt();   // PERF_TRACE: close the frame-work measurement
-#if PERF_TRACE
-                { extern uint32_t g_halt_t; extern bool g_halt_set;
-                  if (!g_halt_set) { g_halt_t = CPU::tstates; g_halt_set = true; } }
-#endif
-                // A HALTed CPU leaves HALT only on an interrupt, so sleep straight
-                // to the next T-state where the INT line can rise (frame end with
-                // interrupts disabled) instead of stepping 4 T per execute(): with
-                // LINE INT armed at 14 MHz that was ~72k execute() calls of pure
-                // spinning per frame (TMNT: a flat 43 ms/frame, hw 2026-09-06).
-                // The video machine is walked line by line, not flushed, so a
-                // per-line effect programmed after the wake still renders right.
-                uint32_t wake = Z80::isIFF1() ? TsConf::nextIntEvent() : statesInFrame;
-                if (wake > statesInFrame) wake = statesInFrame;
-                // A HALTed Z80 samples INT only on its own 4 T NOP grid, and that
-                // grid is anchored where it ENTERED HALT — not on the raster. So
-                // sleeping straight to the event accepts up to 3 T early, and the
-                // error is the guest's HALT phase, which is why it moves from
-                // scene to scene and no raster constant can absorb it.
-                //
-                // Snapping the wake back onto the grid is what makes TS-Conf agree
-                // with Pentagon in EVERY frame: the distance from the HALT to the
-                // interrupt is a property of the guest, identical on both machines,
-                // so both then accept at the same offset past their own interrupt.
-                // Without it TS-Conf accepts exactly AT its window (offset 0) while
-                // Pentagon accepts p = (halt T) mod 4 past its own — measured on
-                // "Across the Edge" (hw 2026-09-12): Pentagon's intT read 0, 1 and 3
-                // in consecutive windows of one scene while TS-Conf sat pinned at 2,
-                // and its border effect came out exactly p columns left of
-                // Pentagon's (2 px per column).
-                //
-                // An earlier attempt on 2026-09-09 was reverted as "moved the
-                // border but did not fix it" — it predates both the INT-at-the-
-                // boundary fix and the +2 raster anchor, either of which alone
-                // leaves the border in the wrong place anyway.
-                if (!ts_halt_phase_set) { ts_halt_phase = tstates & 3u; ts_halt_phase_set = true; }
-                if (wake < statesInFrame) {
-                    // statesInFrame is a multiple of 4, so the phase survives the
-                    // frame wrap; never round past the frame end, where the loop
-                    // would exit with the interrupt unhandled.
-                    uint32_t d = (wake - ts_halt_phase) & 3u;
-                    if (d) { uint32_t w2 = wake + (4u - d); if (w2 < statesInFrame) wake = w2; }
-                }
-                if (wake > tstates) { ts_idle += wake - tstates; haltAdvanceTo(wake); continue; }
-            } else ts_halt_phase_set = false;   // re-taken at the next HALT
-            if (Z80::isIFF1() && TsConf::intLine()) {
-                // The INT line is up and, prefixes aside, we are AT an
-                // instruction boundary: every way into this test lands on one
-                // (a HALT sleep that stopped exactly on the event,
-                // exec_nocheck's slice end, or a completed execute()). A Z80
-                // samples INT at that boundary, so take it HERE.
-                //
-                // This used to call Z80::execute(), which FETCHES AND RUNS a
-                // whole instruction and only checks the line at its END — 4 T
-                // late out of HALT (the fetch of a NOP the CPU never had to
-                // execute), one full instruction late otherwise. Every other
-                // machine gets the boundary for free: its checked loop reaches
-                // the window from the PREVIOUS frame's tail, where the wrap in
-                // Z80Ops::isActiveINT already has the line up, so the INT is
-                // taken at the frame-end overshoot itself. That is why the same
-                // demo read intT = 0..3 on Pentagon and 6..9 on TS-Conf, and
-                // why its border split landed right of Pentagon's (hw
-                // 2026-09-09). The other 2 T of that delta are the window
-                // legitimately opening at hsint=2, and the raster anchor
-                // carries them (TS_SCREEN_TSCONF, Video.h).
-                //
-                // ...unless a DD/FD/ED/CB prefix byte has been fetched and the
-                // instruction is unfinished — execute()/exec_nocheck() can both
-                // return in that state, and a Z80 never samples INT there.
-                if (Z80::atInstrBoundary()) Z80::checkINT();
-                // Not taken means pendingEI (an EI defers the interrupt by
-                // exactly one instruction) or a half-decoded prefix: either way
-                // run the instruction and let its own checkINT() take it.
-                // (checkINT clears IFF1 when it fires, so this doubles as the
-                // "was it taken" test.)
-                if (Z80::isIFF1()) Z80::execute();
-            } else {
-                // Nothing can interrupt before the next INT event (frame end
-                // while interrupts are disabled — EI/RETN/RETI re-enabling them
-                // end the slice through TsConf::intEnableHook, as do INTMask
-                // and DMACtrl writes through tsWakeLoop), so run unchecked to
-                // it. Per-instruction execute() here was 3x the cost of
-                // exec_nocheck() on TMNT (100% of its frame ran checked).
-                uint32_t next = Z80::isIFF1() ? TsConf::nextIntEvent() : statesInFrame;
-                if (next <= tstates) next = tstates + 1;
-                stFrame = next;
-                Z80::exec_nocheck();
-                if (stFrame == 0) continue;           // HALTed: the sleep above takes over
-                // The INT is accepted after the instruction that crossed the
-                // event boundary — same sampling point as execute(). The slice
-                // can end on a fetched prefix byte, though (exec_nocheck's
-                // `else continue` path), and that is mid-instruction: leave it
-                // to the next iteration, which finishes the instruction first.
-                if (Z80::atInstrBoundary()) Z80::checkINT();
-            }
-            if (Config::dma_mode) Z80DMA::handleDMA();
-            if (ZiFi::cdcNicActive && tstates >= zifi_pump_due) {
-                zifi_pump_due = tstates + 3500;
-                ZiFi::cdcPump();
-            }
-            BREAKPOINTS
-        }
-        TsConf::endFrame();
-        // Frame tail — a faithful copy of the shared tail below (kept
-        // duplicated so the hot path of every other machine stays textually
-        // untouched).
-        {
-            uint64_t _ef_t0 = time_us_64();
-            VIDEO::EndFrame();
-            endframe_us = (uint32_t)(time_us_64() - _ef_t0);
-        }
-        CPU::tstates_diff += CPU::tstates - CPU::prev_tstates;
-        if ((ESPectrum::fdd.control & (kRVMWD177XHLD | kRVMWD177XHLT)) != 0)
-        {
-            uint64_t _fdd_t0 = time_us_64();
-            rvmWD1793Step(&ESPectrum::fdd, CPU::tstates_diff / WD177XSTEPSTATES); // FDD
-            fdd_step_us += (uint32_t)(time_us_64() - _fdd_t0);
-        }
-        CPU::tstates_diff = CPU::tstates_diff % WD177XSTEPSTATES;
-        cpu_frame_us += (uint32_t)(time_us_64() - _loop_t0);
-#if PERF_TRACE
-        { extern uint32_t g_frm_int_taken, g_frm_int_miss;
-          if (!g_frm_int_taken) g_frm_int_miss++;   // no interrupt reached the guest this whole frame
-          g_frm_int_taken = 0;
-          extern uint32_t g_brd_first_t, g_brd_min, g_brd_max; extern bool g_brd_first_set;
-          if (g_brd_first_set) { if (g_brd_first_t < g_brd_min) g_brd_min = g_brd_first_t;
-                                 if (g_brd_first_t > g_brd_max) g_brd_max = g_brd_first_t; }
-          g_brd_first_set = false; { extern bool g_halt_set; g_halt_set = false; } }
-#endif
-        global_tstates += statesInFrame;
-        tstates_frame = tstates;
-        tstates_active = tstates_frame - ts_idle;   // load = frame minus the HALT sleeps (haltAdvanceTo's own stamp is per sleep)
-        tstates -= statesInFrame;
-        CPU::prev_tstates = tstates;
-        return;
-    }
+    if (Z80Ops::isTsconf) { tsFrameLoop(_loop_t0, pbbp, nbp, zifi_pump_due); return; }
 
     while (tstates < IntEnd) {
         Z80::execute();

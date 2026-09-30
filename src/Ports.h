@@ -45,6 +45,12 @@ public:
 
     static uint8_t input(uint16_t address);
     static void output(uint16_t address, uint8_t data);
+    // The decode itself, compiled twice (Ports.cpp): <false> inlined into the RAM
+    // entry points above, <true> behind the flash inputProfi/outputProfi.
+    template<bool PROFI> static uint8_t inputImpl(uint16_t address);
+    template<bool PROFI> static void outputImpl(uint16_t address, uint8_t data);
+    static uint8_t inputProfi(uint16_t address);
+    static void outputProfi(uint16_t address, uint8_t data);
     static uint8_t port[128];
     // Profi extended keyboard: bit 5 of each standard row (row 0-7).
     // 0xFF = key not pressed; bit 5 cleared = key pressed.

@@ -644,6 +644,10 @@ if (TSOVL_WIN_SIZE STREQUAL "AUTO")
         # lumped terms fails: raise the term whose CODE grew, not the total.
         math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 5376")
     endif()
+    # CPU.cpp's .tsovl: CPU::tsFrameLoop, the TS-Conf frame ("Stage D") moved out
+    # of the RAM-resident CPU::loop — 736 B measured 2026-09-30 (m2p2, both HDMI
+    # back-ends), + room for its veneers. Not option-gated: TS_OVL_CODE is.
+    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 1024")
     # PERF_TRACE pulls TsConf::intTrace + the INT-ring code into the window as
     # well (measured +2572 B: TsConf +2484, Video +80). Without this the ASSERT
     # fires on every PERF build, which is exactly when you need one.

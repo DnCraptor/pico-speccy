@@ -153,6 +153,7 @@ public:
     static void FlushOnHalt();
     static void FlushOnHaltTo(uint32_t stEnd); // explicit target (TS-Conf sliced loop)
     static void haltAdvanceTo(uint32_t stEnd); // HALT sleep, video walked per line (TS-Conf Stage D)
+    static void tsFrameLoop(uint64_t loop_t0, bool pbbp, int nbp, uint32_t zifi_pump_due); // TS-Conf frame, in the .tsovl window (CPU.cpp)
 
     // CPU Tstates elapsed in current frame
     static uint32_t tstates;

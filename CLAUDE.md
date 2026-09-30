@@ -7302,6 +7302,56 @@ TurboSound FM is on: 2 x `sizeof(OpnFm)` = **2 016 B** + shared tables 2 560 B (
 + tl base 512) + `audioBufferFM` 1 280 B = **5 856 B**, plus the second AY (`AySound`
 chip1, 1 612 B) if TurboSound was not already on → **~7.5 KB**, freed on Off. Not a lever.
 
+## Machine code must not live in the SHARED RAM hot paths (2026-09-30; owner: "работает" on the sram2 test build, not itemised)
+
+Trigger: 720x576 + TS-Conf + NeoGS 2 MB + MIDI + VGA PWM fitted in 1.0.7 and not in
+1.0.8 (HSTX: no VGA picture; PIO: the menu would not open — `DynRows` 3 KB refused).
+1.0.8 had grown static SRAM by ~5.0 KB (PIO) / ~5.9 KB (HSTX), and most of it was
+code for ONE machine sitting inside functions EVERY machine runs from RAM:
+`Ports::input/output` (22 KB together), `Z80::check_trdos`, `CPU::loop`, `EndFrame`.
+Fixed, m2p2 MinSizeRel against 1.0.8: **−9.4 KB RAM (PIO), −10.8 KB (HSTX)**; heap in
+a TS-Conf session ends up +4.0 / +4.6 KB ABOVE 1.0.7.
+
+**The rule for every new machine / feature**: before its branches go into a RAM-
+resident shared function, pick one of these — never "just another `if (isXxx)`":
+1. **Cold flash dispatch** (GMX, ATM, KAY): one `if (flag) { if (xxxPortRead(...)) return; }`
+   in the RAM function, the body in a `static __attribute__((noinline))` function
+   (default `.text` = flash; `Z80_COLD` in Z80_JLS.cpp). Check with `nm` that it is at
+   0x10xxxxxx — a `static inline` helper called from RAM code is inlined INTO SRAM.
+2. **Compile twice** when the branches are woven through a decode whose ORDER is
+   load-bearing (Profi: ~75 sites): the body is `template<bool PROFI> inputImpl()`,
+   `<false>` always_inline'd into the RAM entry (constant-folded away), `<true>` behind
+   a flash `noinline` wrapper the entry calls under `Z80Ops::isProfi`. One source, no
+   drift; costs a flash copy (Profi: +18 KB flash). Static locals get duplicated —
+   fine only while they are all trace counters (checked for Ports).
+3. **An overlay window** when the machine's code is hot enough that XIP is wrong
+   (TS-Conf): `TS_OVL_CODE`, and raise the AUTO term for the object whose code grew.
+   `CPU::tsFrameLoop` (Stage D, 736 B) moved there this way.
+Measure with `meas.py`-style flag knockout (session scratch, 2026-09-30): replace the
+machine's flags with `false` in copies of Ports/Z80_JLS/CPU/Video, recompile each TU
+from `compile_commands.json`, sum `.time_critical*`/`.data` (+ `.text` for Z80_JLS,
+which is RAM by object file). Remaining per-machine RAM after this round, ±200 B
+inlining noise: TS-Conf ~0.5 KB in Ports (dispersed conditions), Timex ~1.1 KB (half
+in the CPU accessors), Scorpion ~1.0 KB, ALF ~0.8 KB, Pentagon ~0.5 KB.
+
+**Watch GCC's inlining after any move.** Taking code out of a RAM function changes
+the size heuristics and GCC then inlines OTHER things into it: after the first move
+`MainScreen_Blank` was inlined into `MainScreen_Blank_Opcode` (+580 B, it already was
+on HSTX) and `updateBorderBrd` into `EndFrame`; `profi_ds80_driver_set` had been
+dragging `crtTransform`'s `powf` chain into `EndFrame` (the +964 B of 1.0.8 HSTX).
+All three are `noinline` now. Diff per-symbol `.data` between two ELFs (`nm -S`, all
+symbols at 0x2002xxxx-0x2006xxxx) after every change, not just the section total.
+
+Also moved in this round: the ATM/KAY glue (`atmPortReadEarly/WriteEarly`,
+`kay1FFDWrite`, `scorpionC000Page`, `Z80::check_trdos_atm`, `Z80::scorp_dos_exit_rom`),
+Hide border's `blExpandLine`/`blPutRow`. What that costs and must be checked on hw:
+Profi/Karabas port I/O now runs from XIP (FPS in DS80 and CP/M, FDC traffic), ATM/KAY
+ports and TR-DOS traps from XIP, the borderless scaler from XIP (FPS on a busy title),
+TS-Conf unchanged in speed (window = SRAM). Test ELFs `debug/{m2p2,m2p2-hstx,DVp2}-sram2-1.0.8`.
+**Hw 2026-09-30, owner: "работает"** — read it as the triggering config (720x576 +
+TS-Conf + NeoGS, VGA) coming up again; the per-machine XIP costs listed above
+(Profi DS80/CP/M FPS, ATM/KAY, borderless) were not itemised and are still owed.
+
 ## SRAM optimisation pass, branch drew-sram-opt (2026-09-21/22; every step hw-confirmed on DVp2)
 
 The target session was 720x576 + TS-Conf + NeoGS + HDMI audio + Covox + TSFM, which booted
@@ -7940,9 +7990,10 @@ TS-Conf mode applies, before `gigascreenModeGate`), so the menu only writes Conf
   the carve path via `bandBorderMode()`), and `BL_CARVE_LAMP` / `BL_CARVE_LED` set by
   the corner lamp and `LED::draw`, which also back their cell with `brd` so no frozen
   scrap of picture shows through. Clearing a carve hands the rows back next frame.
-- State is ONE heap block (~1.4 KB, `tryMalloc`, only while live); RAM code
-  `blExpandLine` 248 B + `blPutRow` 360 B, `-O2 no-unroll no-loop-distribute` so no
-  flash memcpy on the render path. Test ELF `debug/DVp2-borderless-1.0.7.elf`.
+- State is ONE heap block (~1.4 KB, `tryMalloc`, only while live). `blExpandLine`
+  (540 B) + `blPutRow` (376 B) are in FLASH since 2026-09-30 (they were RAM code paid
+  by every session); `-O2 no-unroll no-loop-distribute` keeps libc calls out of them.
+  Test ELF `debug/DVp2-borderless-1.0.7.elf`.
 - **Hw check owed**: picture at 640x480 / 720x480 / 720x576 on HDMI and VGA; a
   multicolour title; ULA+; snow (48K/128K); F8 stats, F9/F10 volume, FDD lamp, LED
   strip, notify banner over the picture (no blinking); toggling on/off; Gigascreen
