@@ -10953,7 +10953,7 @@ holds MISO low (0x00) while it programs, then 0xFF.
   before touching this area again; the file itself cannot be host-compiled (it
   pulls FatFs and the SDK).
 
-### ...and the CMD18 gap byte: WC's DMA sector reader hung on a 0x00 (2026-09-30, NOT hw-tested)
+### ...and the CMD18 gap byte: WC's DMA sector reader hung on a 0x00 (2026-09-30; hw-confirmed the same day — owner: "да, запустился")
 
 "TGV video does not play under WC" (VIDEO_PL.WMF v0.71, `debug/TGV/`, `debug/WC/`).
 VDAC2 is not involved: the player is TS-Conf-only. What it does, from its
@@ -10993,13 +10993,174 @@ never touches the NeoGS at all, which is what made it the bisect.
   DDEV (`dmaStart`), so `5A` = SPI->RAM, DALGN, 512-byte windows — exactly the
   row spreading above; the `DivMMC::zc_read_data` path behind it is the one WC
   boots through.
-- Test ELF `debug/DVp2-tgv-cmd18-1.0.8.elf` (+ .uf2, plain main). **Hw owed**:
-  `binary.tgv` (video only), then `RUNNINGM.TGV` with NeoGS on (the 2 MB
-  byte-by-byte upload, then MP3 + video), TAPM / BMPV loads (same reader), and
-  the ZC card still mounting under TS-BIOS / WC / esxDOS (the R1 slot moved).
+- Test ELF `debug/DVp2-tgv-cmd18-1.0.8.elf` (+ .uf2, plain main). **Hw 2026-09-30,
+  owner: `binary.tgv` starts and plays** (the read path — one verdict, not
+  itemised). **Still owed**: `RUNNINGM.TGV` with NeoGS on (the 2 MB byte-by-byte
+  upload, then MP3 + video), TAPM / BMPV loads (same reader), and the ZC card
+  still mounting under TS-BIOS / WC / esxDOS (the R1 slot moved).
   Diagnostic build that exists for this: `debug/DVp2-tgv-zctrace-1.0.8.elf`
   (`TS_VIDEO_TRACE` + `ZC_PORT_TRACE`, built with `-DTSOVL_WIN_SIZE=28672`
   because that pair alone overflows the AUTO TS overlay window).
+
+### ...and the "negative" frames: nine rounds, seven mechanisms (2026-09-30; hw-confirmed on pal9 — owner: "теперь везде работает")
+
+Once the video played, every few frames a band from some row down came out in
+wrong colours (owner's screenshot: top ~15 rows right, the rest "negative"), and
+the same artifact was reported in **Ppal** (`debug/TSCONF/ppal.spg`) and
+**Keftale** (`debug/TSCONF/keft.trd`), V-Sync on or off. All three are `nb == 1`
+titles (TGV: a 256-cell CRAM sector per frame through the FMAddr window, 512 LDI
+from the INT hook at 0x8283; ppal's main loop at 0x6457 rewrites all 256 cells in
+a free-running loop over a static 256c picture; keft a per-frame fade over a
+palette that already needs more than the 184 slots), i.e. the Kolbass
+hold/release path with the CPU as the palette writer — the hold trigger is
+`wide`, never `blit`. **What actually went wrong, in the order it was found:**
+
+1. **`ts256ProgramBank` was spending its time in `tmds_balanced_pair`** (pal5, the
+   TGV fix, hw-confirmed on `binary.tgv`). Every `graphics_set_palette` runs the
+   balanced-pair SEARCH (tmds_pair.h, ~1000 ops per channel) and `tmds_encoder`
+   six times; 184 slots came to **7-14 ms** — a whole blanking and more — so the
+   palette landed with the beam far into the next sweep, over rows core1 had
+   already re-rendered under the OLD colours. Now memoised per 8-bit level in
+   hdmi.c (`hdmi_balanced_pair_lut`, `tmds_encoder_lut`, lazily filled, +1.5 KB
+   .bss): the flush is 0.4-1.5 ms. Any other palette-heavy path (ULA+, the
+   Gigascreen blend LUT, `applyPalette`) gets the same speed-up for free.
+2. **The blanking-path release waited for core1 inside the window** (pal6): the
+   pal3 fix ordered it Assign -> post -> DRAIN -> flush so the palette would
+   follow the pixels, and the drain is 3.6 ms of 240 rows. With Reduce (2.4 ms,
+   below) that made `total=6.9 ms` against 5.2 ms of blanking at 640x480 — and
+   RRES 360x288 has NO bottom border rows (`lin_end=0..240`), so blanking is the
+   whole window: `beamAfterMax=232`, `beamIn=23-34/s`, the top rows old under
+   the new palette every release. Now `tsReindexRelease(beamOut)`: from the poll
+   (beam in blanking or below the picture) it is Assign -> FLUSH -> post, no
+   drain — core1 starts at row 0 while the beam is still out and renders ~4x
+   faster than the beam scans, so the old rows are never displayed; the release
+   costs core0 ~1.5-2 ms. The forced path (EndFrame, beam anywhere) keeps
+   post -> drain -> flush, which confines the tear to the rows the beam passes
+   during the drain. `TS_REL_MIN_BLANK_LINES` dropped 110 -> 70 (the release is
+   shorter), and `displayBlankLeftOk()` now caps the requirement at the mode's
+   blanking minus 6 (`hdmi_blank_lines_total()`): 720x576 has only **44** blanking
+   lines, where a fixed 110 could never be met and EVERY release would have been
+   the forced one.
+3. **The "wait for a gap in the CRAM writes" gate (pal4) was the WORST of the
+   three for ppal** — a writer that never pauses always timed out (40 ms = two
+   frames), and by then two EndFrames had passed, so the release was FORCED with
+   the beam wherever it was: `burstForced=9 relForced=18` per second of
+   `rel=27`. Removed. A mid-burst snapshot is one frame with a palette the guest
+   was still writing, which the hardware shows too. The forced release itself
+   now needs the hold to outlive TWO EndFrames, not one: with V-Sync pacing a
+   frame that ends late in blanking gets its release at the next blanking
+   start, which comes ~1 ms before the second EndFrame — forcing at the first
+   one released early, into the picture.
+4. **`ts256Reduce` is ~2.5x cheaper** (host: 125 -> 50 us on a random 256-colour
+   palette, 10 -> 4 us on a gradient; identical merge count, error within 0.3 %):
+   cells sorted by colour (groups come out adjacent, no 256 x n dedup search),
+   nearest neighbour by scanning outward in that order and stopping once the red
+   difference alone exceeds the best distance, and after a merge only the groups
+   whose neighbour DIED are marked stale and re-evaluated lazily when they come
+   up as the minimum (their recorded distance is a lower bound, so that is
+   exact) — the old code recomputed every group pointing at the kept one too,
+   and relabelled 256 cells per merge. It still runs once per frame for a
+   continuous writer: the EndFrame pre-assign is defeated whenever the guest
+   writes CRAM again before the release, which ppal always does (`assign=2.4 ms`
+   on every release in the pal5 log). Scratch check in the session scratchpad
+   (`reduce_test.cpp`, old vs new over 400 palettes).
+5. **The demos never had the release problem at all — the pal6 log said so (hw
+   2026-09-30, owner: "better, but something still interferes")**: `beamIn=1-5`,
+   `beamAfterMax` under 25 on the blanking path, `forced=0` — and still
+   `bad=8000 rows/63 sweeps` on ppal and 170-390 on keft. Two mechanisms, both in
+   the STICKY path (a change that does not hold), neither of them timing:
+   - **RUNNINGM: `nb=3` with `live=61/61 exh=1 near=2000/s`.** `ts256PickBanks`
+     runs at mode entry on whatever CRAM holds THEN — the player opens at RRES
+     256x192 on a near-empty palette, so it got three banks of 61 slots, and its
+     100+ colours per video frame exhausted a bank ~160 cells a frame with nothing
+     degrading it: the "back to one bank" rule lived only in `ts256Version` (the
+     hint path), and the video's DMA lands in the NON-visible frame buffer, so the
+     hint never rises and every change is beam-scheduled. `ts256DegradeOneBank()`
+     is one helper now and the poll's sticky assign calls it too.
+   - **ppal / keft: a full single-bank pool with changes too narrow to hold.**
+     ppal's free-running rewrite held on the frames where >= 32 cells moved and
+     took the sticky path on the others (`force 20 blank 27` applies/s,
+     `moved=19000/s`); keft's fade changes 6-12 cells a frame on `live=184/184`
+     (`near=300-600/s`, `stickyPre=30-90`). On an exhausted pool the sticky path
+     can only park a changed cell on the nearest colour or move it to a shared
+     slot — under rows already rendered with the old numbering. So with
+     `ts256_exhausted` a DENSE change of `TS_REINDEX_EXH_CELLS` (4) cells holds
+     like a wide one (the density test keeps Demorama's 1-2 cells a row on the
+     beam rule); the picture is then re-rendered from a Reduced map in blanking,
+     the one consistent answer once colours outnumber slots.
+   Test ELFs `debug/DVp2-tgv-pal7-1.0.8.elf` / `-pal7-trace-`. **Hw 2026-09-30,
+   owner: binary.tgv, RUNNINGM.TGV, keft.trd and Kolbass all work on pal7**
+   (the RUNNINGM log has the `exhausted - back to one bank` line once, as
+   predicted); ppal "no longer a negative, a WRONG PALETTE flashes through,
+   and worse WITH V-Sync". See 6.
+6. **ppal on pal7: the hold fired on every SECOND frame only, and the other half
+   went out through the v_sync poll INSIDE the picture** (`wide=25 rel=25
+   force=25` per 50 frames, `bad≈138 rows` on every sweep, `live` alternating
+   126/184 and 184/184). Two facts behind it, both worth keeping:
+   - **ppal's rewrite is SPREAD, not a burst**: ~274 cells over the whole frame,
+     about one per row, so the `palBurst` density test (4 cells per row) fails
+     whenever the render tick is running — and passes only in a frame where a
+     release has already PARKED the tick (`ts_line_t` = MAX pins `palRow` at the
+     top, span 0). So a hold only ever followed a release inside the frame, and
+     the frame after that took the sticky path (near parks + merged-cell moves
+     under rows rendered with the old numbering). The density test protected
+     Demorama, which is NOT exhausted (123-125 colours) — on an exhausted pool a
+     per-line palette effect cannot be rendered either way, so `exhWide` drops
+     the test: `ts256_exhausted && ncells >= 4` holds, spread or burst.
+   - **The "blanking just started" forced poll in the V-Sync pacing wait runs
+     with the beam at row 190**: `v_sync` fires `TS_VSYNC_LEAD_LINES` before
+     blanking on TS-Conf (the Kolbass round-5 lead), so its comment is wrong for
+     these modes and a sticky flush there lands mid-picture — which is why the
+     owner saw MORE glitches with V-Sync on (`force=0` with it off). Left as is:
+     with the hold now taken on every dense frame, `reindexPending` keeps that
+     poll off, and for a non-exhausted animation the map does not move.
+   Also: `[TSYGC]` fired on EVERY frame of ppal (RRES 360x288, `crop=24`) and
+   shredded the UART — the invariant is `ygctr == curline + crop` at GYOffs 0,
+   it compared against `curline` alone. Fixed.
+   Test ELFs `debug/DVp2-tgv-pal8-1.0.8.elf` / `-pal8-trace-`. **Hw 2026-09-30
+   on pal8: ppal PERFECT with V-Sync off (`bad=0`, `force=0`, hold every
+   change) and UNCHANGED with V-Sync on** (`wide=25 rel=25 force=25`) — see 7.
+7. **The per-frame cell count reset itself on every write made after a release
+   (pal9, NOT hw-tested).** `tsCramChanged` counted cells per frame by testing
+   `ts_pal_seq != ts_frame_seq`, but a change made after the tick has parked
+   (a release inside the frame, then ppal's rewrite going on behind it) is
+   "the next frame's top" and sets `ts_pal_seq = frame + 1` — so every such
+   write reset the count to 0, it never reached `TS_REINDEX_EXH_CELLS`, no hold
+   started, and the v_sync poll flushed the sticky map at row 190. That is why
+   the V-Sync-off run was clean: with no forced poll those cells simply waited
+   for the next frame, where the count works and the hold covers them. The
+   counter has its own frame tag now (`ts_pal_cnt_seq`). Expected on ppal's
+   trace WITH V-Sync: `wide` = `rel` = ~50 per 50 frames, `force=0`, `bad`
+   near 0. Test ELFs `debug/DVp2-tgv-pal9-1.0.8.elf` / `-pal9-trace-`.
+   **Hw 2026-09-30, owner on pal9: "да, теперь везде работает"** — binary.tgv,
+   RUNNINGM.TGV, keft, Kolbass and ppal, V-Sync on and off — and the same
+   evening the regression set: **Demorama, RobFgift and Ninja Gaiden all
+   work** (owner). So the exhausted-pool rule did not catch Demorama's
+   per-line effect (its 123-125 colours keep it off that rule, as designed)
+   and the `nb=4` version-bank path is unharmed. Only a 720x576 run of the
+   `nb=1` titles (the 44-blanking-line cap in `displayBlankLeftOk`) is still
+   owed.
+- **Hypotheses hw-refuted on the way, recorded because the log looked clean under
+  each**: "Reduce renumbered the map under core1" (pal1 — the `mapDeferred`
+  guard stays, it read 0 here); "the beam gate at entry only" (pal3 — the margin
+  gate stays, `relBeamIn` still counted with it); "a CRAM snapshot mid-burst"
+  (pal4 — `inBurst=0` on TGV, and see 3). **The lesson that cost most: the
+  `hold:` log line had grown past `Debug::log`'s 256-byte buffer**, so the
+  `relFlush`/`relTotal` fields were silently cut and the pre-flush beam sample
+  read "still in blanking" while a 10 ms flush ran on. Two rounds went to that.
+  The release fields live on their own `[TSPAL] rel:` line now, and the beam is
+  sampled AFTER the whole release.
+- **Instruments** (`TS_VIDEO_TRACE`): `[TSPAL] rel: beamStartMax beamIn
+  beamAfterMax assign post drain flush total | blank forced inBurst` — `beamIn`
+  must read 0 and `beamAfterMax` < lin_end (or -1) on a blanking-path release,
+  `drain` is 0 there (only the forced path drains), `forced` should be 0 on any
+  title with V-Sync; `blank` = releases taken on the fast path.
+- pal6 was hw-run 2026-09-30 (the release counters came out clean, the demos still
+  wrong — see 5); **hw owed on pal7**: ppal, keft, `RUNNINGM.TGV`, then Kolbass /
+  nygift (same hold path, now also holding on narrow changes) and RobFgift /
+  Ninja Gaiden (`nb=4`; a degrade to one bank there would show in the log as the
+  `exhausted` line and must not happen), Demorama (its per-line effect must NOT
+  hold: `hold=0`, `spread` climbing), and a 720x576 run (the 44-line rule).
 
 ### What Wild Commander still needs from us — CLOSED (analysed and finished 2026-09-18)
 
