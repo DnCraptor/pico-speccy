@@ -33,7 +33,7 @@
 #include "FileUtils.h"
 #include "GS/GS.h"
 #include "MemESP.h"
-#include "ZxEvoAvr.h"
+#include "machines/TsConf/ZxEvoAvr.h"
 #include "ChipPackage.h"
 #include "pwm_audio.h"
 #include "messages.h"

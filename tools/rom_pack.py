@@ -1159,7 +1159,7 @@ def pack_atm():
     open(os.path.join(out_dir, 'atm_roms.c'), 'w').write("\n".join(c) + "\n")
     h = list(banner) + ['// Include from Config.cpp ONLY: the table names gb_rom_1_sinclair_128k,',
                         '// an internal-linkage array a second TU would duplicate (see romScorpion.h).',
-                        '#pragma once', '#include "Atm.h"   // atm_rom_page_t', 'extern "C" {']
+                        '#pragma once', '#include "machines/Atm.h"   // atm_rom_page_t', 'extern "C" {']
     for sym, _ in raws + [(o[0], o[1]) for o in ovls]:
         h.append('extern const unsigned char %s[];' % sym)
     h.append('}')

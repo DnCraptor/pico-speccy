@@ -48,10 +48,10 @@ visit https://zxespectrum.speccy.org/contacto
 #include "IDE.h"
 #include "DivMMC.h"
 #include "GS/GS.h"      // g_ngs_zxdma + GS::zxDmaRead/zxDmaWrite (ZX-DMA window)
-#include "TsConf.h"     // g_tsconf_wr + TsConf::cpuWriteGate (FMAddr window, W0_WE)
+#include "machines/TsConf/TsConf.h"     // g_tsconf_wr + TsConf::cpuWriteGate (FMAddr window, W0_WE)
 #include "Timex.h"      // g_timex_mmu + Timex::rd/wr (TC2068 SCLD horizontal MMU)
-#include "Atm.h"        // g_atm_ro (ATM-Turbo ROM windows) + Atm::reset/intEnabled
-#include "TsFastMem.h"
+#include "machines/Atm.h"        // g_atm_ro (ATM-Turbo ROM windows) + Atm::reset/intEnabled
+#include "machines/TsConf/TsFastMem.h"
 #include "CodeOverlay.h" // TS_OVL_CODE (CPU::tsFrameLoop)
 #if PERF_TRACE && PERF_HIST
 // TS-Conf guest-memory access histogram by PHYSICAL page (the page each CPU

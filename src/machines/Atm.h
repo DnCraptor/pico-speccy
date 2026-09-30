@@ -53,7 +53,7 @@
 #pragma once
 
 #include <stdint.h>
-#include "ArchRom.h"
+#include "../ArchRom.h"
 
 // One ROM page of a bound romset (tools/rom_pack.py pack_atm -> roms/atm/atm_banks.h):
 // base == nullptr is the all-0xFF page; overlay == nullptr means "base as is".

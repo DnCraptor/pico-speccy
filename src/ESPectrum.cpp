@@ -45,7 +45,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "Subsystem.h"
 #include "CPU.h"
 #include "Config.h"
-#include "ZxEvoAvr.h"
+#include "machines/TsConf/ZxEvoAvr.h"
 #include "ESPectrum.h"
 #include "FileUtils.h"
 #include "UsbMsc.h"
@@ -57,6 +57,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "ui/OSDNewMenu.h"
 #include "ui/UiDialog.h"
 #include "ui/UiGfx.h"
+#include "machines/Alf.h"
 #include "Ports.h"
 #include "Snapshot.h"
 #include "Tape.h"
@@ -94,7 +95,7 @@ extern "C" volatile uint32_t hdmi_au_late_write_ct;
 #include "Nvram24.h"
 #include "Z80DMA.h"
 #include "GS/GS.h"
-#include "TsConf.h"
+#include "machines/TsConf/TsConf.h"
 #include "Timex.h"
 #include "CodeOverlay.h"
 #include "GS/NgsSd.h"
@@ -845,7 +846,7 @@ void ESPectrum::setup() {
   // Mount the ALF cartridge from SD (served lazily on demand like a wd1793 disk),
   // per Config::alfCartPath. Empty drive if none is set or the SD file is missing —
   // there is no built-in cart. Must run before ALF banking can read it.
-  { extern void alfBindCart(); alfBindCart(); }
+  Alf::bindCart();
   // ...and the Timex DOCK cartridge, for the same reason: the machine can only find
   // and start it if it is in the slot before the first reset.
   { extern void timexBindCart(); timexBindCart(); }

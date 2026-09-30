@@ -10,7 +10,7 @@
 #include "UiModel.h"
 #include "UiGfx.h"
 #include "Config.h"
-#include "TsConf.h"
+#include "machines/TsConf/TsConf.h"
 #include "SnSound.h"
 #include "CPU.h"
 #include "Video.h"

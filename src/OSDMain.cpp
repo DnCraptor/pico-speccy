@@ -43,7 +43,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include <pico/multicore.h>
 
 #include "OSDMain.h"
-#include "Atm.h"
+#include "machines/Atm.h"
 #include "FileUtils.h"
 #include "Subsystem.h"
 #include "CPU.h"
@@ -52,11 +52,11 @@ visit https://zxespectrum.speccy.org/contacto
 #include "ESPectrum.h"
 #include "messages.h"
 #include "Config.h"
-#include "ZxEvoAvr.h"
+#include "machines/TsConf/ZxEvoAvr.h"
 #include "Debug.h"
 #include "Snapshot.h"
 #include "MemESP.h"
-#include "AlfCart.h"
+#include "machines/Alf.h"
 #include "Buffer.h"
 #include "Tape.h"
 #include "LEDIndicators.h"
@@ -175,7 +175,7 @@ extern "C" const uint32_t profi_default_palette16[16];
 #include "MachineSwitch.h"
 #include "Timex.h"
 #include "GS/GS.h"
-#include "TsConf.h"
+#include "machines/TsConf/TsConf.h"
 #include "RTC.h"
 #include "Nvram24.h"
 
@@ -6843,7 +6843,7 @@ bool OSD::loadAlfCart(const string& fname) {
     // after the 1MB cart image. Clamp to 1MB; only the cart data is served, the tail ignored.
     if (size > (1ul << 20)) size = (1ul << 20);
     // Lazy load: the cart is served from SD on demand (like a wd1793 disk) — NO 1MB
-    // flash write; banks fault in via #5F as the guest pages them (see AlfCart / Ports).
+    // flash write; banks fault in via #5F as the guest pages them (see Alf::Cart).
     // Switch into ALF IN PLACE (no reboot), the same way the Hardware menu and snapshot
     // loads switch machines: mount the cart, requestMachine + reset, then return so the
     // OSD closes cleanly into the running machine. GM.DLS no longer conflicts (the cart
@@ -6856,11 +6856,11 @@ bool OSD::loadAlfCart(const string& fname) {
     // extract to the same temp path (/tmp/.zip_extract.rom), so reloading would otherwise
     // keep a stale handle open on a file that was unlinked+rewritten underneath it
     // (progressively empty catalog until a reboot). mount() closes any previous handle.
-    if (!AlfCart::mount(fname)) {
+    if (!Alf::Cart::mount(fname)) {
         OSD::osdCenteredMsg("ALF cart mount failed", LEVEL_WARN, 2000);
         return false;
     }
-    Config::alfCartBanks = (uint8_t)AlfCart::bankCount();
+    Config::alfCartBanks = (uint8_t)Alf::Cart::bankCount();
     // ALF uses neither General Sound nor Gigascreen — free their SRAM so the cart +
     // machine have headroom. Gigascreen frees live (prevFB via GsSubsys); General
     // Sound only frees across a reboot (no live deinit), so if it was on we reboot
@@ -7032,7 +7032,7 @@ bool OSD::updateROM(const string& fname, uint8_t arch) {
     }
     else if ( arch == 5 ) {
         // Load an ALF cartridge (up to 1MB) served lazily from SD on demand (like a
-        // wd1793 disk — see AlfCart). No 1MB flash write; the file stays on SD and 16K
+        // wd1793 disk — see Alf::Cart). No 1MB flash write; the file stays on SD and 16K
         // banks fault in as the guest pages them. Switches into ALF in place (no reboot).
         fclose2(f);
         return loadAlfCart(fname);   // lazy-mount from SD + switch into ALF in place

@@ -24,12 +24,12 @@
 #include "Z80_JLS/z80.h"
 #include "Ports.h"
 #include "Video.h"
-#include "TsFastMem.h"
+#include "machines/TsConf/TsFastMem.h"
 #include <string.h>
 #include "graphics.h"
 #include "MemESP.h"
 #include "CPU.h"
-#include "Atm.h"
+#include "machines/Atm.h"
 #include "Tape.h"
 #include "Config.h"
 #include "FileUtils.h"
@@ -42,7 +42,7 @@
 #include "DivMMC.h"
 #include "MB02.h"
 #include "Timex.h"   // g_timex_mmu + Timex::rd/read8 (TC2068 SCLD window, exec_nocheck fetch)
-#include "TsConf.h"
+#include "machines/TsConf/TsConf.h"
 
 
 // #include "Snapshot.h"
@@ -2299,6 +2299,44 @@ void Z80::decodeOpcodeee() /* XOR n */
 
 
 
+// Byte ROM LOAD trap, cold half (flash): see decodeOpcodef1. Returns true when
+// FlashLoad took the block and the POP AF / RET has been emulated.
+Z80_COLD bool Z80::byte_tape_trap() {
+    if (!(Config::flashload && !Config::tape_wear &&
+        !Tape::jjScreenAnimating &&
+        (Tape::tapeFileType == TAPE_FTYPE_TAP || Tape::tapeFileType == TAPE_FTYPE_TZX || Tape::tapeFileType == TAPE_FTYPE_PZX) &&
+        Tape::tapeFileName != "none")) return false;
+    // Simulate EX AF,AF': swap A/F with A'/F' so FlashLoad sees flag in A'
+    uint8_t tmpA = regA;       uint8_t tmpAx = REG_Ax;
+    uint8_t tmpF = getFlags(); uint8_t tmpFx = REG_Fx;
+    regA = tmpAx;   REG_Ax = tmpA;
+    setFlags(tmpFx); REG_Fx = tmpF;
+
+    // For JP 0x0556 (e.g. from JJ hidden code), DE may be stale/zero.
+    // FlashLoad uses DE as expected byte count. Set DE to 0xFFFF so
+    // FlashLoad loads the full block (it uses min(DE, blockLen)).
+    uint16_t origDE = getRegDE();
+    if (Tape::FlashLoad()) {
+        if (Tape::tapeStatus == TAPE_LOADING) {
+            Tape::tapeStatus = TAPE_STOPPED;
+            if (!Tape::pzxFlashCont)
+                Tape::tapePhase = TAPE_PHASE_STOPPED;
+        }
+        // Skip POP AF;RET — pop return address from stack.
+        // CALL 0x0556: pops CALL return addr → back to caller
+        // JP 0x0556: pops game entry addr → starts game
+        REG_PC = pop();
+        // Set carry flag = success (standard LD-BYTES convention)
+        carryFlag = true;
+        return true;
+    }
+    // FlashLoad failed — restore original A/F and A'/F' and DE
+    REG_Ax = regA;   regA = tmpA;
+    REG_Fx = getFlags(); setFlags(tmpF);
+    setRegDE(origDE);
+    return false;
+}
+
 void Z80::decodeOpcodef1() /* POP AF */
 {
     // Byte ROM LOAD trap: POP AF at 0x0556 (PC=0x0557 after fetch).
@@ -2310,39 +2348,7 @@ void Z80::decodeOpcodef1() /* POP AF */
     // Both need FlashLoad. After FlashLoad, pop() gives the correct return:
     //   CALL case: pops CALL return addr → back to ROM caller
     //   JP case: pops game entry addr → starts game
-    if (REG_PC == 0x557 && Z80Ops::isByte && Config::flashload && !Config::tape_wear &&
-        !Tape::jjScreenAnimating &&
-        (Tape::tapeFileType == TAPE_FTYPE_TAP || Tape::tapeFileType == TAPE_FTYPE_TZX || Tape::tapeFileType == TAPE_FTYPE_PZX) &&
-        Tape::tapeFileName != "none") {
-        // Simulate EX AF,AF': swap A/F with A'/F' so FlashLoad sees flag in A'
-        uint8_t tmpA = regA;       uint8_t tmpAx = REG_Ax;
-        uint8_t tmpF = getFlags(); uint8_t tmpFx = REG_Fx;
-        regA = tmpAx;   REG_Ax = tmpA;
-        setFlags(tmpFx); REG_Fx = tmpF;
-
-        // For JP 0x0556 (e.g. from JJ hidden code), DE may be stale/zero.
-        // FlashLoad uses DE as expected byte count. Set DE to 0xFFFF so
-        // FlashLoad loads the full block (it uses min(DE, blockLen)).
-        uint16_t origDE = getRegDE();
-        if (Tape::FlashLoad()) {
-            if (Tape::tapeStatus == TAPE_LOADING) {
-                Tape::tapeStatus = TAPE_STOPPED;
-                if (!Tape::pzxFlashCont)
-                    Tape::tapePhase = TAPE_PHASE_STOPPED;
-            }
-            // Skip POP AF;RET — pop return address from stack.
-            // CALL 0x0556: pops CALL return addr → back to caller
-            // JP 0x0556: pops game entry addr → starts game
-            REG_PC = pop();
-            // Set carry flag = success (standard LD-BYTES convention)
-            carryFlag = true;
-            return;
-        }
-        // FlashLoad failed — restore original A/F and A'/F' and DE
-        REG_Ax = regA;   regA = tmpA;
-        REG_Fx = getFlags(); setFlags(tmpF);
-        setRegDE(origDE);
-    }
+    if (REG_PC == 0x557 && Z80Ops::isByte && byte_tape_trap()) return;
     setRegAF(pop());
 }
 

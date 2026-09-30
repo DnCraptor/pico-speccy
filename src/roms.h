@@ -58,7 +58,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "roms/romSTS75.h"
 
 // gb_rom_Alf_cart (built-in "Elf-1") removed — ALF carts are served lazily from SD
-// (see AlfCart). gb_rom_Alf = ALF system ROM; gb_rom_Alf_ep = open-bus filler.
+// (see Alf::Cart, machines/Alf.cpp). gb_rom_Alf = ALF system ROM; gb_rom_Alf_ep = open-bus filler.
 extern "C" const unsigned char gb_rom_Alf[];
 extern "C" const unsigned char gb_rom_Alf_ep[];
 // TR-DOS: ONE raw base, 5.04T, and 5.03 / 5.04TM / 5.05D as small read-only

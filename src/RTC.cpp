@@ -4,7 +4,7 @@
 #include <pico/time.h>
 #include "FileUtils.h"
 #include "Config.h"
-#include "ZxEvoAvr.h"
+#include "machines/TsConf/ZxEvoAvr.h"
 #include "Z80_JLS/z80.h"
 #include <stdio.h>
 #if RTC_PORT_TRACE

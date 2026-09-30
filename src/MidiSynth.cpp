@@ -362,7 +362,7 @@ void MidiSynth::provisionAtBoot() {
 }
 
 // alfCartProvisionAtBoot() removed: ALF cartridges are no longer flashed into the
-// shared region — they are served lazily from SD on demand (see src/AlfCart.*).
+// shared region — they are served lazily from SD on demand (see src/machines/Alf.cpp).
 // The shared flash region is now GM.DLS-only.
 
 // Scan the SD for selectable GM wavetable banks: any *.bin in CONFIG_DIR or the

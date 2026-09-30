@@ -19,7 +19,7 @@
 #include "Video.h"
 #include "Debug.h"
 #include "FileUtils.h"
-#include "AlfCart.h"
+#include "machines/Alf.h"
 #include "DivMMC.h"
 #include "MB02.h"
 #include "Buffer.h"
@@ -74,7 +74,7 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
             if (Config::pref_arch == A_ALF) Config::pref_arch = A_LAST;
             Config::alfCartBanks = 0;   // unmount cart (empty drive)
             Config::alfCartPath  = "";
-            AlfCart::unmount();         // close the SD cart file
+            Alf::Cart::unmount();         // close the SD cart file
         }
         // Entering Profi needs ~96 KB SRAM on butter-less boards.
         // Gate it: the popup frees room (Gigascreen/ZiFi/DivMMC

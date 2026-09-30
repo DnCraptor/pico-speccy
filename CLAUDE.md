@@ -2041,7 +2041,7 @@ modes 16c/256c/text, TSU tiles/sprites, DMA, VDOS) lived in the 2026-08-17 plan
 file; Phase 1 = TS-BIOS boots, 4 MB paging, #nnAF registers, FRAME INT,
 ZCLK turbo, ZX video with CRAM colours, TR-DOS/Beta-128, Z-Controller SD.
 
-- **Core**: `src/TsConf.{h,cpp}` owns the register file (`TsConf::r`, with the
+- **Core**: `src/machines/TsConf/TsConf.{h,cpp}` owns the register file (`TsConf::r`, with the
   hardware's `*_d` line-delay shadows stored for phase 3), CRAM/SFILE, paging
   (`setBanks()` — sole writer of `ramCurrent[0..3]` while TS runs), `write7ffd`
   (LCK128 modes; **Auto=10 treated as 512K** — needs opcode knowledge Ports
@@ -2345,7 +2345,7 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
   per page, byte = CRAM index → `ts256_map`. OSD overlays drawn with ZX indices 0..16
   (F8 stats, FDD lamp, notify) take whatever CRAM put there — same as under ULA+.
   Cost: ~950 B .bss.
-- **Phase 3b (2026-09-06, NOT hw-tested): .spg loader** (`src/TsSpg.cpp`, `FileSPG::load`
+- **Phase 3b (2026-09-06, NOT hw-tested): .spg loader** (`src/machines/TsConf/TsSpg.cpp`, `FileSPG::load`
   behind `LoadSnapshot`; `.spg` registered in the snapshot filters, F5/Web launch
   paths and the browser type label). SPG = "SpectrumProg" (`pentevo/docs/Formats/
   SPGv1_0.txt`), THE distribution format of TS-Conf software: 1 KB header (magic at
@@ -2360,7 +2360,7 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
   CRAM #F0-#FF (`load_spec_colors`), I=#3F, IM1, IY=#5C3A, HL'=#2758, SP, PC, IFF from
   the EI bit. The header's "pager"/"resident" stubs are ignored (Unreal too); SPG
   v0.x is refused. **Depackers** (MegaLZ, Hrust1) are ports of `unreal/depack.cpp`
-  with input AND output bounds, header-only in `src/TsSpgDepack.h` so
+  with input AND output bounds, header-only in `src/machines/TsConf/TsSpgDepack.h` so
   `tools/spg_test.cpp` can diff them against the original on the host: all blocks
   of `debug/TSCONF/*.spg` (Bruce Lee: 6 MLZ + 3 Hrust; Digger, Lode Runner: raw
   only) are byte-identical. Facts from those headers: all three ask for **ZCLK 2 =
@@ -2517,7 +2517,7 @@ of `aligned(4096)` padding. Free heads: DVp2 82.7 KB, z0p2 79.1, z0p2-PIOUSB 64.
      (owner's decision, all boards). Existing build dirs keep their cached values —
      set both explicitly (`cmake -DZ80_CORE_IN_RAM=ON -DZ80_CORE_OPT=-Os .`) or
      delete the cache; `build_all.sh` and fresh configures pick the defaults up.
-  7. **TS-Conf fast guest-memory path (`src/TsFastMem.h`, `g_ts_fastmem`)**: while
+  7. **TS-Conf fast guest-memory path (`src/machines/TsConf/TsFastMem.h`, `g_ts_fastmem`)**: while
      a whole-line mode is live, exec_nocheck's fetch and `Z80Ops::peek8/poke8/
      peek16/poke16` skip the indirect Draw call and every overlay/DivMMC/accessor
      test — `tsFastTick(n)` (T-state add + line-boundary compare) and a direct
@@ -3445,7 +3445,7 @@ moved the copy to [L154, L240]. Dropped; this model replaced it.
   accesses (`memcyc_lcmd` from rm/wm, cache-miss only) but has no 14 MHz waits. ZEsarUX
   completes a DMA instantly and answers DMAStatus with 0 (never busy).
 
-**The model** (`src/TsConf.cpp` "DRAM model", pure arithmetic in `src/TsDram.h`):
+**The model** (`src/machines/TsConf/TsConf.cpp` "DRAM model", pure arithmetic in `src/machines/TsConf/TsDram.h`):
 - `g_ts_memcyc` — one gate byte, zero on every other machine: bit 0 = ZCLK 14 MHz (wait
   states), bit 1 = DMA_ACT (steal). Tested predicted-not-taken in `Z80Ops::peek8/poke8/
   peek16/poke16` (fast and generic paths — the fast ones tail-call `peek8_dram` /
@@ -3519,7 +3519,7 @@ and fishbone runs** — owner's verdict on `debug/DVp2-dram-1.0.5.elf`.
 
 Baseline the owner measured on 720x576: fishbone **45-46 FPS without NeoGS, 42-43
 with** (640x480: 44-45 against 47-48 before the model). Two findings from the
-disassembly of that build, both fixed in `src/TsDramCache.h` (new; TsConf.h includes
+disassembly of that build, both fixed in `src/machines/TsConf/TsDramCache.h` (new; TsConf.h includes
 it) + CPU.cpp + TsConf.cpp; test builds `debug/DVp2-dram-rows-1.0.5.elf` (plain) and
 `debug/DVp2-dram-rows-trace-1.0.5.elf` (PERF_TRACE, its cache carries
 `FB_FORCE_CHUNKS=8`):
@@ -3605,7 +3605,7 @@ fishbone at 480p is paced by core1 (`c1=14.4 ms` = base 3.9 / tsu 8.3 / out 2.1 
 240 lines: 16 / 35 / 9 us a line), so this is where its 576p FPS lives. Four changes,
 all in the per-line path of `tsRenderExec` / `tsuComposeLine` (Video.cpp):
 
-- **`src/TsuBlit.h` — the 8-pixel element blit is SWAR**: the 4 source bytes expand
+- **`src/machines/TsConf/TsuBlit.h` — the 8-pixel element blit is SWAR**: the 4 source bytes expand
   into two 32-bit words (pal folded in), the transparency mask comes from the
   nibble-nonzero flags, and they go out as two unaligned 32-bit stores (Cortex-M33
   allows them; the buffer is SRAM). A fully opaque element (most tiles) is two plain
@@ -4048,7 +4048,7 @@ protect / command 0xF7 reboot), 0x10 SPI flash; with reg C bit 7 the same
 window is a 4 KB EEPROM at `(regA<<4)|idx`. Reg C write bit 0 clears the log;
 reg D READ is the modifier status byte (lctrl rctrl lalt ralt lshift rshift
 f12), reg E lwin/rwin/menu; reg C read adds SD detect (b3). Modelled in
-`src/ZxEvoAvr.{h,cpp}`, dispatched from `RTC::readData/writeData` under
+`src/machines/TsConf/ZxEvoAvr.{h,cpp}`, dispatched from `RTC::readData/writeData` under
 `Z80Ops::isTsconf` only (on Pentagon/Karabas those cells are plain NVRAM). The
 **Reg B on the AVR is not a control register, and 24-hour is HARD-WIRED
 (hw-confirmed 2026-09-19).** Wild Commander printed its clock as `90:25.21` at
@@ -7406,6 +7406,71 @@ MinSizeRel, against the build before it:
 - Test ELFs `debug/{m2p2,m2p2-hstx}-sram4-1.0.8`. **Hw check owed**: NeoGS (NPL MOD +
   MP3, ZP4, TheLink with ZX-DMA, NEO8), classic GS (a MOD player), GS off, and the
   boot log's `[OVL] NeoGS ... code resident` / `window to the heap` lines.
+
+## src/machines: per-machine code lives in its machine module (2026-09-30; hw: owner "работает", not itemised)
+
+**Owner's standing rule: EVERY change that differs from other machines is made in
+`src/machines/`, in that machine's/architecture's module** (`<Name>.{h,cpp}`, or a
+`<Name>/` folder when it has several files) — even with no memory gain, for
+readability. Shared files keep only the test and one call.
+
+Owner's rule: machine-specific port handling lives in its own module under
+`src/machines/` (flash, plain `.text`), and the RAM-resident `Ports::input/output`
+keep only the decode test and one call. CMake's `GLOB_RECURSE src/*.cpp` picks the
+folder up by itself. Modules so far:
+- `Scorpion.{h,cpp}`: `c000Page` (was `scorpionC000Page`), `kay1FFDWrite`,
+  `write1FFD` (the whole #1FFD block incl. the GMX D2 falling edge),
+  `turboPlusRead` (the Turbo+ IN speed toggle).
+- `Pentagon.{h,cpp}`: `eff7Video`, `eff7Paging` (page0/cache/notMore128, 1024SL D4
+  turbo), `hiddenRam` (#FB/#7B).
+- `Alf.{h,cpp}`: `portWrite` (#FE newBit latch + cart bank select), `portRead`
+  (#1D/#1F), `Alf::newBit` (was Ports.cpp's static `newAlfBit`).
+- `Plus3.{h,cpp}`: `portWrite` (#7FFD/#1FFD/#2FFD/#3FFD).
+- `Byte.{h,cpp}`: `ioContention` (DD10/DD11 table above #C000), `portWrite`
+  (non-#FE outputs: PIT or swallowed), and `Ports::pitWrite` (no longer IRAM;
+  `pitGenSound` stays where it was). The Byte ROM LOAD trap at 0x0557 is
+  `Z80::byte_tape_trap()` (`Z80_COLD`).
+- `Atm.{h,cpp}`: moved here as-is (includes now `machines/Atm.h`; `atm_banks.h` and
+  `rom_pack.py` emit that path).
+- `Alf.{h,cpp}` also holds the lazy SD cartridge loader that was `src/AlfCart.*`
+  (now `Alf::Cart::mount/unmount/active/bankCount/residentBank/path`) and
+  `Alf::bindCart()` (was Ports.cpp's `alfBindCart`); `g_alfWindow` stays global
+  for MemESP's ROM-write guard. Pure reorganisation, sizes identical.
+- `TsConf/`: every TS-Conf file — `TsConf.{h,cpp}`, `TsSpg.cpp`, `TsDram.h`,
+  `TsDramCache.h`, `TsFastMem.h`, `TsSpgDepack.h`, `TsuBlit.h`, `ZxEvoAvr.{h,cpp}`.
+  Includers use `machines/TsConf/X.h`; inside the folder siblings include each
+  other plainly and project headers resolve through `-Isrc`. The host tests
+  (`tools/tsdram_test.cpp`, `tsdram_cache_test.cpp`, `tsu_blit_test.cpp`,
+  `spg_test.cpp`) include the new paths and still build with `-Isrc`. The `.tsovl`
+  window is marked per function, not per object path, so nothing in the linker
+  script moved. Sizes identical.
+- `Profi/Profi.{h,cpp}`: the big Profi-only blocks of the shared decode —
+  `writeDFFD`, `ideRead/ideWrite` (PROFI IDE scheme), `extRead/extWrite`
+  (#008B/#018B/#028B + the #F3/#D3/#B3/#93 serial channel), `fdcNoDiskBreak`
+  (CP/M no-disk re-issue loop), the FDD_PORT_TRACE probes — plus the VV51 serial
+  mouse pipeline and the PQ-DOS keyboard queue (`Ports::serialMouse*`, `pushKey`,
+  `pqkBuf`, defined there). Each call sits exactly where its block was, so the
+  decode ORDER is still Ports.cpp's; the smaller woven Profi conditions stay in
+  the template. **Placement unchanged by the owner's call**: these run from the
+  `<true>` instance, which was already flash, and the DS80 renderer stays in
+  Video.cpp / SRAM. Two traps met on the way: an `extern` written inside a
+  `Profi::` function resolves to `Profi::name` (declare driver globals at file
+  scope), and the #DFFD anchor exists on the READ side too — search from
+  `outputImpl`.
+- **`MemESP::romPeek` placement is a COMDAT lottery** (`static inline` in the
+  header, out-of-line copies in several objects, the linker keeps the first).
+  After the Profi move the kept copy is Z80_JLS.o's, i.e. RAM (+144 B), where it
+  used to be Ports.cpp's flash copy reached from `Z80::exec_nocheck`'s opcode
+  fetch through a veneer. The new state is the faster one; if a later move flips
+  it back, pin it with a section attribute rather than chasing link order.
+Saving, m2p2 MinSizeRel: Ports::input 5148 -> 4204, Ports::output 8956 -> 6904 B,
+~3.4 KB of RAM in total; only 8-byte veneers remain in RAM. Test ELF
+`debug/m2p2-machines-1.0.8.elf`. **Hw check owed**: Pentagon 512/1024 hidden RAM +
+#EFF7 + 1024SL turbo, ALF carts, Scorpion/KAY/GMX #1FFD paging and the Turbo+
+Shadow-monitor speed item, +3 paging/FDC, Byte PIT melody test + tape LOAD trap,
+ATM boot. Still in shared RAM: TS/ATM/KAY/P512 dispersed conditions (~0.3-0.4 KB
+each), Timex CPU accessor hooks (deliberate), Profi DS80 in Video.cpp (~1.5 KB),
+check_trdos branches.
 
 ## WD1793 in flash by default (`WD1793_IN_RAM=OFF`, 2026-09-30; hw: owner "все работает", not measured)
 
@@ -12074,9 +12139,9 @@ exactly, 3 = BIOS raw — +21.6 KB in .psramroms (ATM ROMs now 78 938 B).
 (atmturbo.nedopc.com/atmshem.htm) is unreachable from the build env, so the model
 is read out of **UnrealSpeccy** (tslabs/zx-evo pentevo/unreal: memory.cpp
 MM_ATM450 / MM_ATM710, io.cpp, atm.cpp, drawers.cpp) and **MAME sinclair/atm.cpp**
-(2+ only); they agree. The whole port/paging spec is in the header of `src/Atm.h`.
+(2+ only); they agree. The whole port/paging spec is in the header of `src/machines/Atm.h`.
 
-- **Core = `src/Atm.{h,cpp}`**: `Atm::remap()` is the ONE writer of
+- **Core = `src/machines/Atm.{h,cpp}`**: `Atm::remap()` is the ONE writer of
   `MemESP::ramCurrent[0..3]` on ATM (the TsConf::setBanks pattern); it also sets
   `p3special = 2` so `recoverPage0()` keeps out, parks `bank_dirty` on the sink for
   ROM windows, clears contention and re-points `grmem` (page 5/7). Port hooks run

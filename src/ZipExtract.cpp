@@ -16,7 +16,7 @@ using namespace std;
 #include "TryAlloc.h"
 #include "NetArena.h"
 #include "MemESP.h"
-#include "AlfCart.h"
+#include "machines/Alf.h"
 #include "Plus3Fdc.h"
 #include "Video.h"
 #include "OSDMain.h"
@@ -94,7 +94,7 @@ static bool tempPathBusy(const char* path) {
         if (Plus3Fdc::mounted(u) && Plus3Fdc::fname(u) == p) return true;
     if (Tape::tapeFileType != TAPE_FTYPE_EMPTY &&
         FileUtils::TAP_Path + Tape::tapeFileName == p) return true;
-    if (AlfCart::active() && AlfCart::path() == p) return true;
+    if (Alf::Cart::active() && Alf::Cart::path() == p) return true;
     return false;
 }
 
@@ -111,7 +111,7 @@ static void releaseTempOwners(const char* path) {
     if (Tape::tapeFileType != TAPE_FTYPE_EMPTY &&
         FileUtils::TAP_Path + Tape::tapeFileName == p)
         Tape::Init();   // closes the open tape FIL
-    if (AlfCart::active() && AlfCart::path() == p) AlfCart::unmount();
+    if (Alf::Cart::active() && Alf::Cart::path() == p) Alf::Cart::unmount();
 }
 
 static bool hasMatchingExt(const char* filename, uint8_t fileType) {

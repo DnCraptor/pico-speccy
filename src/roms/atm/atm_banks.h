@@ -7,7 +7,7 @@
 // Include from Config.cpp ONLY: the table names gb_rom_1_sinclair_128k,
 // an internal-linkage array a second TU would duplicate (see romScorpion.h).
 #pragma once
-#include "Atm.h"   // atm_rom_page_t
+#include "machines/Atm.h"   // atm_rom_page_t
 extern "C" {
 extern const unsigned char gb_rom_atm1_p0[];
 extern const unsigned char gb_rom_atm2_p3[];

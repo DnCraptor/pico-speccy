@@ -5,9 +5,9 @@
 #include "RTC.h"
 #include "Nvram24.h"
 #include "Ports.h"
-#include "TsConf.h"
+#include "machines/TsConf/TsConf.h"
 #include "roms.h"
-#include "Atm.h"
+#include "machines/Atm.h"
 #include "roms/atm/atm_banks.h"   // ATM page tables — this TU only (see requestMachine)
 #include "roms/kay/kay_banks.h"   // Nemo KAY bank tables — this TU only (same reason)
 #include "FileUtils.h"

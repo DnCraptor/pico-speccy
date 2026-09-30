@@ -3,19 +3,19 @@
 #include "Atm.h"
 
 #include <string.h>
-#include "Buffer.h"
-#include "CPU.h"
-#include "Config.h"
-#include "Debug.h"
-#include "ESPectrum.h"
-#include "IDE.h"
-#include "LEDIndicators.h"
-#include "MemESP.h"
-#include "OSDMain.h"
-#include "Ports.h"
-#include "RomOverlay.h"
-#include "Video.h"
-#include "Z80_JLS/z80.h"
+#include "../Buffer.h"
+#include "../CPU.h"
+#include "../Config.h"
+#include "../Debug.h"
+#include "../ESPectrum.h"
+#include "../IDE.h"
+#include "../LEDIndicators.h"
+#include "../MemESP.h"
+#include "../OSDMain.h"
+#include "../Ports.h"
+#include "../RomOverlay.h"
+#include "../Video.h"
+#include "../Z80_JLS/z80.h"
 
 uint8_t g_atm_ro = 0;
 #if ATM_PAGE_TRACE

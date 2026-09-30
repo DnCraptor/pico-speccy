@@ -44,11 +44,11 @@ using namespace std;
 #include "Timex.h"
 #include "FileUtils.h"
 #include "UsbMsc.h"
-#include "AlfCart.h"
+#include "machines/Alf.h"
 #include "Config.h"
 #include "ESPectrum.h"
 #include "CPU.h"
-#include "Atm.h"
+#include "machines/Atm.h"
 #include "Video.h"
 #include "messages.h"
 #include <math.h>
@@ -539,7 +539,7 @@ static void rfd_release_tmp(const string& tmpp) {
         Tape::Init();   // closes the open tape FIL
     // An ALF cart mounted lazily from this temp path holds the FIL open; release it
     // so the next quick-start can truncate/rewrite the same /tmp/_run.<ext> file.
-    if (AlfCart::active() && AlfCart::path() == tmpp) AlfCart::unmount();
+    if (Alf::Cart::active() && Alf::Cart::path() == tmpp) Alf::Cart::unmount();
     // A DOCK cartridge read out of the same temp path: the file is closed (mountDck
     // copies it into RAM), but the slot must be emptied so the next quick-start does
     // not leave the previous cartridge plugged in under a fresh download.

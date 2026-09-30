@@ -41,10 +41,10 @@ visit https://zxespectrum.speccy.org/contacto
 #include <math.h>       // powf() — CRT filter gamma curve (cold path, init only)
 #include "ui/UiGfx.h"   // uiPalette() for BMP capture of the new menu
 #include "Debug.h"
-#include "TsConf.h"
-#include "TsuBlit.h"
+#include "machines/TsConf/TsConf.h"
+#include "machines/TsConf/TsuBlit.h"
 #include "CodeOverlay.h"
-#include "TsFastMem.h"
+#include "machines/TsConf/TsFastMem.h"
 #include "Subsystem.h"
 #include "Buffer.h"
 #include "TryAlloc.h"
@@ -67,7 +67,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "Ports.h"
 #include "Z80DMA.h"
 #include "hardware/xip_cache.h"
-#include "Atm.h"
+#include "machines/Atm.h"
 extern "C" const unsigned char gb_rom_atm_font[];   // roms/atm/atm_roms.c (SGEN.ROM order)
 #include "hardware/regs/addressmap.h"
 extern "C" void graphics_set_palette(uint8_t i, uint32_t color888);
