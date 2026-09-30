@@ -38,13 +38,13 @@ endif()
 # RP2350 only — RP2040 support was dropped, every board below is an RP2350 target.
 IF(ZERO2)
     # For Board RP2350-PiZero
-    set(PICO_BOARD_HEADER_DIRS ${CMAKE_SOURCE_DIR}/src/boards)
+    set(PICO_BOARD_HEADER_DIRS ${CMAKE_SOURCE_DIR}/src/drivers/board/boards)
     set(PICO_BOARD waveshare_rp2350_pizero CACHE STRING "Board type" FORCE)
     set(PICO_PLATFORM rp2350-arm-s)
 ELSEIF(PICOSPECCY_WIFI)
     # Waveshare RP2350B-Plus-W: same RP2350B package as the header below, plus the
     # on-board CYW43439, 16 MB of flash and PSRAM pads on GPIO47.
-    set(PICO_BOARD_HEADER_DIRS ${CMAKE_SOURCE_DIR}/src/boards)
+    set(PICO_BOARD_HEADER_DIRS ${CMAKE_SOURCE_DIR}/src/drivers/board/boards)
     set(PICO_BOARD picospeccy_rp2350b_w CACHE STRING "Board type" FORCE)
     set(PICO_PLATFORM rp2350-arm-s)
 else()
@@ -52,7 +52,7 @@ else()
     # RP2350B (48-GPIO) package so GPIO 30..47 are valid for any peripheral.
     # pico2 forces PICO_RP2350A=1, so we use a local B-variant header
     # (a CMake `set(PICO_RP2350A 0)` is ignored by the SDK — it must be the header).
-    set(PICO_BOARD_HEADER_DIRS ${CMAKE_SOURCE_DIR}/src/boards)
+    set(PICO_BOARD_HEADER_DIRS ${CMAKE_SOURCE_DIR}/src/drivers/board/boards)
     set(PICO_BOARD picospeccy_rp2350b CACHE STRING "Board type" FORCE)
     set(PICO_PLATFORM rp2350-arm-s)
 endif()

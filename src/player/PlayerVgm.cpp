@@ -16,19 +16,19 @@
 // the audio — so every chip channel gets its own bar.
 
 #include "PicoPlayer.h"
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
 
-#include "AySound.h"
-#include "SAASound.h"
-#include "SnSound.h"
-#include "OplFm.h"
-#include "OpllFm.h"
-#include "OpnFm.h"
+#include "speccy/devices/sound/AySound.h"
+#include "speccy/devices/sound/SAASound.h"
+#include "speccy/devices/sound/SnSound.h"
+#include "speccy/devices/sound/OplFm.h"
+#include "speccy/devices/sound/OpllFm.h"
+#include "speccy/devices/sound/OpnFm.h"
 #include "miniz/miniz.h"
 
-#include "ff.h"
+#include "fatfs/ff.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

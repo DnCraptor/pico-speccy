@@ -15,14 +15,14 @@
 // held notes, CC7 volume x CC11 expression).
 
 #include "PicoPlayer.h"
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
-#include "Config.h"
-#include "MidiSynth.h"
-#include "midi_wt.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
+#include "app/Config.h"
+#include "speccy/devices/sound/MidiSynth.h"
+#include "speccy/devices/sound/midi_wt.h"
 
-#include "ff.h"
+#include "fatfs/ff.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

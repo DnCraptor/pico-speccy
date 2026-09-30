@@ -24,9 +24,9 @@
 #include "UiDialog.h"
 #include "UiStrings.h"
 #include "OSDMain.h"
-#include "Config.h"
-#include "ESPectrum.h"
-#include "fabutils.h"
+#include "app/Config.h"
+#include "app/ESPectrum.h"
+#include "drivers/input/fabutils.h"
 #include <pico/stdlib.h>
 
 namespace nm {

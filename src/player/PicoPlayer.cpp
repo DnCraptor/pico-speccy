@@ -1,8 +1,8 @@
 // pico-speccy — Pico-Zx-Player: format registry + shared text helpers.
 
 #include "PicoPlayer.h"
-#include "Buffer.h"
-#include "Config.h"                    // butter_psram_size()
+#include "app/Buffer.h"
+#include "app/Config.h"                    // butter_psram_size()
 
 #include <string.h>
 

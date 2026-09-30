@@ -129,7 +129,7 @@ SECTIONS
         . = ALIGN(4);
     } > RAM_128K
 
-    /* HDMI palette/TMDS LUT + DMA line buffers (drivers/hdmi/hdmi.c conv_color,
+    /* HDMI palette/TMDS LUT + DMA line buffers (src/drivers/hdmi/hdmi.c conv_color,
      * 4 960 B). It needs 4096-byte alignment — the PIO address converter rebuilds
      * the read address as (reg << 12) | offset, the same rule conv_color_b follows
      * in SCRATCH_Y — and inside .bss that alignment forced the WHOLE section's
@@ -275,7 +275,7 @@ SECTIONS
     /* ── Code overlay windows ────────────────────────────────────────────────
      * Fixed-VMA windows just under the core0 stack, holding code that only an
      * OPTIONAL subsystem executes: .gsovl = the whole General Sound / NeoGS
-     * family (collected BY OBJECT FILE — src/GS/ is GS-only, so no per-function
+     * family (collected BY OBJECT FILE — src/speccy/devices/gs/ is GS-only, so no per-function
      * mark can be forgotten), .tsovl = the TS-Conf renderer and #nnAF path.
      * Their LOAD images live in flash like any .data section, but crt0 does NOT
      * copy them (it copies only __data_start__..__data_end__ and the scratch
@@ -284,7 +284,7 @@ SECTIONS
      *
      * No relocation and no PIC: the VMAs are fixed, so every branch and literal
      * was resolved by the linker for exactly the address we copy to. See
-     * src/CodeOverlay.h for the rule on what may live here — and for why .gsovl
+     * src/app/CodeOverlay.h for the rule on what may live here — and for why .gsovl
      * is the HIGHER window (one sbrk ceiling, heap grows up, so only the lower
      * window can be handed back while the upper one is reserved).
      *
@@ -349,7 +349,7 @@ SECTIONS
      *
      * .psramrom_magic must come FIRST: it is the 16 bytes a bank write overwrites
      * before anything else, so FlashRoms::intact() reading it is the whole "are the
-     * ROMs still there" test (see src/FlashRoms.h).
+     * ROMs still there" test (see src/app/FlashRoms.h).
      *
      * 4 KB-aligned because that is the flash erase granularity, and last in the
      * image so the eaten range is contiguous with the bank partition. .flash_end's

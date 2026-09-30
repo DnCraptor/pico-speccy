@@ -20,4 +20,4 @@
 #define z80_execute       pp_z80_execute
 #define z80_run           pp_z80_run
 
-#include "../GS/Z80_redcode.h"
+#include "redcode/Z80_redcode.h"

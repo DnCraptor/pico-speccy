@@ -10,18 +10,18 @@
 // the audio byte count.
 
 #include "PicoPlayer.h"
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
 
-#include "ff.h"
+#include "fatfs/ff.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <new>
 
 extern "C" {
-#include "mp3dec.h"
+#include "picomp3lib/mp3dec.h"
 extern void* (*ngs_helix_alloc_hook)(size_t);
 }
 

@@ -35,17 +35,17 @@
 #include "UiDialog.h"
 #include "OSDMain.h"
 #include "UiRender.h"        // SYM_* glyph names
-#include "FileUtils.h"
-#include "FileInfo.h"
-#include "ZipExtract.h"
-#include "Config.h"
-#include "ESPectrum.h"
-#include "Video.h"
-#include "wd1793.h"
-#include "PinSerialData_595.h"
-#include "Debug.h"
-#include "SortedFiles.h"
-#include "Buffer.h"
+#include "fs/FileUtils.h"
+#include "fs/FileInfo.h"
+#include "fs/ZipExtract.h"
+#include "app/Config.h"
+#include "app/ESPectrum.h"
+#include "speccy/video/Video.h"
+#include "speccy/devices/disk/wd1793.h"
+#include "drivers/sound/PinSerialData_595.h"
+#include "app/Debug.h"
+#include "fs/SortedFiles.h"
+#include "app/Buffer.h"
 #include "player/PicoPlayer.h"   // F2 = play in Pico-Zx-Player
 #include <pico/stdlib.h>
 

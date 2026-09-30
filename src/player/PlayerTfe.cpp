@@ -7,7 +7,7 @@
 
 #include "PlayerTfe.h"
 #include "PicoPlayer.h"
-#include "Buffer.h"
+#include "app/Buffer.h"
 
 #include <string.h>
 #include <stdio.h>

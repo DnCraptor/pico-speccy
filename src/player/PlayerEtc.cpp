@@ -18,12 +18,12 @@
 #include "PicoPlayer.h"
 #include "PlayerZ80.h"
 #include "etracker_bin.h"
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
-#include "SAASound.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
+#include "speccy/devices/sound/SAASound.h"
 
-#include "ff.h"
+#include "fatfs/ff.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

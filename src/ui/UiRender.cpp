@@ -28,9 +28,9 @@
 #include "UiFont.h"
 #include "UiStage.h"
 #include "OSDMain.h"
-#include "Config.h"
-#include "RTC.h"
-#include "ESPectrum.h"
+#include "app/Config.h"
+#include "speccy/devices/storage/RTC.h"
+#include "app/ESPectrum.h"
 #include <pico/stdlib.h>
 
 namespace nm {

@@ -26,23 +26,23 @@
 #include "UiFont.h"
 #include "UiRender.h"
 #include "UiNav.h"
-#include "ESPectrum.h"
-#include "Config.h"
-#include "Video.h"
-#include "FileUtils.h"
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
-#include "pwm_audio.h"
+#include "app/ESPectrum.h"
+#include "app/Config.h"
+#include "speccy/video/Video.h"
+#include "fs/FileUtils.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
+#include "drivers/sound/pwm_audio.h"
 #include "player/PicoPlayer.h"
 #if ZIFI_NET_CLIENT
-#include "RemoteFs.h"
+#include "net/RemoteFs.h"
 #include "OSDMain.h"
 bool osdPlayerHasLocations();       // OSDMain.cpp: the F5 location chooser
 bool osdPlayerLocations();
 #endif
 
-#include "ff.h"
+#include "fatfs/ff.h"
 #include "pico/time.h"
 #include "pico/rand.h"
 #include "hardware/sync.h"

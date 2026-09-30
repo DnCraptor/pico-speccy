@@ -8,10 +8,10 @@
 # independent AHB ports — HDMI DMA reading the framebuffer cannot stall
 # CPU access to Z80 RAM and vice versa.
 # The linker script is a configure_file template: Z80_CORE_IN_RAM=ON (default since
-# 2026-09-06) places every function of src/Z80_JLS.cpp in SRAM (.data) instead of
+# 2026-09-06) places every function of src/speccy/z80/Z80_JLS.cpp in SRAM (.data) instead of
 # flash (~24.5 KB at -Os, ~44 KB at -O3). OFF is the escape hatch for a board that
 # cannot spare the SRAM — see the TS-Conf performance notes in CLAUDE.md.
-option(Z80_CORE_IN_RAM "Place the Z80 core (src/Z80_JLS.cpp) in SRAM instead of flash" ON)
+option(Z80_CORE_IN_RAM "Place the Z80 core (src/speccy/z80/Z80_JLS.cpp) in SRAM instead of flash" ON)
 if (Z80_CORE_IN_RAM)
     set(Z80_CORE_TEXT_EXCLUDE "*Z80_JLS.cpp.o")
     set(Z80_CORE_RAM_RULE "*Z80_JLS.cpp.o(.text .text.*)")
@@ -19,7 +19,7 @@ else()
     set(Z80_CORE_TEXT_EXCLUDE "")
     set(Z80_CORE_RAM_RULE "")
 endif()
-# Code overlays (src/CodeOverlay.h explains the mechanism, the ordering rule and
+# Code overlays (src/app/CodeOverlay.h explains the mechanism, the ordering rule and
 # the reachability rule for what may live in a window). Two families of hot code
 # are SRAM-resident and useless to most sessions, and code cannot be allocated at
 # runtime, so each gets a FIXED VMA under the core0 stack instead of an address
@@ -27,7 +27,7 @@ endif()
 # our own _sbrk() hands the rest to the heap.
 #
 #   .gsovl  General Sound / NeoGS: the GS-Z80 redcode core, its memory callbacks,
-#           the SD and MP3 paths. ~25 KB. Collected BY OBJECT FILE (src/GS/ is
+#           the SD and MP3 paths. ~25 KB. Collected BY OBJECT FILE (src/speccy/devices/gs/ is
 #           GS-only) and the same objects are excluded from .data's .time_critical
 #           sweep below — an object-file rule cannot be forgotten the way a
 #           per-function mark can. Needs no runtime claim: Audio > General Sound
@@ -46,7 +46,7 @@ endif()
 # still decide whether the TS code is RAM-resident AT ALL — with both OFF the
 # .tsovl window is simply empty and the heap gets all of it on every machine.
 option(TSCONF_CODE_OVERLAY "TS-Conf: put the TS-only hot code in a fixed-VMA SRAM overlay, handed to the heap on other machines (~14.7 KB)" ON)
-option(GS_CODE_OVERLAY "General Sound/NeoGS: put src/GS/'s SRAM-resident code in a fixed-VMA overlay, handed to the heap when GS is Off (~25 KB)" ON)
+option(GS_CODE_OVERLAY "General Sound/NeoGS: put src/speccy/devices/gs/'s SRAM-resident code in a fixed-VMA overlay, handed to the heap when GS is Off (~25 KB)" ON)
 option(DMA_CODE_OVERLAY "Z80 DMA / zxnDMA: put Z80DMA.cpp's SRAM-resident code in a fixed-VMA overlay, handed to the heap when DMA is Off (~5 KB)" ON)
 # The AY stereo slot is a different shape from the three windows above: it is not
 # "reserved or released" but "one of four bodies loaded". ABC, ACB, BAC and

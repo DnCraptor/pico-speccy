@@ -15,15 +15,15 @@
 #include "UiActions.h"
 #include "UiStrings.h"
 #include "UiRender.h"   // SYM_* glyphs for the persist verb lists
-#include "Config.h"
-#include "FileUtils.h"
-#include "MemESP.h"         // butter_psram_size() for the Profi / ext-RAM predicates
-#include "FlashRoms.h"      // romsUsable()/extendable() for the GMX, TS-Conf and bank rows
-#include "psram_spi.h"       // psram_size()
-#include "Buffer.h"          // Buffer::gsPsramAvailable() for the General Sound gate
+#include "app/Config.h"
+#include "fs/FileUtils.h"
+#include "speccy/core/MemESP.h"         // butter_psram_size() for the Profi / ext-RAM predicates
+#include "app/FlashRoms.h"      // romsUsable()/extendable() for the GMX, TS-Conf and bank rows
+#include "drivers/psram/psram_spi.h"       // psram_size()
+#include "app/Buffer.h"          // Buffer::gsPsramAvailable() for the General Sound gate
 #include "player/PicoPlayer.h" // pp::available() for the Pico-Zx-Player row
-#include "BoardPins.h"       // the ESP-link predicate of the Network rows
-#include "messages.h"        // _PIN_XSTR for the Real sound input row label
+#include "drivers/board/BoardPins.h"       // the ESP-link predicate of the Network rows
+#include "app/messages.h"        // _PIN_XSTR for the Real sound input row label
 #include <hardware/vreg.h>   // VREG_VOLTAGE_* values used by the option table
 #include <stdio.h>           // snprintf (murmuzavrTag)
 #include <string.h>          // strlen/strstr/memmove (label fitting)
@@ -44,7 +44,7 @@ extern "C" uint32_t graphics_mode_vga_pixel_hz(int mode);
 extern "C" uint32_t hdmi_hstx_div_at(unsigned tmds_mhz, uint32_t sys_hz);
 #endif
 #if VGA_HSTX
-#include "vga_pwm.h"          // vga_hstx_cycles() — header-only, <stdint.h> alone
+#include "drivers/vga-nextgen/vga_pwm.h"          // vga_hstx_cycles() — header-only, <stdint.h> alone
 #endif
 #ifdef VGA_HDMI
 // vga.c. Must be declared at GLOBAL scope: inside namespace nm it would mangle to
@@ -53,7 +53,7 @@ extern bool SELECT_VGA;
 #endif
 
 #if defined(VGA_HDMI)
-// Defined in drivers/vga-nextgen/vga.c; file scope, or inside namespace nm it would
+// Defined in src/drivers/vga-nextgen/vga.c; file scope, or inside namespace nm it would
 // resolve to nm::SELECT_VGA and fail to link (same note as UiStage.cpp).
 extern bool SELECT_VGA;
 #endif
@@ -532,7 +532,7 @@ static const Option opt_mach_spectrum[] = {
 // is forced on while either runs; see resolveConstraints). Their own family row because
 // they are a different manufacturer's machines, not ZX romsets. The TC2048 is a 48K plus
 // 37 bytes of ROM overlay; the TC2068 brings its own 16 KB HOME ROM, an 8 KB EX-ROM, the
-// eight-slot #F4 memory map and a DOCK cartridge port (ArchRom.h, src/Timex.cpp).
+// eight-slot #F4 memory map and a DOCK cartridge port (ArchRom.h, src/speccy/machines/Timex.cpp).
 static const Option opt_mach_timex[] = {
     { TXT_ROM_TC2048,     NM_MACH(A_48K, R_TC2048) },
     { TXT_ROM_TC2068,     NM_MACH(A_48K, R_TC2068) },

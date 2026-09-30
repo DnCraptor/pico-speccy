@@ -24,11 +24,11 @@
 
 #include "PicoPlayer.h"
 #ifndef PP_BULBA_HOST
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
-#include "AySound.h"
-#include "ff.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
+#include "speccy/devices/sound/AySound.h"
+#include "fatfs/ff.h"
 #endif
 
 #include <string.h>

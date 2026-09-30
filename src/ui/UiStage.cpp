@@ -9,44 +9,44 @@
 #include "UiStage.h"
 #include "UiModel.h"
 #include "UiGfx.h"
-#include "Config.h"
-#include "machines/TsConf/TsConf.h"
-#include "SnSound.h"
-#include "CPU.h"
-#include "Video.h"
-#include "ESPectrum.h"
+#include "app/Config.h"
+#include "speccy/machines/TsConf/TsConf.h"
+#include "speccy/devices/sound/SnSound.h"
+#include "speccy/z80/CPU.h"
+#include "speccy/video/Video.h"
+#include "app/ESPectrum.h"
 #include "LEDIndicators.h"
-#include "sdcard.h"
-#include "MemESP.h"
-#include "wd1793.h"
-#include "roms.h"
-#include "pwm_audio.h"
-#include "Tape.h"       // Tape::Stop for the Real sound input hook
-#include "MachineSwitch.h"
-#include "DivMMC.h"
-#include "MB02.h"
-#include "Plus3Fdc.h"
-#include "IDE.h"
-#include "Ports.h"
-#include "Debug.h"
-#include "GS/GS.h"
-#include "ZiFi.h"
-#include "ZiFiAT.h"
-#include "BoardPins.h"
-#include "Midi.h"
-#include "MidiSynth.h"
-#include "FlashRoms.h"  // romsUsable() for the GMX / TS-Conf constraints
-#include "messages.h"   // _PIN_XSTR for the MIDI/WAV shared-pin note
+#include "drivers/sdcard/sdcard.h"
+#include "speccy/core/MemESP.h"
+#include "speccy/devices/disk/wd1793.h"
+#include "speccy/core/roms.h"
+#include "drivers/sound/pwm_audio.h"
+#include "speccy/devices/tape/Tape.h"       // Tape::Stop for the Real sound input hook
+#include "app/MachineSwitch.h"
+#include "speccy/devices/storage/DivMMC.h"
+#include "speccy/devices/disk/MB02.h"
+#include "speccy/machines/Plus3/Plus3Fdc.h"
+#include "speccy/devices/storage/IDE.h"
+#include "speccy/core/Ports.h"
+#include "app/Debug.h"
+#include "speccy/devices/gs/GS.h"
+#include "speccy/devices/zifi/ZiFi.h"
+#include "net/ZiFiAT.h"
+#include "drivers/board/BoardPins.h"
+#include "speccy/devices/sound/Midi.h"
+#include "speccy/devices/sound/MidiSynth.h"
+#include "app/FlashRoms.h"  // romsUsable() for the GMX / TS-Conf constraints
+#include "app/messages.h"   // _PIN_XSTR for the MIDI/WAV shared-pin note
 #include "UiDialog.h"   // the transport hook asks its reboot question itself
 #include "UiStrings.h"
 #include "UiActions.h"  // netStatusInvalidate
 #include "OSDMain.h"    // OSD::esp_hard_reset for the transport reboot
 
-#include "graphics.h"   // graphics_set_scanlines / graphics_set_dither
-#include "Z80_JLS/z80.h"              // must precede z80operations.h (RegisterPair)
-#include "Z80_JLS/z80operations.h"   // Z80Ops::isProfi / isPentagon for the constraints
+#include "drivers/graphics/graphics.h"   // graphics_set_scanlines / graphics_set_dither
+#include "speccy/z80/z80.h"              // must precede z80operations.h (RegisterPair)
+#include "speccy/z80/z80operations.h"   // Z80Ops::isProfi / isPentagon for the constraints
 
-// Defined in drivers/vga-nextgen/vga.c and already declared (C++ linkage) inside
+// Defined in src/drivers/vga-nextgen/vga.c and already declared (C++ linkage) inside
 // VIDEO::activeVideoMode(); re-stated here at FILE scope because inside namespace nm it
 // would resolve to nm::SELECT_VGA and fail to link.
 extern bool SELECT_VGA;
@@ -187,7 +187,7 @@ NM_BOOL_ACCESS(border, render_border)
 // and part of the driver's own default), which is what makes "Defaults" restore a
 // usable orientation without exposing a row nobody should turn off.
 #if TFT
-#include "st7789.h"     // TFT_FLAGS / TFT_INVERSION + the MADCTL_* bit names
+#include "drivers/st7789/st7789.h"     // TFT_FLAGS / TFT_INVERSION + the MADCTL_* bit names
 
 static inline void tftFlagBit(uint8_t bit, bool on) {
     TFT_FLAGS = (uint8_t)((on ? (TFT_FLAGS | bit) : (TFT_FLAGS & ~bit))

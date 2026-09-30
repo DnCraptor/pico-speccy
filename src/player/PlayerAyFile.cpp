@@ -28,12 +28,12 @@
 
 #include "PicoPlayer.h"
 #include "PlayerZ80.h"
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
-#include "AySound.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
+#include "speccy/devices/sound/AySound.h"
 
-#include "ff.h"
+#include "fatfs/ff.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -17,7 +17,7 @@ if (PICOSPECCY_WIFI)
         # for the real clk_sys (378/504 MHz) — see the gSPI note there.
         CYW43_PIO_CLOCK_DIV_DYNAMIC=1
         CYW43_HOST_NAME="pico-speccy")
-    # lwIP in POLL mode (NO_SYS, src/lwipopts.h): every stack callback runs inside
+    # lwIP in POLL mode (NO_SYS, src/drivers/board/lwipopts.h): every stack callback runs inside
     # cyw43_arch_poll() from core0 — WifiNet::poll() once per frame plus the waits in
     # WifiNet/WifiSock — so the emulator, not a background IRQ context, decides when
     # the network runs. All lwIP memory is heap/net-arena via Buffer::palloc (see
@@ -28,7 +28,7 @@ else()
 endif()
 # Board identity for the sources. MURM2 already defines MURM2=1 in its pin arm;
 # MURM1 defines nothing and is the `#else` fallback everywhere, so MURM_W needs
-# its own macro for src/BoardPins.cpp to tell the two Murmulator-1 modules apart.
+# its own macro for src/drivers/board/BoardPins.cpp to tell the two Murmulator-1 modules apart.
 if (MURM_W)
     target_compile_definitions(${PROJECT_NAME} PRIVATE MURM_W=1)
 endif()

@@ -2,9 +2,9 @@
 // STP/SQT) against the REAL Z80 replayer the firmware plays them with
 // (src/player/PlayerAyZ80.cpp: same binaries, same INIT/PLAY, same loop flag).
 //
-//   gcc -O2 -c -Isrc/GS -DZ80_STATIC '-DZ80_EXTERNAL_HEADER="Z80_compat.h"' \
-//       -o /tmp/z80.o src/GS/Z80_redcode.c && \
-//   g++ -O2 -Wall -Isrc -Isrc/GS -o /tmp/aytime_test tools/aytime_test.cpp /tmp/z80.o && \
+//   gcc -O2 -c -Iexternal/redcode -DZ80_STATIC '-DZ80_EXTERNAL_HEADER="Z80_compat.h"' \
+//       -o /tmp/z80.o external/redcode/Z80_redcode.c && \
+//   g++ -O2 -Wall -Isrc -Iexternal/redcode -o /tmp/aytime_test tools/aytime_test.cpp /tmp/z80.o && \
 //     /tmp/aytime_test file.pt3 dir/*.stc ...
 //
 // Prints one line per mismatch and a summary; exit code 1 on any mismatch.
@@ -15,7 +15,7 @@
 #define Z80_STATIC
 #define Z80_EXTERNAL_HEADER "Z80_compat.h"
 extern "C" {
-#include "GS/Z80_redcode.h"
+#include "redcode/Z80_redcode.h"
 }
 
 #include <cstdio>

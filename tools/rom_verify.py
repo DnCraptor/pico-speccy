@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # rom_verify.py — prove that what the firmware ships still resolves to the ROMs it
-# claims to be. Self-contained: it reads the GENERATED C arrays out of src/roms/ and
+# claims to be. Self-contained: it reads the GENERATED C arrays out of src/speccy/roms/ and
 # compares them against the .bin dumps in the matching src/ directories.
 #
 # Why this exists: rom_pack.py stores most ROM variants as run-list overlays over ONE
@@ -17,7 +17,7 @@ import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rom_pack import load_rom, apply_overlay
 
-R = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'roms')
+R = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'speccy', 'roms')
 def arr(rel, sym): return bytes(load_rom(os.path.join(R, rel), sym))
 def dump(rel):     return open(os.path.join(R, rel), 'rb').read()
 

@@ -22,8 +22,8 @@
 
 #include <stdint.h>
 
-#include "ArchRom.h"     // ArchIdx/RomsetIdx + NM_ARCH_TABLE/NM_ROMSET_TABLE
-#include "Subsystem.h"   // Subsystems::FeatureId used in the table below
+#include "speccy/core/ArchRom.h"     // ArchIdx/RomsetIdx + NM_ARCH_TABLE/NM_ROMSET_TABLE
+#include "app/Subsystem.h"   // Subsystems::FeatureId used in the table below
 using namespace Subsystems;
 
 namespace nm {

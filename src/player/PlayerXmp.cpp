@@ -9,15 +9,15 @@
 // libxmp's own scan gives the length. Meter: every channel's current volume.
 
 #include "PicoPlayer.h"
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
 
 extern "C" {
 #include "libxmp/xmp.h"
 }
 
-#include "ff.h"
+#include "fatfs/ff.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

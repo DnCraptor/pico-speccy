@@ -29,7 +29,7 @@ option(ZERO2 "Waveshare RP2350-PiZero" OFF)
 # 16 MB flash, PSRAM pads on GPIO47 and a Raspberry Pi Radio Module 2 (CYW43439)
 # on board, so these are the SAME carriers as MURM/MURM2 with a different module:
 # each option turns its carrier on and then overrides the handful of pins that the
-# module moves. See src/boards/picospeccy_rp2350b_w.h.
+# module moves. See src/drivers/board/boards/picospeccy_rp2350b_w.h.
 option(MURM_W "Murmulator 1.x + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
 option(MURM2_W "Murmulator 2.0 + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
 # OFF by default and shipped as a SEPARATE z0p2 firmware ("-PIOUSB" in the file name):
@@ -41,7 +41,7 @@ option(MURM2_W "Murmulator 2.0 + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi
 option(ZERO2_PIO_USB "ZERO2: add a USB host on the second Type-C (J2, PIO-USB GP28/GP29) — costs ~18 KB SRAM" OFF)
 option(ZIFI_NET_CLIENT "Enable FTP/SFTP/SSH client over ZiFi (uses mbedTLS)" ON)
 
-# HDMI signal-integrity knobs (drivers/hdmi/hdmi.c). Both ON is the combination
+# HDMI signal-integrity knobs (src/drivers/hdmi/hdmi.c). Both ON is the combination
 # hw-confirmed on a capture card (2026-08-06); turning either off cannot break the
 # stream, so a marginal link can be A/B'd by rebuild. A third knob, a ±2-code level
 # snap, was tried and removed — it broke the new UI's paint on hardware for reasons

@@ -17,13 +17,13 @@
 
 #include "PicoPlayer.h"
 #include "PlayerTfe.h"
-#include "Buffer.h"
-#include "TryAlloc.h"
-#include "Debug.h"
-#include "AySound.h"
-#include "OpnFm.h"
+#include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "app/Debug.h"
+#include "speccy/devices/sound/AySound.h"
+#include "speccy/devices/sound/OpnFm.h"
 
-#include "ff.h"
+#include "fatfs/ff.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

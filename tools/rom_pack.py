@@ -7,19 +7,19 @@
 # and store each variant as a tiny read-only OVERLAY: a sorted list of "runs"
 # (offset,len,bytes) that differ from the base. The overlay lives in flash; at ROM
 # read time MemESP substitutes the patched byte when the address falls inside a run
-# (see src/RomOverlay.h). No RAM copy, no flash write, no reboot — on every board.
+# (see src/speccy/core/RomOverlay.h). No RAM copy, no flash write, no reboot — on every board.
 #
 # This only works when the diff is POSITIONAL (same addresses). For ROMs that differ
 # by insertions/relocations the run-list explodes — check the printed run count.
 #
-# Emits, per family, into src/roms/<fam>/ :
+# Emits, per family, into src/speccy/roms/<fam>/ :
 #   <fam>_overlays.c    — overlay blobs as C arrays (compiled into flash)
 #   <fam>_overlays.h    — extern decls (included by roms.h)
 #   <variant>.ovl       — raw overlay blob (artifact)
 #   <base>.bin          — base ROM dump (artifact)
 #   manifest.json       — human-readable family description
 #
-# Overlay blob layout (little-endian), matched by src/RomOverlay.h:
+# Overlay blob layout (little-endian), matched by src/speccy/core/RomOverlay.h:
 #   0  4  magic  "RPO1"
 #   4  4  rom_len
 #   8  4  nruns
@@ -179,7 +179,7 @@ def pack_family(fam, out_dir):
     return report
 
 # ---------------------------------------------------------------- families
-PLUS3_SRC = os.path.join('src', 'roms', 'plus3', 'src')
+PLUS3_SRC = os.path.join('src', 'speccy', 'roms', 'plus3', 'src')
 
 FAMILIES = {
     # BASE = TR-DOS 5.04T, the build zx-evo puts in TS-BIOS ROM page 1 — and the
@@ -312,7 +312,7 @@ FAMILIES = {
     # overlay cheaply against the SAME bases already used above (stock bank1,
     # and the shared Sinclair 128K halves) -- 5061B + 101B + 2218B vs 48KB raw,
     # ~40KB saved. Re-run `python3 tools/rom_pack.py profi` after updating any
-    # of src/roms/profi/src/bank{1,2,3}_pq.bin from a newer PQDOS build.
+    # of src/speccy/roms/profi/src/bank{1,2,3}_pq.bin from a newer PQDOS build.
     'profi': {
         'id': 'profi',
         'base': {'name': 'sinclair_128k_0', 'sym': 'gb_rom_0_sinclair_128k'},
@@ -376,9 +376,9 @@ FAMILIES = {
 }
 
 # ------------------------------------------------------- +3e / +3 (divIDE) raw banks
-PLUS3E_DIR = os.path.join('src', 'roms', 'plus3e')
+PLUS3E_DIR = os.path.join('src', 'speccy', 'roms', 'plus3e')
 PLUS3E_SRC = os.path.join(PLUS3E_DIR, 'src')
-PLUS3DIV_DIR = os.path.join('src', 'roms', 'plus3div')
+PLUS3DIV_DIR = os.path.join('src', 'speccy', 'roms', 'plus3div')
 
 def pack_plus3e_raw():
     # The +3e's bank 2 (+3DOS + IDEDOS) shares almost nothing positionally with anything
@@ -413,7 +413,7 @@ def pack_plus3e_raw():
 #               else its own overlay over that same half
 #
 # The ROM image is NOT in this repository (it is not redistributable): drop the four
-# 16 KB banks into src/roms/plus3div/src/rom{0,1,2,3}.bin and run this. The firmware
+# 16 KB banks into src/speccy/roms/plus3div/src/rom{0,1,2,3}.bin and run this. The firmware
 # includes the generated plus3div_roms.h unconditionally.
 PLUS3DIV_OVL_DIFF_MAX = 12288   # past this an overlay is not worth it against 16 KB raw
 
@@ -583,17 +583,17 @@ GMX_OVL_DIFF_MAX = 8192   # 1024 until 2026-09-19, when the ROM moved to ProfROM
                           # more than half the bank it replaces.
 
 def pack_gmx():
-    out_dir = os.path.join('src', 'roms', 'scorpion')
+    out_dir = os.path.join('src', 'speccy', 'roms', 'scorpion')
     src_dir = os.path.join(out_dir, 'src')
 
     # Bases follow FAMILIES: rom[0] of the 128K family is the PENTAGON ROM0 since
     # 2026-09-09 (TS-Conf needs it as a base), so a GMX bank equal to it binds the
     # base with no overlay at all, and one equal to the stock Sinclair ROM0 reuses
     # the shipped 101-byte overlay.
-    pent   = open(os.path.join('src', 'roms', 'pentagon', 'src', 'rom0.bin'), 'rb').read()
+    pent   = open(os.path.join('src', 'speccy', 'roms', 'pentagon', 'src', 'rom0.bin'), 'rb').read()
     s128_1 = open(os.path.join(src_dir, 'sinclair_128k_1.bin'), 'rb').read()
-    t504t  = open(os.path.join('src', 'roms', 'trdos', 'src', '504t.bin'), 'rb').read()
-    sinc_blob = open(os.path.join('src', 'roms', 'pentagon',
+    t504t  = open(os.path.join('src', 'speccy', 'roms', 'trdos', 'src', '504t.bin'), 'rb').read()
+    sinc_blob = open(os.path.join('src', 'speccy', 'roms', 'pentagon',
                                   'pentagon_sinclair_128k_0.ovl'), 'rb').read()
 
     # (base symbol, base bytes, optional already-shipped overlay reusable verbatim).
@@ -770,7 +770,7 @@ TSCONF_SRC_MD5 = {
 
 def pack_tsconf():
     import hashlib
-    out_dir = os.path.join('src', 'roms', 'tsconf')
+    out_dir = os.path.join('src', 'speccy', 'roms', 'tsconf')
     src_dir = os.path.join(out_dir, 'src')
 
     def rd(name):
@@ -886,18 +886,18 @@ PROF_OVL_DIFF_MAX = 1024   # same rule as pack_gmx: a wide run list on an
                            # opcode-fetch path is not worth ~4 KB of flash
 
 def pack_prof():
-    out_dir = os.path.join('src', 'roms', 'scorpion')
+    out_dir = os.path.join('src', 'speccy', 'roms', 'scorpion')
     src_dir = os.path.join(out_dir, 'src')
     img = open(os.path.join(src_dir, 'profrom.bin'), 'rb').read()
     if len(img) != PROF_BANKS * PROF_BANK_SZ:
         raise SystemExit("profrom.bin: expected 256 KB, got %d" % len(img))
     banks = [img[i*PROF_BANK_SZ:(i+1)*PROF_BANK_SZ] for i in range(PROF_BANKS)]
 
-    pent   = open(os.path.join('src', 'roms', 'pentagon', 'src', 'rom0.bin'), 'rb').read()
+    pent   = open(os.path.join('src', 'speccy', 'roms', 'pentagon', 'src', 'rom0.bin'), 'rb').read()
     s128_1 = open(os.path.join(src_dir, 'sinclair_128k_1.bin'), 'rb').read()
     b2     = open(os.path.join(src_dir, 'bank2.bin'), 'rb').read()
     b3     = open(os.path.join(src_dir, 'bank3.bin'), 'rb').read()
-    t504t  = open(os.path.join('src', 'roms', 'trdos', 'src', '504t.bin'), 'rb').read()
+    t504t  = open(os.path.join('src', 'speccy', 'roms', 'trdos', 'src', '504t.bin'), 'rb').read()
 
     # (base symbol, base bytes) — everything here is a raw array present in every
     # build. Grows as ProfROM's own banks are emitted raw (self-referential
@@ -1005,7 +1005,7 @@ TC2068_SRC_MD5 = {
 
 def pack_timex():
     import hashlib
-    out_dir = os.path.join('src', 'roms', 'timex')
+    out_dir = os.path.join('src', 'speccy', 'roms', 'timex')
     src_dir = os.path.join(out_dir, 'src')
 
     def rd(name, want):
@@ -1081,14 +1081,14 @@ ATM_IMAGES = [
 ATM_RAW_MAX = 12288   # an overlay bigger than this ships the page raw instead
 
 def pack_atm():
-    out_dir = os.path.join('src', 'roms', 'atm')
+    out_dir = os.path.join('src', 'speccy', 'roms', 'atm')
     src_dir = os.path.join(out_dir, 'src')
     rd = lambda *p: open(os.path.join(*p), 'rb').read()
     bases = [
-        ('gb_rom_0_pentagon_128k', rd('src', 'roms', 'pentagon', 'src', 'rom0.bin')),
-        ('gb_rom_1_sinclair_128k', rd('src', 'roms', '128k', 'src', 'sinclair_128k_1.bin')),
-        ('gb_rom_0_sinclair_48k',  rd('src', 'roms', '48k', 'src', 'sinclair_48k.bin')),
-        ('gb_rom_4_trdos_504t',    rd('src', 'roms', 'trdos', 'src', '504t.bin')),
+        ('gb_rom_0_pentagon_128k', rd('src', 'speccy', 'roms', 'pentagon', 'src', 'rom0.bin')),
+        ('gb_rom_1_sinclair_128k', rd('src', 'speccy', 'roms', '128k', 'src', 'sinclair_128k_1.bin')),
+        ('gb_rom_0_sinclair_48k',  rd('src', 'speccy', 'roms', '48k', 'src', 'sinclair_48k.bin')),
+        ('gb_rom_4_trdos_504t',    rd('src', 'speccy', 'roms', 'trdos', 'src', '504t.bin')),
         ('nullptr',                b'\xff' * 16384),
     ]
     pages = {}
@@ -1153,7 +1153,7 @@ def pack_atm():
     open(os.path.join(out_dir, 'atm_roms.c'), 'w').write("\n".join(c) + "\n")
     h = list(banner) + ['// Include from Config.cpp ONLY: the table names gb_rom_1_sinclair_128k,',
                         '// an internal-linkage array a second TU would duplicate (see romScorpion.h).',
-                        '#pragma once', '#include "machines/Atm.h"   // atm_rom_page_t', 'extern "C" {']
+                        '#pragma once', '#include "speccy/machines/Atm.h"   // atm_rom_page_t', 'extern "C" {']
     for sym, _ in raws + [(o[0], o[1]) for o in ovls]:
         h.append('extern const unsigned char %s[];' % sym)
     h.append('}')
@@ -1211,7 +1211,7 @@ KAY_ROMSETS = [
 KAY_RAW_MAX = 12288
 
 def pack_kay():
-    out_dir = os.path.join('src', 'roms', 'kay')
+    out_dir = os.path.join('src', 'speccy', 'roms', 'kay')
     src_dir = os.path.join(out_dir, 'src')
     rd = lambda *p: open(os.path.join(*p), 'rb').read()
     imgs = {}
@@ -1227,9 +1227,9 @@ def pack_kay():
     # roles overlay four DIFFERENT bases, so Config::requestMachine registers them
     # statically (the plain-Scorpion shape). A raw KAY page may itself be a base.
     bases = [
-        ('gb_rom_0_pentagon_128k', rd('src', 'roms', 'pentagon', 'src', 'rom0.bin')),
-        ('gb_rom_1_sinclair_128k', rd('src', 'roms', '128k', 'src', 'sinclair_128k_1.bin')),
-        ('gb_rom_4_trdos_504t',    rd('src', 'roms', 'trdos', 'src', '504t.bin')),
+        ('gb_rom_0_pentagon_128k', rd('src', 'speccy', 'roms', 'pentagon', 'src', 'rom0.bin')),
+        ('gb_rom_1_sinclair_128k', rd('src', 'speccy', 'roms', '128k', 'src', 'sinclair_128k_1.bin')),
+        ('gb_rom_4_trdos_504t',    rd('src', 'speccy', 'roms', 'trdos', 'src', '504t.bin')),
     ]
     names = ['128', '48', 'svc', 'dos']
     raws, ovls, desc, seen = [], [], {}, {}
@@ -1327,7 +1327,7 @@ def main():
             continue
         if fid not in FAMILIES:
             raise SystemExit("unknown family: %s (known: %s)" % (fid, ", ".join(FAMILIES)))
-        rep = pack_family(FAMILIES[fid], os.path.join('src', 'roms', fid))
+        rep = pack_family(FAMILIES[fid], os.path.join('src', 'speccy', 'roms', fid))
         if fid == 'plus3e':
             pack_plus3e_raw()
         tot = sum(v['len'] for v in rep['variants'])

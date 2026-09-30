@@ -8,8 +8,8 @@
 #include "UiGfx.h"
 #include "UiFont.h"
 #include "OSDMain.h"
-#include "Video.h"
-#include "Config.h"     // ui_vga_solid / ui_rounded — the menu-look preferences
+#include "speccy/video/Video.h"
+#include "app/Config.h"     // ui_vga_solid / ui_rounded — the menu-look preferences
 
 extern "C" volatile bool profi_ds80_active;
 // File scope, OUTSIDE namespace nm: an extern declared inside the namespace

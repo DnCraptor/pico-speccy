@@ -69,7 +69,7 @@ add_compile_definitions(PICO_STACK_SIZE=0x2000 PICO_CORE1_STACK_SIZE=0x800
 # Absolute path means it resolves regardless of per-target include dirs. Harmless
 # on builds that don't link pico_mbedtls (ZIFI_NET_CLIENT=OFF).
 if (ZIFI_NET_CLIENT)
-    set(PICO_MBEDTLS_CONFIG_FILE "${CMAKE_CURRENT_LIST_DIR}/src/mbedtls_config_picospeccy.h")
+    set(PICO_MBEDTLS_CONFIG_FILE "${CMAKE_CURRENT_LIST_DIR}/src/drivers/board/mbedtls_config_picospeccy.h")
 endif ()
 
 # TinyUSB 0.21.0 vendored at external/tinyusb (subset: LICENSE, src/, hw/bsp/
@@ -93,18 +93,23 @@ if(ZERO2 AND ZERO2_PIO_USB)
     add_subdirectory("${PICO_PIO_USB_DIR}" "${CMAKE_BINARY_DIR}/pico-pio-usb")
 endif()
 
-add_subdirectory(drivers/audio)
-add_subdirectory(drivers/picomp3lib)
-add_subdirectory(drivers/nespad)
-add_subdirectory(drivers/fatfs)
-add_subdirectory(drivers/sdcard)
-add_subdirectory(drivers/vga-nextgen)
-add_subdirectory(drivers/st7789)
-add_subdirectory(drivers/hdmi)
-add_subdirectory(drivers/tv)
-add_subdirectory(drivers/tv-software)
-add_subdirectory(drivers/graphics)
-add_subdirectory(drivers/psram)
+# Pico hardware drivers: each is its own CMake library under src/drivers/<name>/.
+# They are linked, not globbed into the firmware target (see the filter below).
+set(PICO_DRIVER_LIBS audio graphics hdmi nespad ps2 ps2kbd psram sdcard st7789 tv
+                     tv-software vga-nextgen)
+add_subdirectory(src/drivers/audio)
+add_subdirectory(src/drivers/nespad)
+add_subdirectory(src/drivers/sdcard)
+add_subdirectory(src/drivers/vga-nextgen)
+add_subdirectory(src/drivers/st7789)
+add_subdirectory(src/drivers/hdmi)
+add_subdirectory(src/drivers/tv)
+add_subdirectory(src/drivers/tv-software)
+add_subdirectory(src/drivers/graphics)
+add_subdirectory(src/drivers/psram)
+# Vendored third-party libraries.
+add_subdirectory(external/picomp3lib)
+add_subdirectory(external/fatfs)
 
 #target_compile_definitions(${PROJECT_NAME} PRIVATE VGA)
 
@@ -115,13 +120,14 @@ add_subdirectory(drivers/psram)
 file(GLOB_RECURSE SRC CONFIGURE_DEPENDS
     "src/*.cpp"
     "src/*.c"
-    "fabgl/*.cpp"
-    "src/roms/*.cpp"
-    "src/roms/*.c"
-    "src/miniz/*.c"
-    "src/GS/*.cpp"
-    "src/GS/*.c"
+    # Vendored code compiled straight into the firmware (flags: cmake/source-flags.cmake).
+    "external/miniz/*.c"
+    "external/redcode/*.c"
+    "external/libxmp/*.c"
 )
+# The driver libraries under src/drivers/ are separate CMake targets.
+string(REPLACE ";" "|" _drv_re "${PICO_DRIVER_LIBS}")
+list(FILTER SRC EXCLUDE REGEX "/src/drivers/(${_drv_re})/")
 
 message(STATUS "Add source files:")
 foreach (SRC_FILE IN LISTS SRC)
@@ -135,13 +141,13 @@ add_executable(${PROJECT_NAME} ${SRC})
 # (hcd_pio_usb.c maps rhport N -> PIO root N-1); the native controller has no HCD in
 # this build at all. Pico-PIO-USB needs a WHOLE PIO (3 SMs, 32 instructions) plus one
 # DMA channel, which main.cpp picks at runtime; it takes pio2, and ZERO2_PIO_USB_HOST
-# is therefore also what pushes HDMI back to pio0 (see PIO_VIDEO in drivers/hdmi/hdmi.h
+# is therefore also what pushes HDMI back to pio0 (see PIO_VIDEO in src/drivers/hdmi/hdmi.h
 # — with both on pio2 the firmware rebooted forever on a core1 PIO panic). pio1 is the
 # PS/2 keyboard + I2S/WAV either way.
 if(ZERO2 AND ZERO2_PIO_USB)
-    # Both HCDs live in the image: src/usb_hcd_native_wrap.c and src/usb_hcd_pio_wrap.c
+    # Both HCDs live in the image: src/drivers/usbhost/usb_hcd_native_wrap.c and src/drivers/usbhost/usb_hcd_pio_wrap.c
     # (picked up by the src/*.c glob) compile hcd_rp2040.c / hcd_pio_usb.c with their
-    # hcd_* entry points renamed, and src/usb_hcd_router.c dispatches by rhport. Do NOT
+    # hcd_* entry points renamed, and src/drivers/usbhost/usb_hcd_router.c dispatches by rhport. Do NOT
     # add hcd_pio_usb.c here as well — the wrapper is its only translation unit.
     target_link_libraries(${PROJECT_NAME} PRIVATE pico_pio_usb)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -184,9 +190,14 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     tinyusb_host tinyusb_board
 )
 
+# Project includes are spelled from src/ ("speccy/core/Ports.h") or from external/
+# ("miniz/miniz.h"); a header in the same directory as its includer is spelled bare.
+# src/drivers/board holds the config headers the SDK looks up by bare name
+# (tusb_config.h, lwipopts.h, FreeRTOSConfig.h).
 target_include_directories(${PROJECT_NAME} PRIVATE
         src
-        src/roms
+        external
+        src/drivers/board
         external/embeded-midi-synth
 )
 
@@ -233,11 +244,11 @@ endif ()
 # runtime — one occupant at a time; see SharedFlash/RomManager).
 
 IF(KBDUSB)
-    add_subdirectory(drivers/ps2kbd)
+    add_subdirectory(src/drivers/ps2kbd)
     target_link_libraries(${PROJECT_NAME} PRIVATE ps2kbd)
     target_compile_definitions(${PROJECT_NAME} PRIVATE KBDUSB)
 ELSE()
-    add_subdirectory(drivers/ps2)
+    add_subdirectory(src/drivers/ps2)
     target_link_libraries(${PROJECT_NAME} PRIVATE ps2)
     target_compile_definitions(${PROJECT_NAME} PRIVATE KBDPS2)
 ENDIF()
@@ -247,12 +258,12 @@ if (BUTTER_PSRAM_GPIO)
 endif()
 # ZiFi (ESP-01S WiFi NIC emulation).
 # TX/RX pins are chosen at RUNTIME (Network → GPIO picker, stored in NVS) from a
-# per-board candidate list defined in src/BoardPins.cpp. No compile-time pin
+# per-board candidate list defined in src/drivers/board/BoardPins.cpp. No compile-time pin
 # define is needed anymore; the old -DZIFI_TX_PIN/-DZIFI_RX_PIN are obsolete.
 
 # ZiFi network client (FTP/SFTP/SSH over the ESP-01S TCP sockets).
 # SSH crypto runs on the Pico via mbedTLS primitives (NOT wolfSSH, NOT mbedTLS's
-# TLS stack; see src/mbedtls_config_picospeccy.h). New sources (ZiFiSock/Ftp/Ssh/
+# TLS stack; see src/drivers/board/mbedtls_config_picospeccy.h). New sources (ZiFiSock/Ftp/Ssh/
 # Sftp.cpp) auto-compile via the GLOB; each file body is wrapped in
 # `#if ZIFI_NET_CLIENT` so ZIFI_NET_CLIENT=OFF builds get zero footprint.
 if (ZIFI_NET_CLIENT)
