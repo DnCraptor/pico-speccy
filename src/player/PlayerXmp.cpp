@@ -36,8 +36,11 @@ extern "C" {
 namespace {
 constexpr size_t   XMP_PAGE = 256 * 1024;
 constexpr size_t   XMP_OWN  = XMP_PAGE / 2;
-constexpr int      XMP_MAX_PAGES = 96;           // 24 MB — beyond any arena
-uint8_t* s_xpage[XMP_MAX_PAGES];
+// The pages form a chain through their own first 8 bytes (the link, then 4 bytes
+// of pad to keep blocks 8-aligned) — the list lives in PSRAM, not in a static
+// table of pointers (384 B of SRAM on every machine, for a player most never open).
+constexpr size_t   XMP_LINK = 8;
+uint8_t* s_xhead = nullptr;                      // newest page = the one being filled
 int      s_xnpages = 0;
 size_t   s_xused = XMP_PAGE;                     // no current page yet
 struct XHdr { uint32_t size; uint32_t own; uint32_t pad[2]; };
@@ -50,12 +53,12 @@ void* pp_xmp_malloc(size_t n) {
     uint8_t* p = nullptr;
     uint32_t own = 1;
     if (need < XMP_OWN) {
-        if (s_xused + need > XMP_PAGE && s_xnpages < XMP_MAX_PAGES) {
+        if (s_xused + need > XMP_PAGE) {
             uint8_t* pg = (uint8_t*)Buffer::palloc(XMP_PAGE, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
-            if (pg) { s_xpage[s_xnpages++] = pg; s_xused = 0; }
+            if (pg) { *(uint8_t**)pg = s_xhead; s_xhead = pg; s_xnpages++; s_xused = XMP_LINK; }
         }
-        if (s_xnpages && s_xused + need <= XMP_PAGE) {
-            p = s_xpage[s_xnpages - 1] + s_xused;
+        if (s_xhead && s_xused + need <= XMP_PAGE) {
+            p = s_xhead + s_xused;
             s_xused += need;
             own = 0;
         }
@@ -93,7 +96,11 @@ void* pp_xmp_realloc(void* p, size_t n) {
 }
 
 static void pp_xmp_release_all() {
-    for (int i = 0; i < s_xnpages; i++) Buffer::pfree(s_xpage[i]);
+    while (s_xhead) {
+        uint8_t* next = *(uint8_t**)s_xhead;
+        Buffer::pfree(s_xhead);
+        s_xhead = next;
+    }
     s_xnpages = 0;
     s_xused = XMP_PAGE;
 }

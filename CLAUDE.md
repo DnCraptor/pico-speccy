@@ -7348,6 +7348,18 @@ Hide border's `blExpandLine`/`blPutRow`. What that costs and must be checked on 
 Profi/Karabas port I/O now runs from XIP (FPS in DS80 and CP/M, FDC traffic), ATM/KAY
 ports and TR-DOS traps from XIP, the borderless scaler from XIP (FPS on a busy title),
 TS-Conf unchanged in speed (window = SRAM). Test ELFs `debug/{m2p2,m2p2-hstx,DVp2}-sram2-1.0.8`.
+**Pico-Zx-Player state, same day (NOT hw-tested): −1268 B more.** Everything the
+player page uses (`Engine E`, `Playlist P`, `PlScan SC`, `Lay L`, the meter arrays,
+`s_msg`) is ONE `Session` on the heap, allocated by `run()` through
+`SessionScope` and freed by the OUTERMOST `run()` only — the player's F5 can start a
+network flow that runs a NESTED `run()` (`playerRemote`) on top of the suspended
+one, and it must reuse the block. Every `run()` exit stops the engine (and so
+`uiIdleHook`) before the scope frees it. `s_dir/s_cur/s_curPath` stay static on
+purpose ("where I was" survives the page). libxmp's bump pages (PlayerXmp.cpp) are
+chained through their own first 8 bytes instead of a 96-entry pointer table
+(`s_xpage`, 384 B), which also drops the 96-page cap. Test ELFs
+`debug/{m2p2,m2p2-hstx}-sram3-1.0.8`.
+
 **Hw 2026-09-30, owner: "работает"** — read it as the triggering config (720x576 +
 TS-Conf + NeoGS, VGA) coming up again; the per-machine XIP costs listed above
 (Profi DS80/CP/M FPS, ATM/KAY, borderless) were not itemised and are still owed.
