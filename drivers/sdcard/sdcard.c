@@ -252,8 +252,16 @@ void init_spi(void)
 	// Re-derived on every call on purpose: clk_sys moves at the Config::cpu_mhz
 	// switch, and re-running pio_spi_init() on the same SM/offset is what puts
 	// the bus back into a known state after a failed probe or a hot swap.
-	float clkdiv = (float)clock_get_hz(clk_sys) / (4.0f * 20000000.0f);
-	if (clkdiv < 1.0f) clkdiv = 1.0f;
+	// An INTEGER divider, the smallest that keeps SCK <= 25 MHz: 4 at 378 MHz
+	// (23.6 MHz), 3 at 252 and 6 at 504 (21 MHz). The old fractional one
+	// (4.725 at 378 for a nominal 20 MHz) jittered between 4 and 5 sys clocks per
+	// PIO cycle, so its shortest SCK half-period was already the /4 one — this
+	// raises the average rate (+18 % at 378, the bus bounds every sector read)
+	// without shortening any edge the card has not already seen.
+	uint32_t sys = clock_get_hz(clk_sys);
+	uint32_t idiv = (sys + 4u * 25000000u - 1u) / (4u * 25000000u);
+	if (idiv < 1u) idiv = 1u;
+	float clkdiv = (float)idiv;
 	pio_div_fast = clkdiv;			/* what FCLK_FAST() goes back to */
 	int cpol = 0;
 	int cpha = 0;

@@ -1324,6 +1324,30 @@ TS_HOT void TsConf::dmaStart(uint8_t ctrl) {
 
     for (;;) {
         for (uint32_t rem = len; rem; ) {
+            if (mode == M_SPIRAM) {
+                // Bulk: copy the rest of the card's data block straight into the
+                // destination run (to the page end, or the alignment window's
+                // end with D_ALGN). A 16-bit DMA word is two card bytes, low
+                // first, i.e. the byte stream itself. Per-word this path cost
+                // ~0.42 us a word — 2.1 ms a frame of TGV playback (hw 2026-09-30).
+                const uint8_t* sp;
+                uint32_t k = DivMMC::zc_read_span(sp);
+                if (k) {
+                    if (k > rem) k = rem;
+                    const uint32_t run = dalgn ? ((m2 + 1 - (dd & m2)) >> 1)
+                                               : ((0x4000 - (dd & 0x3FFE)) >> 1);
+                    if (k > run) k = run;
+                    if (uint8_t* p = dst.at(dd)) memcpy(p, sp, 2 * k);
+                    DivMMC::zc_read_consume(k);
+#if PERF_TRACE && PERF_HIST
+                    ts_dma_dst_hist[(dd >> 14) & 0xFF] += k;
+#endif
+                    dd = dalgn ? ((dd & m1) | ((dd + 2 * k) & m2)) : ((dd + 2 * k) & 0x3FFFFF);
+                    words += k;
+                    rem -= k;
+                    continue;
+                }
+            }
             const uint32_t n = 1;
             switch (mode) {
                 case M_CRAM: {

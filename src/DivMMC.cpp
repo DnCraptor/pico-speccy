@@ -798,6 +798,12 @@ static bool     s_ra_on    = false;   // a CMD18 stream is running
 static uint32_t s_ra_run   = 0;       // sectors served in the running stream
 static uint32_t s_ra_last  = 1;       // sectors the previous stream consumed
 static uint32_t s_ra_next  = 0xFFFFFFFF;   // sector after the last one served
+// One more sector beside the window: the last SINGLE read. Wild Commander
+// re-reads the same FAT sector before every cluster run of a file it streams
+// (6044/6045 in the TGV trace, once per 16 data sectors), and a card read is
+// ~0.43 ms of core0 where a copy is microseconds. Lives at s_ra_buf[RA_MAX].
+static uint32_t s_one_sec  = 0xFFFFFFFF;
+static uint32_t s_one_gen  = 0;
 extern "C" volatile uint32_t g_disk_write_gen;
 
 // End of a guest command: remember the run; the buffer itself stays valid.
@@ -806,7 +812,7 @@ static void raEnd() {
     s_ra_on = false; s_ra_run = 0;
 }
 // A write or a card reset: nothing held may be served any more.
-static void raDrop() { raEnd(); s_ra_n = 0; s_ra_next = 0xFFFFFFFF; }
+static void raDrop() { raEnd(); s_ra_n = 0; s_ra_next = 0xFFFFFFFF; s_one_sec = 0xFFFFFFFF; }
 
 #if PERF_TRACE && PERF_HIST
 // ZC card-read attribution (TGV tuning): what each loadSector/loadSectorStream
@@ -845,7 +851,7 @@ void DivMMC::perfDump(float fr) {
 void DivMMC::loadSectorStream(uint32_t sector) {
     if (!s_ra_buf && !s_ra_tried) {
         s_ra_tried = true;
-        s_ra_buf = (uint8_t*)Buffer::palloc(RA_MAX * 512,
+        s_ra_buf = (uint8_t*)Buffer::palloc((RA_MAX + 1) * 512,
                                             Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         Debug::log("ZC: CMD18 read-ahead %s", s_ra_buf ? "on" : "off (no memory)");
     }
@@ -866,7 +872,20 @@ void DivMMC::loadSectorStream(uint32_t sector) {
     // cluster runs — those broke the plain "last sector + 1" test, hw
     // 2026-09-30). Anything else is a single read that leaves the window alone.
     const bool cont = held && sector == s_ra_first + s_ra_n;
-    if (!cont && !(seq && s_ra_run > 1)) { loadSector(sector); ZS(ZS_SGL, 1, seq ? "sgl1" : "sglJ"); return; }
+    if (!cont && !(seq && s_ra_run > 1)) {
+        uint8_t* one = s_ra_buf + RA_MAX * 512;
+        if (sector == s_one_sec && s_one_gen == g_disk_write_gen) {
+            memcpy(mmc_sector_buf, one, 512);
+            ZS(ZS_HIT, 0, "hit1");
+            return;
+        }
+        const uint32_t gen1 = g_disk_write_gen;
+        loadSector(sector);
+        memcpy(one, mmc_sector_buf, 512);
+        s_one_sec = sector; s_one_gen = gen1;
+        ZS(ZS_SGL, 1, seq ? "sgl1" : "sglJ");
+        return;
+    }
     const uint32_t want = RA_MAX;
     const uint32_t gen = g_disk_write_gen;
     s_ra_n = 0;                            // the buffer is about to be overwritten
@@ -901,6 +920,17 @@ bool DivMMC::zc_read_word(uint16_t& v) {
     mmc_read_index = i + 2;
     return true;
 }
+
+uint32_t DivMMC::zc_read_span(const uint8_t*& p) {
+    if (!mmc_cs_active || !sdhc_mode || (mmc_r1 & 1) == 0 || mmc_wr_resp >= 0) return 0;
+    if (mmc_last_command != 0x51 && mmc_last_command != 0x52) return 0;
+    const int i = mmc_read_index;
+    if (i < 3 || i > 513) return 0;
+    p = mmc_sector_buf + (i - 3);
+    return (uint32_t)(515 - i) / 2;       // pairs whose both bytes are data (i..514)
+}
+
+void DivMMC::zc_read_consume(uint32_t words) { mmc_read_index += (int)(2 * words); }
 
 void DivMMC::loadSector(uint32_t sector) {
     if (divsd_mode) {

@@ -67,6 +67,11 @@ public:
     static uint8_t zc_read_data();        // Port 0x57 read: SPI byte in
     static bool    zc_read_word(uint16_t& v);   // DMA fast path, data phase only
     static void    perfDump(float frames);      // PERF_HIST card-read attribution
+    // DMA bulk path: the data bytes of the block being streamed that are still
+    // unread, as whole words (0 outside the data phase); consume() advances past
+    // `words` of them. Same preconditions as zc_read_word.
+    static uint32_t zc_read_span(const uint8_t*& p);
+    static void     zc_read_consume(uint32_t words);
 
     // IDE/ATA emulation (DivIDE)
     static void ide_write(uint8_t reg, uint8_t value);  // ATA register write
