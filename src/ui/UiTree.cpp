@@ -1378,6 +1378,7 @@ static const Option opt_ui_theme[] = {
 // sit on the VGA grid already, so it is solid on VGA whatever this says. Staged-first
 // so the row greys out the moment the theme is switched.
 static bool p_themeSlate() { return Stage::get(SET_UI_THEME) == 0; }
+static bool p_ledOn()      { return Stage::get(SET_LED_IND) != 0; }
 static const Option opt_ui_vga_pal[] = {
     { "Solid 2:2:2", 1 },     // on-grid twin: solid fills, coarser colours
     { "Dithered",    0 },     // full-depth scheme through the Bayer dither
@@ -1415,6 +1416,7 @@ static const Node kInterface[] = {
     // which came over from Devices — it is indication, not an interface setting
     // of the machine.
     NM_BOOL     (TXT_HW_LED,           SET_LED_IND,   nullptr),
+    NM_BOOL_EN  (NM_IND TXT_HW_LEDPANEL, SET_LED_PANEL, nullptr, p_ledOn),
     // Always available: the legend is reference material, useful before you turn
     // the indicators on (to see what they will mean) as much as after.
     NM_ACTION   (NM_IND TXT_HW_LEGEND, act_ledLegend, nullptr),

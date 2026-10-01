@@ -1125,9 +1125,28 @@ static bool ds80_border_geom = false;
 // owns the rows it sits on: the TS-Conf whole-line renderer and its band rows,
 // the borderless scaler, and the Profi DS80 content renderer + border machine.
 static int ts_notice_x0 = 0, ts_notice_x1 = 0, ts_notice_y0 = 0, ts_notice_y1 = -1;
+
+// LED indicator panel (Interface > LED indicators > Solid background): width in
+// fb bytes (a multiple of 8), 0 = none. It starts at the left edge of the F8
+// stats box's own 16 rows; while that box is up the panel runs all the way to it
+// (LED::draw fills the stretch between), so the two always form ONE contiguous
+// range on a row and every carve site below keeps a single (x0, x1) pair.
+static int osd_led_w = 0;
+
+// The bottom OSD carve on rows [220|268, +16): stats/volume box and/or LED panel.
+// `stats` is the caller's own "box is up" predicate (they differ per renderer).
+// Everything is 4-byte aligned, the panel's own end 8-aligned (the border
+// machine's columns are 8 px on 48K/128K).
+static inline __attribute__((always_inline)) bool osdBarRange(bool stats, int xres, int& x0, int& x1) {
+    if (!stats && !osd_led_w) return false;
+    const int sx = (xres >= 360) ? 188 : 168;
+    x0 = osd_led_w ? 0 : sx;
+    x1 = stats ? sx + 24 * 6 : osd_led_w;
+    return true;
+}
 static int  ds80_brd_col_off = 0;
-static bool ds80_osd_carve = false; // stats overlay visible → carve its rect
-static bool ds80_carve240 = false;  // stats rect coords differ 640×480 vs 720×576
+static bool ds80_osd_carve = false; // stats box / LED panel up → carve the rect
+static int  ds80_cv_c0 = 0, ds80_cv_c1 = 0, ds80_cv_y0 = 0;   // ... in machine cols / fb rows
 static void Select_Update_Border(); // forward declaration
 
 // Timex SCLD video modes
@@ -5815,13 +5834,14 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
         // the content area AND the right border pad (288..319), so BOTH the content
         // write and the right-pad fill must carve it out, leaving it for drawStats.
         // (720×576 keeps stats in the bottom border band, carved out in Update_Border_DS80.)
-        bool skip_stats_row = (ds80_voff == 0) && (VIDEO::OSD & 0x03) && !(VIDEO::OSD & 0x04)
-                              && frow >= 220 && frow < 236;
+        // The LED panel, when it is on, extends the same rect to the left.
+        int ds80_cx0 = 0, ds80_cx1 = 0;
+        bool skip_stats_row = (ds80_voff == 0) && frow >= 220 && frow < 236
+                              && osdBarRange((VIDEO::OSD & 0x03) && !(VIDEO::OSD & 0x04), 320, ds80_cx0, ds80_cx1);
         // ... and the OSD::notify banner: 640x480 DS80 has no top border band, so
         // the banner sits on the first content rows and owns them while it is up
         // (the rect is 8-byte aligned, i.e. whole columns here: pad_l is 32). The
         // two rects never share a row, so one (cx0, cx1) pair serves both.
-        int ds80_cx0 = 168, ds80_cx1 = 312;
         if (!skip_stats_row && (int)frow < ts_notice_y1 && (int)frow >= ts_notice_y0) {
             skip_stats_row = true; ds80_cx0 = ts_notice_x0; ds80_cx1 = ts_notice_x1;
         }
@@ -6264,8 +6284,9 @@ static IRAM_ATTR void tsBandPaint(uint32_t row, uint8_t slot) {
     const int xres = (int)VIDEO::vga.xres;
     int cx0 = 0, cx1 = 0;
     const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
-    if ((VIDEO::OSD & 0x07) && (int)row >= cy0 && (int)row < cy0 + 16) {
-        cx0 = (xres >= 360) ? 188 : 168; cx1 = cx0 + 24 * 6;
+    if ((int)row >= cy0 && (int)row < cy0 + 16
+        && osdBarRange((VIDEO::OSD & 0x07) != 0, xres, cx0, cx1)) {
+        // stats / volume box and/or the LED panel
     } else if ((int)row >= ts_notice_y0 && (int)row < ts_notice_y1) {
         cx0 = ts_notice_x0; cx1 = ts_notice_x1;
     }
@@ -6414,7 +6435,7 @@ static inline uint16_t blBlockRow(int r, bool std, bool tall) {
 static int blOverlayRows(int rects[][2]) {
     int n = 0;
     const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
-    if (VIDEO::OSD & 0x07) { rects[n][0] = cy0; rects[n][1] = cy0 + 16; n++; }
+    if ((VIDEO::OSD & 0x07) || osd_led_w) { rects[n][0] = cy0; rects[n][1] = cy0 + 16; n++; }
     if (ts_notice_y1 > ts_notice_y0) { rects[n][0] = ts_notice_y0; rects[n][1] = ts_notice_y1; n++; }
     for (int i = 0; i < VIDEO::BL_CARVE_N; i++) {
         const int16_t* r = bl->carve[i];
@@ -6607,9 +6628,8 @@ static __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-
     const int words = (int)VIDEO::vga.xres >> 2;
     int cx[BL_CARVE_MAX_RECTS][2]; int n = 0;
     const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
-    if ((VIDEO::OSD & 0x07) && row >= cy0 && row < cy0 + 16) {   // F8 stats / F9-F10 volume box
-        cx[n][0] = ((int)VIDEO::vga.xres >= 360) ? 188 : 168; cx[n][1] = cx[n][0] + 24 * 6; n++;
-    }
+    if (row >= cy0 && row < cy0 + 16                              // F8 stats / F9-F10 volume box, LED panel
+        && osdBarRange((VIDEO::OSD & 0x07) != 0, (int)VIDEO::vga.xres, cx[n][0], cx[n][1])) n++;
     if (row >= ts_notice_y0 && row < ts_notice_y1) {              // OSD::notify banner
         cx[n][0] = ts_notice_x0; cx[n][1] = ts_notice_x1; n++;
     }
@@ -6925,6 +6945,24 @@ void VIDEO::setNoticeCarve(int x0, int y0, int x1, int y1) {
 }
 
 void VIDEO::clearNoticeCarve() { ts_notice_y1 = -1; }
+
+// LED panel width in fb bytes (0 = no panel). Any change moves the carve, so the
+// rows it gives up have to be repainted by whoever owns them: the border machine
+// / gmxBorderFrame through the two flags, the content renderers by themselves.
+// Is the stats / volume box carved in the live mode? DS80 carves the stats box
+// only (its volume box is repainted every frame instead), everything else both.
+// LED::draw asks so it fills the stretch up to the box exactly when the
+// renderers leave that stretch alone.
+bool VIDEO::osdBoxCarved() {
+    return ds80_border_geom ? ((OSD & 0x03) && !(OSD & 0x04)) : ((OSD & 0x07) != 0);
+}
+
+void VIDEO::setLedBar(int w) {
+    if (w == osd_led_w) return;
+    osd_led_w = w;
+    brdChange = true;
+    brdnextframe = true;
+}
 
 // ── TS-Conf video modes ──────────────────────────────────────────────────────
 // Raster geometry per RRES (tsconf_en.md "Raster timings"): pixel area width in
@@ -7579,8 +7617,9 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     // is gmxBorderFrame's `any OSD box`, not "stats only": the volume box is
     // drawn once per keypress and nothing repaints it per frame outside DS80,
     // so excluding it left the content line erasing it a frame later.
-    const bool osdCarve = (VIDEO::OSD & 0x07) != 0;
-    int cx0 = (xres >= 360) ? 188 : 168, cx1 = cx0 + 24 * 6;
+    // The LED panel, when on, extends the rect to the left (osdBarRange).
+    int cx0 = 0, cx1 = 0;
+    const bool osdCarve = osdBarRange((VIDEO::OSD & 0x07) != 0, xres, cx0, cx1);
     const int cy0 = ((int)vga.yres >= 288) ? 268 : 220;
     bool carveRow = osdCarve && (int)frow >= cy0 && (int)frow < cy0 + 16;
     // ... and the OSD::notify banner, when this mode has no top border band to
@@ -8006,9 +8045,9 @@ void VIDEO::gmxBorderFrame(bool skipFrame) {
     // Leave it to them rather than blanking it: ESPectrum::loop redraws it after
     // EndFrame, so a blank would read as a blink — and while PAUSED that redraw
     // does not run at all, so the box would just disappear on any band repaint.
-    const bool carve = (OSD & 0x07) != 0;
-    const int cx0 = ((int)vga.xres >= 360) ? 188 : 168;
-    const int cx1 = cx0 + 24 * 6;
+    // The LED panel extends the same rect to the left (osdBarRange).
+    int cx0 = 0, cx1 = 0;
+    const bool carve = osdBarRange((OSD & 0x07) != 0, (int)vga.xres, cx0, cx1);
     const int cy0 = ((int)vga.yres >= 288) ? 268 : 220;
     if (vga.frameBuffer) {
         for (int _y = 0; _y < (int)vga.yres; _y++) {
@@ -8657,8 +8696,14 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
     // (applyDS80BorderGeometry).  TopBorder_Blank handles lin_end==0 and
     // MiddleBorder guards lin_end2==yres, so no Border_Blank override needed.
     // Refresh the per-frame stats carve-out flags for Update_Border_DS80.
-    ds80_osd_carve = ds80_border_geom && (VIDEO::OSD & 0x03) && !(VIDEO::OSD & 0x04);
-    ds80_carve240  = (int)vga.yres < 288;
+    {
+        int bx0 = 0, bx1 = 0;
+        ds80_osd_carve = ds80_border_geom
+            && osdBarRange((VIDEO::OSD & 0x03) && !(VIDEO::OSD & 0x04), (int)vga.xres, bx0, bx1);
+        ds80_cv_c0 = bx0 >> 1;                 // 640x480: 84..156, 720x576: 94..166
+        ds80_cv_c1 = (bx1 + 1) >> 1;           // (from col 0 with the LED panel)
+        ds80_cv_y0 = ((int)vga.yres >= 288) ? 268 : 220;
+    }
 
     if (bl_live) {
         // Borderless: no border to draw — the scaler writes every row (frame pads
@@ -8776,8 +8821,9 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
     if (Config::ledIndicators) {
         if (gigascreen_enabled) LED::touchR(LED::GIGASCREEN);
         LED::draw();
-    } else if (bl_live) {
-        blClearCarve(BL_CARVE_LED);   // strip gone: the scaler takes its rows back
+    } else {
+        setLedBar(0);                 // panel gone: its rect goes back to the renderers
+        if (bl_live) blClearCarve(BL_CARVE_LED);   // strip gone: the scaler takes its rows back
     }
 
     // Top-border status banner (OSD::notify). Repainted here, after the border
@@ -8943,20 +8989,13 @@ IRAM_ATTR static void Update_Border_XOR() {
 // ds80_brd_col_off centres the 160 visible T-cols in wider rows (720×576);
 // the off-screen edge cols (h-blanking) are extended from the nearest tact.
 IRAM_ATTR static void Update_Border_DS80() {
-    if (ds80_osd_carve) {
-        // Stats overlay rectangle is owned by OSD::drawStats — skip it.
-        if (ds80_carve240) {
-            // 640×480: rows 220..235, fb bytes 288..311 (right pad part).
-            // Paper off: the machine also paints the content columns, so the
-            // carve widens to the whole stats rect (fb bytes 168.., col 84).
-            if (brdlin_cnt >= 220 && brdlin_cnt < 236
-                && brdcol_cnt >= (VIDEO::paper_off ? 84 : 144) && brdcol_cnt < 156) return;
-        } else {
-            // 720×576: rows 268..283, fb bytes 188..331 (bottom band)
-            int c = brdcol_cnt + ds80_brd_col_off;
-            if (brdlin_cnt >= 268 && brdlin_cnt < 284
-                && c >= 94 && c < 166) return;
-        }
+    if (ds80_osd_carve && brdlin_cnt >= ds80_cv_y0 && brdlin_cnt < ds80_cv_y0 + 16) {
+        // Stats box / LED panel: owned by OSD::drawStats / LED::draw — skip it.
+        // 640x480: only the right-pad part is ever reached here (the content
+        // columns are the content renderer's, unless Paper is off); 720x576: the
+        // rect is in the bottom band.
+        const int c = brdcol_cnt + ds80_brd_col_off;
+        if (c >= ds80_cv_c0 && c < ds80_cv_c1) return;
     }
     const uint16_t v = (uint16_t)VIDEO::brd;
     const int col = brdcol_cnt + ds80_brd_col_off;
@@ -9284,7 +9323,8 @@ IRAM_ATTR void VIDEO::MiddleBorder() {
                 prevBrdptr8 = vga.prevFrameBuffer ? prevRowBorder(brdlin_cnt) : (uint8_t *)brdptr16;
                 // DS80: BottomBorder_OSD carve coords are for std-fb layouts —
                 // Update_Border_DS80 carves the stats rect itself; use plain bottom.
-                DrawBorder = ds80_border_geom ? &BottomBorder : Draw_OSD43;
+                DrawBorder = ds80_border_geom ? &BottomBorder
+                           : (osd_led_w ? &BottomBorder_OSD : Draw_OSD43);
                 DrawBorder();
                 return;
             }
@@ -9328,12 +9368,15 @@ IRAM_ATTR void VIDEO::BottomBorder() {
 }
 
 IRAM_ATTR void VIDEO::BottomBorder_OSD() {
-    const bool isFB = VIDEO::isFullBorder288() || VIDEO::isFullBorder240();
     const int osd_y_start = VIDEO::isFullBorder288() ? 268 : 220;
     const int osd_y_end = osd_y_start + 15;
+    // Stats box (fb x 168 / 188, 144 px) and/or the LED panel to its left. This
+    // function also runs for the panel alone, with no box up.
+    int bx0 = 0, bx1 = 0;
+    osdBarRange((VIDEO::OSD & 0x07) != 0, (int)vga.xres, bx0, bx1);
     // OSD x coords in uint16_t units, aligned down/up to brdcol_step for step=4
-    const int osd_x_start = isFB ? (94 & ~(brdcol_step - 1)) : (84 & ~(brdcol_step - 1));
-    const int osd_x_end = isFB ? ((166 + brdcol_step - 1) & ~(brdcol_step - 1)) : ((156 + brdcol_step - 1) & ~(brdcol_step - 1));
+    const int osd_x_start = (bx0 >> 1) & ~(brdcol_step - 1);
+    const int osd_x_end = (((bx1 + 1) >> 1) + brdcol_step - 1) & ~(brdcol_step - 1);
     while (lastBrdTstate <= CPU::tstates) {
         if (brdcol_cnt < brdcol_retrace) {
             if (brdlin_cnt < osd_y_start || brdlin_cnt > osd_y_end) {

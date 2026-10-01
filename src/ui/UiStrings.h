@@ -183,6 +183,10 @@
 #define TXT_IDE_CREATE      "Create image"
 #define TXT_HW_LED          "LED indicators"
 #define TXT_HW_LEGEND       "LED legend"
+// Indicators on their own panel beside the F8 stats box instead of bare glyphs
+// over the border — readable in modes whose border is thin or absent (DS80,
+// GMX 640x200, TS-Conf).
+#define TXT_HW_LEDPANEL     "Solid background"
 // The board's own LED (GPIO 25), blinking on real SD traffic — internal /tmp
 // files (swap, .idx) are deliberately not indicated. Not an on-screen indicator.
 #define TXT_HW_SDLED        "Board LED on SD access"

@@ -56,6 +56,7 @@ bool     Config::loaded = false;
 bool     Config::save_blocked = false;
 bool     Config::slog_on = false;
 bool     Config::ledIndicators = false;
+bool     Config::led_panel = false;
 bool     Config::sdLedBlink = false;
 int8_t   Config::temp_offset = 0;
 uint8_t  Config::gm_field = 0;      // Pico-Scwong options (see Config.h)
@@ -1292,6 +1293,7 @@ void Config::load() {
         nvs_get_b("rightSpace", rightSpace, sts);
         nvs_get_b("wasd", wasd, sts);
         nvs_get_b("ledIndicators", ledIndicators, sts);
+        nvs_get_b("ledPanel", led_panel, sts);
         nvs_get_b("sdLedBlink", sdLedBlink, sts);
         nvs_get_i8("temp_offset", temp_offset, sts);
         nvs_get_u8("gm_field", gm_field, sts);
@@ -1796,6 +1798,7 @@ void Config::save(const char* path, const char* profileName) {
     nvs_set_str(buf,"debug_log", Debug::log_enabled ? "true" : "false");
     nvs_set_str(buf,"flashload", flashload ? "true" : "false");
     nvs_set_str(buf,"ledIndicators", ledIndicators ? "true" : "false");
+    nvs_set_str(buf,"ledPanel", led_panel ? "true" : "false");
     nvs_set_str(buf,"sdLedBlink", sdLedBlink ? "true" : "false");
     nvs_set_i8(buf,"temp_offset", temp_offset);
     nvs_set_u8(buf,"gm_field", gm_field);

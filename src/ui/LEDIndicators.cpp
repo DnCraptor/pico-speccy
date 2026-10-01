@@ -11,6 +11,8 @@
 #include "speccy/devices/sound/Midi.h"
 #include "speccy/devices/storage/IDE.h"
 #include "speccy/devices/gs/GS.h"
+#include "OSDNewMenu.h"
+#include "UiGfx.h"
 
 extern "C" volatile bool profi_ds80_active; // defined in vga.c, set by both HDMI and VGA DS80 paths
 
@@ -287,13 +289,9 @@ static bool resolveLayout(int& base_x, int& base_y) {
     return true;
 }
 
-static inline uint8_t fgColor(Id i) {
-    bool r = rdec[i] > 0;
-    bool w = wdec[i] > 0;
-    // Pick a 0..15 ZX colour index. ORANGE (16) has no DS80 palette slot, so use
-    // BRI_YELLOW for the read+write state — keeps a valid index in both modes.
-    uint8_t zx;
-    // FDD: active state AND colour both come from fdd_active_decay (genuine
+// Activity of one indicator: 0 idle, 1 read, 2 write, 3 both.
+static inline uint8_t actState(Id i) {
+    // FDD: active state AND direction both come from fdd_active_decay (genuine
     // head-load/header-search/data-transfer activity — see wd1793.h), not from
     // rdec/wdec. Raw port I/O direction is wrong on both counts: a disk READ still
     // issues command/data-register *writes* (seek, read-sector cmd), so
@@ -304,31 +302,34 @@ static inline uint8_t fgColor(Id i) {
     if (i == FDD && Config::isPlus3()) {
         // The +3's controller keeps the same kind of signal under its own name:
         // Upd765::activity is set only by real head activity, not by port traffic.
-        if (Plus3Fdc::fdc.activity) {
-            zx = Plus3Fdc::fdc.wroteRecently ? BRI_RED : BRI_GREEN;
-        } else {
-            zx = (VIDEO::borderColor == WHITE) ? BLUE : WHITE;
-        }
+        if (!Plus3Fdc::fdc.activity) return 0;
+        return Plus3Fdc::fdc.wroteRecently ? 2 : 1;
     }
-    else if (i == FDD) {
+    if (i == FDD) {
         rvmWD1793* f = &ESPectrum::fdd;
         if (MB02::enabled) f = &ESPectrum::mb02_fdd;
-        if (f->fdd_active_decay) {
-            bool write = ((f->command & 0xE0) == 0xA0) ||   // Write Sector (0xA_/0xB_)
-                         ((f->command & 0xF0) == 0xF0);     // Write Track  (0xF_)
-            zx = write ? BRI_RED : BRI_GREEN;
-        } else {
-            zx = (VIDEO::borderColor == WHITE) ? BLUE : WHITE;
-        }
+        if (!f->fdd_active_decay) return 0;
+        bool write = ((f->command & 0xE0) == 0xA0) ||   // Write Sector (0xA_/0xB_)
+                     ((f->command & 0xF0) == 0xF0);     // Write Track  (0xF_)
+        return write ? 2 : 1;
     }
-    else if (r && w) zx = BRI_YELLOW;
-    else if (r)      zx = BRI_GREEN;
-    else if (w)      zx = BRI_RED;
-    // Idle: neutral WHITE so the enabled-but-inactive glyph never collides with the
-    // green/red/yellow activity hues. (The old complementary borderColor^7 produced
-    // non-bright YELLOW on a blue border — indistinguishable from the read+write
-    // state.) Swap to BLUE on a white border so it always stays visible.
-    else             zx = (VIDEO::borderColor == WHITE) ? BLUE : WHITE;
+    return (uint8_t)((rdec[i] ? 1 : 0) | (wdec[i] ? 2 : 0));
+}
+
+static inline uint8_t fgColor(Id i) {
+    // Pick a 0..15 ZX colour index. ORANGE (16) has no DS80 palette slot, so use
+    // BRI_YELLOW for the read+write state — keeps a valid index in both modes.
+    uint8_t zx;
+    switch (actState(i)) {
+        case 3:  zx = BRI_YELLOW; break;
+        case 1:  zx = BRI_GREEN;  break;
+        case 2:  zx = BRI_RED;    break;
+        // Idle: neutral WHITE so the enabled-but-inactive glyph never collides with the
+        // green/red/yellow activity hues. (The old complementary borderColor^7 produced
+        // non-bright YELLOW on a blue border — indistinguishable from the read+write
+        // state.) Swap to BLUE on a white border so it always stays visible.
+        default: zx = (VIDEO::borderColor == WHITE) ? BLUE : WHITE; break;
+    }
 
     // DS80 mode: the framebuffer byte indexes the DS80 packed-pair conv_color
     // table, not the standard ZX palette.  Emit a solid-colour pair slot
@@ -371,8 +372,88 @@ void drawGlyph(Id i, int xpix, int ypix, uint8_t fg, uint8_t bg) {
     }
 }
 
+// "Solid background": the indicators on their own panel at the left edge of the
+// F8 stats box's 16 rows, in that box's colours; with F8 on the panel runs up to
+// the box and the two read as one status bar. Every renderer carves the range
+// (Video.cpp osdBarRange) — which is the point: in DS80 640x480 / TS-Conf
+// 320x240 / Hide border these rows are CONTENT, repainted every frame, and in
+// GMX the band is only repainted on a border change, so bare glyphs there
+// flicker, pile up or drown in the picture.
+static void drawPanel() {
+    const int xres = (int)VIDEO::vga.xres, yres = (int)VIDEO::vga.yres;
+    const int y0 = (yres >= 288) ? 268 : 220;
+    if (!VIDEO::vga.frameBuffer || yres < y0 + 16) { VIDEO::setLedBar(0); return; }
+    const int sx = (xres >= 360) ? 188 : 168;       // where the stats box starts
+
+    int n = 0;
+    for (uint8_t i = 0; i < COUNT; i++) if (isVisible((Id)i)) n++;
+    const int maxn = ((sx & ~7) - 8) / CELL_W;      // never reach the stats box
+    if (n > maxn) n = maxn;
+    const int w = (n * CELL_W + 8 + 7) & ~7;        // 4 px margin each side, 8-aligned
+    VIDEO::setLedBar(w);                            // moves the carve + asks for a repaint on change
+
+    // nm::available() runs the menu layout pass — decide once per geometry.
+    static int  nm_key = -1;
+    static bool nm_ok  = false;
+    const int key = (xres << 12) | yres;
+    if (key != nm_key) { nm_key = key; nm_ok = nm::available(); }
+
+    // Colours are OSD::drawStats' own, so the panel and the box are one bar: the
+    // background encodes the speed state, idle glyphs take the box's ink. An
+    // activity colour that would vanish into the background (green at 7 MHz,
+    // yellow at 28) turns cyan (classic: bright white) instead.
+    uint8_t bg, col[4];
+    if (nm_ok && !profi_ds80_active) {
+        nm::gfxComputeSurface();
+        nm::gfxInstallPalette();                    // applyPalette() may have rewritten our block
+        nm::UiColor b;
+        if (ESPectrum::maxSpeed)                b = nm::C_ICON_C;
+        else switch (ESPectrum::multiplicator) {
+            case 1:  b = nm::C_SEL_BG;  break;
+            case 2:  b = nm::C_ACCENT;  break;
+            case 3:  b = nm::C_ICON_Y;  break;
+            default: b = nm::C_FOOT_BG; break;
+        }
+        const nm::UiColor ink = (b == nm::C_ACCENT || b == nm::C_ICON_Y) ? nm::C_BG : nm::C_TEXT;
+        const nm::UiColor act[3] = { nm::C_ACCENT, nm::C_ICON_R, nm::C_ICON_Y };   // read, write, both
+        bg     = nm::uiPaletteSlot(b);
+        col[0] = nm::uiPaletteSlot(ink);
+        for (int k = 0; k < 3; k++)
+            col[k + 1] = nm::uiPaletteSlot(act[k] == b ? nm::C_ICON_C : act[k]);   // C_WHITE is black ink in the ZX theme
+    } else {
+        // Classic: white ink on the speed colour, exactly drawStats' zxColor pair.
+        const uint8_t paper = (uint8_t)(ESPectrum::maxSpeed ? 5 : ((ESPectrum::multiplicator + 1) & 7));
+        uint8_t zx[5] = { paper, WHITE, BRI_GREEN, BRI_RED, BRI_YELLOW };
+        for (int k = 2; k < 5; k++) if ((zx[k] & 7) == paper) zx[k] = 15;   // bright white
+        uint8_t m[5];
+        for (int k = 0; k < 5; k++)
+            m[k] = profi_ds80_active ? VIDEO::profi_pair_lookup[zx[k]][zx[k]] : zx[k];
+        bg = m[0]; col[0] = m[1]; col[1] = m[2]; col[2] = m[3]; col[3] = m[4];
+    }
+
+    // With the stats box up the carve runs to it, so the stretch between is ours.
+    const int px1 = VIDEO::osdBoxCarved() ? sx : w;
+    for (int row = 0; row < 16; row++) {
+        uint8_t* line = (uint8_t*)VIDEO::vga.frameBuffer[y0 + row];
+        if (line) memset(line, bg, (size_t)px1);
+    }
+    int slot = 0;
+    for (uint8_t i = 0; i < COUNT && slot < n; i++) {
+        if (!isVisible((Id)i)) continue;
+        drawSprite((Id)i, 4 + slot * CELL_W, y0 + 4, col[actState((Id)i)]);
+        slot++;
+    }
+}
+
 void draw() {
     if (!Config::ledIndicators) return;
+
+    if (Config::led_panel) {
+        if (VIDEO::bl_live) VIDEO::blClearCarve(VIDEO::BL_CARVE_LED);   // the panel's carve covers it
+        drawPanel();
+        return;
+    }
+    VIDEO::setLedBar(0);
 
     int base_x = 0, base_y = 0;
     if (!resolveLayout(base_x, base_y)) return;

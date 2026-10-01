@@ -416,6 +416,10 @@ public:
   // renderer carves them out, like the F8 stats rectangle.
   static void setNoticeCarve(int x0, int y0, int x1, int y1);
   static void clearNoticeCarve();
+  // LED indicator panel ("Solid background"): w fb bytes from the left edge of
+  // the F8 stats box's 16 rows. Every renderer leaves the rect to LED::draw.
+  static void setLedBar(int w);
+  static bool osdBoxCarved();
   // Cold EndFrame halves, flash-resident on purpose (EndFrame is RAM code):
   static void gmxApplyPending();         // deferred on/off switch, vblank only
   static void gmxBorderFrame(bool skipFrame); // top/bottom band repaint
