@@ -46,9 +46,11 @@ bool ZiFiSock::ensureRxBuf() {
     if (!s_rxbuf.alloc((size_t)N_LINKS * RX_SZ, Buffer::NEED_POINTER | Buffer::USE_NET_ARENA)) return false;
     rx_buf = (uint8_t(*)[RX_SZ])s_rxbuf.data();
     Debug::log("ZiFiSock: rx_buf %uB tier=%s", (unsigned)s_rxbuf.size(), s_rxbuf.tierName());
+    ZiFi::rxSession(true);    // the UART ring takes its 8 KB session depth
     return rx_buf != nullptr;
 }
 void ZiFiSock::freeRxBuf() {
+    if (rx_buf) ZiFi::rxSession(false);   // ...and hands it back once it is quiet
     s_rxbuf.free();
     rx_buf = nullptr;
 }

@@ -758,7 +758,7 @@ size_t featureCost(FeatureId f) {
         // slightly higher 64 KB so switching to Profi with GS on shows the disable
         // popup (and freeing GS yields comfortable headroom) rather than a false DENY.
         case FEAT_PROFI:         return spi ? 64 * 1024 : 0;
-        case FEAT_ZIFI:          return 12 * 1024;   // in/out rings + rx_buf
+        case FEAT_ZIFI:          return 5 * 1024;    // 4K NIC RX ring + 256B TX + 512B stage (session rings are separate)
         case FEAT_MIDI:          return 7 * 1024;    // GM.DLS: ~5K voice array + 2x ~640B L/R buffers
         // ── Additional features (heap-when-enabled; all 0 SRAM when disabled) ──
         case FEAT_ZCONTROLLER:   return 512;         // mmc_sector_buf (shared with DivMMC)

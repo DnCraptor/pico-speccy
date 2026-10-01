@@ -10668,6 +10668,42 @@ The general rule this leaves behind: **a menu key loop is a second main loop.**
 Anything the firmware advances one step at a time — a radio join, a transfer, a
 state machine — needs a call from `uiIdle()`, or it stops the moment F1 is pressed.
 
+### The RX ring is sized by what the link is doing (2026-10-01; hw: owner "все работает", z0p2, not itemised)
+
+The IRQ landing ring was a flat 8 KB (+256 B TX) on the heap for as long as the
+link was up — i.e. for the whole session of anyone with WiFi on through an ESP —
+plus 512 B of spill staging in `.bss` on every board; `FEAT_ZIFI` budgeted 12 KB.
+The 8 KB depth is only ever used by a paused host transfer (SD-write / TLS stalls
+between drains at the boosted rate). Now `rxWantSize()` (ZiFi.cpp):
+
+| state | ring |
+|---|---|
+| link up, NIC off | 2 KB |
+| guest NIC on | 4 KB |
+| ZiFiSock session (FTP/HTTPS/SSH) | 8 KB |
+
+- **Grow is explicit, shrink is lazy.** `ZiFi::rxSession(on)` from
+  `ZiFiSock::ensureRxBuf/freeRxBuf`, and `ZiFi::init()` (idempotent, so the NIC
+  toggle reaches it) call `rxRingFit(true)`; the per-frame `rxSpillTick` only ever
+  SHRINKS, and only a quiet ring (no spill mode, fill <= want/4). A failed grow
+  keeps the current size (logged) and is never retried per frame — the probe is
+  `getLargestAllocatable()`. A failed shrink backs off 2 s.
+- `rxRingResize` swaps the block with the UART IRQ masked (the only other writer;
+  CDC feeds the ring from `tuh_task`, same context) and renormalises the indices.
+  Plain `NEED_POINTER`, deliberately NOT the net arena: the IRQ writes into it,
+  and a lazy shrink would leave it in the lent prevFB after the session.
+- `ZIFI_SWAP_HI` is a quarter of the ring (2048 for the session ring, as before).
+  The staging block is the tail of the TX ring's allocation (`g_out_buf` is a
+  pointer). `FEAT_ZIFI` = 5 KB.
+- **CDC backpressure**: `usbCdcRx` used to pull the whole TinyUSB FIFO and DROP
+  what the ring could not take; it now reads only `room` bytes and `rxSpillTick`
+  re-pulls (top and bottom) — a full FIFO stops the IN endpoint being re-armed,
+  so no callback would ever come for the leftovers.
+- **The cost**: with the NIC live the headroom between per-frame drains is 3 KB
+  instead of 6 (~130 ms of a late frame at 230400 instead of ~260) before
+  `rxDrop` counts. If a title ever shows it, the NIC figure in `rxWantSize()` is
+  the one constant to raise.
+
 ### Baud ceilings (transport-dependent, `src/speccy/devices/zifi/ZiFi.cpp`)
 
 - Menu (Network → Baud) offers 115200/230400/460800/921600; the link idles at

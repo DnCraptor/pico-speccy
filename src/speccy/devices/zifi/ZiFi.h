@@ -55,6 +55,9 @@ public:
     // Drive the SD-backed RX spill from a blocking recv loop (e.g. ZiFiSock during
     // a TLS catalog transfer) when the per-frame tick() can't run. Public wrapper.
     static void     rxSpill();
+    // A paused host session (ZiFiSock) is starting / has ended: the RX ring takes
+    // its 8 KB session depth for the duration and gives it back afterwards.
+    static void     rxSession(bool on);
     // RX-ring overflow byte count (diagnostic; 0 = no bytes lost).
     static uint32_t rxDropped();
 
@@ -94,15 +97,18 @@ public:
     static bool rxAvailable();
 
 private:
-    // RX ring: IRQ landing zone. 8 KB so it absorbs SD-write/decrypt latency spikes
-    // between drains even at high baud (460800/921600) — at 4 KB a blocking TLS
-    // catalog read lost ~55 B near the end of a 29 KB body (rxDrop>0 → MAC/stall).
-    // The real (unbounded) buffering is the SD swap file — see rxSpillTick()/
-    // rxPop(). Free-running uint16_t indices, power-of-2 size → mask on access.
-    static const uint16_t ZIFI_IN_SZ = 8192;
-    // Heap-backed (allocated in init(), freed in deinit()) so the 8 KB+256 B don't
-    // permanently occupy SRAM when the NIC is off — that headroom matters for
-    // memory-tight machines like Profi (which forces 80 KB of SRAM pages).
+    // RX ring: IRQ landing zone. Its SIZE follows what the link is doing, because
+    // only one of its three jobs needs depth (rxWantSize() in ZiFi.cpp):
+    //   2 KB  link up, NIC off  - AT replies only, read by tight polling loops
+    //   4 KB  guest NIC on      - live traffic, drained into the spill once a frame
+    //   8 KB  host session      - FTP/HTTPS/SSH at the boosted rate: absorbs SD-write
+    //         and decrypt stalls between drains (at 4 KB a blocking TLS catalog read
+    //         lost ~55 B near the end of a 29 KB body: rxDrop>0 -> MAC/stall)
+    // The real (unbounded) buffering is the spill ring - see rxSpillTick()/rxPop().
+    // Free-running uint16_t indices, power-of-2 size -> mask on access. Heap-backed
+    // (allocated in init(), freed in deinit()), so a link that is down costs nothing.
+    static uint16_t zifi_in_size;           // current ring size, 0 = no ring
+    static uint16_t zifi_in_mask;           // zifi_in_size - 1
     static uint8_t* zifi_in_buf;
     static volatile uint16_t zifi_in_head;  // written by RX IRQ
     static volatile uint16_t zifi_in_tail;  // consumed by rxSpillTick()/rxPop()
@@ -155,10 +161,13 @@ private:
     static inline bool    fifo_empty(uint8_t head, uint8_t tail) { return head == tail; }
     static inline bool    fifo_full(uint8_t head, uint8_t tail)  { return (uint8_t)(head - tail) == 255; }
 
-    // IN ring helpers (ZIFI_IN_SZ, free-running uint16_t; access masked).
+    // IN ring helpers (zifi_in_size, free-running uint16_t; access masked).
     static inline uint16_t in_fill()  { return (uint16_t)(zifi_in_head - zifi_in_tail); }
     static inline bool     in_empty() { return zifi_in_head == zifi_in_tail; }
-    static inline bool     in_full()  { return in_fill() >= ZIFI_IN_SZ; }
+    static inline bool     in_full()  { return in_fill() >= zifi_in_size; }
+
+    static bool rxRingResize(uint16_t sz);   // move the ring to a block of sz bytes
+    static void rxRingFit(bool grow);        // settle the size on rxWantSize()
 
     static void uart_rx_irq_handler();
 };

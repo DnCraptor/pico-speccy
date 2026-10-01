@@ -223,6 +223,8 @@ static Buffer s_in_buf;
 static Buffer s_out_buf;
 
 uint8_t* ZiFi::zifi_in_buf = nullptr;   // backed by s_in_buf, set in init()
+uint16_t ZiFi::zifi_in_size = 0;
+uint16_t ZiFi::zifi_in_mask = 0;
 volatile uint16_t ZiFi::zifi_in_head  = 0;
 volatile uint16_t ZiFi::zifi_in_tail  = 0;
 uint8_t* ZiFi::zifi_out_buf = nullptr;  // backed by s_out_buf, set in init()
@@ -245,14 +247,16 @@ volatile uint32_t ZiFi::tx_bytes   = 0;
 // IRQ ring far faster than SD AND doesn't contend with the download's SD writes —
 // the old /tmp/zifi-rx.swap file did both, which is what let zifi_in overflow
 // mid-transfer (rxDrop>0 → corrupted TLS stream → MBEDTLS_ERR_SSL_INVALID_MAC).
-#define ZIFI_SWAP_HI     2048              // ring fill that triggers spill mode
+// Spill mode starts at a quarter of the ring (2048 of the 8 KB session ring, as it
+// always was), so three quarters stay as headroom for what arrives between drains.
+#define ZIFI_SWAP_HI     (zifi_in_size / 4)
 #define ZIFI_OUT_STAGE   512               // spill→guest read-back staging block
 #define ZIFI_SPILL_SZ    (1u << 20)        // 1 MB ring (effectively unbounded here)
 static Buffer   g_spill;                   // PREFER_PSRAM accessor ring (lazy)
 static bool     g_spill_mode = false;      // true = draining via the spill ring
 static uint32_t g_spill_w    = 0;          // bytes written into the ring (logical)
 static uint32_t g_spill_r    = 0;          // bytes read back (logical)
-static uint8_t  g_out_buf[ZIFI_OUT_STAGE];
+static uint8_t* g_out_buf  = nullptr;      // staging block: the tail of the TX ring's allocation
 static uint16_t g_out_pos   = 0;           // next byte in g_out_buf
 static uint16_t g_out_len   = 0;           // valid bytes in g_out_buf
 static uint32_t g_swap_max  = 0;           // high-water of spill backlog (trace)
@@ -290,10 +294,10 @@ void __not_in_flash("zifi") ZiFi::uart_rx_irq_handler() {
         rx_bytes++;
         got = true;
         if (!in_full())
-            zifi_in_buf[zifi_in_head++ & (ZIFI_IN_SZ - 1)] = b;
+            zifi_in_buf[zifi_in_head++ & zifi_in_mask] = b;
         else
             rx_dropped++; // ring full — should not happen: rxSpillTick() drains it
-                          // to SD every frame, faster than 115200 fills 4 KB
+                          // into the spill every frame
     }
     if (got) LED::touchR(LED::NET); // RX activity → down arrow (green)
 }
@@ -308,6 +312,73 @@ void ZiFi::rxReset() {
     g_spill_w = g_spill_r = g_swap_max = 0;
     g_spill_mode = false;
     g_spill.free();   // release the ring; re-alloc'd lazily on the next overflow
+}
+
+// ── RX ring sizing ───────────────────────────────────────────────────────────
+// The ring used to be a flat 8 KB for as long as the link was up - i.e. for the
+// whole session of anyone with WiFi on, although that depth is only ever used by
+// a paused host transfer. Growing is done at the two moments that ask for it
+// (session start, init); shrinking is lazy, from the per-frame tick, once the
+// ring has gone quiet.
+static bool     s_rx_session    = false;   // a ZiFiSock session holds the 8 KB depth
+static uint32_t s_rx_shrink_at  = 0;       // ms: no shrink attempt before this (failed alloc)
+
+static uint16_t rxWantSize() {
+    return s_rx_session ? 8192 : (Config::zifi_enabled ? 4096 : 2048);
+}
+
+bool ZiFi::rxRingResize(uint16_t sz) {
+    if (sz == zifi_in_size) return true;
+    Buffer nb;
+    if (!nb.alloc(sz, Buffer::NEED_POINTER)) return false;
+    uint8_t* p = nb.data();
+    Buffer old;
+    // The UART IRQ is the only other writer (CDC feeds the ring from tuh_task, i.e.
+    // from this same context); hold it off while the indices change meaning.
+    const bool irq = g_uart != nullptr;
+    if (irq) irq_set_enabled(g_uart_irq, false);
+    const uint16_t n = in_fill();
+    const bool fits = n <= sz;
+    if (fits) {
+        for (uint16_t i = 0; i < n; i++)
+            p[i] = zifi_in_buf[(uint16_t)(zifi_in_tail + i) & zifi_in_mask];
+        old          = static_cast<Buffer&&>(s_in_buf);
+        s_in_buf     = static_cast<Buffer&&>(nb);
+        zifi_in_buf  = p;
+        zifi_in_size = sz;
+        zifi_in_mask = (uint16_t)(sz - 1);
+        zifi_in_tail = 0;
+        zifi_in_head = n;
+    }
+    if (irq) irq_set_enabled(g_uart_irq, true);
+    return fits;                // `old` / an unused `nb` are freed here, IRQ back on
+}
+
+void ZiFi::rxRingFit(bool grow) {
+    if (!zifi_in_buf) return;
+    const uint16_t want = rxWantSize();
+    if (want == zifi_in_size) return;
+    if (want > zifi_in_size) {
+        if (!grow) return;      // never from the per-frame path: a failed probe costs
+        if (!rxRingResize(want))
+            Debug::log("ZiFi: RX ring stays %uB (no room for %uB)", (unsigned)zifi_in_size, (unsigned)want);
+        else
+            Debug::log("ZiFi: RX ring %uB (%s)", (unsigned)zifi_in_size, s_in_buf.tierName());
+        return;
+    }
+    // Shrink only a quiet ring: nothing spilled, and what is queued fits well inside.
+    if (g_spill_mode || in_fill() > want / 4) return;
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    if ((int32_t)(now - s_rx_shrink_at) < 0) return;
+    if (rxRingResize(want))
+        Debug::log("ZiFi: RX ring %uB (%s)", (unsigned)zifi_in_size, s_in_buf.tierName());
+    else
+        s_rx_shrink_at = now + 2000;   // the smaller block did not fit beside the old one
+}
+
+void ZiFi::rxSession(bool on) {
+    s_rx_session = on;
+    rxRingFit(true);
 }
 
 // Public wrappers (let other modules drive the spill / read the drop counter
@@ -401,11 +472,19 @@ void ZiFi::rxSpillTick() {
     // small rx FIFO until tuh_task() runs, and once that FIFO fills the IN endpoint
     // stops being re-armed and the CH340's ~256 B internals overflow SILENTLY.
     // Pump here so every spill (and every pre-SD-write rxSpill()) starts with the
-    // FIFO drained into the 8 KB ring / PSRAM spill.
-    if (g_usb_mode) usbService();
+    // FIFO drained into the ring / PSRAM spill.
+    if (g_usb_mode) {
+        usbService();
+        // A full ring leaves bytes in TinyUSB's FIFO (usbCdcRx), and a full FIFO stops
+        // the IN endpoint being re-armed - so no callback would ever come for them.
+        if (g_cdc_idx >= 0) usbCdcRx(g_cdc_idx);
+    }
 #endif
     if (!g_spill_mode) {
-        if (in_fill() < ZIFI_SWAP_HI) return;          // normal traffic: fast path
+        if (in_fill() < ZIFI_SWAP_HI) {                // normal traffic: fast path
+            rxRingFit(false);                          // (hand back session/NIC depth)
+            return;
+        }
         if (!g_spill.ok() && !g_spill.alloc(ZIFI_SPILL_SZ, Buffer::PREFER_PSRAM))
             return;                                     // no spill backing → ring-only
         g_spill_w = g_spill_r = 0; g_spill_mode = true;
@@ -420,11 +499,15 @@ void ZiFi::rxSpillTick() {
         uint16_t chunk = n > ZIFI_OUT_STAGE ? ZIFI_OUT_STAGE : n;
         if (chunk > room) chunk = (uint16_t)room;
         for (uint16_t i = 0; i < chunk; i++)
-            tmp[i] = zifi_in_buf[zifi_in_tail++ & (ZIFI_IN_SZ - 1)];
+            tmp[i] = zifi_in_buf[zifi_in_tail++ & zifi_in_mask];
         spillWrite(tmp, chunk);
         n -= chunk;
     }
     if (g_spill_w - g_spill_r > g_swap_max) g_swap_max = g_spill_w - g_spill_r;
+#if CFG_TUH_CDC
+    // The ring has room again: pull whatever usbCdcRx() left in TinyUSB's FIFO.
+    if (g_usb_mode && g_cdc_idx >= 0) usbCdcRx(g_cdc_idx);
+#endif
     // Backlog fully consumed and nothing left → resume the fast path (keep the
     // ring allocated for the rest of the session — re-arming is a cheap counter).
     if (g_spill_r >= g_spill_w && g_out_pos >= g_out_len && in_empty()) {
@@ -443,7 +526,7 @@ int __not_in_flash("zifi") ZiFi::rxPop() {
         g_out_len = len; g_out_pos = 1;
         return g_out_buf[0];
     }
-    if (!in_empty()) return zifi_in_buf[zifi_in_tail++ & (ZIFI_IN_SZ - 1)];
+    if (!in_empty()) return zifi_in_buf[zifi_in_tail++ & zifi_in_mask];
     return -1;
 }
 
@@ -454,7 +537,7 @@ bool __not_in_flash("zifi") ZiFi::rxAvailable() {
 // ─── init / deinit ──────────────────────────────────────────────────────────
 
 void ZiFi::init() {
-    if (hw_initialized) return;
+    if (hw_initialized) { rxRingFit(true); return; }   // e.g. the NIC was just switched on
 #if PICOSPECCY_WIFI
     // The on-chip radio is the network transport: there is no ESP-01 to bring up,
     // and claiming the UART pins for one would steal them from the peripheral
@@ -466,10 +549,22 @@ void ZiFi::init() {
     }
 #endif
     // Allocate the RX/TX rings on the heap (freed in deinit) so they cost nothing
-    // when the NIC is off. RP2350 malloc panics on true OOM; ZiFi is only enabled
+    // when the link is down. RP2350 malloc panics on true OOM; ZiFi is only enabled
     // from the menu (plenty of heap), never during a memory-tight machine boot.
-    if (!zifi_in_buf  && s_in_buf.alloc(ZIFI_IN_SZ, Buffer::NEED_POINTER))  zifi_in_buf  = s_in_buf.data();
-    if (!zifi_out_buf && s_out_buf.alloc(256, Buffer::NEED_POINTER))         zifi_out_buf = s_out_buf.data();
+    if (!zifi_in_buf) {
+        // The size the link needs NOW; fall back a step at a time rather than fail.
+        for (uint16_t sz = rxWantSize(); sz >= 2048 && !zifi_in_buf; sz >>= 1)
+            if (s_in_buf.alloc(sz, Buffer::NEED_POINTER)) {
+                zifi_in_buf  = s_in_buf.data();
+                zifi_in_size = sz;
+                zifi_in_mask = (uint16_t)(sz - 1);
+            }
+    }
+    // TX ring (256 B) + the spill read-back staging block behind it.
+    if (!zifi_out_buf && s_out_buf.alloc(256 + ZIFI_OUT_STAGE, Buffer::NEED_POINTER)) {
+        zifi_out_buf = s_out_buf.data();
+        g_out_buf    = zifi_out_buf + 256;
+    }
     if (!zifi_in_buf || !zifi_out_buf) {
         Debug::log("ZiFi: buffer alloc failed — NIC disabled");
         hw_initialized = true;         // mark done so deinit() runs + frees
@@ -592,8 +687,8 @@ void ZiFi::deinit() {
 #endif
     rxReset();                         // close/delete swap file, clear buffers
     // Return the rings to their tier so a memory-tight machine (Profi) regains them.
-    s_in_buf.free();  zifi_in_buf  = nullptr;
-    s_out_buf.free(); zifi_out_buf = nullptr;
+    s_in_buf.free();  zifi_in_buf  = nullptr; zifi_in_size = zifi_in_mask = 0;
+    s_out_buf.free(); zifi_out_buf = nullptr; g_out_buf = nullptr;
     hw_initialized = false;
     api_mode = 0;
 }
@@ -966,12 +1061,17 @@ void __not_in_flash("zifi") ZiFi::usbCdcRx(int idx) {
     uint8_t tmp[64];
     uint32_t n;
     bool got = false;
-    while ((n = tuh_cdc_read((uint8_t)idx, tmp, sizeof tmp)) > 0) {
-        for (uint32_t i = 0; i < n; i++) {
-            rx_bytes++;
-            if (!in_full()) zifi_in_buf[zifi_in_head++ & (ZIFI_IN_SZ - 1)] = tmp[i];
-            else            rx_dropped++;   // ring full — rxSpillTick() drains per frame
-        }
+    // Take only what the ring has room for: the rest waits in TinyUSB's own FIFO
+    // (the bigger of the two on most boards) instead of being dropped here, and is
+    // pulled by the next rx callback or by rxSpillTick() once the ring has drained.
+    for (;;) {
+        uint32_t room = (uint32_t)zifi_in_size - in_fill();
+        if (!room) break;
+        if (room > sizeof tmp) room = sizeof tmp;
+        if ((n = tuh_cdc_read((uint8_t)idx, tmp, room)) == 0) break;
+        for (uint32_t i = 0; i < n; i++)
+            zifi_in_buf[zifi_in_head++ & zifi_in_mask] = tmp[i];
+        rx_bytes += n;
         got = true;
     }
     if (got) LED::touchR(LED::NET); // RX activity → down arrow (green)
