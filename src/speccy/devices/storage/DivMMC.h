@@ -65,6 +65,13 @@ public:
     static uint8_t zc_read_status();      // Port 0x77 read: card detect / WP
     static void zc_write_data(uint8_t value);   // Port 0x57 write: SPI byte out
     static uint8_t zc_read_data();        // Port 0x57 read: SPI byte in
+    static bool    zc_read_word(uint16_t& v);   // DMA fast path, data phase only
+    static void    perfDump(float frames);      // PERF_HIST card-read attribution
+    // DMA bulk path: the data bytes of the block being streamed that are still
+    // unread, as whole words (0 outside the data phase); consume() advances past
+    // `words` of them. Same preconditions as zc_read_word.
+    static uint32_t zc_read_span(const uint8_t*& p);
+    static void     zc_read_consume(uint32_t words);
 
     // IDE/ATA emulation (DivIDE)
     static void ide_write(uint8_t reg, uint8_t value);  // ATA register write
@@ -140,6 +147,7 @@ private:
     // For DivMMC superfloppy images: synthesize an MBR at sector 0 so the
     // host sees a partition table; sectors >=1 are read from .mmc with offset.
     static void loadSector(uint32_t sector);
+    static void loadSectorStream(uint32_t sector);   // CMD18 read-ahead
     static void storeSector(uint32_t sector);
 
     // Bank memory management (butter PSRAM or swap)

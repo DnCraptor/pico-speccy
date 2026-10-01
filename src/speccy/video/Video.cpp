@@ -38,6 +38,8 @@ visit https://zxespectrum.speccy.org/contacto
 #include "hardware/regs/addressmap.h"
 #endif
 #include "Video.h"
+#include "app/PerfScope.h"
+#include "speccy/devices/storage/DivMMC.h"
 #include <math.h>       // powf() — CRT filter gamma curve (cold path, init only)
 #include "ui/UiGfx.h"   // uiPalette() for BMP capture of the new menu
 #include "app/Debug.h"
@@ -91,6 +93,8 @@ extern "C" volatile bool profi_ds80_active;
 extern "C" volatile uint hdmi_current_line;
 #ifdef VGA_HDMI
 extern "C" int hdmi_beam_row(void);
+extern "C" int hdmi_blank_lines_left(void);
+extern "C" int hdmi_blank_lines_total(void);
 extern "C" int vga_beam_row(void);
 extern "C" void hdmi_set_vsync_line(unsigned line);
 extern "C" void vga_set_vsync_line(uint32_t line);
@@ -538,12 +542,12 @@ static bool     ts_pal_assigned = false;   // ts256Assign already ran for the pe
 #endif
 #if TSPAL_DBG
 static struct {
-    uint32_t changes, applies, p_force, p_nobeam, p_norow, p_blank, p_vis, p_later, blocked_seq, waited, p_bank;
+    uint32_t changes, applies, p_force, p_nobeam, p_norow, p_blank, p_vis, p_later, blocked_seq, waited, p_bank, map_deferred;
     int      beam_min, beam_max;
     uint32_t lat_max_us, chg_gt_max_us;
     uint64_t change_us;
     uint32_t c1_prev;
-} ts_pal_dbg = {0,0,0,0,0,0,0,0,0,0,0, 999,-999, 0,0, 0, 0};
+} ts_pal_dbg = {0,0,0,0,0,0,0,0,0,0,0,0, 999,-999, 0,0, 0, 0};
 static uint64_t ts_frame_start_us = 0;
 #define TSPAL_APPLIED(field, beam) tsPalDbgApplied(ts_pal_dbg.field, (beam))
 #define TSPAL_COUNT(field)         (ts_pal_dbg.field++)
@@ -2407,7 +2411,23 @@ static constexpr uint32_t TS_REINDEX_MIN_BYTES = 2048;
 // tsPalettePoll flushes in the blanking after that. Costs one display frame of
 // latency — the demo that needs this updates 12 times a second.
 static uint16_t ts_pal_ncells = 0;             // CRAM cells written in THIS frame's pending window
-static constexpr uint16_t TS_REINDEX_MIN_CELLS = 32;   // a change this wide is a whole-palette change wherever it lands
+static uint8_t  ts_pal_cnt_seq = 0;            // the guest frame ts_pal_ncells counts for (NOT ts_pal_seq: that one
+                                               // is frame+1 for a change made after the tick parked, see tsCramChanged)
+static uint32_t ts_cram_gen = 0;               // +1 per CRAM change (tsCramChanged) — ts256Reduce's cache key
+static uint64_t ts_cram_last_t = 0;            // guest T at the last CRAM change (global_tstates + tstates): the burst detector
+static inline uint64_t tsGuestT() { return CPU::global_tstates + (uint64_t)CPU::tstates; }
+// A CRAM burst is in progress while the last cell landed less than two raster
+// lines ago: a 512-LDI palette upload writes a cell every ~20 T, so any gap of a
+// whole line is the burst's end. Sampled against the CURRENT clock scale.
+static inline bool tsCramBurstLive() {
+    const uint64_t now = tsGuestT();
+    const uint64_t quiet = (uint64_t)(2u * (unsigned)VIDEO::tStatesPerLine) << ESPectrum::multiplicator;
+    return now >= ts_cram_last_t && (now - ts_cram_last_t) < quiet;
+}
+static uint32_t ts256_reduce_gen = 0xFFFFFFFFu; // CRAM generation the current map was REDUCED for
+static uint8_t  ts256_reduce_bs = 0;
+static constexpr uint16_t TS_REINDEX_MIN_CELLS = 32;
+static constexpr uint16_t TS_REINDEX_EXH_CELLS = 4;    // ...or this many on a pool that has already run out of slots (nb == 1)
 // ...but only when those cells arrived as a BURST. A whole-palette change is
 // written at one raster position — a CRAM DMA is instantaneous, and even a
 // 256-cell FMAddr upload is ~7 T-state lines at ZCLK 14 — while a PER-LINE
@@ -2441,6 +2461,7 @@ static uint32_t ts_ygc_logged_frame = 0xFFFFFFFFu;
 #define TS_YGC_SRC(bit) do {} while (0)
 #endif
 static bool     ts_reindex_ready_seen = false;  // tsReindexReady was already up at the previous EndFrame
+static uint8_t  ts_reindex_ready_frames = 0;    // EndFrames the pending release has outlived (forced at 2)
 #if TSPAL_DBG
 static uint32_t ts_dbg_rel = 0, ts_dbg_rel_dirty = 0, ts_dbg_rel_forced = 0, ts_dbg_hold_blit = 0, ts_dbg_hold_wide = 0, ts_dbg_hold_spread = 0;
 #endif
@@ -2454,6 +2475,7 @@ static void tsReindexClear() {
     ts_reindex_hold = false;
     ts_reindex_held_prev = false;
     ts_reindex_ready_seen = false;
+    ts_reindex_ready_frames = 0;
     VIDEO::tsReindexReady = false;
 }
 
@@ -2487,6 +2509,14 @@ static uint32_t ts_scan_bad = 0, ts_scan_bad_sweep = 0, ts_scan_bad_max = 0, ts_
 // cannot show in the row-generation count above; it shows here.
 static uint32_t ts_inv_viol = 0, ts_inv_dirty = 0, ts_inv_moved = 0, ts_inv_near = 0, ts_inv_live = 0, ts_inv_checks = 0;
 static uint32_t ts_inv_mergemax = 0, ts_inv_merges = 0;   // worst / count of colour merges (ts256Reduce), 5-bit RGB distance squared
+// Release timing: how long core1 took to drain the release's rows, and where the
+// beam was when it had — a beam already back inside the picture means the sweep
+// showed old pixels under the palette flushed at the release (2026-09-30).
+static uint32_t ts_rel_drain_max_us = 0, ts_rel_beam_in = 0; static int ts_rel_beam_after_max = -1;
+static uint32_t ts_rel_assign_max_us = 0, ts_rel_post_max_us = 0, ts_rel_flush_max_us = 0, ts_rel_total_max_us = 0; static int ts_rel_beam_start_max = -1;
+static uint32_t ts_dbg_rel_inburst = 0;  // releases that fired while the guest was still writing CRAM (diagnostic only)
+static uint32_t ts_dbg_rel_blank = 0;    // releases taken on the blanking path (flush first, no drain)
+static uint32_t ts_dbg_sticky_pre = 0;   // sticky (non-held) Assign runs with a partial (<32 cells) CRAM window, nb == 1
 #endif
 
 // TsConf::dmaStart, every bulk DMA: destination inside the base bitmap or a
@@ -2563,7 +2593,13 @@ static inline uint32_t ts555Dist(uint16_t a, uint16_t b) {
 static inline void ts256MarkDirty(uint8_t off) {
     for (int b = 0; b < ts256_nb; b++) ts256_dirty_b[b][off >> 5] |= 1u << (off & 31);
 }
+#if TSPAL_DBG
+static bool ts_map_changed = false;   // an assign changed at least one cell's offset (-> map generation bump)
+#endif
 static inline void ts256SetMap(int cell, uint8_t off) {
+#if TSPAL_DBG
+    if (ts256_off[cell] != off) ts_map_changed = true;
+#endif
     ts256_off[cell] = off;
     for (int b = 0; b < ts256_nb; b++) ts256_map_b[b][cell] = ts256_pool[b * ts256_bs + off];
 }
@@ -2618,44 +2654,93 @@ static uint16_t TS_OVL_BSS ts256_cell_col[256];
 static void ts256Reduce() {
     ts256PoolInit();
     const int bs = ts256_bs;
+    // Deterministic in CRAM, so a second call for the same CRAM (the release's
+    // flush after its own assign, or a release after the EndFrame pre-assign)
+    // would only recompute the identical map.
+    if (ts256_valid && ts256_reduce_gen == ts_cram_gen && ts256_reduce_bs == (uint8_t)bs) return;
+    ts256_reduce_gen = ts_cram_gen; ts256_reduce_bs = (uint8_t)bs;
+    // Cost matters here: this runs INSIDE the beam-out window of a held
+    // release, and a continuous CRAM writer (ppal.spg) defeats the EndFrame
+    // pre-assign, so the release pays it every frame. The first version was
+    // O(n^2) three times over — a 256 x n linear dedup, an all-pairs
+    // nearest-neighbour pass and a FULL recompute of every group whose
+    // neighbour was the kept OR the merged one after each of ~50 merges —
+    // 2.4 ms of a 5.2 ms window (hw 2026-09-30). Now: the cells are SORTED by
+    // colour (groups come out adjacent, no dedup search), a nearest neighbour
+    // is found by scanning outward in that order and stopping once the red
+    // difference alone exceeds the best distance (sorted by red first), and a
+    // merge only marks the groups whose neighbour DIED as stale — the kept
+    // group's colour does not change, so a neighbour pointing at it is still
+    // right. A stale group is recomputed lazily, when it comes up as the
+    // minimum: its recorded distance is a lower bound (the minimum over a set
+    // can only grow when a member is removed), so re-evaluating just that one
+    // and picking again is exact. Merged groups redirect through rc_nn and are
+    // resolved once at the end instead of relabelling 256 cells per merge.
+    uint16_t *const key = ts256_cell_col;      // cell -> colour, scratch until the final pass rewrites it
+    uint8_t  *const ord = rc_nn;               // sorted cell order, scratch until the groups exist
+    for (int i = 0; i < 256; i++) { key[i] = TsConf::cram[i] & 0x7FFF; ord[i] = (uint8_t)i; }
+    for (int i = 1; i < 256; i++) {            // insertion sort: 256 keys, mostly runs
+        const uint8_t v = ord[i]; const uint16_t c = key[v];
+        int j = i;
+        while (j > 0 && key[ord[j - 1]] > c) { ord[j] = ord[j - 1]; j--; }
+        ord[j] = v;
+    }
     int n = 0;
     for (int i = 0; i < 256; i++) {
-        const uint16_t c = TsConf::cram[i] & 0x7FFF;
-        int k = 0;
-        while (k < n && rc_col[k] != c) k++;
-        if (k == n) { rc_col[n] = c; rc_cnt[n] = 0; rc_alive[n] = 1; n++; }
-        rc_of[i] = (uint8_t)k;
-        if (rc_cnt[k] < 255) rc_cnt[k]++;
+        const uint8_t cell = ord[i]; const uint16_t c = key[cell];
+        if (n == 0 || rc_col[n - 1] != c) { rc_col[n] = c; rc_cnt[n] = 0; rc_alive[n] = 1; n++; }
+        rc_of[cell] = (uint8_t)(n - 1);
+        if (rc_cnt[n - 1] < 255) rc_cnt[n - 1]++;
     }
     int alive = n;
     if (alive > bs) {
         auto nnOf = [&](int k) {
+            const uint16_t ck = rc_col[k]; const int rk = ck >> 10;
             uint32_t bd = 0xFFFFFFFFu; int bj = k;
-            for (int j = 0; j < n; j++) {
-                if (j == k || !rc_alive[j]) continue;
-                const uint32_t d = ts555Dist(rc_col[k], rc_col[j]);
+            for (int j = k + 1; j < n; j++) {
+                if (!rc_alive[j]) continue;
+                const int dr = (rc_col[j] >> 10) - rk;
+                if ((uint32_t)(dr * dr) >= bd) break;   // sorted by red: nothing further can be closer
+                const uint32_t d = ts555Dist(ck, rc_col[j]);
+                if (d < bd) { bd = d; bj = j; }
+            }
+            for (int j = k - 1; j >= 0; j--) {
+                if (!rc_alive[j]) continue;
+                const int dr = rk - (rc_col[j] >> 10);
+                if ((uint32_t)(dr * dr) >= bd) break;
+                const uint32_t d = ts555Dist(ck, rc_col[j]);
                 if (d < bd) { bd = d; bj = j; }
             }
             rc_nn[k] = (uint8_t)bj; rc_nd[k] = (uint16_t)(bd > 0xFFFF ? 0xFFFF : bd);
+            rc_alive[k] = 1;                       // fresh
         };
         for (int k = 0; k < n; k++) nnOf(k);
         while (alive > bs) {
             int a = -1; uint32_t bd = 0xFFFFFFFFu;
             for (int k = 0; k < n; k++) if (rc_alive[k] && rc_nd[k] < bd) { bd = rc_nd[k]; a = k; }
+            if (a < 0) break;
+            if (rc_alive[a] == 2 || !rc_alive[rc_nn[a]] || rc_nn[a] == a) {   // stale: re-evaluate, pick again
+                nnOf(a);
+                if (rc_nn[a] == a) break;                                        // no other live group (cannot happen while alive > bs)
+                continue;
+            }
             const int b = rc_nn[a];
 #if TSPAL_DBG
             if (bd > ts_inv_mergemax) ts_inv_mergemax = bd;
             ts_inv_merges++;
 #endif
             const int keep = (rc_cnt[a] >= rc_cnt[b]) ? a : b, gone = (keep == a) ? b : a;
-            for (int i = 0; i < 256; i++) if (rc_of[i] == gone) rc_of[i] = (uint8_t)keep;
             const unsigned sum = (unsigned)rc_cnt[keep] + rc_cnt[gone];
             rc_cnt[keep] = (uint8_t)(sum > 255 ? 255 : sum);
-            rc_alive[gone] = 0; alive--;
-            for (int k = 0; k < n; k++)
-                if (rc_alive[k] && (k == keep || rc_nn[k] == gone || rc_nn[k] == keep)) nnOf(k);
+            rc_alive[gone] = 0; rc_nn[gone] = (uint8_t)keep; alive--;   // dead: rc_nn is the redirect
+            for (int k = 0; k < n; k++) if (rc_alive[k] && rc_nn[k] == gone) rc_alive[k] = 2;   // stale
         }
         ts256_exhausted = true;             // colours were approximated (reported by the trace)
+        for (int i = 0; i < 256; i++) {     // resolve the merge chains
+            int k = rc_of[i];
+            while (!rc_alive[k]) k = rc_nn[k];
+            rc_of[i] = (uint8_t)k;
+        }
     }
     // Offsets. Pass 1: a live or free offset that already shows the colour is
     // kept — no palette write. Pass 2: the rest take free offsets and go dirty.
@@ -2702,9 +2787,13 @@ static void ts256Assign(bool full) {
     // in the next frame reproduces the same map and writes nothing.
     if (!full && ts256_valid && ts256_nb == 1 && (ts_reindex_hold || ts_reindex_held_prev)) {
         ts256Reduce();
+#if TSPAL_DBG
+        if (ts_map_changed) { ts_map_gen++; ts_map_changed = false; }
+#endif
         return;
     }
     if (full || !ts256_valid) {
+        ts256_reduce_gen = 0xFFFFFFFFu;
         for (int i = 0; i < TS256_POOL; i++) { ts256_slot_col[i] = 0xFFFF; ts256_slot_ref[i] = 0; }
         for (int i = 0; i < 256; i++) ts256_cell_col[i] = 0xFFFF;
         memset(ts256_dirty_b, 0, sizeof ts256_dirty_b);
@@ -2767,11 +2856,18 @@ static void ts256Assign(bool full) {
         ts256_slot_ref[hit]++;
         ts256_cell_col[i] = c;
     }
+    ts256_reduce_gen = 0xFFFFFFFFu;   // the sticky path moved cells: the Reduce cache no longer describes the map
     // Banks beyond nb mirror bank 0: a line still queued with a higher bank tag
     // from before the count shrank then renders with live slots, not a stale map.
     if (!ts256_valid)
         for (int b = ts256_nb; b < TS256_MAX_BANKS; b++) memcpy(ts256_map_b[b], ts256_map_b[0], 256);
     ts256_valid = true;
+#if TSPAL_DBG
+    // Every assign that renumbers a cell is a new map generation — the release's
+    // and the flush's included. Bumping only from the poll left `bad` blind to
+    // exactly the rows this section is about (2026-09-30).
+    if (ts_map_changed) { ts_map_gen++; ts_map_changed = false; }
+#endif
 }
 
 // Write bank `b`'s slots whose colour changed since that bank was last written.
@@ -2865,6 +2961,26 @@ static void tsPalette256Flush(bool invalidate) {
 // change folds in place (the legacy behaviour for a per-line CRAM writer). A
 // bank that ran out of offsets degrades the whole remap to one bank (the beam
 // rule) — one frame of mismatched rows, then the pre-2026-09-14 behaviour.
+// A bank that ran out of offsets: back to ONE bank of the whole pool, rebuilt
+// and written at once (one frame of mismatched rows, then the beam rule).
+// Reached from the versioned apply AND from the beam-scheduled sticky assign:
+// the bank count is picked from the CRAM at mode entry, and a title whose
+// palette GROWS afterwards (the TGV video player: RRES 256x192 opens on a
+// near-empty palette -> nb=3 x 61 slots, then 100+ colours per video frame)
+// exhausted its 61-slot bank on the sticky path, where nothing ever degraded
+// it - `live=61/61 exh=1 near=2000/s` for the whole run, ~160 cells a frame
+// parked on the nearest of 61 colours (hw 2026-09-30, "negative" RUNNINGM).
+static void ts256DegradeOneBank() {
+    Debug::log("[TSV] ts256 remap: bank of %u slots exhausted - back to one bank", ts256_bs);
+    ts256_nb = 1;
+    ts256_bs = ts256_pool_n;
+    ts256_cur_bank = 0;
+    ts256_valid = false;
+    ts256Assign(true);
+    for (int o = 0; o < ts256_bs; o++)
+        if (ts256_slot_ref[o]) ts256MarkDirty((uint8_t)o);
+    ts256ProgramBank(0);
+}
 static constexpr uint8_t TS_PAL_MAX_VERSIONS = 16;
 static void ts256Version() {
     ts_reindex_hint = false;
@@ -2875,18 +2991,7 @@ static void ts256Version() {
         ts_pal_flushes++;
     }
     ts256Assign(false);
-    if (ts256_exhausted) {
-        Debug::log("[TSV] ts256 remap: bank of %u slots exhausted - back to one bank", ts256_bs);
-        ts256_nb = 1;
-        ts256_bs = ts256_pool_n;
-        ts256_cur_bank = 0;
-        ts256_valid = false;
-        ts256Assign(true);
-        for (int o = 0; o < ts256_bs; o++)
-            if (ts256_slot_ref[o]) ts256MarkDirty((uint8_t)o);
-        ts256ProgramBank(0);
-        return;
-    }
+    if (ts256_exhausted) { ts256DegradeOneBank(); return; }
     ts256ProgramBank(ts256_cur_bank);
 }
 
@@ -2980,6 +3085,8 @@ void VIDEO::tsPaletteRestore() {
 // guest line (tsDrawTick), at EndFrame and from the frame-pacing waits.
 void VIDEO::tsCramChanged() {
     tsCramDirty = true;
+    ts_cram_gen++;
+    ts_cram_last_t = tsGuestT();
     // The fb row this change first shows on (the next line to render), computed
     // up front: the width test below needs the SPREAD of the cells, and the
     // second and later changes of a frame return early before reaching the
@@ -2994,7 +3101,16 @@ void VIDEO::tsCramChanged() {
     // must not make every later single-cell write "wide" (its own comment said
     // so; the `ts_pal_row < 0` test alone did not, because ts_pal_row stays >= 0
     // across frames until a flush).
-    if (ts_pal_row < 0 || ts_pal_seq != ts_frame_seq) { ts_pal_ncells = 0; ts_pal_row0 = palRow; }
+    // The frame tag is ITS OWN (ts_pal_cnt_seq), not ts_pal_seq: a change made
+    // after the tick parked (a release inside the frame, ppal.spg's spread
+    // rewrite continuing behind it) is "the next frame's top" and sets
+    // ts_pal_seq = frame + 1, so testing THAT reset the count on every one of
+    // those writes — it never reached TS_REINDEX_EXH_CELLS, no hold started,
+    // and the v_sync poll then flushed the sticky map with the beam at row 190
+    // (`wide=25 rel=25 force=25` per 50 frames, `bad≈138 rows` a sweep, only
+    // with V-Sync — without it those cells wait for the next frame's count,
+    // `bad=0`; hw 2026-09-30, pal8).
+    if (ts_pal_row < 0 || ts_pal_cnt_seq != ts_frame_seq) { ts_pal_ncells = 0; ts_pal_row0 = palRow; ts_pal_cnt_seq = ts_frame_seq; }
     if (ts_pal_ncells < 0xFFFF) ts_pal_ncells++;
     const int32_t palSpan = palRow > ts_pal_row0 ? palRow - ts_pal_row0 : 0;
     const bool palBurst = (uint32_t)palSpan * TS_PAL_BURST_PER_ROW < (uint32_t)ts_pal_ncells;
@@ -3005,8 +3121,32 @@ void VIDEO::tsCramChanged() {
     // change took the sticky path on a full pool — `viol=144 near=72 moved=0
     // merges=0` in one window, hw 2026-09-17 — 72 cells left on their old
     // colours for a frame, the "full negative" at the scene cut.
+    // ...and on an EXHAUSTED single-bank pool every dense change is a re-index,
+    // however narrow: with more colours than slots the sticky path can only
+    // park a changed cell on the nearest live colour (or move it to a slot
+    // another cell shares), and it does so under rows already rendered with the
+    // old numbering. ppal.spg's free-running 256-cell rewrite held on the
+    // frames where >= 32 cells moved and took the sticky path on the others
+    // (`force 20 blank 27` applies/s, `moved=19000/s`, `bad=8000 rows/63
+    // sweeps`); Keftale's fade changes 6-12 cells a frame on a full pool
+    // (`near=300-600/s`, `stickyPre=30-90`). Both looked "negative" on the
+    // rows the beam had already passed (hw 2026-09-30, pal6). A hold renders
+    // the whole picture from a REDUCED map in blanking, which is the only
+    // consistent answer once the pool is short.
+    // NO density test on an exhausted pool (pal8, hw 2026-09-30 on pal7): ppal
+    // rewrites its 256 cells SPREAD over the frame (~1 cell per row), so the
+    // burst test only passed on the frames where a release inside the frame
+    // had parked the tick (palRow pinned at the top, span 0) and failed on the
+    // others — half the frames held, the other half took the sticky path and
+    // were flushed by the v_sync poll with the beam at row 190 (`wide=25
+    // rel=25 force=25` per 50 frames, `bad≈138 rows` every sweep, worse WITH
+    // V-Sync since that poll only exists there). A per-line palette effect on
+    // a pool that is already short of slots cannot be rendered right either
+    // way, so holding it costs nothing that was available. Demorama, the title
+    // the density test protects, is not exhausted (123-125 colours).
+    const bool exhWide = ts256_exhausted && ts_pal_ncells >= TS_REINDEX_EXH_CELLS;
     if (ts_pal256_live && ts256_nb == 1 && !tsReindexReady &&
-        (ts_reindex_hint || (ts_pal_ncells >= TS_REINDEX_MIN_CELLS && palBurst))) {
+        (ts_reindex_hint || exhWide || (ts_pal_ncells >= TS_REINDEX_MIN_CELLS && palBurst))) {
 #if TSPAL_DBG
         if (!ts_reindex_hold) ts_dbg_hold_wide++;
 #endif
@@ -3070,11 +3210,11 @@ static void tsPalDbgPrint() {
     if (!ts_pal_dbg.changes && !ts_pal_dbg.applies) return;
     extern volatile uint32_t ts_c1_us;
     const uint32_t c1 = ts_c1_us - ts_pal_dbg.c1_prev; ts_pal_dbg.c1_prev = ts_c1_us;
-    Debug::log("[TSPAL] vsync=%d chg=%u app=%u (bank %u force %u nobeam %u norow %u blank %u vis %u later %u) beam=%d..%d latMax=%uus chgAt<=%uus blockedSeq=%u waited=%u pal256=%d nb=%u ver=%lu c1=%uus/f pos=%08lX",
+    Debug::log("[TSPAL] vsync=%d chg=%u app=%u (bank %u force %u nobeam %u norow %u blank %u vis %u later %u) beam=%d..%d latMax=%uus chgAt<=%uus blockedSeq=%u waited=%u mapDeferred=%u pal256=%d nb=%u ver=%lu c1=%uus/f pos=%08lX",
                (int)Config::v_sync_enabled, ts_pal_dbg.changes, ts_pal_dbg.applies, ts_pal_dbg.p_bank, ts_pal_dbg.p_force, ts_pal_dbg.p_nobeam,
                ts_pal_dbg.p_norow, ts_pal_dbg.p_blank, ts_pal_dbg.p_vis, ts_pal_dbg.p_later,
                ts_pal_dbg.beam_min, ts_pal_dbg.beam_max, ts_pal_dbg.lat_max_us, ts_pal_dbg.chg_gt_max_us,
-               ts_pal_dbg.blocked_seq, ts_pal_dbg.waited, (int)VIDEO::ts_pal256_live, ts256_nb, (unsigned long)ts256_ver,
+               ts_pal_dbg.blocked_seq, ts_pal_dbg.waited, ts_pal_dbg.map_deferred, (int)VIDEO::ts_pal256_live, ts256_nb, (unsigned long)ts256_ver,
                c1 / 50, (unsigned long)ts_render_pos);
     Debug::log("[TSPAL] bad=%lu rows/%lu sweeps (worst sweep %lu of %u visible) hold=%d | map: viol=%lu dirty=%lu near=%lu moved=%lu live=%lu/%u checks=%lu exh=%d merges=%lu mergeMaxD2=%lu",
                (unsigned long)ts_scan_bad, (unsigned long)ts_scan_sweeps, (unsigned long)ts_scan_bad_max,
@@ -3082,15 +3222,23 @@ static void tsPalDbgPrint() {
                (unsigned long)ts_inv_viol, (unsigned long)ts_inv_dirty, (unsigned long)ts_inv_near, (unsigned long)ts_inv_moved,
                (unsigned long)ts_inv_live, (unsigned)ts256_bs, (unsigned long)ts_inv_checks, (int)ts256_exhausted,
                (unsigned long)ts_inv_merges, (unsigned long)ts_inv_mergemax);
-    Debug::log("[TSPAL] late=%lu rows rendered behind the beam (max %lu rows behind) | hold: blit=%lu wide=%lu spread=%lu rel=%lu relDirty=%lu relForced=%lu ready=%d hold=%d",
+    Debug::log("[TSPAL] late=%lu rows rendered behind the beam (max %lu rows behind) | hold: blit=%lu wide=%lu spread=%lu rel=%lu relDirty=%lu relForced=%lu ready=%d hold=%d stickyPre=%lu",
                (unsigned long)ts_late_rows, (unsigned long)ts_late_max, (unsigned long)ts_dbg_hold_blit, (unsigned long)ts_dbg_hold_wide, (unsigned long)ts_dbg_hold_spread,
-               (unsigned long)ts_dbg_rel, (unsigned long)ts_dbg_rel_dirty, (unsigned long)ts_dbg_rel_forced, (int)VIDEO::tsReindexReady, (int)ts_reindex_hold);
-    ts_late_rows = 0; ts_late_max = 0;
+               (unsigned long)ts_dbg_rel, (unsigned long)ts_dbg_rel_dirty, (unsigned long)ts_dbg_rel_forced, (int)VIDEO::tsReindexReady, (int)ts_reindex_hold,
+               (unsigned long)ts_dbg_sticky_pre);
+    Debug::log("[TSPAL] rel: beamStartMax=%d beamIn=%lu beamAfterMax=%d assign=%luus post=%luus drain=%luus flush=%luus total=%luus | blank=%lu forced=%lu inBurst=%lu",
+               ts_rel_beam_start_max, (unsigned long)ts_rel_beam_in, ts_rel_beam_after_max,
+               (unsigned long)ts_rel_assign_max_us, (unsigned long)ts_rel_post_max_us, (unsigned long)ts_rel_drain_max_us,
+               (unsigned long)ts_rel_flush_max_us, (unsigned long)ts_rel_total_max_us,
+               (unsigned long)ts_dbg_rel_blank, (unsigned long)ts_dbg_rel_forced, (unsigned long)ts_dbg_rel_inburst);
+    ts_dbg_rel_inburst = ts_dbg_rel_blank = 0;
+    ts_late_rows = 0; ts_late_max = 0; ts_dbg_sticky_pre = 0; ts_rel_drain_max_us = 0; ts_rel_beam_in = 0; ts_rel_beam_after_max = -1;
+    ts_rel_beam_start_max = -1; ts_rel_assign_max_us = ts_rel_post_max_us = ts_rel_flush_max_us = ts_rel_total_max_us = 0;
     ts_dbg_hold_blit = ts_dbg_hold_wide = ts_dbg_hold_spread = ts_dbg_rel = ts_dbg_rel_dirty = ts_dbg_rel_forced = 0;
     ts_scan_bad = ts_scan_bad_max = ts_scan_sweeps = 0;
     ts_inv_viol = ts_inv_dirty = ts_inv_near = ts_inv_moved = ts_inv_checks = ts_inv_merges = ts_inv_mergemax = 0;
     ts_pal_dbg.changes = ts_pal_dbg.applies = ts_pal_dbg.p_force = ts_pal_dbg.p_nobeam = ts_pal_dbg.p_norow = ts_pal_dbg.p_bank = 0;
-    ts_pal_dbg.p_blank = ts_pal_dbg.p_vis = ts_pal_dbg.p_later = ts_pal_dbg.blocked_seq = ts_pal_dbg.waited = 0;
+    ts_pal_dbg.p_blank = ts_pal_dbg.p_vis = ts_pal_dbg.p_later = ts_pal_dbg.blocked_seq = ts_pal_dbg.waited = ts_pal_dbg.map_deferred = 0;
     ts_pal_dbg.beam_min = 999; ts_pal_dbg.beam_max = -999; ts_pal_dbg.lat_max_us = 0; ts_pal_dbg.chg_gt_max_us = 0;
 }
 #else
@@ -3119,6 +3267,30 @@ void VIDEO::setVsyncLead(bool on) {
 #endif
 }
 
+// True when the beam is in vertical blanking with at least TS_REL_MIN_BLANK_LINES
+// display lines still ahead (or when the driver cannot say — VGA).
+// The blanking-path release (ts256 map + palette flush + posting the rows,
+// core1 renders behind) costs core0 ~1.5-2 ms; the beam must not reach fb row
+// 0 before the flush, so the release may only START with that much blanking
+// left. 640x480 48.83 Hz has 164 blanking lines (5.2 ms), 720x576 only 44
+// (1.4 ms) — there the window is whatever the mode has, minus a margin: a
+// release that starts at the very top of blanking beats one forced from
+// EndFrame wherever the beam happens to be.
+static constexpr int TS_REL_MIN_BLANK_LINES = 70;    // ~2.2 ms at 31.75 us/line
+static bool displayBlankLeftOk() {
+#ifdef VGA_HDMI
+    extern bool SELECT_VGA;
+    if (SELECT_VGA) return true;
+    const int left = hdmi_blank_lines_left();
+    if (left < 0) return true;
+    int need = TS_REL_MIN_BLANK_LINES;
+    const int total = hdmi_blank_lines_total() - 6;
+    if (need > total) need = total > 0 ? total : 1;
+    return left >= need;
+#else
+    return true;
+#endif
+}
 int VIDEO::displayBeamRow() {
 #ifdef VGA_HDMI
     extern bool SELECT_VGA;
@@ -3164,23 +3336,75 @@ static void tsPalScanBeam(int beam) {
 // stays ahead of the beam from row one, so the sweep that follows carries new
 // pixels under the new palette on every row. The guest's own line ticks for the
 // rest of this frame are switched off (the picture is already posted).
-static void tsReindexRelease() {
+// `beamOut`: the beam is out of the picture (blanking, or the bottom border)
+// with room to spare — the palette is flushed BEFORE the rows are posted and
+// core1 renders them behind the flush, ahead of the beam (it starts at row 0
+// while the beam is still in blanking and runs ~4x faster than the beam does).
+// Nothing waits for core1, so the release costs core0 only the map, the
+// flush and the posting (~1.5 ms) and fits the 5.2 ms of blanking with room
+// — the earlier post -> DRAIN -> flush order spent 3.6 ms waiting for core1
+// inside that window and ran past its end (ppal / keft, hw 2026-09-30:
+// `total=6.9 ms`, `beamAfterMax=232`, the top rows shown old under the new
+// palette). Without `beamOut` (forced from EndFrame, beam anywhere) the old
+// order stays: one torn frame either way, and flipping the palette only once
+// all rows are new keeps the torn region to the rows the beam passes during
+// the drain.
+static void tsReindexRelease(bool beamOut) {
     ts_reindex_ready_seen = false;
+    ts_reindex_ready_frames = 0;
+#if TSPAL_DBG
+    const uint64_t tr0 = time_us_64();
+    { const int b0 = VIDEO::displayBeamRow(); if (b0 > ts_rel_beam_start_max) ts_rel_beam_start_max = b0; }
+    if (beamOut) ts_dbg_rel_blank++;
+    if (tsCramBurstLive()) ts_dbg_rel_inburst++;
+#endif
+    // Rows still queued from before the hold would render under the map
+    // rebuilt below (they are the previous frame's, so nothing is lost by
+    // letting core1 finish them first — the ring is empty in practice).
+    if (beamOut && tsC1Pending()) VIDEO::tsRenderDrain();
     // The map must match the CRAM of THIS moment: a change that landed after
     // the poll which reduced it (a palette animation writing at every frame's
     // top) would otherwise render with a map for the previous palette.
     if (VIDEO::ts_pal256_live) { ts256Assign(false); ts_pal_assigned = true; }
+#if TSPAL_DBG
+    const uint64_t tr1 = time_us_64();
+    if ((uint32_t)(tr1 - tr0) > ts_rel_assign_max_us) ts_rel_assign_max_us = (uint32_t)(tr1 - tr0);
+#endif
     ts_reindex_hold = false;
     VIDEO::tsReindexReady = false;
     ts_reindex_held_prev = true;
+#if TSPAL_DBG
+    ts_dbg_rel++;
+    if (VIDEO::tsCramDirty) ts_dbg_rel_dirty++;
+#endif
+    auto flush = [&]() {
+        if (!VIDEO::tsCramDirty) return;
+        TSPAL_APPLIED(p_blank, -1);
+#if TSPAL_DBG
+        const uint64_t tf0 = time_us_64();
+#endif
+        VIDEO::tsPaletteFlush();
+        ts_pal_flushes++;
+#if TSPAL_DBG
+        const uint32_t df = (uint32_t)(time_us_64() - tf0);
+        if (df > ts_rel_flush_max_us) ts_rel_flush_max_us = df;
+#endif
+    };
+    if (beamOut) flush();
     const uint32_t lines = lin_end2 - lin_end;
     ts_last_curline = 0xFFFFFFFFu;
+#if TSPAL_DBG
+    const uint64_t tp0 = time_us_64();
+#endif
     for (uint32_t i = 0; i < lines; i++) {
         linedraw_cnt = lin_end + i;
         curline = i;
         TS_YGC_SRC(4);
         VIDEO::tsRenderLine(i);
     }
+#if TSPAL_DBG
+    { const uint32_t dp = (uint32_t)(time_us_64() - tp0); if (dp > ts_rel_post_max_us) ts_rel_post_max_us = dp; }
+#endif
     // Stop the guest's ticks re-posting THIS frame — but only if the frame is
     // still being posted (ts_line_idx > 0). With V-Sync pacing a HALT-only frame
     // is over 0.1 ms after v_sync and the release lands in its pacing wait,
@@ -3195,29 +3419,54 @@ static void tsReindexRelease() {
         VIDEO::Draw = &VIDEO::Blank;
         VIDEO::Draw_Opcode = &VIDEO::Blank_Opcode;
     }
+    if (!beamOut) {
+        // Forced release with the beam inside the picture: the palette follows
+        // the PIXELS into the framebuffer. Waiting here costs core0 the drain
+        // (~3.5 ms of 240 rows) once per forced release; a stuck queue falls
+        // back inside tsRenderDrain itself.
 #if TSPAL_DBG
-    ts_dbg_rel++;
-    if (VIDEO::tsCramDirty) ts_dbg_rel_dirty++;
+        const uint64_t t0 = time_us_64();
 #endif
-    if (VIDEO::tsCramDirty) {
-        TSPAL_APPLIED(p_blank, -1);
-        VIDEO::tsPaletteFlush();
-        ts_pal_flushes++;
+        VIDEO::tsRenderDrain();
+#if TSPAL_DBG
+        const uint32_t dt = (uint32_t)(time_us_64() - t0);
+        if (dt > ts_rel_drain_max_us) ts_rel_drain_max_us = dt;
+#endif
+        flush();
     }
+#if TSPAL_DBG
+    { const uint32_t dt = (uint32_t)(time_us_64() - tr0); if (dt > ts_rel_total_max_us) ts_rel_total_max_us = dt;
+      // The beam AFTER the whole release, flush included — the pre-flush sample
+      // alone read "still in blanking" while a 10 ms flush ran on (2026-09-30).
+      const int b = VIDEO::displayBeamRow();
+      if (b >= (int)lin_end && b < (int)lin_end2) ts_rel_beam_in++;
+      if (b > ts_rel_beam_after_max) ts_rel_beam_after_max = b; }
+#endif
 }
 
 void VIDEO::tsPalettePoll(bool force) {
+    PERF_BUCKET_SCOPE(PB_PALPOLL);
     const int beam0 = displayBeamRow();
 #if TSPAL_DBG
     if (ts_pal256_live) tsPalScanBeam(beam0);
 #endif
     // Release the moment the beam has left the PICTURE — the bottom border is as
-    // good as blanking and adds ~1.3 ms: the release render (200 lines, ~4.5 ms
-    // of core1 plus the HDMI ISR's share) must be complete before the beam
-    // reaches the first content row of the next sweep, or those rows show the
-    // OLD pixels under the NEW palette for one frame — invisible while the
-    // pictures are alike, a negative flash at a scene cut (hw 2026-09-17).
-    if (tsReindexReady && (beam0 < 0 || beam0 >= (int)lin_end2)) { tsReindexRelease(); return; }
+    // good as blanking: the palette is flushed at once and core1 re-renders the
+    // rows behind it, ahead of the beam (tsReindexRelease, beamOut). The start
+    // needs enough blanking LEFT for the map + flush (displayBlankLeftOk): one
+    // that started on the last blanking lines used to end with the beam 80-130
+    // rows into the picture (hw 2026-09-30, `relBeamIn=2..9/s`).
+    // NOT gated on the guest being quiet: a "wait for a gap in the CRAM writes"
+    // gate was tried (pal4) and hw-refuted twice — the TGV player never tripped
+    // it, and ppal.spg (all 256 cells rewritten in a free-running loop) never
+    // LEAVES a gap, so every release timed out 40 ms later and was then forced
+    // from EndFrame with the beam wherever it was (`burstForced=9 relForced=18`
+    // per second, hw 2026-09-30). A mid-burst snapshot is one frame with a
+    // palette the guest was still writing, which is what the hardware shows too.
+    if (tsReindexReady && (beam0 >= (int)lin_end2 || (beam0 < 0 && displayBlankLeftOk()))) {
+        tsReindexRelease(true);
+        return;
+    }
     if (!tsCramDirty) return;
     if (ts_pal256_live && ts256_nb > 1 && ts_reindex_hint) {
         // RE-INDEX (pixels were redrawn for this palette — ts_reindex_hint):
@@ -3238,9 +3487,34 @@ void VIDEO::tsPalettePoll(bool force) {
     }
     // The cell→slot map follows CRAM at once (lines rendered from here on use
     // the new numbering); only the slot COLOURS wait for the beam below.
+    // ...EXCEPT a single-bank RE-INDEX (ts256Reduce renumbers every cell) while
+    // core1 still holds rows posted with the current numbering: the rows it
+    // renders after the rewrite carry the NEW offsets under the OLD colours
+    // until the next release. A held release posts 192 rows and returns to the
+    // guest at once, and a title that rewrites CRAM continuously (ppal.spg: all
+    // 256 cells in a free-running loop, ~20 times a frame; the TGV video
+    // player: 256 cells per flip) reaches the next poll's Assign while core1 is
+    // 10-30 rows into that render — top rows right, the rest in another map's
+    // colours, "a negative in places" (hw 2026-09-30). Defer the renumbering
+    // until the ring is empty; nothing is posted while the hold is up, and the
+    // release runs its own Assign, so nothing waits on this one.
     if (ts_pal256_live && !ts_pal_assigned) {
+        if (ts256_valid && ts256_nb == 1 && (ts_reindex_hold || ts_reindex_held_prev) && tsC1Pending()) {
+            TSPAL_COUNT(map_deferred);
+            return;
+        }
+#if TSPAL_DBG
+        if (ts256_valid && ts256_nb == 1 && !ts_reindex_hold && !ts_reindex_held_prev && ts_pal_ncells < TS_REINDEX_MIN_CELLS) ts_dbg_sticky_pre++;
+#endif
         ts256Assign(false); ts_pal_assigned = true;
-        TSPAL_MAPGEN();
+        if (ts256_nb > 1 && ts256_exhausted) {
+            // The sticky path parked a cell on a nearest colour: this bank is
+            // too small for the palette the title has grown into. Same answer
+            // as the versioned path (ts256Version) - one bank of the whole pool.
+            ts256DegradeOneBank();
+            tsCramDirty = false; ts_pal_row = -1; ts_pal_ncells = 0;
+            return;
+        }
     }
     // The unconditional flush at v_sync (ESPectrum::loop) would otherwise defeat
     // the re-index rule below by landing the new palette on the picture that is
@@ -6387,6 +6661,7 @@ void VIDEO::tsBandReplay() {
 }
 
 IRAM_ATTR void VIDEO::tsDrawTick() {
+    PERF_BUCKET_SCOPE(PB_DRAWTICK);
     const uint32_t rows = vga.yres;
     TsConf::dmaLineTick();   // a queued DMA whose DMA_ACT has dropped must be complete before the guest goes on
     if (__builtin_expect(tsCramDirty, 0)) {
@@ -7020,7 +7295,11 @@ void VIDEO::tsRenderLine(uint32_t curline) {
     }
     jobSetLyx(j, curline, ts_ygctr, TsConf::r.g_xoffs);
 #if defined(TS_VIDEO_TRACE) && TS_VIDEO_TRACE
-    if (TsConf::r.g_yoffs == 0 && ts_ygctr != (curline & 0x1FF)) {
+    // With GYOffs 0 the Y counter is the raster line, i.e. curline plus the
+    // lines the crop skipped (RRES 360x288 on a 240-row fb: 24) — the first
+    // cut compared against curline alone and logged every frame of ppal.spg
+    // at 288 lines, shredding the UART (2026-09-30).
+    if (TsConf::r.g_yoffs == 0 && ts_ygctr != ((curline + ts_crop_top) & 0x1FF)) {
         ts_ygc_bad++;
         if (ts_ygc_logged_frame != ts_frame_seq) {
             ts_ygc_logged_frame = ts_frame_seq;
@@ -7730,6 +8009,7 @@ void VIDEO::gmxBorderFrame(bool skipFrame) {
 
 
 IRAM_ATTR void VIDEO::EndFrame() {
+    PERF_BUCKET_SCOPE(PB_ENDFRAME);
 
     // Console drain, once per frame. Debug::log lands in a 4 KB ring that
     // pumpUart() empties into the 32-byte UART FIFO, and until 2026-09-09 the
@@ -8102,6 +8382,29 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
                         for (int i = 0; i < 257; i++) ts_page_hist[i] = 0;
                         for (int i = 0; i < 256; i++) ts_dma_src_hist[i] = ts_dma_dst_hist[i] = 0;
                     }
+                    {   // host time inside CPU::loop: ports by low byte, then the big buckets
+                        const double fr = 10.0 * 60.0;
+                        int p = 0; uint8_t used[512] = {0};
+                        uint64_t ptot = 0; for (int i = 0; i < 512; i++) ptot += perf_port_us[i];
+                        for (int j = 0; j < 8 && p < (int)sizeof(line) - 28; j++) {
+                            int best = -1; uint32_t bv = 0;
+                            for (int i = 0; i < 512; i++) if (!used[i] && perf_port_us[i] > bv) { bv = perf_port_us[i]; best = i; }
+                            if (best < 0) break;
+                            used[best] = 1;
+                            p += snprintf(line + p, sizeof(line) - p, " %s%02X:%.2fms/%u",
+                                          best >= 256 ? "o" : "i", best & 0xFF, bv / fr / 1000.0,
+                                          (unsigned)(perf_port_n[best] / fr));
+                        }
+                        Debug::log("[PERF] ports: %.2fms/f total:%s", ptot / fr / 1000.0, line);
+                        Debug::log("[PERF] host: halt=%.2fms/%u drawtick=%.2fms/%u palpoll=%.2fms/%u endframe=%.2fms (per frame)",
+                            perf_bucket_us[PB_HALT] / fr / 1000.0, (unsigned)(perf_bucket_n[PB_HALT] / fr),
+                            perf_bucket_us[PB_DRAWTICK] / fr / 1000.0, (unsigned)(perf_bucket_n[PB_DRAWTICK] / fr),
+                            perf_bucket_us[PB_PALPOLL] / fr / 1000.0, (unsigned)(perf_bucket_n[PB_PALPOLL] / fr),
+                            perf_bucket_us[PB_ENDFRAME] / fr / 1000.0);
+                        DivMMC::perfDump((float)fr);
+                        for (int i = 0; i < 512; i++) perf_port_us[i] = perf_port_n[i] = 0;
+                        for (int i = 0; i < PB_N; i++) perf_bucket_us[i] = perf_bucket_n[i] = 0;
+                    }
                     hist_cpu_us = 0; hist_windows = 0;
                 }
             }
@@ -8288,18 +8591,31 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         // is released by tsPalettePoll when the beam enters blanking, whole
         // picture and palette together (tsReindexRelease).
         if (ts_reindex_hold) {
-            if (ts_reindex_ready_seen) {
-                // Ready since the PREVIOUS EndFrame and still not released: no poll
-                // saw the beam leave the picture for a whole frame (a full-height
-                // mode, a core0 with no idle, ...). Release now, wherever the beam
-                // is — one torn frame beats a picture that never renders.
+            if (ts_reindex_ready_seen && ++ts_reindex_ready_frames >= 2) {
+                // Ready for TWO whole frames and still not released: no poll
+                // saw the beam leave the picture (a full-height mode, a core0
+                // with no idle, ...). Release now, wherever the beam is — one
+                // torn frame beats a picture that never renders. Two frames,
+                // not one: with V-Sync pacing a frame that ENDS late in
+                // blanking has its release at the NEXT blanking start, which
+                // comes just before the second EndFrame — forcing at the first
+                // one released ~1 ms early, with the beam still in the picture.
 #if TSPAL_DBG
                 ts_dbg_rel_forced++;
 #endif
-                tsReindexRelease();
+                tsReindexRelease(false);
             } else {
+                if (!ts_reindex_ready_seen) ts_reindex_ready_frames = 0;
                 tsReindexReady = true;
                 ts_reindex_ready_seen = true;
+                // Reduce the map NOW, off the release's critical path (its own
+                // Assign then hits the CRAM-generation cache — unless the guest
+                // writes CRAM again before the release, which a continuous
+                // writer does; ts256Reduce is cheap enough for that now).
+                // Nothing is posted while the hold is up, so a renumbered map
+                // can only reach rows the release re-renders anyway — but not
+                // while core1 still holds rows posted before the hold.
+                if (ts_pal256_live && !tsC1Pending()) { ts256Assign(false); ts_pal_assigned = true; }
             }
         } else {
             ts_reindex_ready_seen = false;

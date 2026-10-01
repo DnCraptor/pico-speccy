@@ -734,6 +734,22 @@ int hdmi_beam_row(void) {
     const uint l = hdmi_current_line;
     return (l < hdmi_isr_mode.v_active) ? (int)(l >> 1) : -1;
 }
+// Lines of vertical blanking still ahead of the beam (0 = the last blanking
+// line), -1 while the beam is inside the active area. The TS-Conf re-index
+// release needs a KNOWN margin, not merely "in blanking": a release that starts
+// on the last blanking lines finishes with the beam 100 rows into the picture.
+int hdmi_blank_lines_left(void) {
+    const uint l = hdmi_current_line;
+    if (l < hdmi_isr_mode.v_active) return -1;
+    return (l <= hdmi_isr_mode.v_total) ? (int)(hdmi_isr_mode.v_total - l) : 0;
+}
+
+// Total vertical blanking of the live mode in display lines (164 at 640x480
+// 48.83 Hz, only 44 at 720x576 — a release window has to be judged against
+// what the mode HAS, not a fixed number).
+int hdmi_blank_lines_total(void) {
+    return (int)(hdmi_isr_mode.v_total - hdmi_isr_mode.v_active);
+}
 
 // IRQ-latency diagnostic: largest gap between consecutive HDMI line IRQs (µs).
 // If the IRQ is serviced late (line not ready in time), this spikes well above
@@ -1862,13 +1878,45 @@ static inline void hdmi_write_pair(hdmi_word_t *ccw, uint8_t slot, uint32_t left
     ccw[HDMI_PX_IX(slot, 1)] = hdmi_tmds_level888(right888 & 0x00ffffffu);
 }
 #else
+#if HDMI_TMDS_BALANCED_PAIR
+// tmds_balanced_pair() is a SEARCH — three candidate levels x four
+// representations, each scored by a 40-step run walk — i.e. ~1000 operations per
+// channel, ~20k cycles per palette slot with both pages. Written once per boot
+// that is nothing; written 184 slots at a time it is 7-14 ms on core0, which is
+// how a TS-Conf 256c palette flush (ts256ProgramBank, every held re-index) ran
+// PAST the vertical blanking it was scheduled into: the beam reached the top of
+// the re-rendered picture with half the slots still holding the previous
+// palette — a "negative" frame at every palette change (TGV / ppal / keft, hw
+// 2026-09-30; `flush=7..14 ms` on the [TSPAL] rel: line, blanking ~6 ms). The
+// pair depends on the 8-bit level alone, so it is memoised per level: 1 KB +
+// 32 B of .bss, filled lazily, ~30 cycles per channel afterwards.
+static uint16_t hdmi_bal_a[256], hdmi_bal_b[256];
+static uint32_t hdmi_bal_valid[8];
+static inline void hdmi_balanced_pair_lut(uint8_t v, uint16_t *a, uint16_t *b) {
+    const uint32_t bit = 1u << (v & 31);
+    if (!(hdmi_bal_valid[v >> 5] & bit)) {
+        tmds_balanced_pair(v, &hdmi_bal_a[v], &hdmi_bal_b[v]);
+        hdmi_bal_valid[v >> 5] |= bit;
+    }
+    *a = hdmi_bal_a[v]; *b = hdmi_bal_b[v];
+}
+#endif
+// Same for the plain encoder (the CRT-tap pages, where left != right): a bit walk
+// per channel, memoised into 512 B.
+static uint16_t hdmi_enc_lut[256];
+static uint32_t hdmi_enc_valid[8];
+static inline uint16_t tmds_encoder_lut(uint8_t v) {
+    const uint32_t bit = 1u << (v & 31);
+    if (!(hdmi_enc_valid[v >> 5] & bit)) { hdmi_enc_lut[v] = (uint16_t)tmds_encoder(v); hdmi_enc_valid[v >> 5] |= bit; }
+    return hdmi_enc_lut[v];
+}
 static void hdmi_write_pair(hdmi_word_t *ccw, uint8_t slot, uint32_t left888, uint32_t right888) {
     if (((left888 ^ right888) & 0x00ffffff) == 0) {
 #if HDMI_TMDS_BALANCED_PAIR
         uint16_t rA, rB, gA, gB, bA, bB;
-        tmds_balanced_pair((left888 >> 16) & 0xff, &rA, &rB);
-        tmds_balanced_pair((left888 >>  8) & 0xff, &gA, &gB);
-        tmds_balanced_pair( left888        & 0xff, &bA, &bB);
+        hdmi_balanced_pair_lut((left888 >> 16) & 0xff, &rA, &rB);
+        hdmi_balanced_pair_lut((left888 >>  8) & 0xff, &gA, &gB);
+        hdmi_balanced_pair_lut( left888        & 0xff, &bA, &bB);
         ccw[HDMI_SLOT_IX(slot, 0)] = get_ser_diff_data(rA, gA, bA);
         ccw[HDMI_SLOT_IX(slot, 1)] = get_ser_diff_data(rB, gB, bB);
 #else
@@ -1880,14 +1928,14 @@ static void hdmi_write_pair(hdmi_word_t *ccw, uint8_t slot, uint32_t left888, ui
         return;
     }
 
-    const uint R_l = tmds_encoder((left888 >> 16) & 0xff);
-    const uint G_l = tmds_encoder((left888 >>  8) & 0xff);
-    const uint B_l = tmds_encoder( left888        & 0xff);
+    const uint R_l = tmds_encoder_lut((left888 >> 16) & 0xff);
+    const uint G_l = tmds_encoder_lut((left888 >>  8) & 0xff);
+    const uint B_l = tmds_encoder_lut( left888        & 0xff);
     ccw[HDMI_SLOT_IX(slot, 0)] = get_ser_diff_data(R_l, G_l, B_l);
 
-    const uint R_r = tmds_encoder((right888 >> 16) & 0xff);
-    const uint G_r = tmds_encoder((right888 >>  8) & 0xff);
-    const uint B_r = tmds_encoder( right888        & 0xff);
+    const uint R_r = tmds_encoder_lut((right888 >> 16) & 0xff);
+    const uint G_r = tmds_encoder_lut((right888 >>  8) & 0xff);
+    const uint B_r = tmds_encoder_lut( right888        & 0xff);
     ccw[HDMI_SLOT_IX(slot, 1)] = get_ser_diff_data(
         R_r ^ ((hdmi_tmds_disp(R_l) * hdmi_tmds_disp(R_r) >= 0) ? 0xFF : 0),
         G_r ^ ((hdmi_tmds_disp(G_l) * hdmi_tmds_disp(G_r) >= 0) ? 0xFF : 0),

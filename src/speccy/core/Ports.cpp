@@ -54,6 +54,7 @@ bool g_brd_first_set = false;
 #include "speccy/machines/Alf.h"
 #include "speccy/devices/tape/Tape.h"
 #include "speccy/video/Video.h"
+#include "app/PerfScope.h"
 #include "speccy/z80/z80.h"
 #include "drivers/sound/pwm_audio.h"
 #include "roms.h"
@@ -952,6 +953,7 @@ static __attribute__((noinline)) bool atmPortReadEarly(uint16_t address, uint8_t
 // *_TRACE flags. Rule for a new machine with woven-in branches: same shape.
 // ---------------------------------------------------------------------------
 template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputImpl(uint16_t address) {
+  PERF_PORT_SCOPE(address & 0xFF);
   uint8_t data;
 #if SND_PORT_TRACE
   sndTraceRd[address & 0xFF]++;
@@ -2793,6 +2795,7 @@ static __attribute__((noinline)) bool atmPortWriteEarly(uint16_t address, uint8_
 
 
 template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImpl(uint16_t address, uint8_t data) {
+  PERF_PORT_SCOPE(256 + (address & 0xFF));
 #if SCORP_FF_TRACE
   if (Z80Ops::isScorpion) {
     static uint32_t outN=0; outN++;

@@ -131,6 +131,16 @@ static inline void cs_deselect(uint cs_pin) {
  * alone does NOT do. */
 static float pio_div_fast = 1.0f;
 
+/* The fast divider for the live clk_sys — the ONE formula, shared by init_spi()
+ * and sdcard_reclock() (see the comment in init_spi for why it is an integer). */
+static float pio_fast_div(void)
+{
+    uint32_t sys = clock_get_hz(clk_sys);
+    uint32_t idiv = (sys + 4u * 25000000u - 1u) / (4u * 25000000u);
+    if (idiv < 1u) idiv = 1u;
+    return (float)idiv;
+}
+
 static void pio_set_sck(uint32_t hz)
 {
     float div = (float)clock_get_hz(clk_sys) / (4.0f * (float)hz);
@@ -252,8 +262,13 @@ void init_spi(void)
 	// Re-derived on every call on purpose: clk_sys moves at the Config::cpu_mhz
 	// switch, and re-running pio_spi_init() on the same SM/offset is what puts
 	// the bus back into a known state after a failed probe or a hot swap.
-	float clkdiv = (float)clock_get_hz(clk_sys) / (4.0f * 20000000.0f);
-	if (clkdiv < 1.0f) clkdiv = 1.0f;
+	// An INTEGER divider, the smallest that keeps SCK <= 25 MHz: 4 at 378 MHz
+	// (23.6 MHz), 3 at 252 and 6 at 504 (21 MHz). The old fractional one
+	// (4.725 at 378 for a nominal 20 MHz) jittered between 4 and 5 sys clocks per
+	// PIO cycle, so its shortest SCK half-period was already the /4 one — this
+	// raises the average rate (+18 % at 378, the bus bounds every sector read)
+	// without shortening any edge the card has not already seen.
+	float clkdiv = pio_fast_div();
 	pio_div_fast = clkdiv;			/* what FCLK_FAST() goes back to */
 	int cpol = 0;
 	int cpha = 0;
@@ -277,9 +292,7 @@ void sdcard_reclock(void)
 {
 	if (Stat & STA_NOINIT) return;
 #ifdef SDCARD_PIO
-	float clkdiv = (float)clock_get_hz(clk_sys) / (4.0f * 20000000.0f);
-	if (clkdiv < 1.0f) clkdiv = 1.0f;
-	pio_div_fast = clkdiv;
+	pio_div_fast = pio_fast_div();
 #endif
 	FCLK_FAST();
 }
@@ -770,6 +783,11 @@ int xmit_datablock (	/* 1:OK, 0:Error */
 /* Write sector(s)                                                       */
 /*-----------------------------------------------------------------------*/
 
+/* Bumped by every sector write on either volume. DivMMC's CMD18 read-ahead
+   keeps sectors across guest commands and drops them when this moves, so a
+   write by the host (config, NVRAM, logs) can never be served back stale. */
+volatile uint32_t g_disk_write_gen = 0;
+
 DRESULT disk_write (
 	BYTE drv,			/* Physical drive number (0) */
 	const BYTE *buff,	/* Ponter to the data to write */
@@ -777,6 +795,7 @@ DRESULT disk_write (
 	UINT count			/* Number of sectors to write (1..128) */
 )
 {
+	g_disk_write_gen++;
 	if (drv == 1) return usb_disk_write(buff, sector, count);
 	if (drv || !count) return RES_PARERR;		/* Check parameter */
 	if (Stat & STA_NOINIT) return RES_NOTRDY;	/* Check drive status */

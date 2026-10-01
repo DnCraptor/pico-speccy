@@ -8,6 +8,7 @@
 #include "speccy/core/MemESP.h"
 #include "app/Config.h"
 #include "app/Debug.h"
+#include "hardware/timer.h"
 #include "fs/FileUtils.h"
 #include "speccy/core/roms.h"
 #include "speccy/z80/z80.h"
@@ -19,6 +20,7 @@ extern int butter_pages;
 // Raw-passthrough target: physical SD (pdrv 0) normally, the USB stick
 // (pdrv 1) when it took over as the root volume (no SD card at boot).
 static BYTE raw_pdrv() { return FileUtils::usbRoot ? 1 : 0; }
+static void raDrop();   // CMD18 read-ahead (see loadSectorStream)
 
 #if ZC_PORT_TRACE
 // Z-Controller / DivSD card trace. Two lessons from the SMUC and GMX traces are
@@ -136,6 +138,13 @@ uint8_t DivMMC::mmc_r1 = 0;
 bool DivMMC::mmc_cs_active = false;
 
 int DivMMC::mmc_read_index = -1;
+static bool mmc_read_cont = false;   // CMD18: past the first block (no R1 in the gap)
+// CMD18: the next block has been addressed but not fetched yet. It is loaded
+// when the guest reaches its data token, not when the previous CRC ends: a
+// reader that stops after one block (WC's one-sector FAT lookups) would
+// otherwise cost a card read it never uses — and with the read-ahead, a whole
+// 16-sector refill that also evicted the data window (hw trace 2026-09-30).
+static bool mmc_cont_pending = false;
 int DivMMC::mmc_write_index = -1;
 int DivMMC::mmc_csd_index = -1;
 int DivMMC::mmc_cid_index = -1;
@@ -518,6 +527,7 @@ void DivMMC::reset() {
     mmc_ocr_index = -1;
     mmc_sector_buf_addr = 0xFFFFFFFF;
     mmc_sector_dirty = false;
+    raDrop();
 
     // Reset IDE state
     ide_feature = 0;
@@ -756,6 +766,172 @@ void DivMMC::flushWriteBuffer() {
 // In DivMMC mode the .mmc file is "superfloppy" formatted (FAT16 starts at
 // sector 0). ZP4 expects an MBR with a partition table at sector 0, so we
 // synthesize one and shift the .mmc data by +1 sector.
+// CMD18 read-ahead. A guest streaming a multi-block read (Wild Commander's
+// TGV player pulls 73 sectors per video frame, ~24 per emulated frame) used to
+// cost one single-block host read per sector: a CMD17 round trip on the real
+// card plus its access latency, every 512 bytes, all on core0 inside the frame.
+// While a CMD18 is running, the next sectors are fetched as ONE multi-block host
+// read (disk_read count>1 = CMD18/CMD12 on the card, or one f_read of the image)
+// and served from this buffer. Scope is one guest CMD18 only: the buffer is
+// dropped when a new command starts, on a CS edge and on any sector write, so
+// nothing the host or the guest writes can be served stale beyond the running
+// stream. Lives in butter PSRAM when there is some (the SD driver reads with
+// the CPU, no DMA), else heap; no buffer = the old single-sector path.
+// What a sector costs on the real card decides the shape (hw 2026-09-30, TGV):
+// a single-sector read is ~0.5 ms, almost all of it the card's access latency,
+// while an 8-sector multi-block read is ~1.2 ms. So the thing to minimise is the
+// NUMBER of card reads, not the bytes. Wild Commander's reader issues ~3-4
+// sectors per CMD18 (one cluster run) and every run starts where the last one
+// ended, so the buffer is KEPT across guest commands and filled RA_MAX sectors
+// at a time whenever the guest reads on sequentially. A stream that starts
+// somewhere unrelated (a FAT or directory read) fetches what the previous
+// stream consumed, so random access does not pay for 16 sectors it never uses.
+// The buffer is dropped on any sector write — the guest's (storeSector) and the
+// host's (g_disk_write_gen, bumped by disk_write) — and on a card reset.
+static constexpr uint32_t RA_MAX = 16;
+static uint8_t* s_ra_buf   = nullptr;
+static bool     s_ra_tried = false;
+static uint32_t s_ra_first = 0;
+static uint32_t s_ra_n     = 0;       // sectors held (0 = empty)
+static uint32_t s_ra_gen   = 0;       // g_disk_write_gen when filled
+static bool     s_ra_on    = false;   // a CMD18 stream is running
+static uint32_t s_ra_run   = 0;       // sectors served in the running stream
+static uint32_t s_ra_last  = 1;       // sectors the previous stream consumed
+static uint32_t s_ra_next  = 0xFFFFFFFF;   // sector after the last one served
+// One more sector beside the window: the last SINGLE read. Wild Commander
+// re-reads the same FAT sector before every cluster run of a file it streams
+// (6044/6045 in the TGV trace, once per 16 data sectors), and a card read is
+// ~0.43 ms of core0 where a copy is microseconds. Lives at s_ra_buf[RA_MAX].
+static uint32_t s_one_sec  = 0xFFFFFFFF;
+static uint32_t s_one_gen  = 0;
+extern "C" volatile uint32_t g_disk_write_gen;
+
+// End of a guest command: remember the run; the buffer itself stays valid.
+static void raEnd() {
+    if (s_ra_on) s_ra_last = s_ra_run ? s_ra_run : 1;
+    s_ra_on = false; s_ra_run = 0;
+}
+// A write or a card reset: nothing held may be served any more.
+static void raDrop() { raEnd(); s_ra_n = 0; s_ra_next = 0xFFFFFFFF; s_one_sec = 0xFFFFFFFF; }
+
+#if PERF_TRACE && PERF_HIST
+// ZC card-read attribution (TGV tuning): what each loadSector/loadSectorStream
+// call turned into, how long the card took, and a short sector trace.
+enum { ZS_C17, ZS_HIT, ZS_SGL, ZS_REFILL, ZS_N };
+static uint32_t zs_n[ZS_N], zs_us[ZS_N], zs_sec[ZS_N];
+static uint16_t zs_trace_left = 0;
+static uint32_t zs_frames_seen = 0;
+static void zsNote(int k, uint32_t us, uint32_t secs, uint32_t sector, const char* why) {
+    zs_n[k]++; zs_us[k] += us; zs_sec[k] += secs;
+    if (zs_trace_left) {
+        zs_trace_left--;
+        Debug::log("ZCT %s s=%lu run=%lu us=%lu held=%lu+%lu", why, (unsigned long)sector,
+                   (unsigned long)s_ra_run, (unsigned long)us,
+                   (unsigned long)s_ra_first, (unsigned long)s_ra_n);
+    }
+}
+void DivMMC::perfDump(float fr) {
+    static const char* nm[ZS_N] = {"c17", "hit", "sgl", "fill"};
+    char line[200]; int p = 0;
+    for (int k = 0; k < ZS_N; k++)
+        p += snprintf(line + p, sizeof(line) - p, " %s=%.1f/%.2fms/%.1fs", nm[k],
+                      zs_n[k] / fr, zs_us[k] / fr / 1000.0, zs_sec[k] / fr);
+    Debug::log("[PERF] zc:%s (calls/ms/sectors per frame)", line);
+    for (int k = 0; k < ZS_N; k++) zs_n[k] = zs_us[k] = zs_sec[k] = 0;
+    // one 200-line sector trace per boot, a few windows in (playback running)
+    if (++zs_frames_seen == 3) zs_trace_left = 200;
+}
+#define ZS_T0() uint32_t _zs_t0 = time_us_32()
+#define ZS(k, secs, why) zsNote(k, time_us_32() - _zs_t0, secs, sector, why)
+#else
+#define ZS_T0() do {} while (0)
+#define ZS(k, secs, why) do {} while (0)
+#endif
+
+void DivMMC::loadSectorStream(uint32_t sector) {
+    if (!s_ra_buf && !s_ra_tried) {
+        s_ra_tried = true;
+        s_ra_buf = (uint8_t*)Buffer::palloc((RA_MAX + 1) * 512,
+                                            Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        Debug::log("ZC: CMD18 read-ahead %s", s_ra_buf ? "on" : "off (no memory)");
+    }
+    const bool seq = (sector == s_ra_next);
+    s_ra_run++;
+    s_ra_next = sector + 1;
+    if (!s_ra_buf || (!divsd_mode && !mmc_file_open[0])) { loadSector(sector); return; }
+    const bool held = s_ra_n && s_ra_gen == g_disk_write_gen;
+    ZS_T0();
+    if (held && sector >= s_ra_first && sector - s_ra_first < s_ra_n) {
+        memcpy(mmc_sector_buf, s_ra_buf + (sector - s_ra_first) * 512, 512);
+        ZS(ZS_HIT, 0, "hit");
+        return;
+    }
+    // Refill only for a sequential read: the stream's own next sector, or the
+    // sector right after the held window (the data stream resuming after the
+    // guest's FAT lookups, which WC interleaves as one-sector CMD18s between
+    // cluster runs — those broke the plain "last sector + 1" test, hw
+    // 2026-09-30). Anything else is a single read that leaves the window alone.
+    const bool cont = held && sector == s_ra_first + s_ra_n;
+    if (!cont && !(seq && s_ra_run > 1)) {
+        uint8_t* one = s_ra_buf + RA_MAX * 512;
+        if (sector == s_one_sec && s_one_gen == g_disk_write_gen) {
+            memcpy(mmc_sector_buf, one, 512);
+            ZS(ZS_HIT, 0, "hit1");
+            return;
+        }
+        const uint32_t gen1 = g_disk_write_gen;
+        loadSector(sector);
+        memcpy(one, mmc_sector_buf, 512);
+        s_one_sec = sector; s_one_gen = gen1;
+        ZS(ZS_SGL, 1, seq ? "sgl1" : "sglJ");
+        return;
+    }
+    const uint32_t want = RA_MAX;
+    const uint32_t gen = g_disk_write_gen;
+    s_ra_n = 0;                            // the buffer is about to be overwritten
+    if (divsd_mode) {
+        if (disk_read(raw_pdrv(), s_ra_buf, sector, want) != RES_OK) {
+            loadSector(sector);            // e.g. past the end of the card
+            return;
+        }
+    } else {
+        UINT br = 0;
+        f_lseek(&mmc_file[0], (FSIZE_t)sector * 512);
+        f_read(&mmc_file[0], s_ra_buf, want * 512, &br);
+        if (br < want * 512) memset(s_ra_buf + br, 0, want * 512 - br);
+    }
+    s_ra_first = sector;
+    s_ra_n = want;
+    s_ra_gen = gen;
+    memcpy(mmc_sector_buf, s_ra_buf, 512);
+    ZS(ZS_REFILL, want, cont ? "fillC" : "fillS");
+}
+
+// DMA fast path (TS-Conf SPI->RAM): two data bytes straight out of the sector
+// buffer while a read block's DATA phase is running, skipping mmc_read's
+// per-byte protocol dispatch. Anything else (token, CRC, gap, block boundary,
+// a non-SDHC card, no CS) answers false and the caller takes the byte path.
+bool DivMMC::zc_read_word(uint16_t& v) {
+    if (!mmc_cs_active || !sdhc_mode || (mmc_r1 & 1) == 0 || mmc_wr_resp >= 0) return false;
+    if (mmc_last_command != 0x51 && mmc_last_command != 0x52) return false;
+    const int i = mmc_read_index;
+    if (i < 3 || i > 513) return false;    // both bytes must be data (3..514)
+    v = (uint16_t)mmc_sector_buf[i - 3] | ((uint16_t)mmc_sector_buf[i - 2] << 8);
+    mmc_read_index = i + 2;
+    return true;
+}
+
+uint32_t DivMMC::zc_read_span(const uint8_t*& p) {
+    if (!mmc_cs_active || !sdhc_mode || (mmc_r1 & 1) == 0 || mmc_wr_resp >= 0) return 0;
+    if (mmc_last_command != 0x51 && mmc_last_command != 0x52) return 0;
+    const int i = mmc_read_index;
+    if (i < 3 || i > 513) return 0;
+    p = mmc_sector_buf + (i - 3);
+    return (uint32_t)(515 - i) / 2;       // pairs whose both bytes are data (i..514)
+}
+
+void DivMMC::zc_read_consume(uint32_t words) { mmc_read_index += (int)(2 * words); }
+
 void DivMMC::loadSector(uint32_t sector) {
     if (divsd_mode) {
         DRESULT r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
@@ -791,6 +967,7 @@ void DivMMC::loadSector(uint32_t sector) {
 }
 
 void DivMMC::storeSector(uint32_t sector) {
+    raDrop();
     if (divsd_mode) {
         DRESULT r = disk_write(raw_pdrv(), mmc_sector_buf, sector, 1);
 #if ZC_PORT_TRACE
@@ -818,6 +995,7 @@ void DivMMC::storeSector(uint32_t sector) {
 // Treat CS as active if EITHER bit 0 or bit 1 is 0.
 void DivMMC::mmc_cs(uint8_t value) {
     mmc_cs_active = (value & 0x01) == 0;  // Active low
+    raEnd();
 
     // Reset protocol state on CS change (like ZEsarUX)
     mmc_r1 = 1;
@@ -943,26 +1121,45 @@ uint8_t DivMMC::mmc_read() {
             return 0xFF;
 
         case 0x52: // CMD18 READ_MULTIPLE_BLOCK
+                   // Stream: NCR, R1, then per block: token 0xFE, 512 data
+                   // bytes, 2 CRC bytes, and ONLY 0xFF between a block's CRC
+                   // and the next token (the card's Nac gap). This case used to
+                   // restart at the R1 slot for every block, i.e. it put a 0x00
+                   // into that gap. Wild Commander's DMA sector reader (the one
+                   // its Video Player, TAPM, BMPV and TXTEDIT load through)
+                   // waits for the first non-0xFF byte after the CRC and then
+                   // does `CP 0xFE / JR NZ,$` — a deliberate hang on anything
+                   // else — so the first multi-sector read froze the machine on
+                   // its second sector (dump: A=00, one sector landed, 2026-09-30).
+                   // A real card and Unreal's model both never emit that byte.
             if (mmc_read_index >= 0) {
-                if (mmc_read_index == 0) value = 0xFF;
-                if (mmc_read_index == 1) value = 0;
-                if (mmc_read_index == 2) value = 0xFE;
+                if (mmc_read_index == 0) value = 0xFF;                       // NCR / gap
+                if (mmc_read_index == 1) value = mmc_read_cont ? 0xFF : 0;   // R1 once per command
+                if (mmc_read_index == 2) {                                   // data token
+                    if (mmc_cont_pending) {
+                        mmc_cont_pending = false;
+                        if (s_ra_on) loadSectorStream(mmc_read_address);
+                        else loadSector(mmc_read_address);
+                        mmc_sector_buf_addr = mmc_read_address;
+                    }
+                    value = 0xFE;
+                }
                 if (mmc_read_index >= 3 && mmc_read_index <= 514) {
                     if (sdhc_mode)
                         value = mmc_sector_buf[mmc_read_index - 3];
                     else
                         value = readByte(mmc_read_address + mmc_read_index - 3);
                 }
+                if (mmc_read_index == 515 || mmc_read_index == 516)
+                    value = 0xFF; // CRC
                 mmc_read_index++;
-                if (mmc_read_index == 516) mmc_read_index = -1;
-                // Auto-advance to next sector
-                if (mmc_read_index == -1) {
+                // Auto-advance to the next block: the stream continues at the
+                // gap slots (0xFF, 0xFF) and the next token.
+                if (mmc_read_index == 517) {
                     mmc_read_index = 0;
+                    mmc_read_cont = true;
                     mmc_read_address += sdhc_mode ? 1 : 512;
-                    if (sdhc_mode) {
-                        loadSector(mmc_read_address);
-                        mmc_sector_buf_addr = mmc_read_address;
-                    }
+                    if (sdhc_mode) mmc_cont_pending = true;   // fetched at the token
                 }
                 return value;
             }
@@ -1089,6 +1286,7 @@ void DivMMC::mmc_write(uint8_t value) {
         mmc_last_command = value;
         mmc_index_command++;
         mmc_wr_resp = -1;
+        raEnd();                                   // the running CMD18 (if any) is over
 #if ZC_PORT_TRACE
         // Block commands are reported by load/storeSector with their sector;
         // here only the init/status frames, folded so a polled CMD13 cannot
@@ -1171,7 +1369,12 @@ void DivMMC::mmc_write(uint8_t value) {
                                    mmc_params[3];
                 if (sdhc_mode) {
                     flushWriteBuffer();
+#if PERF_TRACE && PERF_HIST
+                    { const uint32_t sector = mmc_read_address; ZS_T0();
+                      loadSector(sector); ZS(ZS_C17, 1, "c17"); }
+#else
                     loadSector(mmc_read_address);
+#endif
                     mmc_sector_buf_addr = mmc_read_address;
                 }
                 mmc_read_index = 0;
@@ -1189,10 +1392,14 @@ void DivMMC::mmc_write(uint8_t value) {
                                    mmc_params[3];
                 if (sdhc_mode) {
                     flushWriteBuffer();
-                    loadSector(mmc_read_address);
+                    raEnd();                       // a new stream starts
+                    s_ra_on = true;
+                    loadSectorStream(mmc_read_address);
                     mmc_sector_buf_addr = mmc_read_address;
                 }
                 mmc_read_index = 0;
+                mmc_read_cont = false;
+                mmc_cont_pending = false;
             }
             break;
 
@@ -1557,6 +1764,7 @@ void DivMMC::zc_init() {
     mmc_ocr_index = -1;
     mmc_sector_buf_addr = 0xFFFFFFFF;
     mmc_sector_dirty = false;
+    raDrop();
     zc_config = 0;
     zc_enabled = true;
     Debug::log("Z-Controller: raw %s, %lu sectors, SDHC mode",
