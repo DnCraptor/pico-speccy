@@ -84,7 +84,8 @@ public:
     // newRomSet == R_NONE resets the arch to its default romset (the old "" argument).
     static void requestMachine(ArchIdx newArch, RomsetIdx newRomSet);
 
-    static void setJoyMap(uint8_t joy_type);
+    // The default pad map of a joystick type. No UI, nothing saved.
+    static void joyDefaults(uint8_t joy_type, uint16_t out[14]);
 
     // arch/romSet* always hold a real table index after load(); only the pref_*
     // members may additionally hold A_LAST/R_LAST ("Last used") — and pref_arch may
@@ -302,6 +303,9 @@ public:
     }
     static uint8_t  joystick;
     static uint16_t joydef[14];
+    // True when pad control `slot` is assigned a KEYBOARD key (not None, not a
+    // joystick action): the control then presses that key and nothing else.
+    static bool     joyKeyTarget(int slot);
     static uint8_t  AluTiming;
     static uint8_t  ayConfig;
     static uint8_t  turbosound;

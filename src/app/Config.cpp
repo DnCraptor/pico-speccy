@@ -2216,25 +2216,26 @@ void Config::clearPendingVideoMode() {
     f_unlink(VMODE_PENDING_FILE);
 }
 
-void Config::setJoyMap(uint8_t joytype) {
-    for (int n = 0; n < 14; n++) joydef[n] = fabgl::VK_NONE;
-    // Ask to overwrite map with default joytype values
-    string title = "Joystick";
-    string msg = OSD_DLG_SETJOYMAPDEFAULTS;
-    uint8_t res = OSD::msgDialog(title, msg);
-    if (res == DLG_YES) {
-        joydef[0] = fabgl::VK_DPAD_LEFT;
-        joydef[1] = fabgl::VK_DPAD_RIGHT;
-        joydef[2] = fabgl::VK_DPAD_UP;
-        joydef[3] = fabgl::VK_DPAD_DOWN;
-        joydef[6] = fabgl::VK_DPAD_FIRE;
-        if (joytype == JOY_KEMPSTON) {
-            joydef[4] = fabgl::VK_DPAD_START;
-            joydef[5] = fabgl::VK_DPAD_SELECT;
-            joydef[7] = fabgl::VK_DPAD_ALTFIRE;
-            joydef[9] = fabgl::VK_JOY_X;
-        }
-        Config::save();
+bool Config::joyKeyTarget(int slot) {
+    const uint16_t t = joydef[slot];
+    // Every key the picker offers sits below VK_JOY_RIGHT. Codes past the
+    // DPAD block (VK_MENU_*) are NOT keys: a config saved in Fuller mode by an
+    // older build can hold them, and injecting those would steer the menu.
+    return t != fabgl::VK_NONE && t < fabgl::VK_JOY_RIGHT;
+}
+
+void Config::joyDefaults(uint8_t joytype, uint16_t out[14]) {
+    for (int n = 0; n < 14; n++) out[n] = fabgl::VK_NONE;
+    out[0] = fabgl::VK_DPAD_LEFT;
+    out[1] = fabgl::VK_DPAD_RIGHT;
+    out[2] = fabgl::VK_DPAD_UP;
+    out[3] = fabgl::VK_DPAD_DOWN;
+    out[6] = fabgl::VK_DPAD_FIRE;
+    if (joytype == JOY_KEMPSTON) {
+        out[4] = fabgl::VK_DPAD_START;
+        out[5] = fabgl::VK_DPAD_SELECT;
+        out[7] = fabgl::VK_DPAD_ALTFIRE;
+        out[9] = fabgl::VK_JOY_X;
     }
 }
 

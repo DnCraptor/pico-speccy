@@ -8783,8 +8783,9 @@ int OSD::joyPickKey(int currentVk) {
             default: return -1;
         }
     }
-    // Joystick (Kempston / Fuller): the classic handler shifts the first six by
-    // 6 for Fuller.
+    // Joystick actions. The same codes serve Kempston and Fuller: there are no
+    // separate Fuller VKs here (the classic handler added 6 for Fuller, which in
+    // this enum lands on Start/Select and the VK_MENU_* codes).
     const int i = nm::uiPickList("Joystick", kmp, 12, 0);
     if (i < 0) return -1;
     const int opt2 = i + 1;
@@ -8804,7 +8805,6 @@ int OSD::joyPickKey(int currentVk) {
         case 12: vk = fabgl::VK_DPAD_SELECT;  break;
         default: return -1;
     }
-    if (Config::joystick == JOY_FULLER && opt2 <= 6) vk += 6;
     return vk;
 }
 

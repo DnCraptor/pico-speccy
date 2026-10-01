@@ -332,127 +332,70 @@ inline static void repalceKey(VirtualKeyItem& it, const VirtualKey k) {
     m_VKMap[(int)it.vk >> 3] &= ~(1 << ((int)it.vk & 7));
 }
 */
+// Pad control -> joydef slot. The D-pad, A/B, Start and Select arrive as
+// VK_DPAD_*; the extra buttons (C, X, Y, Z, L2, R2) arrive from the gamepad
+// handlers as their own VK_JOY_* code. Anything else (keyboard keys, and the
+// VK_JOY_* codes joyMap itself emits) is not a pad control and is never remapped
+// — which is also what keeps an injected key from being matched again.
+static int padSlot(VirtualKey vk) {
+  switch (vk) {
+    case fabgl::VK_DPAD_LEFT:    return 0;
+    case fabgl::VK_DPAD_RIGHT:   return 1;
+    case fabgl::VK_DPAD_UP:      return 2;
+    case fabgl::VK_DPAD_DOWN:    return 3;
+    case fabgl::VK_DPAD_START:   return 4;
+    case fabgl::VK_DPAD_SELECT:  return 5;
+    case fabgl::VK_DPAD_FIRE:    return 6;
+    case fabgl::VK_DPAD_ALTFIRE: return 7;
+    case fabgl::VK_JOY_C:        return 8;
+    case fabgl::VK_JOY_X:        return 9;
+    case fabgl::VK_JOY_Y:        return 10;
+    case fabgl::VK_JOY_Z:        return 11;
+    case fabgl::VK_JOY_L2:       return 12;
+    case fabgl::VK_JOY_R2:       return 13;
+    default:                     return -1;
+  }
+}
+
 inline static void joyMap(const VirtualKeyItem& it) {
-  VirtualKey virtualKey = it.vk;
-  // VK_JOY_* codes are the raw output of the HID/gamepad layer and are already
-  // the final joystick codes. They must not pass through the joydef remap below:
-  // if a joydef slot were itself a VK_JOY_* (e.g. C -> Joy.A), re-injecting would
-  // feed the code back into the queue and joyMap would match it again, self-looping
-  // so the key never releases. Duplicating an extra button onto one of the 5
-  // Kempston bits is handled directly in the Kempston port-update loop (ESPectrum.cpp)
-  // by reading isVKDown(VK_JOY_<slot>) and OR-ing the target bit.
-  if (virtualKey >= fabgl::VK_JOY_RIGHT && virtualKey <= fabgl::VK_JOY_R2)
-    return;
+  const int slot = padSlot(it.vk);
+  if (slot < 0) return;
+  // Slots 8..13 are raw: the event itself is already the slot's VK_JOY_* state.
+  const bool raw = slot >= 8;
+  const uint16_t target = Config::joydef[slot];
+  const bool keyTarget = Config::joyKeyTarget(slot);
+
+  // "Keyboard mapping": a control assigned a keyboard key presses that key, on
+  // every joystick type. The joystick action it would otherwise have is
+  // suppressed by the port-update code in ESPectrum.cpp (Config::joyKeyTarget).
+  if (keyTarget)
+    joyPushData((VirtualKey)target, it.down);
+
   if (Config::joystick == JOY_KEMPSTON || Config::joystick == JOY_FULLER || Config::joystick == JOY_CUSTOM) {
-    // VK_DPAD_* are emitted directly by gamepad HID handlers. They always map to
-    // their VK_JOY_* counterparts unconditionally, so that isVKDown(VK_JOY_B) etc.
-    // reliably tracks the physical button state regardless of joydef configuration.
-    // joydef slots then control only keyboard-key → joystick mappings.
-    switch (virtualKey) {
-      case fabgl::VK_DPAD_LEFT:    joyPushData(fabgl::VK_JOY_LEFT,  it.down); return;
-      case fabgl::VK_DPAD_RIGHT:   joyPushData(fabgl::VK_JOY_RIGHT, it.down); return;
-      case fabgl::VK_DPAD_UP:      joyPushData(fabgl::VK_JOY_UP,    it.down); return;
-      case fabgl::VK_DPAD_DOWN:    joyPushData(fabgl::VK_JOY_DOWN,  it.down); return;
-      case fabgl::VK_DPAD_FIRE:    joyPushData(fabgl::VK_JOY_A,     it.down); return;
-      case fabgl::VK_DPAD_ALTFIRE: joyPushData(fabgl::VK_JOY_B,     it.down); return;
-      case fabgl::VK_DPAD_START:   joyPushData(fabgl::VK_JOY_START, it.down); return;
-      case fabgl::VK_DPAD_SELECT:  joyPushData(fabgl::VK_JOY_MODE,  it.down); return;
-      default: break;
-    }
-    if (virtualKey == Config::joydef[0]) {
-        joyPushData(fabgl::VK_JOY_LEFT, it.down);
-    }
-    else if (virtualKey == Config::joydef[1]) {
-        joyPushData(fabgl::VK_JOY_RIGHT, it.down);
-    }
-    else if (virtualKey == Config::joydef[2]) {
-        joyPushData(fabgl::VK_JOY_UP, it.down);
-    }
-    else if (virtualKey == Config::joydef[3]) {
-        joyPushData(fabgl::VK_JOY_DOWN, it.down);
-    }
-    else if (virtualKey == Config::joydef[4]) {
-        joyPushData(fabgl::VK_JOY_START, it.down);
-    }
-    else if (virtualKey == Config::joydef[5]) {
-        joyPushData(fabgl::VK_JOY_MODE, it.down);
-    }
-    else if (virtualKey == Config::joydef[6]) {
-        joyPushData(fabgl::VK_JOY_A, it.down);
-    }
-    else if (virtualKey == Config::joydef[7]) {
-        joyPushData(fabgl::VK_JOY_B, it.down);
-    }
-    else if (virtualKey == Config::joydef[8]) {
-        joyPushData(fabgl::VK_JOY_C, it.down);
-    }
-    else if (virtualKey == Config::joydef[9]) {
-        joyPushData(fabgl::VK_JOY_X, it.down);
-    }
-    else if (virtualKey == Config::joydef[10]) {
-        joyPushData(fabgl::VK_JOY_Y, it.down);
-    }
-    else if (virtualKey == Config::joydef[11]) {
-        joyPushData(fabgl::VK_JOY_Z, it.down);
-    }
-    else if (virtualKey == Config::joydef[12]) {
-        joyPushData(fabgl::VK_JOY_L2, it.down);
-    }
-    else if (virtualKey == Config::joydef[13]) {
-        joyPushData(fabgl::VK_JOY_R2, it.down);
-    }
+    // VK_DPAD_* always map to their VK_JOY_* counterparts, so isVKDown(VK_JOY_B)
+    // etc. tracks the physical button whatever joydef says (JoyTest relies on it).
+    // Aliasing a button onto another Kempston bit (C -> Joy.A) is resolved in the
+    // Kempston port-update loop from the slot's joydef entry.
+    static const VirtualKey slotVk[8] = {
+      fabgl::VK_JOY_LEFT, fabgl::VK_JOY_RIGHT, fabgl::VK_JOY_UP, fabgl::VK_JOY_DOWN,
+      fabgl::VK_JOY_START, fabgl::VK_JOY_MODE, fabgl::VK_JOY_A, fabgl::VK_JOY_B
+    };
+    if (!raw) joyPushData(slotVk[slot], it.down);
+    return;
   }
-  else if (Config::joystick == JOY_SINCLAIR2) {
-    if (virtualKey == Config::joydef[0]) {
-        joyPushData(fabgl::VK_1, it.down);
-    }
-    else if (virtualKey == Config::joydef[1]) {
-        joyPushData(fabgl::VK_2, it.down);
-    }
-    else if (virtualKey == Config::joydef[2]) {
-        joyPushData(fabgl::VK_4, it.down);
-    }
-    else if (virtualKey == Config::joydef[3]) {
-        joyPushData(fabgl::VK_3, it.down);
-    }
-    else if (virtualKey == Config::joydef[6]) {
-        joyPushData(fabgl::VK_5, it.down);
-    }
-  }
-  else if (Config::joystick == JOY_SINCLAIR1) {
-    if (virtualKey == Config::joydef[0]) {
-        joyPushData(fabgl::VK_6, it.down);
-    }
-    else if (virtualKey == Config::joydef[1]) {
-        joyPushData(fabgl::VK_7, it.down);
-    }
-    else if (virtualKey == Config::joydef[2]) {
-        joyPushData(fabgl::VK_9, it.down);
-    }
-    else if (virtualKey == Config::joydef[3]) {
-        joyPushData(fabgl::VK_8, it.down);
-    }
-    else if (virtualKey == Config::joydef[6]) {
-        joyPushData(fabgl::VK_0, it.down);
-    }
-  }
-  else if (Config::joystick == JOY_CURSOR) {
-    if (virtualKey == Config::joydef[0]) {
-        joyPushData(fabgl::VK_5, it.down);
-    }
-    else if (virtualKey == Config::joydef[1]) {
-        joyPushData(fabgl::VK_8, it.down);
-    }
-    else if (virtualKey == Config::joydef[2]) {
-        joyPushData(fabgl::VK_7, it.down);
-    }
-    else if (virtualKey == Config::joydef[3]) {
-        joyPushData(fabgl::VK_6, it.down);
-    }
-    else if (virtualKey == Config::joydef[6]) {
-        joyPushData(fabgl::VK_0, it.down);
-    }
-  }
+
+  // Sinclair 1 / Sinclair 2 / Cursor: the control's action becomes a ZX key.
+  if (keyTarget || target == fabgl::VK_NONE) return;
+  int act = padSlot((VirtualKey)target);        // a joystick action aliases the control
+  if (act < 0) act = slot;
+  static const VirtualKey s2[5]  = { fabgl::VK_1, fabgl::VK_2, fabgl::VK_4, fabgl::VK_3, fabgl::VK_5 };
+  static const VirtualKey s1[5]  = { fabgl::VK_6, fabgl::VK_7, fabgl::VK_9, fabgl::VK_8, fabgl::VK_0 };
+  static const VirtualKey cur[5] = { fabgl::VK_5, fabgl::VK_8, fabgl::VK_7, fabgl::VK_6, fabgl::VK_0 };
+  const int k = act <= 3 ? act : act == 6 ? 4 : -1;   // left, right, up, down, fire
+  if (k < 0) return;
+  if (Config::joystick == JOY_SINCLAIR2)      joyPushData(s2[k], it.down);
+  else if (Config::joystick == JOY_SINCLAIR1) joyPushData(s1[k], it.down);
+  else if (Config::joystick == JOY_CURSOR)    joyPushData(cur[k], it.down);
 }
 
 bool Keyboard::getNextVirtualKey(VirtualKeyItem* item, int timeOutMS)

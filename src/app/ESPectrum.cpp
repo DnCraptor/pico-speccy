@@ -2225,7 +2225,7 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
               { " Joy: Cursor     ", " Joy: Kempston   ", " Joy: Sinclair 1 ",
                 " Joy: Sinclair 2 ", " Joy: Fuller     " };
           Config::joystick = (Config::joystick + 1) % 5; // Custom stays OSD-only
-          // NOT setJoyMap() — it wipes joydef and pops a "load default map?"
+          // NOT the menu's type hook — it pops a "load default map?"
           // dialog; the pad-button mapping is orthogonal to the port type and
           // stays editable in the OSD joystick menu.
           Config::save();
@@ -2351,8 +2351,12 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
         // are aliased via joydef slots 6..13: joydef[slot] gives the target action which
         // is resolved to a Kempston bit by the switch below.
         // directions: fixed bit = code - VK_JOY_RIGHT (0..3)
+        // A control assigned a keyboard key ("Keyboard mapping") presses that key
+        // instead (keyboard.cpp joyMap) and must not also move the joystick.
+        static const uint8_t dirSlot[4] = { 1, 0, 3, 2 };   // right, left, down, up
         for (int i = fabgl::VK_JOY_RIGHT; i <= fabgl::VK_JOY_UP; i++)
-          if (Kbd->isVKDown((fabgl::VirtualKey)i))
+          if (Kbd->isVKDown((fabgl::VirtualKey)i) &&
+              !Config::joyKeyTarget(dirSlot[i - fabgl::VK_JOY_RIGHT]))
             bitWrite(Ports::port[Config::kempstonPort], i - fabgl::VK_JOY_RIGHT, 1);
         // extra buttons A,B,C,X,Y,Z,L2,R2 -> joydef slots 6..13
         static const fabgl::VirtualKey extraRaw[8] = {
@@ -2364,7 +2368,7 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
           // Resolve the target action for this physical button from its joydef slot.
           // Only VK_JOY_* / VK_DPAD_FIRE|ALTFIRE targets drive a Kempston bit here;
           // VK_NONE or a keyboard key means this pad button does nothing on Kempston
-          // (a keyboard target is handled by joyMap as a key press instead).
+          // (a keyboard target is pressed as a key by joyMap in keyboard.cpp).
           uint16_t target = Config::joydef[6 + e];
           int bit = -1;
           switch (target) {
@@ -2389,22 +2393,22 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
             bitWrite(Ports::port[Config::kempstonPort], bit, 1);
         }
         // Start is not in extraRaw (it flows via joydef[4] → VK_JOY_START separately)
-        if (Kbd->isVKDown(fabgl::VK_JOY_START))
+        if (Kbd->isVKDown(fabgl::VK_JOY_START) && !Config::joyKeyTarget(4))
           bitWrite(Ports::port[Config::kempstonPort], 7, 1);
       } else if (Config::joystick == JOY_FULLER) { // Fuller
-        if (Kbd->isVKDown(fabgl::VK_JOY_RIGHT)) {
+        if (Kbd->isVKDown(fabgl::VK_JOY_RIGHT) && !Config::joyKeyTarget(1)) {
           bitWrite(Ports::port[0x7f], 3, 0);
         }
-        if (Kbd->isVKDown(fabgl::VK_JOY_LEFT)) {
+        if (Kbd->isVKDown(fabgl::VK_JOY_LEFT) && !Config::joyKeyTarget(0)) {
           bitWrite(Ports::port[0x7f], 2, 0);
         }
-        if (Kbd->isVKDown(fabgl::VK_JOY_DOWN)) {
+        if (Kbd->isVKDown(fabgl::VK_JOY_DOWN) && !Config::joyKeyTarget(3)) {
           bitWrite(Ports::port[0x7f], 1, 0);
         }
-        if (Kbd->isVKDown(fabgl::VK_JOY_UP)) {
+        if (Kbd->isVKDown(fabgl::VK_JOY_UP) && !Config::joyKeyTarget(2)) {
           bitWrite(Ports::port[0x7f], 0, 0);
         }
-        if (Kbd->isVKDown(fabgl::VK_JOY_A)) {
+        if (Kbd->isVKDown(fabgl::VK_JOY_A) && !Config::joyKeyTarget(6)) {
           bitWrite(Ports::port[0x7f], 7, 0);
         }
       }

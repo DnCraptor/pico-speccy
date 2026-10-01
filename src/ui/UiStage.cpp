@@ -680,7 +680,12 @@ static bool hook_ideScheme(int32_t, int32_t) {
     return true;
 }
 static bool hook_joyType(int32_t nv, int32_t) {
-    Config::setJoyMap((uint8_t)nv);     // each type carries its own key map
+    // Each type has its own default map. Declining keeps the map as it is — the
+    // pad controls mean the same thing on every type, so an edited map carries over.
+    if (uiConfirm(OSD_DLG_SETJOYMAPDEFAULTS, TXT_JOY_TYPE, /*default_yes=*/true)) {
+        Config::joyDefaults((uint8_t)nv, Config::joydef);
+        Config::save();
+    }
     return true;
 }
 static bool hook_tabFire(int32_t nv, int32_t) {
