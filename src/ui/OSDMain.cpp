@@ -1445,9 +1445,10 @@ static bool     notify_on = false;
 static bool     notify_nm = false;
 
 // Top border height in framebuffer rows = the border machine's lin_end:
-// 48 on the 360x288 full-border modes, 24 everywhere else. Profi DS80 is excluded
-// altogether — 640x480 has no top border at all (lin_end == 0), and the packed
-// pair-slot framebuffer is the guest palette's, not ours. Scorpion GMX shares the
+// 48 on the 360x288 full-border modes, 24 everywhere else. Profi DS80 has a
+// 24-row band at 720x576 and none at 640x480 (lin_end == 0): the banner then
+// sits on the first content rows and the DS80 renderer + border machine carve it
+// out (VIDEO::setNoticeCarve), the TS-Conf shape below. Scorpion GMX shares the
 // pair-slot framebuffer but DOES have a band (20 rows at 240, 44 at 288) and is
 // the easy case: its border machine is parked, so the band is static — no column
 // reservation is needed and nothing can erase the banner mid-frame. Colours come
@@ -1487,9 +1488,15 @@ static bool notifyGeom(int textw, int& x, int& y, bool* carve = nullptr) {
             top = 24;
             cv  = true;
         }
-    } else if (profi_ds80_active) {
-        return false;
+    } else if (VIDEO::ds80BandMode()) {          // Profi/Karabas DS80
+        // 24-row band at 720x576, none at 640x480 (content starts at fb row 0):
+        // there the banner takes the first content rows at the usual offset and
+        // the DS80 renderer + its border machine carve the rect out.
+        top = VIDEO::ds80TopBandRows();
+        if (top < NOTIFY_BAND_H) { top = 24; cv = true; }
     } else {
+        // Includes Timex hi-res: a pair-slot framebuffer, but the standard
+        // geometry and the standard border machine, so the ordinary band works.
         top = VIDEO::isFullBorder288() ? 48 : 24;
     }
     if (top < NOTIFY_BAND_H) return false;
@@ -1506,7 +1513,7 @@ bool OSD::notifyAvailable() {
 }
 
 void OSD::notify(const string& msg, uint8_t warn_level, uint16_t millis) {
-    // No top border to put it in (DS80): keep the classic behaviour rather than
+    // No place to put it in this mode: keep the classic behaviour rather than
     // dropping the message.
     if (!notifyAvailable()) { osdCenteredMsg(msg, warn_level, millis ? millis : 1000); return; }
 
@@ -1630,6 +1637,17 @@ void OSD::drawNotify() {
         // has no whole-line renderer and gmxBorderFrame still owns its bands.
         if (carve || VIDEO::ts_render_live || VIDEO::bl_live) VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
         else                               VIDEO::clearNoticeCarve();
+    } else if (VIDEO::ds80BandMode()) {
+        // The border machine is live here (per-T-state, 4 px per column) and the
+        // content renderer writes 8-byte columns: snap to 8 so both carve whole
+        // units, and reserve the rect in either case (band or content rows) —
+        // Update_Border_DS80 and the DS80 content renderer read it at paint time.
+        px0 &= ~7;
+        px1 = (px1 + 7) & ~7;
+        if (px0 < 0) px0 = 0;
+        if (px1 > (int)VIDEO::vga.xres) px1 = (int)VIDEO::vga.xres;
+        if (px1 - px0 < textw) { cancelNotify(); return; }
+        VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
     } else {
         VIDEO::setNoticeBand(y, y + NOTIFY_BAND_H - 1, px0, px1);
         if (px1 - px0 < textw) { cancelNotify(); return; }

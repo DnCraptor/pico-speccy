@@ -1121,6 +1121,10 @@ static bool brdPairWrite = true;   // true: uint32_t pair writes, false: uint16_
 // applyDS80BorderGeometry(); ds80_brd_col_off shifts the 160 visible
 // T-columns inside wider rows (720×576: 180 uint16 cols → off=10).
 static bool ds80_border_geom = false;
+// OSD::notify banner rect (fb bytes / fb rows), honoured by every renderer that
+// owns the rows it sits on: the TS-Conf whole-line renderer and its band rows,
+// the borderless scaler, and the Profi DS80 content renderer + border machine.
+static int ts_notice_x0 = 0, ts_notice_x1 = 0, ts_notice_y0 = 0, ts_notice_y1 = -1;
 static int  ds80_brd_col_off = 0;
 static bool ds80_osd_carve = false; // stats overlay visible → carve its rect
 static bool ds80_carve240 = false;  // stats rect coords differ 640×480 vs 720×576
@@ -5813,6 +5817,14 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
         // (720×576 keeps stats in the bottom border band, carved out in Update_Border_DS80.)
         bool skip_stats_row = (ds80_voff == 0) && (VIDEO::OSD & 0x03) && !(VIDEO::OSD & 0x04)
                               && frow >= 220 && frow < 236;
+        // ... and the OSD::notify banner: 640x480 DS80 has no top border band, so
+        // the banner sits on the first content rows and owns them while it is up
+        // (the rect is 8-byte aligned, i.e. whole columns here: pad_l is 32). The
+        // two rects never share a row, so one (cx0, cx1) pair serves both.
+        int ds80_cx0 = 168, ds80_cx1 = 312;
+        if (!skip_stats_row && (int)frow < ts_notice_y1 && (int)frow >= ts_notice_y0) {
+            skip_stats_row = true; ds80_cx0 = ts_notice_x0; ds80_cx1 = ts_notice_x1;
+        }
         // Side borders are rendered per-T-state by the border state machine
         // (Update_Border_DS80, ZXMAK2 192T-line timing) — no per-line fill here.
         for (unsigned int j = start_col; j < end_col; j++) {
@@ -5827,7 +5839,7 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
             // Stats overlay carve-out: skip the 8-byte column block if it overlaps the
             // stats rectangle (fb bytes 168..311) on a stats row — drawStats owns it.
             size_t pbase = (size_t)pad_l + (size_t)j * 8;
-            bool in_stats = skip_stats_row && (pbase + 8 > 168) && (pbase < 312);
+            bool in_stats = skip_stats_row && ((int)pbase + 8 > ds80_cx0) && ((int)pbase < ds80_cx1);
             if (fb_row && !in_stats) {
                 // 16 source pixels per col → 8 packed bytes at content offset pad_l + j*8.
                 // Pre-apply (k^2) swap so ISR reads in correct order.
@@ -6229,7 +6241,6 @@ void VIDEO::tsFastMemRecalc() {
 // first content rows and tsRenderLine skips them, the same carve-out the F8
 // stats rectangle already gets there. Without it the renderer overwrote the
 // banner on every frame and it flickered at frame rate (hw 2026-09-10).
-static int ts_notice_x0 = 0, ts_notice_x1 = 0, ts_notice_y0 = 0, ts_notice_y1 = -1;
 
 // One fb row of the top/bottom border band, painted at the raster line it
 // belongs to so a per-line Border register shows as bands of colour (hardware:
@@ -6900,6 +6911,12 @@ int VIDEO::gmxTopBandRows() { return (gmx_ext_live || ts_render_live) ? (int)lin
 // the top/bottom bands are painted frame-granularly by gmxBorderFrame and their
 // height is lin_end — which can be ZERO, unlike the border machine's 24/48.
 bool VIDEO::bandBorderMode() { return gmx_ext_live || ts_render_live || bl_live; }
+
+// Profi/Karabas DS80 geometry is live: the border machine runs (unlike the
+// modes above) but its top band is lin_end = 24 rows at 720x576 and NONE at
+// 640x480, and both it and the content renderer honour the notice carve.
+bool VIDEO::ds80BandMode() { return ds80_border_geom; }
+int  VIDEO::ds80TopBandRows() { return ds80_border_geom ? (int)lin_end : 0; }
 
 
 void VIDEO::setNoticeCarve(int x0, int y0, int x1, int y1) {
@@ -8943,6 +8960,11 @@ IRAM_ATTR static void Update_Border_DS80() {
     }
     const uint16_t v = (uint16_t)VIDEO::brd;
     const int col = brdcol_cnt + ds80_brd_col_off;
+    // OSD::notify banner (top band at 720x576, the side pads of the first rows
+    // at 640x480, the whole row under Paper off). The rect is 4-byte aligned and
+    // col ^ 1 stays inside one 4-byte group, so testing col is enough.
+    if (brdlin_cnt < ts_notice_y1 && brdlin_cnt >= ts_notice_y0
+        && col * 2 >= ts_notice_x0 && col * 2 < ts_notice_x1) return;
     brdptr16[col ^ 1] = v;
     if (ds80_brd_col_off) {
         if (brdcol_cnt == 0) {
@@ -9134,8 +9156,8 @@ IRAM_ATTR void VIDEO::TopBorder_Blank() {
         prevBrdptr8 = vga.prevFrameBuffer ? prevRowBorder(0) : (uint8_t *)brdptr16;
         // lin_end==0 (DS80 640×480): no top border rows — straight to side borders.
         // (TopBorder would otherwise paint row 0 full-width over the content.)
-        // ds80_border_geom is excluded belt-and-braces: OSD::notify never reserves
-        // a band there (the packed-pair framebuffer is the guest palette's).
+        // ds80_border_geom is excluded: there OSD::notify reserves its rect through
+        // setNoticeCarve, which Update_Border_DS80 tests itself.
         DrawBorder = lin_end ? ((osd_notice_carve && !ds80_border_geom)
                                     ? &TopBorder_OSD : &TopBorder)
                              : &MiddleBorder;

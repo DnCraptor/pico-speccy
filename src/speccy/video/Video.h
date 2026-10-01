@@ -407,8 +407,13 @@ public:
   // TS-Conf non-ZX mode) — the band height above is then authoritative and may
   // be 0, where the border machine's 24/48 would be a lie.
   static bool bandBorderMode();
-  // OSD::notify in a TS-Conf mode with no top band: the banner sits on the first
-  // content rows and tsRenderLine carves them out, like the F8 stats rectangle.
+  // Profi/Karabas DS80: band height is 24 rows at 720x576 and 0 at 640x480; the
+  // banner is reserved with setNoticeCarve in both (content rows AND border).
+  static bool ds80BandMode();
+  static int  ds80TopBandRows();
+  // OSD::notify in a mode with no top band (TS-Conf RRES 320x240/360x288, Profi
+  // DS80 at 640x480): the banner sits on the first content rows and the mode's
+  // renderer carves them out, like the F8 stats rectangle.
   static void setNoticeCarve(int x0, int y0, int x1, int y1);
   static void clearNoticeCarve();
   // Cold EndFrame halves, flash-resident on purpose (EndFrame is RAM code):
