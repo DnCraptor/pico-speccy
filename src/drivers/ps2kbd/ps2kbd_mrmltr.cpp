@@ -562,3 +562,11 @@ void Ps2Kbd_Mrmltr::init_gpio(uint base_gpio) {
     if (reinit) _keyHandler(&_report, &prev);
     _started = true;
 }
+
+// See the header. Same divider formula as init_gpio(); the SM keeps running — a
+// divider change takes effect on its next cycle, and a frame it lands in fails the
+// stop/parity check and resyncs like any other bad frame.
+void Ps2Kbd_Mrmltr::reclock() {
+    if (!_started) return;
+    pio_sm_set_clkdiv(_pio, _sm, (float)clock_get_hz(clk_sys) / (8 * 16700));
+}

@@ -22,6 +22,7 @@ void Init_PWM_175(uint8_t tspin_mode);
 void Deinit_PWM_175();
 
 void send_to_595(uint16_t data);
+void ay595_reclock(void);   // re-derive the AY clock + strobe delay after a clk_sys change
 
 /// HW TurboSound support
 extern uint16_t control_bits;

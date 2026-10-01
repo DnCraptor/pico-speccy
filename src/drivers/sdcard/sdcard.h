@@ -37,6 +37,11 @@ void disk_invalidate(void);
  * CMD0/ACMD41 cycle, which a re-inserted (power-cycled) card requires. */
 int sdcard_alive(void);
 
+/* clk_sys changed (the Config::cpu_mhz switch): re-derive the SPI clock for the
+ * new rate. Without it the divider computed at boot keeps running, i.e. SCK is
+ * scaled by new/old clock (252 -> 378 MHz put the PIO path at 30 MHz). */
+void sdcard_reclock(void);
+
 /* Enable/disable onboard LED (GPIO 25) blink on physical SD card access */
 void sdcard_set_led_blink(int enable);
 

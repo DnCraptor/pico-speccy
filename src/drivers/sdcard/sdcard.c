@@ -270,6 +270,20 @@ void init_spi(void)
 #endif
 }
 
+/* See sdcard.h. Called between transfers (main(), right after the clock switch).
+ * A card that is not initialised needs nothing: disk_initialize() re-runs
+ * init_spi(), which derives everything from the live clk_sys. */
+void sdcard_reclock(void)
+{
+	if (Stat & STA_NOINIT) return;
+#ifdef SDCARD_PIO
+	float clkdiv = (float)clock_get_hz(clk_sys) / (4.0f * 20000000.0f);
+	if (clkdiv < 1.0f) clkdiv = 1.0f;
+	pio_div_fast = clkdiv;
+#endif
+	FCLK_FAST();
+}
+
 /* Exchange a byte */
 static
 BYTE xchg_spi (

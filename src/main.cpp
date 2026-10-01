@@ -1,5 +1,9 @@
 #pragma GCC optimize("Ofast")
 
+#include "sdcard.h"   // sdcard_reclock()
+#include "drivers/sound/PinSerialData_595.h"   // ay595_reclock()
+#include "speccy/devices/sound/OplFm.h"
+#include "speccy/devices/sound/OpllFm.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
@@ -2108,6 +2112,23 @@ int main() {
 #endif
             // Reinit audio: I2S PIO divider was calculated for old sys_clk
             pcm_setup(ESPectrum::Audio_freq);
+            // Everything else whose divider was derived from the BOOT clock (CPU_MHZ)
+            // in setup(): without these the SD card's PIO SCK, the AY clock pin, the
+            // PS/2 and NESPAD state machines all run scaled by new/old clk_sys.
+            sdcard_reclock();
+            ay595_reclock();
+#ifdef KBDUSB
+            ps2kbd.reclock();
+#endif
+#if USE_NESPAD
+            if (nespad_active) nespad_reclock(clock_get_hz(clk_sys) / 1000);
+#endif
+            // OPL3/OPLL pick half-rate synthesis below 450 MHz, decided in setup().
+            {
+                const bool half = clock_get_hz(clk_sys) < 450000000u;
+                if (oplfm)  { oplfm->setRates(OPL3_YMF262_CLOCK, ESPectrum::Audio_freq, half);  oplfm->reset(); }
+                if (opllfm) { opllfm->setRates(OPLL_YM2413_CLOCK, ESPectrum::Audio_freq, half); opllfm->reset(); }
+            }
 #if defined(KBDUSB) && defined(ZERO2_PIO_USB_HOST)
             // PICOSPECCY_ZERO2_PIO_USB_HOST_V1: same story for the PIO-USB bus dividers — pio_usb_host_init()
             // derived them from the boot clock at tuh_init() time.

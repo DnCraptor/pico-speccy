@@ -73,6 +73,8 @@ public:
   // pin and the old pins released. Used to move off GP2/3 when a board wants them
   // for something else (ZERO2's PCM5122 control I2C).
   void init_gpio(uint base_gpio);
+  // clk_sys changed: the SM divider was derived from the boot clock in init_gpio().
+  void reclock();
   uint clock_gpio() const { return _base_gpio; }
   uint data_gpio()  const { return _base_gpio + 1; }
   // Total frames rejected by the stop/parity check (each one also resynced the

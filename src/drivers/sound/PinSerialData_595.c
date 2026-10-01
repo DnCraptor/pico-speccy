@@ -93,8 +93,22 @@ inline static void wait_to_adjust(uint32_t wait_nops) {
 	for (int i = 0; i < wait_nops; ++i) __asm volatile("nop");
 }
 
+static uint32_t wait_nops = 0;
+
+// clk_sys changed (the Config::cpu_mhz switch in main()): the 1.75 MHz AY clock is
+// a PWM divider of clk_sys and the 595 strobe delay is counted in nops, so both
+// were sized for the boot clock. Re-derive them for the live one.
+void ay595_reclock(void) {
+	wait_nops = 0;                       // send_to_595 recomputes on its next call
+	if (!ts_595_enabled) return;
+	const float div = clock_get_hz(clk_sys)/(4.0*1750000);
+	if (gpio_get_function(CLK_AY_PIN1) == GPIO_FUNC_PWM)
+		pwm_set_clkdiv(pwm_gpio_to_slice_num(CLK_AY_PIN1), div);
+	if (CLK_AY_PIN2 != 255 && gpio_get_function(CLK_AY_PIN2) == GPIO_FUNC_PWM)
+		pwm_set_clkdiv(pwm_gpio_to_slice_num(CLK_AY_PIN2), div);
+}
+
 void __not_in_flash_func(send_to_595)(uint16_t data) {
-	static uint32_t wait_nops = 0;
 	if (wait_nops == 0) {
      	wait_nops = clock_get_hz(clk_sys) / (_30MHZ * 5);
 	}

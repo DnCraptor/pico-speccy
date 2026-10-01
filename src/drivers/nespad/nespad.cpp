@@ -155,3 +155,10 @@ void nespad_read()
 }
 
 
+
+// clk_sys changed: put the SM back on its 1 MHz clock (nespad_begin derived the
+// divider from the boot clock).
+void nespad_reclock(uint32_t cpu_khz) {
+    if (sm == 0xFF) return;
+    pio_sm_set_clkdiv_int_frac(pio, sm, cpu_khz / 1000, 0);
+}

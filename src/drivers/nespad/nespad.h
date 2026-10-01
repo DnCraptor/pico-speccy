@@ -22,3 +22,4 @@ extern bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin,
 
 
 extern void nespad_read();
+extern void nespad_reclock(uint32_t cpu_khz);   // after a clk_sys change
