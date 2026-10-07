@@ -570,7 +570,7 @@ void NEXTVID::Reset() {
 // Returns true when the geometry moved.
 bool NEXTVID::computeGeometry() {
     const int tpl = VIDEO::tStatesPerLine;
-    const int shift = (NextReg::reg[0x05] & 0x04) ? 26 : 0;
+    const int shift = NextReg::raster().hz60 ? 26 : 0;   // Pentagon: 50 Hz only
     int fv = (VIDEO::tStatesBorder + tpl / 2) / tpl - shift;
     if (fv < 0) fv = 0;
     const int paper = (VIDEO::tStatesScreen + tpl / 2) / tpl - shift;
@@ -603,6 +603,7 @@ IRAM_ATTR void NEXTVID::haltAdvanceTo(uint32_t stEnd) {
     }
 }
 
+extern int ts_notice_x0, ts_notice_x1, ts_notice_y0, ts_notice_y1;   // Video.cpp
 #if NEXT_TRACE
 void nxErrPoll();   // Z80_JLS.cpp: ERR_NR turning #15 -> dump the RST 8 ring
 #endif
@@ -619,17 +620,24 @@ IRAM_ATTR void NEXTVID::EndFrame() {
         if (row < 0) row = 0;
         for (; row < (int)VIDEO::vga.yres; row++) emitRow(row);
     }
-    // nextreg 0x05 bit 2 (50/60 Hz) moves the raster anchors: apply at the
-    // frame boundary, after core1 has drawn every row of the old geometry
-    // (RenderLayers reads paperTopRow live).
+    // The machine timing (nextreg 0x03) and 50/60 Hz (0x05) change the whole
+    // frame: apply at the frame boundary, after core1 has drawn every row of
+    // the old geometry (RenderLayers reads paperTopRow live). The BIOS writes
+    // the timing just before its soft reset into a personality, NextZXOS's TAP
+    // Loader without any reset.
     {
-        static uint8_t s_hz = 0xFF;
-        const uint8_t hz = NextReg::reg[0x05] & 0x04;
-        if (hz != s_hz) {
-            s_hz = hz;
+        static uint8_t s_key = 0xFF;
+        const uint8_t key = NextReg::rasterKey();
+        if (key != s_key) {
+            s_key = key;
             c1Drain();
+            ESPectrum::nextRasterApply();
             computeGeometry();
         }
+    }
+    if (ESPectrum::nextRefreshCheckPending) {
+        ESPectrum::nextRefreshCheckPending = false;
+        ESPectrum::nextRefreshCheck();
     }
     // A fixed 1-in-64 skip made the BIOS update at <1 Hz even when the CPU
     // managed 50 emulated frames/s. Bound skipping by wall time instead;
@@ -808,6 +816,12 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     if ((LS->osd & 0x07) != 0 && row >= cy0 && row < cy0 + 16) {
         k0 = ((VIDEO::vga.xres >= 360) ? 188 : 168) >> 2;
         k1 = k0 + 144 / 4;
+    }
+    // OSD::notify banner (VIDEO::setNoticeCarve, 4-aligned): left to drawNotify,
+    // or this row copy erased it on the very next frame (hw 2026-10-07).
+    else if (row >= ts_notice_y0 && row < ts_notice_y1) {
+        k0 = ts_notice_x0 >> 2;
+        k1 = (ts_notice_x1 + 3) >> 2;
     }
     for (int k = 0; k < k0; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
     for (int k = k1; k < words; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }

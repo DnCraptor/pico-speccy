@@ -62,14 +62,36 @@ public:
 
     // Raster position for reg 0x1E/0x1F reads
     static uint16_t activeLine();
-    static uint8_t machineType();
+    static uint8_t machineType();     // nextreg 0x03 machine type (1 48K, 2 128K, 3 +3/Next, 4 Pentagon)
+    static uint8_t machineTiming();   // nextreg 0x03 bits 6:4, same encoding
     // NextZXOS's own tape trap is live: divMMC automap enabled (NR 0x0A b4,
     // NR 0x83 b0), the #056A entry point armed (NR 0xBB b5) and ROM in slot 0
     // counting as ROM3. Our in-ROM fast load must stand aside then.
-    static bool osTapeTrapArmed();   // nextreg 0x03 machine type (1 48K, 2 128K, 3 +3/Next, 4 Pentagon)
-    // Raster line (from the frame INT) of pixel line 0: 63 at 50 Hz, 26 lower
-    // at 60 Hz (nextreg 0x05 bit 2 — shorter top border, NEXTVID::computeGeometry).
-    static inline uint32_t paperLine() { return (reg[0x05] & 0x04) ? 63 - 26 : 63; }
+    static bool osTapeTrapArmed();
+
+    // The video frame of the machine TIMING (nextreg 0x03 bits 6:4) and 50/60 Hz
+    // (nextreg 0x05 bit 2; Pentagon is 50 Hz only) — wiki.specnext.dev
+    // Reference_machines (VGA): 48K 224 T x 312/262 lines, 128K/+3 228 T x
+    // 311/261, Pentagon 224 T x 320; the top border at 60 Hz is 26 lines shorter.
+    // The one source for CPU::updateStatesInFrame, VIDEO's raster anchors,
+    // the frame pacing and the audio set (ESPectrum::nextRasterApply).
+    struct Raster {
+        uint16_t tpl;        // T-states per line
+        uint16_t lines;      // lines per frame
+        uint8_t  kind;       // 0 = 48K, 1 = 128K/+3, 2 = Pentagon
+        bool     hz60;
+        uint8_t  intEnd;     // INT pulse length (base T)
+        uint32_t micros;     // frame period, us
+    };
+    static Raster raster();
+    static uint8_t rasterKey();       // changes whenever raster() would
+    // Raster line (from the frame INT) of pixel line 0 for the current raster:
+    // 48K 64, 128K/+3 63, Pentagon 80, 26 fewer at 60 Hz. Cached (the line-IRQ
+    // test in Z80Ops::isActiveINT reads it per instruction), set by
+    // applyRaster() with the rest of the raster.
+    static uint16_t paperLineV;
+    static inline uint32_t paperLine() { return paperLineV; }
+    static void applyRasterPaper();   // recompute paperLineV from raster()
 
     // Timex/SCLD port 0xFF (Next decodes the full low byte). bit 6 disables
     // the ULA frame interrupt (zxnext.vhd port_ff_interrupt_disable — zx_go's

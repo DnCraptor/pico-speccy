@@ -1485,6 +1485,9 @@ static bool notifyGeom(int textw, int& x, int& y, bool* carve = nullptr, bool le
     int top;
     if (VIDEO::bandBorderMode()) {               // GMX 640x200 / TS-Conf non-ZX / VDAC2 (FT812)
         top = VIDEO::gmxTopBandRows();           // = lin_end, authoritative, may be 0
+        // Spectrum Next: NEXTVID renders every fb row and carves the banner rect
+        // (setNoticeCarve) — the usual band offset, whatever its raster.
+        if (Z80Ops::isNext) top = VIDEO::isFullBorder288() ? 48 : 24;
         if (top < NOTIFY_BAND_H) {
             if (!VIDEO::ts_render_live && !VIDEO::bl_live && !VIDEO::ft_live) return false;
             // Carved out of the content instead. Keep the 24-row band's own
@@ -1688,7 +1691,7 @@ static bool notifyPaint(const char* text, uint8_t level, bool nmUi, bool left) {
         // rows read this rect at render time, which is also what erases the
         // banner authoritatively when the rect is cleared. GMX ignores it — it
         // has no whole-line renderer and gmxBorderFrame still owns its bands.
-        if (carve || VIDEO::ts_render_live || VIDEO::bl_live || VIDEO::ft_live) VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
+        if (carve || VIDEO::ts_render_live || VIDEO::bl_live || VIDEO::ft_live || Z80Ops::isNext) VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
         else                               VIDEO::clearNoticeCarve();
     } else if (VIDEO::ds80BandMode()) {
         // The border machine is live here (per-T-state, 4 px per column) and the

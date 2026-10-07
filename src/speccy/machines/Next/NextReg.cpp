@@ -336,6 +336,44 @@ uint16_t NextReg::activeLine() {
 
 static void applyRomSelect();
 uint8_t NextReg::machineType() { return s_machineType; }
+uint8_t NextReg::machineTiming() { return s_machineTiming; }
+uint16_t NextReg::paperLineV = 63;
+
+uint8_t NextReg::rasterKey() {
+    const uint8_t t = s_machineTiming;
+    const uint8_t k = (t <= 1) ? 0 : (t == 4) ? 2 : 1;      // 48K / 128K,+3 / Pentagon
+    const bool h = (reg[0x05] & 0x04) && k != 2;           // Pentagon is 50 Hz only
+    return (uint8_t)(k | (h ? 4 : 0));
+}
+
+NextReg::Raster NextReg::raster() {
+    const uint8_t key = rasterKey();
+    const bool h = key & 4;
+    Raster r;
+    r.hz60 = h;
+    switch (key & 3) {
+        case 0:  // 48K: 224 T x 312 (50) / 262 (60) — 3.5 MHz frames
+            r.kind = 0; r.tpl = 224; r.lines = h ? 262 : 312; r.intEnd = INT_END48;
+            r.micros = h ? MICROS_PER_FRAME_EVO60 : MICROS_PER_FRAME_48;
+            break;
+        case 2:  // Pentagon: 224 T x 320, 50 Hz only
+            r.kind = 2; r.tpl = 224; r.lines = 320; r.intEnd = INT_END_PENTAGON;
+            r.micros = MICROS_PER_FRAME_PENTAGON;
+            break;
+        default: // 128K / +3: 228 T x 311 (50) / 261 (60)
+            r.kind = 1; r.tpl = 228; r.lines = h ? 261 : 311; r.intEnd = INT_END128;
+            // 60 Hz: 59508 T at the 128K pacing rate (70908 T per 19992 us)
+            r.micros = h ? 16778 : MICROS_PER_FRAME_128;
+            break;
+    }
+    return r;
+}
+
+void NextReg::applyRasterPaper() {
+    const Raster r = raster();
+    const uint16_t p = (r.kind == 0) ? 64 : (r.kind == 2) ? 80 : 63;
+    paperLineV = (uint16_t)(r.hz60 ? p - 26 : p);
+}
 bool NextReg::osTapeTrapArmed() {
     return (reg[0x0A] & 0x10) && (reg[0x83] & 0x01) && (reg[0xBB] & 0x20) &&
            (MemESP::next_rom_mask & 1) && MemESP::next_rom3;
@@ -430,11 +468,9 @@ void NextReg::write(uint8_t r, uint8_t v) {
                 CPU::stFrame = 0;
             }
             break;
-        case 0x05: { // Peripheral 1: bit 2 = 50/60 Hz
-            ESPectrum::target = (v & 0x04) ? 17067 : MICROS_PER_FRAME_128;
-            CPU::updateStatesInFrame();
+        case 0x05: // Peripheral 1: bit 2 = 50/60 Hz — the frame changes at the
+                   // next frame boundary (NEXTVID::EndFrame -> ESPectrum::nextRasterApply)
             break;
-        }
         case 0x07: // CPU speed: 0=3.5, 1=7, 2=14, 3=28 MHz
             applySpeed();
             break;

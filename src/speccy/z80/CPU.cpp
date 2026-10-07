@@ -197,12 +197,13 @@ void CPU::updateStatesInFrame() {
             IntEnd = INT_END_PENTAGON;
         }
     } else if (Config::arch == A_NEXT) {
-        // Next runs 128K frame timing (the VGA-timing set of real TBBlue);
-        // nextreg 0x05 bit 2 selects 60Hz: 262 lines of 228 T-states
-        statesInFrame = (NextReg::reg[0x05] & 0x04) ? 228 * 262
-                                                    : TSTATES_PER_FRAME_128;
-        IntStart = INT_START128;
-        IntEnd = INT_END128 + CPU::latetiming;
+        // The frame of the machine TIMING (nextreg 0x03) and 50/60 Hz (0x05):
+        // NextReg::raster() — 48K 224x312/262, 128K/+3 228x311/261, Pentagon
+        // 224x320 (Reference_machines, VGA).
+        const NextReg::Raster r = NextReg::raster();
+        statesInFrame = (uint32_t)r.tpl * r.lines;
+        IntStart = 0;
+        IntEnd = r.intEnd + (r.kind == 1 ? CPU::latetiming : 0);
     } else { // if (Config::arch == A_PENT) - by default
         statesInFrame = TSTATES_PER_FRAME_PENTAGON;
         IntStart = INT_START_PENTAGON;
@@ -386,7 +387,7 @@ void CPU::reset() {
         Z80Ops::is512 = false;
         Z80Ops::is1024 = false;
         Z80Ops::isProfi = false;
-        ESPectrum::target = MICROS_PER_FRAME_128;
+        ESPectrum::target = NextReg::raster().micros;
     } else if (Config::arch == A_TSCONF) {
         // TS-Conf: Pentagon raster (224 T/line, 71680 T/frame), uncontended.
         Z80Ops::isByte = false;

@@ -112,6 +112,14 @@ public:
     static void loop();
     static void reset();
     static void reset(uint8_t romInUse);
+    // Spectrum Next: audio set + frame pacing of NextReg::raster(), and the
+    // whole raster switch at a frame boundary (NEXTVID::EndFrame).
+    static void nextAudioSet();
+    static void nextRasterApply();
+    // 50/60 Hz of the Next vs the video mode, with V-Sync on: banner if they
+    // differ. Raised by a raster change, the V-Sync setting and the first frame.
+    static bool nextRefreshCheckPending;
+    static void nextRefreshCheck();
     // A PROGRAM LOAD (snapshot, .spg, disk launch) restarts the Spectrum side
     // only. A real machine loading a program does not touch its NeoGS, and the
     // emulated card's reboot is not free: every .spg load was rebooting it and

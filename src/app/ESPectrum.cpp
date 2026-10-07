@@ -1428,7 +1428,9 @@ void ESPectrum::setup() {
   // Scorpion Yellow: 69888 T/frame — numerically the 48K frame, so the 48K audio
   // branch is exact (the Pentagon branch would over-feed the DAC, see the reset()
   // twin). Scorpion Green (316-line frame) gets its own exact set below.
-  if (Config::arch == A_48K || Config::arch == A_PROFI ||
+  if (Config::arch == A_NEXT) {
+    nextAudioSet();   // the machine timing's set (48K / 128K / Pentagon / 60 Hz)
+  } else if (Config::arch == A_48K || Config::arch == A_PROFI ||
       (Config::arch == A_SCORP && isScorpYellowTiming(Config::romSetScorp)) ||
       (Config::arch == A_ATM && !atmFrame316(Config::romSetAtm) && !Config::isEvoBase()) ||
       Config::isEvo48Raster()) {
@@ -1742,6 +1744,82 @@ static bool s_reset_keeps_card = false;
 void ESPectrum::resetForLoad()            { s_reset_keeps_card = true; reset();  s_reset_keeps_card = false; }
 void ESPectrum::resetForLoad(uint8_t rom) { s_reset_keeps_card = true; reset(rom); s_reset_keeps_card = false; }
 
+// Spectrum Next: the audio set of the frame NextReg::raster() describes. The
+// sets are the classic machines' own (48K 624, 128K 625, Pentagon 640 samples;
+// 60 Hz 524) — the Next used to fall into the Pentagon branch whatever its
+// frame was (640 samples on a 70908 T frame).
+void ESPectrum::nextAudioSet() {
+    const NextReg::Raster r = NextReg::raster();
+    const uint32_t sif = (uint32_t)r.tpl * r.lines;
+    if (r.hz60) {
+        samplesPerFrame = ESP_AUDIO_SAMPLES_EVO60;
+        audioOverSampleDivider = ESP_AUDIO_OVERSAMPLES_DIV_EVO60;
+        audioSampleDivider = ESP_AUDIO_SAMPLES_DIV_EVO60;
+        audioAYDivider = (r.kind == 1) ? ESP_AUDIO_AY_DIV_128 : ESP_AUDIO_AY_DIV_EVO60;
+        Audio_freq = ESP_AUDIO_FREQ_EVO60;
+    } else if (r.kind == 0) {
+        samplesPerFrame = ESP_AUDIO_SAMPLES_48;
+        audioOverSampleDivider = ESP_AUDIO_OVERSAMPLES_DIV_48;
+        audioAYDivider = ESP_AUDIO_AY_DIV_48;
+        audioSampleDivider = ESP_AUDIO_SAMPLES_DIV_48;
+        Audio_freq = ESP_AUDIO_FREQ_48;
+    } else if (r.kind == 2) {
+        samplesPerFrame = ESP_AUDIO_SAMPLES_PENTAGON;
+        audioOverSampleDivider = ESP_AUDIO_OVERSAMPLES_DIV_PENTAGON;
+        audioAYDivider = ESP_AUDIO_AY_DIV_PENTAGON;
+        audioSampleDivider = ESP_AUDIO_SAMPLES_DIV_PENTAGON;
+        Audio_freq = ESP_AUDIO_FREQ_PENTAGON;
+    } else {
+        samplesPerFrame = ESP_AUDIO_SAMPLES_128;
+        audioOverSampleDivider = ESP_AUDIO_OVERSAMPLES_DIV_128;
+        audioAYDivider = ESP_AUDIO_AY_DIV_128;
+        audioSampleDivider = ESP_AUDIO_SAMPLES_DIV_128;
+        Audio_freq = ESP_AUDIO_FREQ_128;
+    }
+    tstatesPerSampleFP = (sif << 8) / samplesPerFrame;
+    audioCOVOXDivider = audioAYDivider;
+    target = r.micros;
+}
+
+// Called from NEXTVID::EndFrame — inside CPU::loop, before the end-of-frame
+// `tstates -= statesInFrame` — when the raster changed. The new frame length
+// is folded into tstates so that subtraction leaves the same overshoot.
+void ESPectrum::nextRasterApply() {
+    VIDEO::nextRasterSet();
+    const uint32_t old = CPU::statesInFrame;
+    CPU::updateStatesInFrame();
+    CPU::tstates = (uint32_t)((int32_t)CPU::tstates + (int32_t)(CPU::statesInFrame - old));
+    nextAudioSet();
+    VIDEO::pickMachineVideoMode();   // the display frame follows the raster (V-Sync pacing)
+    const NextReg::Raster r = NextReg::raster();
+    Debug::log("NEXT raster: %s %u T x %u lines%s, %u us",
+               r.kind == 0 ? "48K" : r.kind == 2 ? "Pentagon" : "128K/+3",
+               (unsigned)r.tpl, (unsigned)r.lines, r.hz60 ? " (60 Hz)" : "", (unsigned)r.micros);
+    nextRefreshCheckPending = true;
+}
+
+bool ESPectrum::nextRefreshCheckPending = false;
+
+// With V-Sync the display refresh paces the emulation, and a 50 Hz machine on a
+// 60 Hz mode (or the reverse) runs at the wrong speed. The video mode is the
+// user's pick — say so instead of switching it under them. Three things move
+// the comparison: the Next's own 50/60 Hz (BIOS / NR 0x05), our video mode
+// (reboot-class, so the first frame after boot re-checks) and V-Sync itself.
+void ESPectrum::nextRefreshCheck() {
+#ifdef VGA_HDMI
+    if (Config::arch != A_NEXT || !Config::v_sync_enabled) return;
+    extern bool SELECT_VGA;
+    const uint8_t vm = Config::baseVideoMode(SELECT_VGA ? Config::vga_video_mode
+                                                        : Config::hdmi_video_mode);
+    const bool disp60 = vm == Config::VM_640x480_60 || vm == Config::VM_720x480_60;
+    const bool next60 = NextReg::raster().hz60;
+    if (disp60 != next60)
+        OSD::notify(next60 ? " Next runs 60 Hz: pick a 60 Hz video mode "
+                           : " Next runs 50 Hz: pick a 50 Hz video mode ",
+                    LEVEL_WARN, 5000);
+#endif
+}
+
 void ESPectrum::reset() {
   // Pentagon+Gluk: boot with Gluk ROM so it installs service monitor at 0xDB00
   // This matches real Pentagon hardware where Gluk always boots first
@@ -2019,7 +2097,9 @@ void ESPectrum::reset(uint8_t romInUse) {
   // (640*50.08fps = 32051 > 31250), causing ring overrun → periodic clicks/buzz.
   // Scorpion Yellow is the same 69888 T frame — same rule; Green (70784 T) gets
   // its own exact 632-sample set below.
-  if (Config::arch == A_48K || Config::arch == A_PROFI ||
+  if (Config::arch == A_NEXT) {
+    nextAudioSet();   // the machine timing's set (48K / 128K / Pentagon / 60 Hz)
+  } else if (Config::arch == A_48K || Config::arch == A_PROFI ||
       (Config::arch == A_SCORP && isScorpYellowTiming(Config::romSetScorp)) ||
       (Config::arch == A_ATM && !atmFrame316(Config::romSetAtm) && !Config::isEvoBase()) ||
       Config::isEvo48Raster()) {

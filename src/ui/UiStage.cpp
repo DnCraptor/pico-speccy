@@ -505,9 +505,10 @@ static bool hook_ay48(int32_t nv, int32_t) {
     return true;
 }
 static bool hook_render(int32_t nv, int32_t) {
-    // Snow is meaningless on Pentagon-class machines (no ULA contention model for it).
-    VIDEO::snow_toggle = (Config::arch != A_P1024 && Config::arch != A_PENT &&
-                          Config::arch != A_P512) ? (nv != 0) : false;
+    // Snow exists only on the Sinclair ULA machines; elsewhere the machine's own
+    // renderer owns Draw and must not be replaced (VIDEO::snowAllowed).
+    if (!VIDEO::snowAllowed()) { VIDEO::snow_toggle = false; return true; }
+    VIDEO::snow_toggle = (nv != 0);
     if (VIDEO::snow_toggle) {
         VIDEO::Draw        = &VIDEO::MainScreen_Blank_Snow;
         VIDEO::Draw_Opcode = &VIDEO::MainScreen_Blank_Snow_Opcode;
@@ -515,6 +516,14 @@ static bool hook_render(int32_t nv, int32_t) {
         VIDEO::Draw        = &VIDEO::MainScreen_Blank;
         VIDEO::Draw_Opcode = &VIDEO::MainScreen_Blank_Opcode;
     }
+    return true;
+}
+// V-Sync makes the DISPLAY refresh pace the emulation: on the Spectrum Next a
+// 50/60 Hz mismatch between the machine and the video mode is then worth a
+// banner — checked on the next running frame (a banner raised under the menu
+// would not survive it).
+static bool hook_vsync(int32_t, int32_t) {
+    ESPectrum::nextRefreshCheckPending = true;
     return true;
 }
 static bool hook_paper(int32_t nv, int32_t) {

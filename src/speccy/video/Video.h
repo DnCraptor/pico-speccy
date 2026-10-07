@@ -391,6 +391,9 @@ public:
   static void     tsRenderExec(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq); // one line, core1 or core0
   static void     tsRenderExecOvr(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq, const struct TsLineCtx& c); // the GFXOVR merge (flash)
   static void     tsRenderCore1Pump();   // core1 render loop: run queued lines
+  static bool     snowAllowed();         // ULA snow exists on this machine (Render type)
+  static void     pickMachineVideoMode(); // per-machine 50 Hz display mode (v_total) + publish
+  static void     nextRasterSet();       // Spectrum Next: raster anchors of the machine timing
   static void     tsRenderDrain();       // core0: wait for the core1 queue to empty
   static bool     tsRenderOverlaps(uint32_t addr, uint32_t len); // a RAM write would race a queued line
   static bool     tsWatchedPage(uint32_t page);   // a queued line may read this physical page

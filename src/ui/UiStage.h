@@ -124,7 +124,7 @@ const char* romsetName(int32_t composite);
     /* ── Video ───────────────────────────────────────────────────────────────── */      \
     X(SET_PALETTE,         AC_LIVE,   F_PREVIEW | F_PALETTE, get_palette,    put_palette,    hook_palette,   -1)          \
     X(SET_SCANLINES,       AC_LIVE,   F_PREVIEW,             get_scanlines,  put_scanlines,  hook_scanlines, -1)          \
-    X(SET_VSYNC,           AC_PURE,   0,                     get_vsync,      put_vsync,      nullptr,        -1)          \
+    X(SET_VSYNC,           AC_LIVE,   0,                     get_vsync,      put_vsync,      hook_vsync,        -1)          \
     X(SET_HDMI_DITHER,     AC_LIVE,   F_PREVIEW,             get_dither,     put_dither,     hook_dither,    -1)          \
     X(SET_DMA,             AC_SUBSYS, F_SUBSYS,              get_dma,        put_dma,        nullptr,        FEAT_DMA)    \
     X(SET_RENDER,          AC_LIVE,   0,                     get_render,     put_render,     hook_render,    -1)          \

@@ -75,6 +75,7 @@ static void ftTraceTick();   // defined in the VDAC2 glue section below
 #include "speccy/core/Ports.h"
 #include "speccy/devices/Z80DMA.h"
 #include "speccy/machines/Next/NextVideo.h"
+#include "speccy/machines/Next/NextReg.h"
 #include "hardware/xip_cache.h"
 #include "speccy/machines/Atm.h"
 #include "speccy/machines/Pentagon.h"
@@ -1158,7 +1159,7 @@ static bool ds80_border_geom = false;
 // OSD::notify banner rect (fb bytes / fb rows), honoured by every renderer that
 // owns the rows it sits on: the TS-Conf whole-line renderer and its band rows,
 // the borderless scaler, and the Profi DS80 content renderer + border machine.
-static int ts_notice_x0 = 0, ts_notice_x1 = 0, ts_notice_y0 = 0, ts_notice_y1 = -1;
+int ts_notice_x0 = 0, ts_notice_x1 = 0, ts_notice_y0 = 0, ts_notice_y1 = -1;   // NEXTVID reads them too
 
 // LED indicator panel (Interface > LED indicators > Solid background): width in
 // fb bytes (a multiple of 8), 0 = none. It starts at the left edge of the F8
@@ -4853,6 +4854,128 @@ void VIDEO::Init() {
     }
 }
 
+// The 50 Hz display modes are per MACHINE RASTER (v_total tuned so one display
+// frame is one emulated frame: Pentagon 48.83 / 128K 50.02 / 48K 50.08 Hz) —
+// with v_sync pacing the display refresh IS the emulated frame rate. Picked on
+// every machine reset and, on the Spectrum Next, whenever its machine timing
+// changes (ESPectrum::nextRasterApply): a Next in Pentagon timing ran at the
+// 128K display's 50.02 fps (hw 2026-10-07).
+void VIDEO::pickMachineVideoMode() {
+#ifdef VGA_HDMI
+    // Next: the raster kind of its machine timing (0 48K, 1 128K/+3, 2 Pentagon)
+    const int nk = (Config::arch == A_NEXT) ? NextReg::raster().kind : -1;
+    // A "fast" (90/75 Hz) pick selects the SAME index plus VMODE_FAST_OFFSET —
+    // graphics.c holds the 37.8 MHz twin of every standard mode there, with the
+    // same geometry and the same v_total. Only sys_clk 378 MHz gives those a clean
+    // PIO divider, so anything else falls back to the 25.2 MHz twin here as well
+    // as in Config::load() — this is the path a live Overclock change reaches.
+    const uint8_t vmSel   = SELECT_VGA ? Config::vga_video_mode : Config::hdmi_video_mode;
+    bool          useFast = Config::isFastVideoMode(vmSel) &&
+                            Config::cpu_mhz == Config::VM_FAST_CPU_MHZ;
+#if VGA_HSTX
+    // The serializer has no 37.8 MHz: 126 MHz / 3.333 is not a whole number of
+    // clk_hstx cycles per pixel. The menu hides the set (vmFastOffered), this is
+    // the backstop for a mode persisted by a PIO build or another board.
+    if (SELECT_VGA) useFast = false;
+#endif
+    if (SELECT_VGA)
+    {
+        switch (Config::baseVideoMode(vmSel)) {
+            case Config::VM_640x480_50:
+                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 2;
+                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) video_mode = 3;
+                else video_mode = 1; // Pentagon
+                break;
+            case Config::VM_720x480_60:
+                video_mode = 7;
+                break;
+            case Config::VM_720x576_50:
+                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 5;
+                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) video_mode = 6;
+                else video_mode = 4; // Pentagon
+                break;
+            default: // VM_640x480_60
+                video_mode = 0;
+                break;
+        }
+    }
+    else
+    {
+        // HDMI: map Config enum to graphics.c video_mode index
+        switch (Config::baseVideoMode(vmSel)) {
+            case Config::VM_640x480_60:
+                video_mode = 0;
+                break;
+            case Config::VM_640x480_50:
+                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 2;
+                else if (Config::arch == A_128K || Config::isEvo128Raster() || nk == 1) video_mode = 3;
+                else video_mode = 1; // Pentagon
+                break;
+            case Config::VM_720x480_60:
+                video_mode = 7;
+                break;
+            case Config::VM_720x576_50:
+                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 5;
+                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) video_mode = 6;
+                else video_mode = 4; // Pentagon
+                break;
+            default:
+                video_mode = 0;
+                break;
+        }
+    }
+    if (useFast) video_mode = graphics_fast_mode(video_mode);
+    // The 50 Hz modes above are per MACHINE — one display frame is tuned to be
+    // exactly one emulated frame (v_total 644 Pentagon 48.83 Hz / 629 128K
+    // 50.02 Hz / 628 48K, Profi, Scorpion 50.08 Hz) — and with v_sync pacing the
+    // display's refresh IS the emulated frame rate. So the pick has to reach the
+    // driver here, on every machine reset, not just at boot: the HDMI line ISR
+    // reads a snapshot taken in hdmi_init(), and without this a Pentagon -> 128K
+    // switch kept running the new machine at the old machine's 48.83 fps until a
+    // full reboot (the VGA ISR reads the table live and never had the bug).
+    graphics_update_mode_timing();
+#endif
+}
+
+// Spectrum Next: ULA raster anchors of the machine TIMING (nextreg 0x03 bits
+// 6:4) — the 48K, 128K/+3 and Pentagon sets the classic machines use. Called
+// from Reset and, on a timing change, from ESPectrum::nextRasterApply at the
+// frame boundary.
+void VIDEO::nextRasterSet() {
+    const bool full = VIDEO::isFullBorderMode(), b240 = VIDEO::isFullBorder240();
+    switch (NextReg::raster().kind) {
+        case 0:
+            tStatesPerLine = TSTATES_PER_LINE;
+            tStatesScreen = TS_SCREEN_48;
+            tStatesBorder = full ? (b240 ? TS_BORDER_360x240 : TS_BORDER_360x288) : TS_BORDER_320x240;
+            break;
+        case 2:
+            tStatesPerLine = TSTATES_PER_LINE_PENTAGON;
+            tStatesScreen = TS_SCREEN_PENTAGON;
+            tStatesBorder = full ? (b240 ? TS_BORDER_360x240_PENTAGON : TS_BORDER_360x288_PENTAGON)
+                                 : TS_BORDER_320x240_PENTAGON;
+            break;
+        default:
+            tStatesPerLine = TSTATES_PER_LINE_128;
+            tStatesScreen = TS_SCREEN_128;
+            tStatesBorder = full ? (b240 ? TS_BORDER_360x240_128 : TS_BORDER_360x288_128)
+                                 : TS_BORDER_320x240_128;
+            break;
+    }
+    NextReg::applyRasterPaper();
+}
+
+// ULA snow exists only on the Sinclair ULA machines (48K/128K/+2 and the
+// machines that reuse their beam renderer). One rule for Reset and the
+// Video > Render type hook: the hook used to test only the Pentagons and
+// re-pointed Draw at the standard ULA renderer on the Next / TS-Conf / ATM,
+// whose own renderers own Draw (2026-10-07).
+bool VIDEO::snowAllowed() {
+    return Config::arch != A_P1024 && Config::arch != A_P512 && Config::arch != A_PENT &&
+           Config::arch != A_PROFI && Config::arch != A_SCORP && Config::arch != A_TSCONF &&
+           Config::arch != A_ATM && Config::arch != A_NEXT && !Config::isPlus3();
+}
+
 void VIDEO::Reset() {
 
     borderColor = 7;
@@ -4933,11 +5056,9 @@ void VIDEO::Reset() {
         Draw_OSD43 = BottomBorder;
         DrawBorder = TopBorder_Blank;
     } else if (Config::arch == A_NEXT) {
-        // Next runs 128K ULA timing; the Byte-romset variants never apply here
-        tStatesPerLine = TSTATES_PER_LINE_128;
-        tStatesScreen = TS_SCREEN_128;
-        tStatesBorder = isFullBorder ? (isFullBorder240 ? TS_BORDER_360x240_128 : TS_BORDER_360x288_128)
-                      : TS_BORDER_320x240_128;
+        // Next: the raster of the machine timing (nextreg 0x03), 50 Hz anchors
+        // (NEXTVID::computeGeometry shifts them at 60 Hz).
+        nextRasterSet();
         VsyncFinetune[0] = 0;
         VsyncFinetune[1] = 0;
 
@@ -5188,7 +5309,7 @@ void VIDEO::Reset() {
 
     // The +2A/+3 ULA has no snow bug either (its RAM is not shared with the CPU the
     // way the 48K/128K ULA's is), so it joins the machines that never render snow.
-    VIDEO::snow_toggle = (Config::arch != A_P1024 && Config::arch != A_P512 && Config::arch != A_PENT && Config::arch != A_PROFI && Config::arch != A_SCORP && Config::arch != A_TSCONF && Config::arch != A_ATM && !Config::isPlus3()) ? Config::render : false;
+    VIDEO::snow_toggle = snowAllowed() ? Config::render : false;
 
     // +2A/+3 contention pattern (see wait_st_tab). Selected here, after the per-arch
     // timing block above, so every machine reset re-picks it.
@@ -5218,78 +5339,8 @@ void VIDEO::Reset() {
     // Borderless: the per-arch blocks above re-armed the border machine; it must
     // stay parked (the scaler owns every row). blRecalc re-decides at EndFrame.
     if (bl_live) DrawBorder = &Border_Blank;
-#ifdef VGA_HDMI
-    // A "fast" (90/75 Hz) pick selects the SAME index plus VMODE_FAST_OFFSET —
-    // graphics.c holds the 37.8 MHz twin of every standard mode there, with the
-    // same geometry and the same v_total. Only sys_clk 378 MHz gives those a clean
-    // PIO divider, so anything else falls back to the 25.2 MHz twin here as well
-    // as in Config::load() — this is the path a live Overclock change reaches.
-    const uint8_t vmSel   = SELECT_VGA ? Config::vga_video_mode : Config::hdmi_video_mode;
-    bool          useFast = Config::isFastVideoMode(vmSel) &&
-                            Config::cpu_mhz == Config::VM_FAST_CPU_MHZ;
-#if VGA_HSTX
-    // The serializer has no 37.8 MHz: 126 MHz / 3.333 is not a whole number of
-    // clk_hstx cycles per pixel. The menu hides the set (vmFastOffered), this is
-    // the backstop for a mode persisted by a PIO build or another board.
-    if (SELECT_VGA) useFast = false;
-#endif
-    if (SELECT_VGA)
-    {
-        switch (Config::baseVideoMode(vmSel)) {
-            case Config::VM_640x480_50:
-                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster()) video_mode = 2;
-                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || Config::arch == A_NEXT) video_mode = 3;
-                else video_mode = 1; // Pentagon
-                break;
-            case Config::VM_720x480_60:
-                video_mode = 7;
-                break;
-            case Config::VM_720x576_50:
-                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster()) video_mode = 5;
-                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || Config::arch == A_NEXT) video_mode = 6;
-                else video_mode = 4; // Pentagon
-                break;
-            default: // VM_640x480_60
-                video_mode = 0;
-                break;
-        }
-    }
-    else
-    {
-        // HDMI: map Config enum to graphics.c video_mode index
-        switch (Config::baseVideoMode(vmSel)) {
-            case Config::VM_640x480_60:
-                video_mode = 0;
-                break;
-            case Config::VM_640x480_50:
-                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster()) video_mode = 2;
-                else if (Config::arch == A_128K || Config::isEvo128Raster() || Config::arch == A_NEXT) video_mode = 3;
-                else video_mode = 1; // Pentagon
-                break;
-            case Config::VM_720x480_60:
-                video_mode = 7;
-                break;
-            case Config::VM_720x576_50:
-                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster()) video_mode = 5;
-                else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || Config::arch == A_NEXT) video_mode = 6;
-                else video_mode = 4; // Pentagon
-                break;
-            default:
-                video_mode = 0;
-                break;
-        }
-    }
-    if (useFast) video_mode = graphics_fast_mode(video_mode);
-    // The 50 Hz modes above are per MACHINE — one display frame is tuned to be
-    // exactly one emulated frame (v_total 644 Pentagon 48.83 Hz / 629 128K
-    // 50.02 Hz / 628 48K, Profi, Scorpion 50.08 Hz) — and with v_sync pacing the
-    // display's refresh IS the emulated frame rate. So the pick has to reach the
-    // driver here, on every machine reset, not just at boot: the HDMI line ISR
-    // reads a snapshot taken in hdmi_init(), and without this a Pentagon -> 128K
-    // switch kept running the new machine at the old machine's 48.83 fps until a
-    // full reboot (the VGA ISR reads the table live and never had the bug).
-    graphics_update_mode_timing();
-#endif
+    pickMachineVideoMode();
+
 
     // Restore stats mode that was active before reset
     if (prevOSDstats) {
@@ -7209,7 +7260,7 @@ int VIDEO::gmxTopBandRows() { return (gmx_ext_live || ts_render_live) ? (int)lin
 // border machine is parked (Scorpion GMX 640x200, every TS-Conf non-ZX mode):
 // the top/bottom bands are painted frame-granularly by gmxBorderFrame and their
 // height is lin_end — which can be ZERO, unlike the border machine's 24/48.
-bool VIDEO::bandBorderMode() { return gmx_ext_live || ts_render_live || bl_live || ft_live; }
+bool VIDEO::bandBorderMode() { return gmx_ext_live || ts_render_live || bl_live || ft_live || Z80Ops::isNext; }
 
 // Profi/Karabas DS80 geometry is live: the border machine runs (unlike the
 // modes above) but its top band is lin_end = 24 rows at 720x576 and NONE at
