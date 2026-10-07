@@ -15,6 +15,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "hardware/regs/xip.h"
 #include "hardware/regs/addressmap.h"
 #include "NextVideo.h"
+#include "NextRtc.h"
 #include "app/Debug.h"
 #include "speccy/z80/z80.h"
 #include "speccy/devices/storage/DivMMC.h"
@@ -322,6 +323,7 @@ void NextReg::reset(bool hard) {
     applyRomSelect();
     MemESP::applyNextConfigWindow();
     contendRecalc();
+    NextRtc::reset();   // zxnext.vhd: i2c_scl_o / i2c_sda_o <= '1' on reset
 }
 
 // Raster line for reg 0x1E/0x1F and the line interrupt. Line 0 is the first

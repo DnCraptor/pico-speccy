@@ -92,7 +92,6 @@ Ported from the pico-next donor branch (`~/github/pico-next`,
 - **Not done yet** (gap list in the plan file): relative/unified sprites
   (anchors only), ULA scroll 0x26/0x27, LoRes radastan 4bpp, horizontal copper
   WAIT, peripheral regs 0x06/0x08/0x09 as working bits, interrupt ctl 0xC0+,
-  DS1307 i2c shim on 0x103B/0x113B (reads 0xFF now — NextZXOS clock dead),
   Next-UART 0x133B→ZiFi bridge, zxnDMA prescaler mode, .SNX.
 
 **Scope (rebrand, 2026-07-25):** RP2350 only — RP2040 support, the ZERO and
@@ -318,6 +317,16 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   TopBorder). Раскраска — `nxPaintBorderRuns` во flash. 7 отрезков было мало: тест
   цветных полос меняет #FE 8 раз за строку. Debug > Paper off работает и на Next
   (paper-строки рисуются как бордюр).
+- **DS1307 на I2C** (2026-10-07, hw-confirmed: часы в NextZXOS): `machines/Next/
+  NextRtc.cpp` (flash) — честный I2C-слейв на #103B/#113B (START/STOP по SDA при
+  SCL=1, ACK на каждый байт, автоинкремент 0..63, ACK/NACK мастера), адрес 0x68,
+  отвечает только при «CMOS + NVRAM». Время латчится из `RTC::now` на START, запись
+  регистров 0-6 (`.TIME/.DATE`) → `RTC::setDateTime` на STOP. Подпись 'ZX' в
+  #3E/#3F преднастроена; RAM 8-63 не сохраняется. Сверено: wiki RTC / I2C clock,
+  zxnext.vhd 3236-3266, дистрибутив TBBLUE `src/asm/rtc/rtcack.asm` (= nextzxos/
+  RTC.SYS — ТРЕБУЕТ ACK: 4 опроса SDA при SCL=1) и `rtcsig.asm` (10 байт с #3E).
+  ZEsarUX ds1307.c слишком упрощён (без ACK и записи) — не брать. Хост-тест
+  `tools/nextrtc_test.cpp` (+ заглушки `tools/nextrtc_stub/`), рецепт в шапке.
 - **Floating bus Next** (hw: halt2int Float): только порт с младшим байтом #FF и
   только в тайминге 48K/128K на 3.5 МГц (zxnext.vhd 2813/4513), окно как у
   `getFloatBusData48/128`, на 60 Гц paper на 26 строк раньше; Timex-чтение (NR 08 b2

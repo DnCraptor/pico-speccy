@@ -11,6 +11,7 @@
 #include "NextPorts.h"
 #include "NextReg.h"
 #include "NextVideo.h"
+#include "NextRtc.h"
 #include "app/ESPectrum.h"
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
@@ -50,8 +51,9 @@ int NextPorts::input(uint16_t address) {
     if (address == 0x253B) return NextReg::read(NextReg::selected);
     if (address == 0x123B && NextReg::portOn(NextReg::PE_LAYER2)) return NextReg::port123B;
     if (address == 0x303B && NextReg::portOn(NextReg::PE_SPRITE)) return NEXTVID::spriteFlagsRead();
-    // I2C bus (RTC) — no device attached: lines read idle-high
-    if (address == 0x103B || address == 0x113B) return 0xFF;
+    // I2C bus + DS1307 (NextRtc.cpp); NR 0x83 bit 2 undecodes both ports
+    if (address == 0x103B && NextReg::portOn(NextReg::PE_I2C)) return NextRtc::readScl();
+    if (address == 0x113B && NextReg::portOn(NextReg::PE_I2C)) return NextRtc::readSda();
     // Port 0xFF: the Timex register read-back, gated on nextreg 0x08 bit 2 and
     // the port's own enable; otherwise the ULA floating bus (even with the
     // port undecoded — zxnext.vhd port_ff_rd_dat ignores port_ff_io_en there).
@@ -75,8 +77,9 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
         NEXTVID::spriteSlotSelect(data);
         return true;
     }
-    // I2C bus (RTC) — writes ignored, no device attached
-    if (address == 0x103B || address == 0x113B) return true;
+    // I2C bus + DS1307 (NextRtc.cpp)
+    if (address == 0x103B && NextReg::portOn(NextReg::PE_I2C)) { NextRtc::writeScl(data); return true; }
+    if (address == 0x113B && NextReg::portOn(NextReg::PE_I2C)) { NextRtc::writeSda(data); return true; }
 
     // Next DACs (Covox/SpecDrum/Soundrive ports): A/B = left, C/D = right,
     // routed through the stereo Covox channel. Each port is gated by its
