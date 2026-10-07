@@ -1042,7 +1042,10 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         for (int x = 0; x < 256; x++)
             p[x] = ulaLut[base[(uint8_t)(x + sxl) >> 1]];
     }
-    else if (!(LS->r68 & 0x80) && LS->hires) {
+    // Timex screen mode = port FF / NR 0x69 bits 2:0, forced to 000 while the
+    // shadow screen (bank 7, NR 0x69 bit 6 = port 7FFD bit 3) is displayed —
+    // zxula.vhd: "limit timex modes to bank 5 as bank 7 only has 8k bram".
+    else if (!(LS->r68 & 0x80) && LS->hires && !(LS->r69 & 0x40)) {
         // Timex hi-res 512x192: screen 0 (0x4000) gives the left 8 pixels of
         // each 16-pixel column, screen 1 (0x6000) the right 8 — the TC2048
         // layout VIDEO's renderer uses, and its nibble LUT (ink/paper from port
@@ -1059,8 +1062,17 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         memset(p, HIRES_MARK, 256);
     }
     else if (!(LS->r68 & 0x80)) {
-        const uint8_t* bmp = LS->grmem + VIDEO::offBmp[y];
-        const uint8_t* att = LS->grmem + VIDEO::offAtt[y];
+        // zxula.vhd vram_a: pixel = mode(0) & pixel address, attribute =
+        // '1' & PIXEL address when mode(1) (hi-colour 8x1 attributes at
+        // 0x6000), else mode(0) & attribute address. Mode 1 = the second
+        // screen at 0x6000/0x7800, mode 2 = hi-colour, mode 3 = both (pixel
+        // and attribute from the same 0x6000 byte, as the hardware does).
+        // Hi-res modes (bit 2) other than 6 take this path with bits 1:0.
+        const uint8_t tm = (LS->r69 & 0x40) ? 0 : (LS->r69 & 0x03);
+        const uint16_t pOff = VIDEO::offBmp[y];
+        const uint8_t* bmp = LS->grmem + pOff + ((tm & 1) << 13);
+        const uint8_t* att = LS->grmem + ((tm & 2) ? 0x2000 + pOff
+                                                   : VIDEO::offAtt[y] + ((tm & 1) << 13));
         if (ulaNext) {
             // ULANext attribute format: ink = attr & mask, paper = 128 + rest
             uint8_t mask = LS->r42;

@@ -54,11 +54,12 @@ int NextPorts::input(uint16_t address) {
     // I2C bus + DS1307 (NextRtc.cpp); NR 0x83 bit 2 undecodes both ports
     if (address == 0x103B && NextReg::portOn(NextReg::PE_I2C)) return NextRtc::readScl();
     if (address == 0x113B && NextReg::portOn(NextReg::PE_I2C)) return NextRtc::readSda();
-    // Port 0xFF: the Timex register read-back, gated on nextreg 0x08 bit 2 and
-    // the port's own enable; otherwise the ULA floating bus (even with the
-    // port undecoded — zxnext.vhd port_ff_rd_dat ignores port_ff_io_en there).
+    // Port 0xFF: the Timex register read-back, gated on nextreg 0x08 bit 2;
+    // otherwise the ULA floating bus. zxnext.vhd also needs port_ff_io_en
+    // (NR 0x82 bit 0) for the read-back — ignored here like the write
+    // (deliberate deviation, see nextPortFFOverride in Ports.cpp).
     if ((address & 0xFF) == 0xFF) {
-        if ((NextReg::reg[0x08] & 0x04) && NextReg::portOn(NextReg::PE_FF))
+        if (NextReg::reg[0x08] & 0x04)   // NR 82 bit 0 ignored, as for writes (Ports.cpp)
             return NextReg::portFF;
         return nxFloatBus();
     }

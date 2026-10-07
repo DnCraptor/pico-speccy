@@ -93,6 +93,21 @@ extern "C" const uint32_t profi_default_palette16[16];
 #include "speccy/machines/Byte.h"
 #include "speccy/machines/Profi/Profi.h"
 
+// Spectrum Next: a port #FF write with NR 0x82 bit 0 clear. zxnext.vhd drops
+// it (port_ff_wr needs port_ff_io_en) and TBBLUE.FW v1.44 clears that bit for
+// every 48K/128K/+3/Pentagon personality, the TC2048 one included — so on the
+// board no Timex program can switch a screen mode. DELIBERATE DEVIATION (owner,
+// 2026-10-08): the write is applied anyway. Logged once per boot.
+__attribute__((noinline)) static void nextPortFFOverride(uint8_t v) {
+  static bool said = false;
+  if (!said) {
+    said = true;
+    Debug::log("[NEXT] OUT #FF,%02X with port FF disabled (NR 82h=%02X): applied anyway (Timex deviation)",
+               v, NextReg::reg[0x82]);
+  }
+  NextReg::writePortFF(v);
+}
+
 // Set to 1 to trace every 0x7FFD / 0xDFFD paging-port write (Profi debugging).
 // Off by default — these fire thousands of times during DS80/CP/M init.
 #ifndef PROFI_PORT_TRACE
@@ -3404,6 +3419,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     // nextreg 0x69 (NEXTVID's screen-mode source).
     if (Z80Ops::isNext && a8 == 0xFF) {
       if (NextReg::portOn(NextReg::PE_FF)) NextReg::writePortFF(data);
+      else nextPortFFOverride(data);  // VHDL drops it; we do not (see the helper)
       ioContentionLate(MemESP::ramContended[rambank]);
       return;
     }

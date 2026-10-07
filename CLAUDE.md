@@ -203,6 +203,17 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
 - **Порт 0xFF** (Timex/SCLD, полный декод lo-байта на Next): bit6 = запрет ULA
   frame INT (`Z80Ops::isActiveINT`, рядом с NR 0x22 bit2 — гэп из матрицы
   zx_go), биты 5:0 ↔ NR 0x69 биты 5:0; чтение gated NR 0x08 bit2.
+  **Запись в #FF НЕ гейтится NR 0x82 bit 0 — сознательное отклонение
+  (владелец, 2026-10-08).** zxnext.vhd: `port_ff_wr <= iowr and port_ff and
+  port_ff_io_en`, а TBBLUE.FW v1.44 гасит этот бит во ВСЕХ личностях
+  48K/128K/+3/Pentagon (включая TC2048 и сам Next = mode 2, NR 82 = DA) —
+  ни одна Timex-программа на плате режим не включит (wiki про это молчит,
+  zx_go не моделирует). `nextPortFFOverride` (Ports.cpp) пишет всё равно и
+  логирует первый такой OUT. Режимы экрана в NEXTVID по zxula.vhd: бит 0 —
+  пиксели +0x2000 (второй экран 0x6000/0x7800), бит 1 — атрибуты по адресу
+  пикселя в 0x6000 (hi-colour 8×1), при показе теневого экрана (NR 69 b6)
+  режим = 000. Тест: `debug/Timex/next_timex_modes.tap` (клавиши 0/1/2/3/6).
+  hw-confirmed 2026-10-08 (владелец: «работает», личность TC2048, не детализировано).
 - **NEXT_TRACE** (CMake, по умолч. ON в текущем кэше): 1 Hz `NEXT:` state-line
   + `NEXT ev:` кольцо (64) nextreg/легаси-портов/automap с PC. Дизайн — уроки
   NGS-кольца: новейшие в конце, `..` при усечении, флуд (палитра 0x40/41/44,
