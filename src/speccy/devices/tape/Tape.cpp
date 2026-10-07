@@ -353,13 +353,12 @@ void StopRealPlayer(void) {
 // Every machine whose ROM the in-ROM trap and the loader snapshots were made for.
 // Shared by the two gates below, which differ only in what tape wear does to them.
 static inline bool tapeFastMachineOk() {
-    // Spectrum Next: NextZXOS owns tape loading while its divMMC tape trap is
-    // armed (.tapein + automap at #056A, which maps AFTER the fetch — so the
-    // CP A at #056A runs from ROM and our in-ROM trap at #056B always won the
-    // race, feeding LD-BYTES the image left in OUR deck instead of the file the
-    // Browser chose: a foreign header, then "M RAMTOP no good" — hw 2026-10-07).
-    // BIOS personalities without it (48K/128K/Pentagon) keep our fast load.
-    if (Config::arch == A_NEXT && NextReg::osTapeTrapArmed()) return false;
+    // Spectrum Next: fast load is available in every mode. Where NextZXOS's
+    // divMMC tape trap is armed our in-ROM trap yields to it (Z80_JLS.cpp, the
+    // CP A trap) — it would otherwise steal the Browser's .tapein blocks — and
+    // takes over only when the OS gives the load back to the deck (menu "Tape
+    // Loader", no .tapein: Z80::next_os_tape_decline). So the deck must stay
+    // STOPPED after a mount here too, or it spools past the header.
     return Config::arch != A_ALF &&
            Config::romSet != R_ZX81P && Config::romSet != R_48K_CS &&
            Config::romSet != R_128K_CS;

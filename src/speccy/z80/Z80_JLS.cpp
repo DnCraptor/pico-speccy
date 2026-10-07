@@ -2104,6 +2104,12 @@ void Z80::decodeOpcode76()
 
     cp(regA);
 
+    // Spectrum Next: NextZXOS's tape trap declining (no .tapein file attached —
+    // the NextZXOS menu's "Tape Loader") repeats the CP A in divMMC RAM and
+    // returns to ROM3 at #056B, past our in-ROM trap. See next_os_tape_decline().
+    if (__builtin_expect(Z80Ops::isNext, 0) && MemESP::divmmc_mapped &&
+        next_os_tape_decline()) return;
+
     // LOAD trap: CP A in ROM LD-BYTES routine
     // PC after fetch depends on ROM variant:
     //   0x056B = Spanish 48K ROM (CP A at 0x056A) -> RET at 0x05E2
@@ -2484,6 +2490,35 @@ Z80_COLD bool Z80::evo_tape_trap() {
     }
     regA = a; setFlags(f); REG_C = c;
     return false;
+}
+
+// Spectrum Next, NextZXOS's divMMC tape trap (automap at #056A, handler at
+// divMMC RAM #387F in NextZXOS 2.09) with NO .tapein file attached — the menu's
+// "Tape Loader": it restores the border, repeats the ROM's CP A and leaves for
+// the real tape via `PUSH #056B / JP #1FF9` (the divMMC off-zone RET), i.e.
+// back into ROM3 LD-BYTES past the CP A our in-ROM trap sits on. That CP A
+// followed by PUSH #056B (ED 8A 05 6B) occurs nowhere else in the divMMC
+// memory, and the .tapein branch never takes it — so it means "the OS gave the
+// load to the tape deck", which is ours. FlashLoad the block like the 48K trap
+// and leave by the OS's own exit, returning to ROM3's RET at #05E2 instead of
+// #056B. Registers are the ROM's (IX/DE/A' untouched by the handler).
+Z80_COLD bool Z80::next_os_tape_decline() {
+    const uint16_t pc = REG_PC;
+    if (pc >= 0x4000 ||
+        MemESP::readbyte(pc) != 0xED || MemESP::readbyte(pc + 1) != 0x8A ||
+        MemESP::readbyte(pc + 2) != 0x05 || MemESP::readbyte(pc + 3) != 0x6B ||
+        MemESP::readbyte(pc + 4) != 0xC3) return false;
+    if (!(Config::flashload && !Config::tape_wear && !Rzx::mode && !Tape::jjScreenAnimating &&
+          (Tape::tapeFileType == TAPE_FTYPE_TAP || Tape::tapeFileType == TAPE_FTYPE_TZX ||
+           Tape::tapeFileType == TAPE_FTYPE_PZX) && Tape::tapeFileName != "none")) return false;
+    if (!Tape::FlashLoad()) return false;
+    if (Tape::tapeStatus == TAPE_LOADING) {
+        Tape::tapeStatus = TAPE_STOPPED;
+        if (!Tape::pzxFlashCont) Tape::tapePhase = TAPE_PHASE_STOPPED;
+    }
+    push(0x05E2);   // ROM3 LD-BYTES' RET -> LD-RET (#053F) already on the stack
+    REG_PC = (uint16_t)(MemESP::readbyte(pc + 5) | (MemESP::readbyte(pc + 6) << 8));
+    return true;
 }
 
 Z80_COLD bool Z80::byte_tape_trap() {

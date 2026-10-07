@@ -33,6 +33,7 @@ uint8_t NextReg::port7FFD = 0;
 uint8_t NextReg::portDFFD = 0;
 uint8_t NextReg::port1FFD = 0;
 uint8_t NextReg::port123B = 0;
+uint32_t NextReg::portEn = ~0u;   // all decoded; NextReg::reset / CPU::reset own it
 
 uint8_t  NextReg::resetPending = 0;
 bool     NextReg::lineIrqEnabled = false;
@@ -293,6 +294,7 @@ void NextReg::reset(bool hard) {
             reg[0x85] = 0x8F;
         }
     }
+    portEnRecalc();
     reg[0x12] = 0x08; // Layer 2 bank
     reg[0x13] = 0x0B; // Layer 2 shadow bank
     reg[0x42] = 0x07; // ULANext attribute format
@@ -529,6 +531,12 @@ void NextReg::write(uint8_t r, uint8_t v) {
             applyRomSelect();   // lock bits move ROM / ROM3 / the Alt-ROM half
             break;
         }
+        case 0x85: // only bit 7 (reset type) and bits 3:0 exist; read-back 6:4 = 0
+            reg[0x85] = v & 0x8F;
+            /* fall through */
+        case 0x82: case 0x83: case 0x84:
+            portEnRecalc();
+            break;
         case 0x60: NEXTVID::copperDataWrite(v);   break;
         case 0x61: NEXTVID::copperIndexLo(v);     break;
         case 0x62: NEXTVID::copperControl(v);     break;

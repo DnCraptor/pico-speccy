@@ -82,6 +82,7 @@ extern "C" const uint32_t profi_default_palette16[16];
 #include "speccy/machines/Plus3/Plus3Fdc.h"
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Next/NextVideo.h"
+#include "speccy/machines/Next/NextPorts.h"
 #include "hardware/gpio.h"
 #include "drivers/sdcard/sdcard.h"
 #include "speccy/machines/Atm.h"
@@ -1034,7 +1035,8 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
   // it up to 12800 times after every sector write (enNextZX page 2 0x1925 /
   // 0x19A1 — its busy wait only ends on timeout). Nothing between here and the
   // DivMMC branch claims 0xEB on the Next, so the answer is the same one.
-  if (Z80Ops::isNext && (address & 0xFF) == 0xEB && DivMMC::enabled && !DivMMC::divide_mode) {
+  if (Z80Ops::isNext && (address & 0xFF) == 0xEB && DivMMC::enabled && !DivMMC::divide_mode &&
+      NextReg::portOn(NextReg::PE_SPI)) {
     LED::touchR(LED::SD);
     return DivMMC::mmc_read();
   }
@@ -1317,21 +1319,14 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     }
 #endif
     if (ia && bitRead(p8, 7) == 0) Alf::portRead(p8);   // #1D/#1F: cart RAM on/off
-    // ZX Next register access ports
+    // ZX Next ports (machines/Next/NextPorts.cpp, flash)
     if (Z80Ops::isNext) {
-      if (address == 0x243B) return NextReg::selected;
-      if (address == 0x253B) return NextReg::read(NextReg::selected);
-      if (address == 0x123B) return NextReg::port123B;
-      if (address == 0x303B) return NEXTVID::spriteFlagsRead();
-      // I2C bus (RTC) — no device attached: lines read idle-high
-      if (address == 0x103B || address == 0x113B) return 0xFF;
-      // Timex port 0xFF read-back, gated on nextreg 0x08 bit 2 (with the
-      // gate off the read falls through to the floating-bus path)
-      if ((address & 0xFF) == 0xFF && (NextReg::reg[0x08] & 0x04))
-        return NextReg::portFF;
+      int nv = NextPorts::input(address);
+      if (nv >= 0) return (uint8_t)nv;
     }
     // ULA+ data port read
-    if (Config::ulaplus && address == 0xFF3B) {
+    if (Config::ulaplus && address == 0xFF3B &&
+        NextReg::portOn(NextReg::PE_ULAP)) {
       LED::touchR(LED::ULAPLUS);
       uint8_t reg = VIDEO::ulaplus_reg;
       if ((reg & 0xC0) == 0x00)
@@ -1384,7 +1379,8 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     // Z80 DMA / zxnDMA port read: listen on both 0x0B and 0x6B
     // (Next always has its DMA on both: #0B Zilog mode, #6B zxn mode)
     if ((Config::dma_mode && ((address & 0xFF) == 0x0B || (address & 0xFF) == 0x6B)) ||
-        (Z80Ops::isNext && ((address & 0xFF) == 0x6B || (address & 0xFF) == 0x0B))) {
+        (Z80Ops::isNext && (((address & 0xFF) == 0x6B && NextReg::portOn(NextReg::PE_DMA6B)) ||
+                            ((address & 0xFF) == 0x0B && NextReg::portOn(NextReg::PE_DMA0B))))) {
       LED::touchR(LED::DMA);
       ioContentionLate(MemESP::ramContended[rambank]);
       return Z80DMA::readPort();
@@ -1414,7 +1410,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
 
     if (DivMMC::enabled) {
       uint8_t lo = address & 0xFF;
-      if (lo == 0xE3) {
+      if (lo == 0xE3 && NextReg::portOn(NextReg::PE_DIVMMC)) {
         LED::touchR(LED::SD);
         return (DivMMC::conmem ? 0x80 : 0) | (DivMMC::mapram ? 0x40 : 0) | DivMMC::bank;
       }
@@ -1425,11 +1421,11 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
           return DivMMC::ide_read(reg);
         }
       } else {
-        if (lo == 0xEB) {
+        if (lo == 0xEB && NextReg::portOn(NextReg::PE_SPI)) {
           LED::touchR(LED::SD);
           return DivMMC::mmc_read();
         }
-        if (lo == 0xE7) {
+        if (lo == 0xE7 && NextReg::portOn(NextReg::PE_SPI)) {
           LED::touchR(LED::SD);
           return 0xFF;
         }
@@ -1853,7 +1849,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     // ROMain's Karabas-RTC presence probe reads (reg 0x0A in A → IN A,(#DF)),
     // and a non-0xFF answer there fakes an RTC. Other archs keep the
     // traditional partial decode (Pentagon-style Kempston mice rely on it).
-    if (!(PROFI && (portDFFD & 0x20))) {
+    if (!(PROFI && (portDFFD & 0x20)) && NextReg::portOn(NextReg::PE_MOUSE)) {
       uint16_t mdec = PROFI ? (uint16_t)address : (address & 0x05ff);
       if (mdec == (PROFI ? 0xFBDF : 0x01df)) {
         LED::touchR(LED::KEMPMOUSE);
@@ -1911,7 +1907,8 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     // Karabas-Pro manual p.24: gate is "CPM=0 & DOS=0" — in CP/M mode the
     // port #1F belongs to the FDC and Kempston must stay off the bus.
     if (Config::joystick == JOY_KEMPSTON &&
-        !(PROFI && (portDFFD & 0x20))) {
+        !(PROFI && (portDFFD & 0x20)) &&
+        NextReg::portOn(p8 == 0x37 ? NextReg::PE_37 : NextReg::PE_1F)) {
       if (((p8 & 0x20) == 0) || (p8 == Config::kempstonPort)) {
         LED::touchR(LED::KEMPJOY);
         return ia ? (port[Config::kempstonPort] ^ 0xA0)
@@ -1924,7 +1921,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       return port[0x7f];
 
     // Sound (AY-3-8912)
-    if (ESPectrum::AY_emu) {
+    if (ESPectrum::AY_emu && NextReg::portOn(NextReg::PE_AY)) {
       if ((address & 0xC002) == 0xC000) {
         LED::touchR(LED::AY);
         AySound* chip = ayChipFor(address);
@@ -3265,78 +3262,13 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     }
     VIDEO::Draw(3, !(Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion || Z80Ops::isTsconf || (Z80Ops::isAtm && !g_evo_contend))); // I/O Contention (Late)
   } else {
-    // ZX Next register access + legacy paging extension ports
-    if (Z80Ops::isNext) {
-      if (address == 0x243B) {
-        NextReg::selected = data;
-        ioContentionLate(false);
-        return;
-      }
-      if (address == 0x253B) {
-        NextReg::write(NextReg::selected, data);
-        ioContentionLate(false);
-        return;
-      }
-      if (address == 0x123B) { // Layer 2 access port
-        NextReg::writeLayer2Port(data);
-        ioContentionLate(false);
-        return;
-      }
-      if (address == 0x303B) {
-        NEXTVID::spriteSlotSelect(data);
-        ioContentionLate(false);
-        return;
-      }
-      // I2C bus (RTC) — writes ignored, no device attached
-      if (address == 0x103B || address == 0x113B) {
-        ioContentionLate(false);
-        return;
-      }
-      // Next DACs (Covox/SpecDrum/Soundrive ports): A/B = left, C/D = right,
-      // routed through the stereo Covox channel
-      if (a8 == 0x0F || a8 == 0x1F || a8 == 0x4F || a8 == 0x5F ||
-          a8 == 0xDF || a8 == 0xFB || a8 == 0xB3) {
-        static uint8_t nextDac[4];
-        switch (a8) {
-          case 0x0F: nextDac[0] = data; break;              // A (left)
-          case 0x1F: nextDac[1] = data; break;              // B (left)
-          case 0x4F: nextDac[2] = data; break;              // C (right)
-          case 0x5F: nextDac[3] = data; break;              // D (right)
-          case 0xB3: nextDac[0] = nextDac[3] = data; break; // stereo pair A/D
-          default:                                          // SpecDrum/Covox mono
-            nextDac[0] = nextDac[1] = nextDac[2] = nextDac[3] = data;
-            break;
-        }
-        ESPectrum::lastCovoxVal  = (uint8_t)((nextDac[0] + nextDac[1]) >> 1);
-        ESPectrum::lastCovoxValR = (uint8_t)((nextDac[2] + nextDac[3]) >> 1);
-        ESPectrum::CovoxGetSample();
-        ioContentionLate(false);
-        return;
-      }
-      // Sprite upload ports decode the low byte only
-      if (a8 == 0x57) {
-        NEXTVID::spriteAttrWrite(data);
-        ioContentionLate(false);
-        return;
-      }
-      if (a8 == 0x5B) {
-        NEXTVID::spritePatternWrite(data);
-        ioContentionLate(false);
-        return;
-      }
-      if (address == 0xDFFD) {
-        NextReg::writeDFFD(data);
-        ioContentionLate(false);
-        return;
-      }
-      if ((address & 0xF002) == 0x1000) { // 0x1FFD (+3 paging)
-        NextReg::write1FFD(data);
-        ioContentionLate(false);
-        return;
-      }
+    // ZX Next ports (machines/Next/NextPorts.cpp, flash)
+    if (Z80Ops::isNext && NextPorts::output(address, data)) {
+      ioContentionLate(false);
+      return;
     }
     // ULA+ ports (odd addresses: 0xBF3B register select, 0xFF3B data)
-    if (Config::ulaplus) {
+    if (Config::ulaplus && NextReg::portOn(NextReg::PE_ULAP)) {
       if (address == 0xBF3B) {
         LED::touchW(LED::ULAPLUS);
         VIDEO::ulaplus_reg = data;
@@ -3459,7 +3391,8 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     // Z80 DMA / zxnDMA port write: listen on both 0x0B and 0x6B
     // (Next always has its DMA on both: #0B Zilog mode, #6B zxn mode)
     if ((Config::dma_mode && (a8 == 0x0B || a8 == 0x6B)) ||
-        (Z80Ops::isNext && (a8 == 0x6B || a8 == 0x0B))) {
+        (Z80Ops::isNext && ((a8 == 0x6B && NextReg::portOn(NextReg::PE_DMA6B)) ||
+                            (a8 == 0x0B && NextReg::portOn(NextReg::PE_DMA0B))))) {
       if (Z80Ops::isNext) Z80DMA::nextZ80Mode = (a8 == 0x0B);   // TX-1696 uploads its patterns via #0B
       LED::touchW(LED::DMA);
       Z80DMA::writePort(data);
@@ -3470,7 +3403,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     // byte. bit6 disables the ULA frame interrupt; bits 5:0 mirror into
     // nextreg 0x69 (NEXTVID's screen-mode source).
     if (Z80Ops::isNext && a8 == 0xFF) {
-      NextReg::writePortFF(data);
+      if (NextReg::portOn(NextReg::PE_FF)) NextReg::writePortFF(data);
       ioContentionLate(MemESP::ramContended[rambank]);
       return;
     }
@@ -3678,7 +3611,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
 
     if (DivMMC::enabled) {
       uint8_t lo = address & 0xFF;
-      if (lo == 0xE3) {
+      if (lo == 0xE3 && NextReg::portOn(NextReg::PE_DIVMMC)) {
         LED::touchW(LED::SD);
         DivMMC::bank = data & (DIVMMC_NUM_BANKS - 1);
         if (data & 0x40) DivMMC::mapram = true;
@@ -3694,12 +3627,12 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
           return;
         }
       } else {
-        if (lo == 0xEB) {
+        if (lo == 0xEB && NextReg::portOn(NextReg::PE_SPI)) {
           LED::touchW(LED::SD);
           DivMMC::mmc_write(data);
           return;
         }
-        if (lo == 0xE7) {
+        if (lo == 0xE7 && NextReg::portOn(NextReg::PE_SPI)) {
           LED::touchW(LED::SD);
           DivMMC::mmc_cs(data);
           return;
@@ -4052,7 +3985,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
   if (Z80Ops::isNext) {
     // Next decodes 0x7FFD +2A/+3-style (A15=0, A14=1, A1=0) and implements
     // it on top of the MMU
-    if ((address & 0xC002) == 0x4000)
+    if ((address & 0xC002) == 0x4000 && NextReg::portOn(NextReg::PE_7FFD))
       NextReg::write7FFD(data);
     return;
   }
@@ -4308,8 +4241,8 @@ IRAM_ATTR void Ports::dmaOutput(uint16_t address, uint8_t data) {
     // over-count on rare ports, accepted).
     if (Z80Ops::isNext) {
         const uint8_t a8 = address & 0xFF;
-        if (a8 == 0x5B) { NEXTVID::spritePatternWrite(data); return; }
-        if (a8 == 0x57) { NEXTVID::spriteAttrWrite(data); return; }
+        if (a8 == 0x5B && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spritePatternWrite(data); return; }
+        if (a8 == 0x57 && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spriteAttrWrite(data); return; }
         if (address == 0x253B) { NextReg::write(NextReg::selected, data); return; }
         if (address == 0x243B) { NextReg::selected = data; return; }
         if (address & 0x0001) { output(address, data); return; }

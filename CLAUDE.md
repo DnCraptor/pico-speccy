@@ -275,13 +275,38 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   Диагностика `[NXERR]` (NEXT_TRACE): кольцо 64 RST 8 + опрос ERR_NR раз в кадр,
   срабатывает на M (`#15`) — оставлена. PC-брейкпоинт не различает банки ПЗУ
   (`#34C1` в ROM0 — цикл Browser), для ошибок ROM пользоваться ею.
+- **Fast load из меню NextZXOS «Tape Loader»** (2026-10-07, hw-confirmed, owner
+  «работает», не детализировано; `debug/DVp2-next-tapeldr-1.0.9.elf`): без .tapein трап ОС (divMMC RAM bank 0
+  #387F в 2.09: `LD A,(#2F1C) / AND A / JR NZ` = tapein есть) сам отдаёт загрузку
+  деке — `LD A,C / OUT (#FE),A / CP A / PUSH #056B / JP #1FF9` (off-zone RET в ROM3
+  #056B, мимо нашего CP A-трапа). `Z80::next_os_tape_decline()` (flash; в RAM —
+  тест `isNext && divmmc_mapped` в CP A, +44 B) ловит `CP A` + `ED 8A 05 6B` из
+  divMMC, делает FlashLoad и выходит тем же `JP` с #05E2 (RET ROM3) на стеке.
+  Сигнатура в divMMC памяти единственная, tapein-ветка (#3896) её не проходит.
+  `tapeFastMachineOk()` больше не исключает Next — дека после монтирования стоит
+  (иначе Play прокрутил бы заголовок до выбора Tape Loader).
 - **60 Гц (NR 05 b2): верхний бордюр на 26 строк короче** (Reference_machines: 128K
   311/261 строк, экран через 63/37 строк после INT). `NEXTVID::computeGeometry`,
   `NextReg::paperLine()` (line IRQ, NR 1E/1F); без этого 17 нижних строк fb не
   перерисовывались (остался футер меню). hw-confirmed 2026-10-07.
 - **Открыто (аудит переключения машин):** тайминг машины (NR 03 b6:4: 48K 224×312,
-  Pentagon 224×320) игнорируется — всегда растр 128K; NR 82-85 хранятся, но порты
-  не отключают; contention на Next нет совсем; AY в личности 48K не гасится.
+  Pentagon 224×320) игнорируется — всегда растр 128K; contention на Next нет совсем.
+- **NR 0x82-0x85 = разрешения декодирования портов** (2026-10-07,
+  `debug/DVp2-next-portdec-1.0.9.elf`; hw-confirmed AY-часть: личность 48K без
+  «AY in 48K» — AY молчит, с ней — играет, 128K — играет; 7FFD в 48K-личности
+  отключён — 128K-игра видит 48K; Pentagon, режим Next (спрайты/Layer 2/SD) и
+  переход Next → Pentagon — тоже ок, owner 2026-10-07): `NextReg::portEn` = zxnext.vhd
+  internal_port_enable(27:0), биты `NextReg::PE_*`; каждый порт Next (7FFD/DFFD/1FFD/
+  FF/DMA 6B+0B/Kempston 1F+37/divMMC E3/SPI E7+EB/мышь/спрайты/Layer2/AY/все DAC
+  включая недостававшие 3F и Soundrive-2 F1/F3/F9/ULA+) проверяет свой бит;
+  выключенный порт не декодируется. TBBLUE.FW `init_registers` гасит их по
+  личности (48K: FF/7FFD/DFFD/1FFD/6B и AY без «AY в 48K»; 128K: FF/DFFD/1FFD;
+  Pentagon: FF/1FFD/SD2; спрайты и Layer2 — во всех), NextZXOS пишет 0xFF при
+  загрузке (ROM0 #00FB) и сам гасит 7FFD для своих 48K/128K-режимов (bank 2 #0DE0).
+  Next-декодирование вынесено в `machines/Next/NextPorts.cpp` (flash); вне Next
+  `portEn = ~0` (CPU::reset), поэтому общие гейты — один тест бита без isNext.
+  Не сделано: +3 floating bus (бит 4), multiface, UART, CTC, EFF7; dac_hw_en (NR 08
+  b3) не учитывается — прямая загрузка без BIOS осталась бы без Covox.
 - **gm_bank** ужат 0x260000→0x25C000 (16K прошивке; банк перепровиженится).
 - **Цена ветки: +14 KB статического RAM** (231.9K → 246.2K) — на PICO_DV это
   съело весь запас кучи у VIDEO::Init: P1024+NeoGS перестал грузиться (OOM-

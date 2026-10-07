@@ -265,6 +265,10 @@ void CPU::reset() {
     Z80Ops::isTc2068 = Config::isTc2068();
     g_timex_machine  = Config::isTimex();
     Z80Ops::isNext = (Config::arch == A_NEXT);
+    // Off the Next every port is "decoded": the shared decoders test the NR
+    // 0x82-0x85 bit alone (no isNext), so leaving a 48K personality behind a
+    // machine switch must not silence another machine's AY / divMMC / mouse.
+    if (!Z80Ops::isNext) NextReg::portEn = ~0u;
     Z80Ops::isP3 = Config::isPlus3();
     if (Z80Ops::isP3) {
         Z80Ops::isByte = false;

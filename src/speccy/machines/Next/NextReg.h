@@ -33,6 +33,28 @@ public:
     static uint8_t port1FFD;
     static uint8_t port123B;     // Layer 2 access port
 
+    // Internal port decode enables, NR 0x82-0x85 packed as zxnext.vhd's
+    // internal_port_enable(27:0) (2397-2442): a clear bit means the FPGA does
+    // not decode that port at all. TBBLUE.FW clears them per BIOS personality
+    // (48K: no 7FFD/DFFD/1FFD/FF, AY optional), NextZXOS writes 0xFF at boot
+    // and clears 7FFD & co. itself for its own 48K/128K modes. No expansion
+    // bus here, so NR 0x86-0x89 never take part.
+    enum : uint32_t {
+        PE_FF = 1u << 0, PE_7FFD = 1u << 1, PE_DFFD = 1u << 2, PE_1FFD = 1u << 3,
+        PE_P3FLOAT = 1u << 4, PE_DMA6B = 1u << 5, PE_1F = 1u << 6, PE_37 = 1u << 7,
+        PE_DIVMMC = 1u << 8, PE_MF = 1u << 9, PE_I2C = 1u << 10, PE_SPI = 1u << 11,
+        PE_UART = 1u << 12, PE_MOUSE = 1u << 13, PE_SPRITE = 1u << 14, PE_LAYER2 = 1u << 15,
+        PE_AY = 1u << 16, PE_DAC_SD1 = 1u << 17, PE_DAC_SD2 = 1u << 18, PE_DAC_PROFI = 1u << 19,
+        PE_DAC_COVOX = 1u << 20, PE_DAC_FB = 1u << 21, PE_DAC_B3 = 1u << 22, PE_DAC_DF = 1u << 23,
+        PE_ULAP = 1u << 24, PE_DMA0B = 1u << 25, PE_EFF7 = 1u << 26, PE_CTC = 1u << 27,
+    };
+    static uint32_t portEn;
+    static inline bool portOn(uint32_t m) { return (portEn & m) != 0; }
+    static void portEnRecalc() {
+        portEn = (uint32_t)reg[0x82] | ((uint32_t)reg[0x83] << 8) |
+                 ((uint32_t)reg[0x84] << 16) | ((uint32_t)(reg[0x85] & 0x0F) << 24);
+    }
+
     // Line interrupt state (nextreg 0x22/0x23)
     static bool     lineIrqEnabled;
     static bool     ulaIrqDisabled;
