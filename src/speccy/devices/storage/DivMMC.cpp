@@ -765,7 +765,7 @@ void DivMMC::snapRestore(uint8_t control, bool automapped) {
     mapram  = (control & 0x40) != 0;
     bank    = control & 0x3F;
     automap = automapped;
-    trap_after = unmap_after = false;
+    pend_after = 0;
     applyMapping();
 }
 

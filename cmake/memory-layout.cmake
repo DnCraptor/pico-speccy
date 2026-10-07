@@ -209,7 +209,7 @@ if (NOT VDAC2_CODE_OVERLAY)
 endif()
 
 if (DMAOVL_WIN_SIZE STREQUAL "AUTO")
-    set(DMAOVL_WIN_SIZE_EFFECTIVE 5632)   # 5 120 measured + headroom
+    set(DMAOVL_WIN_SIZE_EFFECTIVE 6144)   # 5 656 measured (zxnDMA paths for the Next) + headroom
 else()
     set(DMAOVL_WIN_SIZE_EFFECTIVE ${DMAOVL_WIN_SIZE})
 endif()
