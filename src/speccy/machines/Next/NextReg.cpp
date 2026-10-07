@@ -65,7 +65,40 @@ struct NextTraceEnt { char kind; uint8_t reg, val; uint16_t pc; uint16_t rep; };
 static NextTraceEnt s_nt_ring[64];
 static uint32_t s_nt_w = 0;                  // total writes; ring index = w & 63
 static uint32_t s_nt_pal = 0, s_nt_cop = 0, s_nt_spr = 0;   // flood counters
+// NMI one-shot trace (2026-10-07, esxDOS NMI on Next): from a divMMC NMI
+// request on, the next events go straight to the UART instead of the ring,
+// which the per-frame IM1 automap floods within a second. h= is a checksum of
+// divMMC bank 0 0x2000-0x2152 (esxDOS's NMI/ISR dispatch), found zeroed in
+// the post-crash dump.
+uint16_t g_nmi_trace_left = 0;
+uint16_t next_div0_sum() {
+    const uint8_t* b = DivMMC::bank_ptr[0];
+    if (!b) return 0xFFFF;
+    uint16_t s = 0;
+    for (int i = 0; i < 0x153; i++) s = (uint16_t)((s << 1 | s >> 15) ^ b[i]);
+    return s;
+}
+void next_trace_rst8() {   // esxDOS API call: the function byte follows the RST 8
+    const uint16_t sp = Z80::getRegSP();
+    const uint16_t ra = (uint16_t)(MemESP::readbyte(sp) | (MemESP::readbyte((uint16_t)(sp + 1)) << 8));
+    next_trace_ev('8', MemESP::readbyte(ra), (uint8_t)(ra >> 8));
+}
 void next_trace_ev(char kind, uint8_t r, uint8_t v) {
+    if (g_nmi_trace_left) {
+        const uint16_t tpc = Z80::getRegPC();
+        // esxDOS's own bank juggling (copy loop 0x051C/0x0521, the RST 8
+        // dispatcher 0x09AE/0x09C0, the SD driver 0x1E00-0x1FFF) floods the
+        // budget; drop those #E3 writes, keep everything else.
+        if (kind == 'E' && ((tpc >= 0x0500 && tpc < 0x0530) || (tpc >= 0x09A0 && tpc < 0x09C8) ||
+                            (tpc >= 0x0B40 && tpc < 0x0B80) || (tpc >= 0x1E00 && tpc < 0x2000)))
+            goto ring;
+        g_nmi_trace_left--;
+        Debug::log("[NMIT] %c %02X %02X pc=%04X sp=%04X af=%04X hl=%04X am=%u cm=%u bk=%u",
+                   kind, r, v, tpc, Z80::getRegSP(), Z80::getRegAF(), Z80::getRegHL(),
+                   (unsigned)DivMMC::automap, (unsigned)DivMMC::conmem,
+                   (unsigned)DivMMC::bank);
+    }
+ring:
     // Consecutive duplicates collapse into one entry with a repeat count —
     // a file loader hammering NR 0x04 with the same page (2600+/s, hw
     // 2026-08-09) purged the whole ring and hid the one interesting write.
@@ -103,6 +136,7 @@ void next_trace_dump(uint32_t frames) {
              s0 <  (const uint8_t*)0x20082000) own = 'S';            // SRAM page
     else if (s0 >= (const uint8_t*)0x11000000 &&
              s0 <  (const uint8_t*)0x12000000) own = 'P';            // butter page
+    Debug::log("NEXT div0 h=%04X", next_div0_sum());
     Debug::log("NEXT: pc=%04X s0=%08X%c s1=%08X spd=%u/%u"
                " mmu=%02X.%02X.%02X.%02X.%02X.%02X.%02X.%02X"
                " rom=%u boot=%c cfg=%c pg=%02X am=%u 7FFD=%02X 1FFD=%02X DFFD=%02X"
@@ -381,6 +415,30 @@ void NextReg::applyRasterPaper() {
     const uint16_t p = (r.kind == 0) ? 64 : (r.kind == 2) ? 80 : 63;
     paperLineV = (uint16_t)(r.hz60 ? p - 26 : p);
 }
+// zxnext.vhd 2091 (nmi_assert_divmmc: hotkey or NR 02 bit 2, AND NR 06 bit 4),
+// 6349 (hotkey_drive needs port_divmmc_io_en = NR 83 bit 0), 2102 (none in
+// config mode), 2106-2111 + the nmi_state HOLD (no new NMI while divmmc_nmi_hold
+// = automap or the latched button). divmmc.vhd: button_nmi set by the NMI,
+// dropped once automap is held — so an NMI taken while already automapped
+// leaves no button behind.
+uint8_t NextReg::divNmiRequest(bool hotkey) {
+    if (!DivMMC::enabled || MemESP::nextConfigMode || MemESP::nextBootRomActive) return 1;
+    if (!(reg[0x06] & 0x10)) return 1;
+    if (hotkey && !(reg[0x83] & 0x01)) return 1;
+    if (DivMMC::next_nmi_hold) {
+        if (DivMMC::next_nmi_btn || DivMMC::automap) return 2;
+        DivMMC::next_nmi_hold = false;
+    }
+    DivMMC::next_nmi_btn = !DivMMC::automap;
+    DivMMC::next_nmi_hold = true;
+    Z80::triggerNMI();
+#if NEXT_TRACE
+    { extern uint16_t g_nmi_trace_left; g_nmi_trace_left = 1500;
+      next_trace_ev('M', DivMMC::next_nmi_btn, reg[0xBB]); }
+#endif
+    return 0;
+}
+
 bool NextReg::osTapeTrapArmed() {
     return (reg[0x0A] & 0x10) && (reg[0x83] & 0x01) && (reg[0xBB] & 0x20) &&
            (MemESP::next_rom_mask & 1) && MemESP::next_rom3;
@@ -480,6 +538,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
                    // at the end of each boot stage — latching only left the
                    // boot in an endless crash-restart loop (hw: white flash
                    // blinking). Deferred to the frame boundary.
+            if (v & 0x04) divNmiRequest(false);   // generate divMMC NMI
             if (v & 0x02) resetPending = 2;
             else if (v & 0x01) resetPending = 1;
             if (v & 0x03) {
@@ -495,6 +554,13 @@ void NextReg::write(uint8_t r, uint8_t v) {
                 Z80::setIFF1(false);
                 Z80::setIFF2(false);
                 CPU::stFrame = 0;
+            }
+            break;
+        case 0x09: // Peripheral 4: bit 3 = reset the divMMC MAPRAM bit
+                   // (zxnext.vhd: nr_09_we and nr_wr_dat(3) -> port_e3_reg(6) <= 0)
+            if ((v & 0x08) && DivMMC::mapram) {
+                DivMMC::mapram = false;
+                DivMMC::applyMapping();
             }
             break;
         case 0x05: // Peripheral 1: bit 2 = 50/60 Hz — the frame changes at the
@@ -525,6 +591,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
             if (MemESP::videoLatch != vl) {
                 MemESP::videoLatch = vl;
                 VIDEO::grmem = vl ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
+                VIDEO::gigascreenAutoFlip();   // Gigascreen Auto (NEXTVID::gigsFrame)
             }
             break;
         }
@@ -735,6 +802,7 @@ void NextReg::write7FFD(uint8_t v) {
     if (MemESP::videoLatch != vl) {
         MemESP::videoLatch = vl;
         VIDEO::grmem = vl ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
+        VIDEO::gigascreenAutoFlip();   // Gigascreen Auto (NEXTVID::gigsFrame)
     }
     reg[0x69] = (uint8_t)((reg[0x69] & ~0x40) | (vl << 6));
     MemESP::romLatch = (v >> 4) & 1;

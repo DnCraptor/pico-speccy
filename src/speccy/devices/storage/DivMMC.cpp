@@ -92,6 +92,8 @@ static void zcTraceWrite(uint32_t sector, int res, const uint8_t* buf) {
 // Static member definitions
 bool DivMMC::enabled = false;
 bool DivMMC::automap = false;
+bool DivMMC::next_nmi_btn = false;
+bool DivMMC::next_nmi_hold = false;
 // Next cold-boot: $0000 automap stays disarmed until the CPU leaves the
 // reset vector (the FPGA bootrom overlay does this on real hardware)
 bool g_next_automap_armed = false;
@@ -527,9 +529,30 @@ void DivMMC::reopenFiles() {
     }
 }
 
+// Next: any RETN (outside Multiface, which we do not emulate) drops the
+// automap and the NMI button — divmmc.vhd i_retn_seen. The esxDOS/NextZXOS NMI
+// handlers leave through RETN.
+void DivMMC::nextRetn() {
+#if NEXT_TRACE
+    next_trace_ev('R', automap, conmem);
+#endif
+    next_nmi_btn = false;
+    if (automap) {
+        automap = false;
+        if (!conmem) applyMapping();
+    }
+}
+
 void DivMMC::reset() {
     automap = false;
-    g_next_automap_armed = false;   // Next: $0000 trap re-arms after reset vector
+    next_nmi_btn = false;
+    next_nmi_hold = false;
+    // Next: the $0000 entry point is hidden only by the FPGA bootrom overlay
+    // of a cold TBBLUE boot (preOpcFetch stands aside while it is active), so
+    // with the TBBLUE chain it is armed on every other reset — F11 included,
+    // or esxDOS skipped its cold init and the next NMI failed (hw 2026-10-07).
+    // The direct enNextZX boot (no bootrom) keeps "re-arm after the vector".
+    g_next_automap_armed = (MemESP::nextBootRom != nullptr);
     pend_after = 0;
     conmem = false;
     mapram = false;
@@ -1074,6 +1097,11 @@ void DivMMC::raInvalidate() {
 
 
 void DivMMC::loadSector(uint32_t sector) {
+#if NEXT_TRACE
+    { extern uint16_t g_nmi_trace_left;
+      if (g_nmi_trace_left)
+          next_trace_ev('S', (uint8_t)(sector >> 8), (uint8_t)sector); }
+#endif
     if (divsd_mode) {
         // Read-ahead hit: no card access at all
         if (s_sq_buf && sector >= s_sq_base && sector < s_sq_base + s_sq_count &&

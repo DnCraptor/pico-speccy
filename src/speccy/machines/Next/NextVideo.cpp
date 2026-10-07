@@ -21,6 +21,8 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 #include "hardware/sync.h"
 #include "pico/time.h"
 #include "app/TryAlloc.h"
+#include "app/Buffer.h"
+#include "app/Config.h"
 
 // Hot render path in SRAM, like the rest of the video code
 #undef IRAM_ATTR
@@ -42,6 +44,12 @@ uint8_t NEXTVID::pal9First = 0;
 uint8_t NEXTVID::palCtrl = 0;
 
 uint8_t* NEXTVID::lineBuf = nullptr;
+uint8_t* NEXTVID::gigsPrev = nullptr;
+uint8_t  NEXTVID::gigsBlend[256];
+// 0 = off, 1 = blend with the previous frame, 2 = only record this frame (the
+// first frame after the buffer came up, or Auto between flips)
+static uint8_t s_gigs = 0;
+static bool    s_gigsSeed = true;
 uint8_t* NEXTVID::pairMap = nullptr;
 uint8_t* NEXTVID::hiresRow = nullptr;
 uint8_t* NEXTVID::sprPatterns = nullptr;
@@ -91,6 +99,7 @@ struct NextLineState {
     uint8_t clip[4][4];
     uint8_t r12, r14, r15, r16, r17, r2F, r30, r31, r32, r33, r42, r4A, r4B, r4C, r68, r69, r6B, r6C, r6E, r6F, r70, r71;
     uint8_t p123B, palCtrl, border, flashing, hires, osd;
+    uint8_t gigs, _pad[3];   // Gigascreen this frame (s_gigs), kept word-aligned
     // Border colour changes INSIDE the row (OUT #FE mid-line): segment i ends
     // at fb x 2*brd.t[i] (T-states into the row, cell-aligned) in colour nibble i of brd.c;
     // the rest of the row is `border`. n = 0 for an ordinary row (every byte
@@ -141,6 +150,8 @@ IRAM_ATTR void NEXTVID::captureLine(NextLineState& st) {
     st.flashing = VIDEO::flashing;
     st.hires = VIDEO::timex_hires_live ? 1 : 0;
     st.osd = VIDEO::OSD;
+    st.gigs = s_gigs;
+    st._pad[0] = st._pad[1] = st._pad[2] = 0;
     uint32_t* w = (uint32_t*)&st.brd;   // no libc memset on this path (flash)
     for (unsigned i = 0; i < sizeof st.brd / 4; i++) w[i] = 0;
 }
@@ -683,6 +694,49 @@ extern int ts_notice_x0, ts_notice_x1, ts_notice_y0, ts_notice_y1;   // Video.cp
 #if NEXT_TRACE
 void nxErrPoll();   // Z80_JLS.cpp: ERR_NR turning #15 -> dump the RST 8 ring
 #endif
+// Gigascreen for the next frame (Config::gigascreen_onoff: 0 off, 1 on, 2 auto —
+// Auto blends while VIDEO::gigascreenAutoFlip() keeps the countdown up, i.e. the
+// program flips the displayed page through #7FFD bit 3 / NR 0x69 bit 6).
+// The generic Gigascreen (prev-FB + blend slots 17..136) stays suspended on the
+// Next: those slots are NEXTVID's colour lattice.
+__attribute__((noinline)) void NEXTVID::gigsFrame() {
+    const uint8_t mode = Config::gigascreen_onoff;
+    if (!mode) {
+        if (gigsPrev) { c1Drain(); Buffer::pfree(gigsPrev); gigsPrev = nullptr; }
+        s_gigs = 0;
+        return;
+    }
+    if (!gigsPrev) {
+        gigsPrev = (uint8_t*)Buffer::palloc(192 * 128, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        s_gigsSeed = true;
+        if (!gigsPrev) { s_gigs = 0; return; }
+    }
+    bool want = (mode == 1);
+    if (mode == 2 && VIDEO::gigascreen_auto_countdown > 0) {
+        VIDEO::gigascreen_auto_countdown--;
+        want = true;
+    }
+    if (want && !s_gigsSeed) {
+        // ULA palette (NR 0x43 bit 3 picks the second): the average of every
+        // pair of its 16 ink colours, to the nearest renderable index. Rebuilt
+        // per blended frame — 256 entries, and the palette may have moved.
+        const uint16_t* pal = rawPal[(palCtrl & 0x08) ? 4 : 0];
+        for (int i = 0; i < 16; i++)
+            for (int j = 0; j < 16; j++) {
+                const uint16_t a = pal[i] & 0x1FF, b = pal[j] & 0x1FF;
+                const unsigned r = (((a >> 6) & 7) + ((b >> 6) & 7) + 1) >> 1;
+                const unsigned g = (((a >> 3) & 7) + ((b >> 3) & 7) + 1) >> 1;
+                const unsigned bl = ((a & 7) + (b & 7) + 1) >> 1;
+                gigsBlend[(i << 4) | j] = (i == j) ? lut[(palCtrl & 0x08) ? 4 : 0][i]
+                                                   : remap[(r << 6) | (g << 3) | bl];
+            }
+        s_gigs = 1;
+    } else {
+        s_gigs = 2;   // record only
+    }
+    s_gigsSeed = false;
+}
+
 IRAM_ATTR void NEXTVID::EndFrame() {
 #if NEXT_TRACE
     nxErrPoll();
@@ -723,6 +777,7 @@ IRAM_ATTR void NEXTVID::EndFrame() {
     lineIdx = 0;
     nextLineTstate = (uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator;
     totalLines = (CPU::statesInFrame >> ESPectrum::multiplicator) / VIDEO::tStatesPerLine;
+    gigsFrame();
     if ((copCtrl >> 6) == 3) { // mode %11: restart the copper on vertical blank
         copPC = 0;
         copWaiting = false;
@@ -1020,6 +1075,30 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
                     : ulaLut[128 + (a >> shift)];
                 for (int bit = 0; bit < 8; bit++)
                     p[bit] = (b & (0x80 >> bit)) ? ink : pap;
+                p += 8;
+            }
+        } else if (LS->gigs && gigsPrev) {
+            // Gigascreen: the line is blended only when the classic ULA is all
+            // there is on it — Layer 2, sprites or the tilemap switch it off
+            // (the row is still recorded, so the next frame has a valid prev).
+            const bool blend = LS->gigs == 1 && !(LS->r15 & 0x01) && !(LS->r6B & 0x80) &&
+                               !((LS->p123B & 0x02) || (LS->r69 & 0x80));
+            uint32_t* gp = (uint32_t*)(gigsPrev + y * 128);
+            for (int col = 0; col < 32; col++) {
+                uint8_t a = att[col];
+                uint8_t b = bmp[col] ^ (uint8_t)(-((a & LS->flashing) >> 7));
+                uint8_t bright = (a & 0x40) >> 3;
+                const uint8_t ci = (a & 7) | bright, cp = ((a >> 3) & 7) | bright;
+                const uint8_t ink = ulaLut[ci], pap = ulaLut[16 + cp];
+                const uint32_t prev = gp[col];
+                uint32_t cur = 0;
+                for (int bit = 0; bit < 8; bit++) {
+                    const bool on = b & (0x80 >> bit);
+                    const uint8_t c = on ? ci : cp;
+                    cur |= (uint32_t)c << (bit * 4);
+                    p[bit] = blend ? gigsBlend[((prev >> (bit * 4)) & 15) << 4 | c] : (on ? ink : pap);
+                }
+                gp[col] = cur;
                 p += 8;
             }
         } else {

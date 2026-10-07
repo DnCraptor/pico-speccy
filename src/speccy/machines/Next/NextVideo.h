@@ -29,6 +29,7 @@ struct NextLineState;   // NextVideo.cpp: the per-line render inputs
 class NEXTVID {
 public:
     static void Reset();       // machine reset: geometry, default palettes
+    static void gigsFrame();   // EndFrame: Gigascreen state for the next frame
     static void EndFrame();    // frame restart (called from VIDEO::EndFrame)
     static void onClockChange(); // nextreg 0x07 turbo switch: rescale line boundary
     // HALT flush (CPU::FlushOnHaltTo): advance CPU::tstates to stEnd a line at
@@ -146,6 +147,13 @@ private:
     // pays. Pointer-to-array types keep the 2D indexing syntax intact.
     static uint8_t* sprPatterns;         // [16384] 64 patterns x 256B
     static uint8_t* lineBuf;             // [384] one row, composed linearly, copied rotated
+    // Gigascreen on the Next (2026-10-07): the classic ULA paper only — every
+    // other layer/mode turns it off for that line. gigsPrev = the previous
+    // frame's ULA colour per pixel, 4 bits (192 rows x 128 B, PSRAM, allocated
+    // while Config::gigascreen_onoff != 0); gigsBlend[(prev << 4) | cur] = the
+    // nearest palette index to the average of the two ULA colours.
+    static uint8_t* gigsPrev;
+    static uint8_t  gigsBlend[256];
     static uint8_t* pairMap;             // [256] Timex hi-res: palette index -> solid pair slot
     static uint8_t* hiresRow;            // [256] Timex hi-res: this row's ULA as pair slots, linear
     static uint8_t  (*sprAttr)[5];       // [128][5]

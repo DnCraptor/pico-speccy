@@ -915,14 +915,50 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
 // RAM fallback for Config when no SD card
 static string nvs_ram_buf;
 
-static bool nvs_get_str(const char* key, string& v, const vector<string>& sts) {
-    string k = key; k += '=';
-    for(const string& s: sts) {
-        if ( strncmp(k.c_str(), s.c_str(), k.size()) == 0 ) {
-            if ( s.size() <= k.size() ) {
-                return false;
+// The parsed NVS text: ONE buffer (each '\n' turned into '\0') plus a table of
+// line starts. Config::load() used to build a vector<string>, one heap string per
+// line in a doubling vector — with ~300 lines that is a 12 KB (0x3000) vector
+// reallocation next to the 6 KB it replaces plus a few hundred small blocks, all
+// BEFORE CodeOverlay::apply() hands the overlay windows to the heap, i.e. on the
+// ~34 KB the framebuffer leaves. It panicked there ("Out of memory" right after
+// "initFileSystem done", hw 2026-10-08, Next build). This is ~file size + 4 B a line.
+struct NvsLines {
+    string buf;
+    vector<uint32_t> off;
+    void split() {
+        size_t n = 0;
+        for (char c : buf) if (c == '\n') ++n;
+        off.clear();
+        off.reserve(n + 1);
+        size_t start = 0;
+        for (size_t i = 0; i < buf.size(); ++i) {
+            if (buf[i] == '\n') {
+                buf[i] = '\0';
+                off.push_back((uint32_t)start);
+                start = i + 1;
             }
-            v = s.c_str() + k.size();
+        }
+        if (start < buf.size()) off.push_back((uint32_t)start);   // no trailing '\n'
+    }
+    // Whole file in one read; false on any FatFs error.
+    bool read(FIL* f) {
+        const FSIZE_t sz = f_size(f);
+        buf.assign((size_t)sz, '\0');
+        UINT br = 0;
+        if (sz && (f_read(f, &buf[0], (UINT)sz, &br) != FR_OK || br != sz)) return false;
+        split();
+        return true;
+    }
+};
+
+static bool nvs_get_str(const char* key, string& v, const NvsLines& sts) {
+    const size_t kl = strlen(key);
+    const char* base = sts.buf.c_str();
+    for (uint32_t o : sts.off) {
+        const char* s = base + o;
+        if (strncmp(key, s, kl) == 0 && s[kl] == '=') {
+            if (s[kl + 1] == '\0') return false;
+            v = s + kl + 1;
             return true;
         }
     }
@@ -930,33 +966,33 @@ static bool nvs_get_str(const char* key, string& v, const vector<string>& sts) {
 }
 // Enum twins of nvs_get_str: unknown/garbage on-disk text keeps the current value
 // (the compiled-in default), so Config never holds a non-table index.
-static void nvs_get_arch(const char* key, ArchIdx& v, const vector<string>& sts) {
+static void nvs_get_arch(const char* key, ArchIdx& v, const NvsLines& sts) {
     string t;
     if (nvs_get_str(key, t, sts)) v = archFromStr(t, v);
 }
-static void nvs_get_romset(const char* key, RomsetIdx& v, const vector<string>& sts) {
+static void nvs_get_romset(const char* key, RomsetIdx& v, const NvsLines& sts) {
     string t;
     if (nvs_get_str(key, t, sts)) v = romsetFromStr(t, v);
 }
-static void nvs_get_b(const char* key, bool& v, const vector<string>& sts) {
+static void nvs_get_b(const char* key, bool& v, const NvsLines& sts) {
     string t;
     if (nvs_get_str(key, t, sts)) {
         v = (t == "true");
     }
 }
-static void nvs_get_i(const char* key, int& v, const vector<string>& sts) {
+static void nvs_get_i(const char* key, int& v, const NvsLines& sts) {
     string t;
     if (nvs_get_str(key, t, sts)) {
         v = atoi(t.c_str());
     }
 }
-static void nvs_get_i8(const char* key, int8_t& v, const vector<string>& sts) {
+static void nvs_get_i8(const char* key, int8_t& v, const NvsLines& sts) {
     string t;
     if (nvs_get_str(key, t, sts)) {
         v = atoi(t.c_str());
     }
 }
-static bool nvs_get_u8(const char* key, uint8_t& v, const vector<string>& sts) {
+static bool nvs_get_u8(const char* key, uint8_t& v, const NvsLines& sts) {
     string t;
     if (nvs_get_str(key, t, sts)) {
         v = atoi(t.c_str());
@@ -964,13 +1000,13 @@ static bool nvs_get_u8(const char* key, uint8_t& v, const vector<string>& sts) {
     }
     return false;
 }
-static void nvs_get_u16(const char* key, uint16_t& v, const vector<string>& sts) {
+static void nvs_get_u16(const char* key, uint16_t& v, const NvsLines& sts) {
     string t;
     if (nvs_get_str(key, t, sts)) {
         v = atoi(t.c_str());
     }
 }
-static void nvs_get_sc(const char* key, signed char& v, const vector<string>& sts) {
+static void nvs_get_sc(const char* key, signed char& v, const NvsLines& sts) {
     string t;
     if (nvs_get_str(key, t, sts)) {
         v = atoi(t.c_str());
@@ -1215,23 +1251,15 @@ extern "C" uint8_t TFT_INVERSION;
 #endif
 
 // Parse NVS data from a raw string into vector of lines
-static void nvs_parse_lines(const string& data, vector<string>& sts) {
-    string s;
-    for (char c : data) {
-        if (c == '\n') {
-            sts.push_back(s);
-            s.clear();
-        } else {
-            s += c;
-        }
-    }
-    if (!s.empty()) sts.push_back(s);
+static void nvs_parse_lines(const string& data, NvsLines& sts) {
+    sts.buf = data;
+    sts.split();
 }
 
 // Read config from FS
 void Config::load() {
     initHotkeys(); // fill defaults before overriding from NVS
-    vector<string> sts;
+    NvsLines sts;
     if (FileUtils::fsMount) {
         // storage.nvs or nothing: there is no fallback to a saved profile. A
         // firmware update lands in a new per-version directory and therefore
@@ -1243,22 +1271,9 @@ void Config::load() {
         if (!handle) {
             return;
         }
-        UINT br;
-        char c;
-        string s;
-        while(!f_eof(handle)) {
-            if (f_read(handle, &c, 1, &br) != FR_OK) {
-                fclose2(handle);
-                return;
-            }
-            if (c == '\n') {
-                sts.push_back(s);
-                s.clear();
-            } else {
-                s += c;
-            }
-        }
+        const bool ok = sts.read(handle);
         fclose2(handle);
+        if (!ok) return;
     } else if (!nvs_ram_buf.empty()) {
         nvs_parse_lines(nvs_ram_buf, sts);
     } else {
@@ -2434,23 +2449,10 @@ bool Config::loadPendingVideoMode(uint8_t &hdmi_vm, uint8_t &vga_vm) {
     FIL* handle = fopen2(VMODE_PENDING_FILE, FA_READ);
     if (!handle) return false;
 
-    vector<string> sts;
-    UINT br;
-    char c;
-    string s;
-    while (!f_eof(handle)) {
-        if (f_read(handle, &c, 1, &br) != FR_OK) {
-            fclose2(handle);
-            return false;
-        }
-        if (c == '\n') {
-            sts.push_back(s);
-            s.clear();
-        } else {
-            s += c;
-        }
-    }
+    NvsLines sts;
+    const bool ok = sts.read(handle);
     fclose2(handle);
+    if (!ok) return false;
 
     nvs_get_u8("hdmi_vmode", hdmi_vm, sts);
     nvs_get_u8("vga_vmode", vga_vm, sts);

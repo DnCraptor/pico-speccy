@@ -103,6 +103,10 @@ public:
     // NR 0x83 b0), the #056A entry point armed (NR 0xBB b5) and ROM in slot 0
     // counting as ROM3. Our in-ROM fast load must stand aside then.
     static bool osTapeTrapArmed();
+    // DivMMC NMI ("drive" button, F10 on a real Next; NR 0x02 bit 2 from
+    // software). 0 = NMI raised, 1 = disabled (NR 0x06 bit 4 / NR 0x83 bit 0),
+    // 2 = refused, the previous NMI is still being served.
+    static uint8_t divNmiRequest(bool hotkey);
 
     // The video frame of the machine TIMING (nextreg 0x03 bits 6:4) and 50/60 Hz
     // (nextreg 0x05 bit 2; Pentagon is 50 Hz only) — wiki.specnext.dev
@@ -145,6 +149,7 @@ public:
 // costs more than the bug): newest entries always survive the print budget,
 // flood sources (palette/copper/sprite streams) are counted, not recorded.
 void next_trace_ev(char kind, uint8_t r, uint8_t v);
+void next_trace_rst8();
 void next_trace_dump(uint32_t frames);
 #endif
 

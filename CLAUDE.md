@@ -317,6 +317,34 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   TopBorder). Раскраска — `nxPaintBorderRuns` во flash. 7 отрезков было мало: тест
   цветных полос меняет #FE 8 раз за строку. Debug > Paper off работает и на Next
   (paper-строки рисуются как бордюр).
+- **DivMMC NMI + esxDOS-личности** (2026-10-07, hw-confirmed: esxDOS 0.8.9 NMI-браузер
+  и LFN Browser v1.02 из личности Pentagon с `ESXMMC.BIN`). По VHDL (zxnext.vhd 2091-2170,
+  divmmc.vhd): кнопка Drive = Alt+F10 / NR 02 b2, гейт NR 06 b4 (+ NR 83 b0 для клавиши) —
+  `NextReg::divNmiRequest`; `$0066` мапит только при взведённой кнопке, NR BB b1 instant /
+  b0 delayed (esxDOS = delayed, его `#0066` = RET); RETN снимает automap (`DivMMC::nextRetn`);
+  `doNMI` на Next DivMMC не трогает. Пять дефектов, каждый глушил NMI молча: (1) холостой M1
+  в `Z80::nmi()` по PC=#0038 (INT принят на хвосте кадра) срабатывал как entry RST 38 — на
+  Next он только тикает; (2) NMI брался после `execute()`; (3) мягкий сброс NR 02 оставлял
+  `#E3` (FW работает с MAPRAM → банк 3 вместо ESXMMC) — VHDL обнуляет его на любом сбросе,
+  плюс NR 09 b3; (4) `$0000`-трап разоружён после сброса из TBBLUE.FW и после F11 — esxDOS
+  не делал холодный init (теперь armed при `nextBootRom`); (5) RAM Next при старте — нули
+  (как Karabas/Evo; к NMI не относилось, решение владельца). NextZXOS сама гасит NR 06 b3/b4
+  (ROM p2 #0852) — тост «DivMMC NMI disabled» там верный, её NMI-меню — Multiface (не
+  эмулирован). Карта: FW ищет `/machines/next/esxmmc.bin`, нужен `divmmc=1`; LFN Browser
+  выходит сразу без `/bin/browse.cfg` (`.brwscfg` → Advanced → Auto detect device).
+  Диагностика `[NMIT]` (NEXT_TRACE): после NMI 1500 событий в UART — map/unmap, `#E3`,
+  RST 8 с кодом функции, сектора SD, AF/HL.
+- **Декод #7FFD/#1FFD/#DFFD по VHDL** (2026-10-08, hw-confirmed: EYEACHE через esxDOS в
+  личности Pentagon; zxnext.vhd 2578-2599): port_fd =
+  A1:0 = 01; #7FFD = A15=0 и (A14=1 ИЛИ тайминг не +3) и не #1FFD; #1FFD = A15:12 = 0001;
+  #DFFD = A15:12 = 1101. A14 — только в тайминге +3 (NextZXOS); в личностях
+  48K/128K/Pentagon декод неполный, как на самих машинах. Было «всегда A14» — EYEACHE
+  (IM2: `LD A,#16 / OUT (#FD),A` = #16FD) не подключал банк плеера и падал.
+- **Gigascreen на Next** (2026-10-08, hw: «работает»): свой, в `NEXTVID` — только строки
+  с одним классическим ULA (Layer 2 / спрайты / тайлмап / ULANext / LoRes / hi-res его
+  выключают), prev = 4 бита/пиксель paper (24 КБ PSRAM), смесь 16x16 → ближайший индекс
+  NEXTVID (`gigsBlend`, без записи слотов палитры), Auto по флипу #7FFD b3 / NR 69 b6.
+  Общий Gigascreen (prev-FB + слоты 17..136) на Next подавлен: те слоты — решётка NEXTVID.
 - **DS1307 на I2C** (2026-10-07, hw-confirmed: часы в NextZXOS): `machines/Next/
   NextRtc.cpp` (flash) — честный I2C-слейв на #103B/#113B (START/STOP по SDA при
   SCL=1, ACK на каждый байт, автоинкремент 0..63, ACK/NACK мастера), адрес 0x68,

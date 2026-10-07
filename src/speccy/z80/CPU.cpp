@@ -706,7 +706,13 @@ IRAM_ATTR void CPU::loop() {
         Z80::execute();
         Z80::doNMIDOS();
     } else if (Z80::isNMI()) {
-        Z80::execute();
+        // Next: take the NMI at the boundary we are already on. The frame
+        // tail very often accepts the frame INT (PC = 0x0038, not fetched
+        // yet); execute() first would fetch it, automap esxDOS through the
+        // RST 0x38 entry point, and the NMI would then fetch 0x0066 from the
+        // esxDOS ROM — a RET there, the NMI lost without a trace (hw
+        // 2026-10-07). A Z80 takes a pending NMI before INT anyway.
+        if (!(Z80Ops::isNext && Z80::atInstrBoundary())) Z80::execute();
         Z80::doNMI();
     }
     // ZiFi over USB-CDC: service the host stack mid-frame (~1 kHz) even while the

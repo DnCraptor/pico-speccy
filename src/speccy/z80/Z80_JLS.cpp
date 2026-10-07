@@ -1217,7 +1217,15 @@ Z80_COLD void Z80::nmi(void) {
     // Esta lectura consigue dos cosas:
     //      1.- La lectura del opcode del M1 que se descarta
     //      2.- Si estaba en un HALT esperando una INT, lo saca de la espera
-    Z80Ops::fetchOpcode();
+    // Next: the discarded M1 must not run the divMMC entry-point check. Our
+    // NMI is taken at a frame boundary, where the frame INT has usually just
+    // been accepted (PC = 0x0038, not fetched): fetchOpcode() there tripped the
+    // RST 0x38 entry point, automapped esxDOS, and the NMI then fetched 0x0066
+    // from ESXMMC — a RET, the esxDOS NMI browser never opened (hw 2026-10-07,
+    // [NMIT] trace: A01@0038 right after the request, no 0x0066 trap). On a
+    // real Next the two cannot coincide like that; the cycle's timing is kept.
+    if (Z80Ops::isNext) VIDEO::Draw(4, false);
+    else Z80Ops::fetchOpcode();
 
     VIDEO::Draw(1, false);
 
@@ -1236,7 +1244,9 @@ Z80_COLD void Z80::doNMI(void) {
     // fires correctly. Without this, if automap is already ON, preOpcFetch
     // won't set trap_after (it checks !automap) and 0x0066 reads C9=RET from
     // ESXDOS ROM instead of F5=PUSH AF from Spectrum ROM.
-    if (DivMMC::enabled) {
+    // Not on the Next: there the NMI does not touch the divMMC state — the
+    // 0x0066 entry point maps it (NR 0xBB) and RETN unmaps (DivMMC::nextRetn).
+    if (DivMMC::enabled && !Z80Ops::isNext) {
         DivMMC::conmem = false;
         DivMMC::automap = false;
         DivMMC::applyMapping();
@@ -3712,6 +3722,7 @@ void Z80::decodeED(void) {
         { /* RETN */
             ffIFF1 = ffIFF2;
             REG_PC = REG_WZ = pop();
+            if (Z80Ops::isNext && DivMMC::enabled) DivMMC::nextRetn();
             check_trdos();
             if (Z80Ops::isTsconf && ffIFF1) TsConf::intEnableHook();
             break;

@@ -33,6 +33,13 @@ public:
     static bool conmem;           // Port 0xE3 bit 7: manual map control
     static bool mapram;           // Port 0xE3 bit 6: sticky MAPRAM flag
     static uint8_t bank;          // Port 0xE3 bits 5:0: RAM bank select
+    // ZX Spectrum Next DivMMC NMI (divmmc.vhd button_nmi / zxnext.vhd nmi_state):
+    // next_nmi_btn = the "drive" button latched until the 0x0066 entry point
+    // maps (NR 0xBB bits 1/0), RETN or reset; next_nmi_hold = an NMI is in
+    // progress, no new one is accepted until both the button and automap drop.
+    static bool next_nmi_btn;
+    static bool next_nmi_hold;
+    static void nextRetn();       // Next: RETN unmaps (divmmc i_retn_seen)
 
     static uint8_t *esxdos_rom;   // 8KB ESXDOS ROM (dynamically allocated)
     static uint8_t* bank_ptr[DIVMMC_NUM_BANKS]; // direct pointer per bank (null = swapped out)
@@ -261,6 +268,7 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
         // off; without this gate their IM1 interrupt at #0038 mapped enNxtmmc
         // in for good (black paper, white border — hw 2026-10-07).
         if (!(nr[0x0A] & 0x10) || !(nr[0x83] & 0x01)) {
+            next_nmi_btn = false;
             if (automap) {
                 automap = false;
                 if (!conmem) applyMapping();
@@ -277,6 +285,11 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
         if (!g_next_automap_armed) {
             if (pc != 0x0000) g_next_automap_armed = true;
         }
+#if NEXT_TRACE
+        // [NMIT]: every esxDOS API call (RST 8) with its function byte.
+        { extern uint16_t g_nmi_trace_left;
+          if (__builtin_expect(g_nmi_trace_left != 0, 0) && pc == 0x0008) next_trace_rst8(); }
+#endif
         if (!automap) {
             // "ROM3" = the 48K BASIC ROM as zxnext.vhd defines it: depends on
             // the machine type and the Alt-ROM (NextReg applyRomSelect) — ROM3
@@ -287,6 +300,20 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
                 if (pc == 0x0000 && !g_next_automap_armed) bit = 0;
                 if (bit && (nr[0xB8] & bit) && ((nr[0xB9] & bit) || rom3)) {
                     pend_after |= 1;
+                }
+            } else if (pc == 0x0066) {
+                // zxnext.vhd 2907-2908: 0x0066 maps only with the divMMC NMI
+                // button latched — bit 1 instant (the 0x0066 fetch already
+                // comes from the divMMC ROM, NextZXOS), bit 0 delayed (after
+                // the fetch, classic divMMC/esxDOS). Not a ROM3 entry point.
+                if (next_nmi_btn && (nr[0xBB] & 0x03)) {
+                    next_nmi_btn = false;          // divmmc.vhd: cleared by automap_held
+                    if (nr[0xBB] & 0x02) {
+                        automap = true;
+                        if (!conmem) applyMapping();
+                    } else {
+                        pend_after |= 1;
+                    }
                 }
             } else if (rom3) {
                 if ((pc == 0x04C6 && (nr[0xBB] & 0x04)) ||
@@ -299,7 +326,6 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
                     if (!conmem) applyMapping();
                 }
             }
-            // 0x0066 (bits 0/1) is fetch+BUTTON — no NMI button emulated here
         }
         if (automap && pc >= DIVMMC_OFF_START && pc <= DIVMMC_OFF_END &&
             (nr[0xBB] & 0x40)) {
@@ -308,6 +334,10 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
         return;
     }
 
+#if NEXT_TRACE
+    { extern uint16_t g_nmi_trace_left;
+      if (__builtin_expect(g_nmi_trace_left != 0, 0) && pc == 0x0008) next_trace_rst8(); }
+#endif
     // Entry points: map AFTER fetch, only if automap is currently OFF
     if (!automap) {
         if (pc == DIVMMC_TRAP_0000 || pc == DIVMMC_TRAP_0008 ||

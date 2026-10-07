@@ -4598,7 +4598,11 @@ bool VIDEO::gigascreenModeIncompatible() {
         // ahead of the Gigascreen one, so the paper is never blended, while the border
         // and the prev-FB window would still pay for Gigascreen — and 16col software
         // double-buffers through #7FFD D3, which is exactly what arms Auto.
-        || mode16col_enabled;
+        || mode16col_enabled
+        // Spectrum Next: NEXTVID renders every layer itself and owns palette
+        // slots 17..219 (its RGB333 lattice) — the blend LUT's 17..136 landed
+        // on top of it and broke the Next's colours.
+        || Config::arch == A_NEXT;
 }
 
 // The one predicate every palette/blend decision uses: the user wants Gigascreen
@@ -5694,6 +5698,10 @@ void initGigascreenBlendLUT() {
     // (e.g. ULA+ disable -> palette restore) races with HDMI DMA reading conv_color
     // and produces palette tearing at the top of the screen.
     if (gigsBlendLUTReady) return;
+    // Spectrum Next: slots 17..219 are NEXTVID's colour lattice (see
+    // gigascreenModeIncompatible) — every caller (Reset, the menu toggles, the
+    // Auto arm) is refused here rather than at each site.
+    if (Config::arch == A_NEXT) return;
     uint8_t nextSlot = 17; // start after ORANGE(16)
 
     // For each pair (i, j), compute average RGB and assign palette slot
@@ -8436,6 +8444,12 @@ IRAM_ATTR void VIDEO::EndFrame() {
             if (timex_hires_live && !was) NEXTVID::rebuildPairMap();
         }
         NEXTVID::EndFrame();
+        gigascreenModeGate();   // suspends Gigascreen (and frees its prev-FB) on the Next
+        // Top-border banner (OSD::notify): this branch returns long before the
+        // generic call at the end of EndFrame, so on the Next the banner never
+        // timed out — cancelNotify never ran, the carve stayed and NEXTVID kept
+        // skipping those words until something else repainted them (hw 2026-10-08).
+        OSD::drawNotify();
         tsFastMemRecalc();   // TsFastMem.h: breakpoints can revoke it per frame
         framecnt++;
         return;

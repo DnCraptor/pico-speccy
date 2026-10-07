@@ -743,7 +743,12 @@ void ESPectrum::powerOnRamFill(int arch, int romset) {
   // TR-DOS was picked from the 128 menu (hw 2026-10-03). Zero = harmless #BF = 0.
   const RomsetIdx rs = romset < 0 ? (RomsetIdx)Config::romSet : (RomsetIdx)romset;
   const bool evo = arch < 0 ? Config::isEvoBase() : (arch == A_ATM && isEvoBaseRomset(rs));
-  const bool dramPattern = !isKarabasRomset(rs) && !evo;
+  // ZX Spectrum Next: zeros as well (owner's call, 2026-10-07). esxDOS's NMI
+  // browser (ESXMMC.BIN as the divMMC ROM, a 48K/128K/Pentagon personality)
+  // shows bank 7's screen (7FFD=#6A) and crashed to #0000 over the wake-up
+  // checkerboard; NextZXOS is unaffected either way.
+  const bool next = arch < 0 ? (Config::arch == A_NEXT) : (arch == A_NEXT);
+  const bool dramPattern = !isKarabasRomset(rs) && !evo && !next;
   size_t n = 0;
   for (size_t i = 0; i < MEM_PG_CNT; ++i) {
     if (MemESP::ram[i].memType() == mem_type_t::POINTER) {
@@ -755,7 +760,7 @@ void ESPectrum::powerOnRamFill(int arch, int romset) {
     }
   }
   Debug::log("ZX RAM: %u pages %s, freeHeap=%u", (unsigned)n,
-             dramPattern ? "set to DRAM power-on pattern" : "cleared (Karabas / ZX-Evo)",
+             dramPattern ? "set to DRAM power-on pattern" : "cleared (Karabas / ZX-Evo / Next)",
              getFreeHeap());
 }
 
@@ -3768,8 +3773,27 @@ void ESPectrum::loop() {
         MemESP::wr_overlay_active = false;
         MemESP::applyMMU(0, 0xFF);
         MemESP::applyMMU(1, 0xFF);
-        // divMMC: overlay off, SPI CS deasserted; pager banks/state survive
+        // divMMC: overlay off. Its RAM survives (NextZXOS keeps boot-stage
+        // state there), but port 0xE3 does NOT: zxnext.vhd ~4177 clears
+        // port_e3_reg on every reset, soft included. TBBLUE.FW runs with
+        // MAPRAM set, and a stale MAPRAM put divMMC RAM bank 3 (FW leftovers)
+        // at 0x0000 in place of ESXMMC.BIN in every esxDOS personality —
+        // the esxDOS NMI ran into it and crashed (hw 2026-10-07).
         DivMMC::automap = false;
+        DivMMC::conmem = false;
+        DivMMC::mapram = false;
+        DivMMC::bank = 0;
+        DivMMC::next_nmi_btn = false;
+        DivMMC::next_nmi_hold = false;
+        // The $0000 entry point is live on this reset vector: the FPGA
+        // bootrom overlay that hides it on a cold boot is long gone once
+        // TBBLUE.FW soft-resets into a personality (zxnext.vhd: B8/B9 bit 0
+        // = always). Disarmed, esxDOS never ran its cold init at $0000 and
+        // the first NMI came up as "loading esxDOS" + "No such FILE or DIR"
+        // (hw 2026-10-07). The direct enNextZX boot (no bootrom) keeps the
+        // old rule — that is where the disarm came from.
+        { extern bool g_next_automap_armed;
+          if (MemESP::nextBootRom) g_next_automap_armed = true; }
         DivMMC::applyMapping();
         // speed back to 3.5MHz (VHDL soft-reset default for nextreg 0x07)
         NextReg::reg[0x07] = 0;

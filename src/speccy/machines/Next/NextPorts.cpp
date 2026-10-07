@@ -115,8 +115,10 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
     // Sprite upload ports decode the low byte only
     if (a8 == 0x57 && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spriteAttrWrite(data); return true; }
     if (a8 == 0x5B && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spritePatternWrite(data); return true; }
-    if (address == 0xDFFD && NextReg::portOn(NextReg::PE_DFFD)) { NextReg::writeDFFD(data); return true; }
-    if ((address & 0xF002) == 0x1000 && NextReg::portOn(NextReg::PE_1FFD)) {   // 0x1FFD (+3 paging)
+    // zxnext.vhd 2596-2599: port_dffd = A15:12 = 1101 and A1:0 = 01;
+    // port_1ffd = A15:12 = 0001 and A1:0 = 01 (it also masks port_7ffd).
+    if ((address & 0xF003) == 0xD001 && NextReg::portOn(NextReg::PE_DFFD)) { NextReg::writeDFFD(data); return true; }
+    if ((address & 0xF003) == 0x1001 && NextReg::portOn(NextReg::PE_1FFD)) {   // 0x1FFD (+3 paging)
         NextReg::write1FFD(data);
         return true;
     }

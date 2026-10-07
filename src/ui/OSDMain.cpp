@@ -171,6 +171,7 @@ extern "C" void graphics_set_dither(bool enabled);
 extern "C" volatile bool profi_ds80_active;
 extern "C" const uint32_t profi_default_palette16[16];
 #include "speccy/devices/storage/DivMMC.h"
+#include "speccy/machines/Next/NextReg.h"
 #include "speccy/devices/storage/IDE.h"
 #include "speccy/devices/disk/MB02.h"
 #include "speccy/machines/Plus3/Plus3Fdc.h"
@@ -2229,9 +2230,20 @@ static uint8_t hotkeyChooser(const string& menu) {
 }
 
 void OSD::nmiAction() {
+    if (Z80Ops::isNext) {
+        // The Next's DivMMC NMI ("drive" button): enNxtmmc's NMI menu, or the
+        // esxDOS NMI browser with ESXMMC.BIN as the divMMC ROM.
+        const uint8_t r = NextReg::divNmiRequest(true);
+        if (r == 1) notify(" DivMMC NMI disabled (NR 06) ", LEVEL_INFO, 1200);
+        return;
+    }
     if (DivMMC::enabled) {
         // DivMMC NMI: automap at 0x0066 handled by preOpcFetch/postOpcFetch
         Z80::triggerNMI();
+#if NEXT_TRACE
+        { extern uint16_t g_nmi_trace_left; g_nmi_trace_left = 1500;
+          next_trace_ev('M', 0, 0); }
+#endif
     } else
     if (Z80Ops::isByte) {
         // ZX Byte: NMI menu with COBMECT mode toggle
@@ -2651,6 +2663,16 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
             // suspended while one of them is up (VIDEO::gigascreenModeGate) and
             // toggling it here would only fight that. In the standard ZX mode of
             // those same machines it is available like anywhere else.
+            if (Config::arch == A_NEXT) {
+                // The Next's own Gigascreen (NEXTVID::gigsFrame) needs only the
+                // setting: no generic prev-FB, no blend slots.
+                Config::gigascreen_onoff = (Config::gigascreen_onoff + 1) % 3;
+                VIDEO::gigascreen_auto_countdown = 0;
+                Config::save();
+                static const char* const kGs[3] = { " Gigascreen: Off ", " Gigascreen: On ", " Gigascreen: Auto " };
+                notify(kGs[Config::gigascreen_onoff], LEVEL_INFO, 1200);
+                return;
+            }
             if (VIDEO::gigascreenModeIncompatible()) {
                 notify(" Gigascreen: not in this video mode ", LEVEL_WARN, 1800);
                 return;
@@ -6456,6 +6478,7 @@ static void buildEmulatorInfoText() {
             // Suspended for the duration of a whole-line mode (DS80, GMX 640x200,
             // any TS-Conf non-ZX mode) — the setting is untouched and comes back
             // with the standard renderer, so say so instead of claiming On.
+            else if (Config::arch == A_NEXT) gs = Config::gigascreen_onoff == 1 ? "On (ULA only)" : "Auto (ULA only)";
             else if (VIDEO::gigascreenModeIncompatible()) gs = "On (off in this mode)";
             else if (!Config::gigascreen_enabled) gs = "Off (no memory)";
             else if (Config::gigascreen_onoff == 1) gs = "On";

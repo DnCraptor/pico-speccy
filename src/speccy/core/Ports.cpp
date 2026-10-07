@@ -3617,6 +3617,10 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
         if (data & 0x40) DivMMC::mapram = true;
         DivMMC::conmem = (data & 0x80) != 0;
         DivMMC::applyMapping();
+#if NEXT_TRACE
+        { extern uint16_t g_nmi_trace_left;
+          if (g_nmi_trace_left) next_trace_ev('E', 0xE3, data); }
+#endif
         return;
       }
       if (DivMMC::divide_mode) {
@@ -3983,9 +3987,16 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
   // does just that. That is honest Pentagon behaviour, not a bug here; see
   // the extracker-7ffd-loose-decode note before "fixing" it with A14.
   if (Z80Ops::isNext) {
-    // Next decodes 0x7FFD +2A/+3-style (A15=0, A14=1, A1=0) and implements
-    // it on top of the MMU
-    if ((address & 0xC002) == 0x4000 && NextReg::portOn(NextReg::PE_7FFD))
+    // zxnext.vhd 2578-2599: port_fd = A1:0 = "01"; port_7ffd = A15=0 and
+    // (A14=1 or NOT +3 timing) and port_fd and not port_1ffd. A14 is decoded
+    // only in +3 timing (NextZXOS); the 48K/128K/Pentagon personalities have
+    // the machines' own loose decode. EYEACHE's IM2 handler pages its player
+    // in with LD A,#16 / OUT (#FD),A = port #16FD — dropped by the old
+    // always-A14 decode, so CALL #F403 ran bank 0 (hw 2026-10-08).
+    // port_1ffd (A15:12 = 0001, enabled) took the write in NextPorts already.
+    if ((address & 0x8003) == 0x0001 &&
+        ((address & 0x4000) || NextReg::machineTiming() != 3) &&
+        NextReg::portOn(NextReg::PE_7FFD))
       NextReg::write7FFD(data);
     return;
   }
