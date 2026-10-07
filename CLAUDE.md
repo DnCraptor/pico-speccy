@@ -246,8 +246,42 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   прерыванием уходит в enNxtmmc через OUT (0xE3),0x80 — порченый ROM =
   дерейл). Теперь `MemESP::divmmc_lo_rom` ставится в applyMapping/MB02 явно.
   После порчи вылечивает только перезагрузка MCU (setup перечитает ROM с SD).
-- **Известный баг**: .tap из LFN Browser виснет (.bas/.dsk ок) — подозрение на
-  tape-трапы/rom3-gate; диагностика: NEXT_TRACE + memdump.
+- **.tap из Browser NextZXOS + личности BIOS (hw-confirmed 2026-10-07)** — бывший
+  «известный баг .tap из LFN Browser виснет». Источники: wiki.specnext.dev
+  (Specifications, Reference_machines), zxnext.vhd (gitlab SpectrumNext FPGA,
+  curl raw), исходник TBBLUE.FW (gitlab.com/thesmog358/tbblue `src/firmware`).
+  Четыре дефекта:
+  1. **Наш in-ROM трап ленты воровал блоки у NextZXOS.** Automap на `#056A`
+     ОТЛОЖЕННЫЙ (после fetch), поэтому `CP A` на `#056A` исполняется из ПЗУ и наш
+     трап на PC=`#056B` всегда успевал первым, подсовывая LD-BYTES образ из НАШЕЙ
+     деки (чужой заголовок → CLEAR с аргументом 2 → «M RAMTOP no good»; лечилось
+     извлечением образа из деки). Теперь наш трап и `Tape::tapeFastMachineOk()`
+     уступают, когда `NextReg::osTapeTrapArmed()` (NR 0A b4, NR 83 b0, NR BB b5,
+     ROM3 в слоте 0); личности BIOS 48K/128K/Pentagon без divMMC — наш fast load.
+     Авто-запуск (loader128) на Next выключен: снимка нет, он только ребутил.
+  2. **ROM3 зависит от типа машины** (zxnext.vhd ~2981, `NextReg applyRomSelect`
+     → `MemESP::next_rom3`): 48K — ROM 0 всегда и ROM3; +3/Next — `1FFD.2:7FFD.4`,
+     ROM3 = оба; 128K/Pentagon — `0:7FFD.4`, ROM3 = 7FFD.4; лок-биты NR 8C
+     перекрывают, половина AltROM = alt_128_n. TAP Loader NextZXOS в режимах
+     48K/128K/Pentagon переписывает ROM0/1 128-й парой (48 BASIC = ROM1) — по
+     старому «romInUse==3» его трап `#056A` не взводился, грузилось в реальном времени.
+  3. **Automap гейтится NR 0x0A бит 4 и NR 0x83 бит 0** (divmmc_automap_reset);
+     без этого личность BIOS 128K/Pentagon (`divmmc=0`) уходила в enNxtmmc на
+     каждом IM1 `#0038` — чёрный paper, белый бордюр.
+  4. **Мягкий сброс НЕ трогает NR 05/06/08/09/0A и 82-85** (кроме hotkey-битов 06,
+     contention-disable 08, sprite-tie 09; 82-85 — только при NR 85 b7). TBBLUE.FW
+     пишет их перед soft reset в личность — мы обнуляли. При power-on 82-85 = FF,
+     0A = 0 (при загрузке без TBBLUE.FW — 0x10, некому выставить).
+  Диагностика `[NXERR]` (NEXT_TRACE): кольцо 64 RST 8 + опрос ERR_NR раз в кадр,
+  срабатывает на M (`#15`) — оставлена. PC-брейкпоинт не различает банки ПЗУ
+  (`#34C1` в ROM0 — цикл Browser), для ошибок ROM пользоваться ею.
+- **60 Гц (NR 05 b2): верхний бордюр на 26 строк короче** (Reference_machines: 128K
+  311/261 строк, экран через 63/37 строк после INT). `NEXTVID::computeGeometry`,
+  `NextReg::paperLine()` (line IRQ, NR 1E/1F); без этого 17 нижних строк fb не
+  перерисовывались (остался футер меню). hw-confirmed 2026-10-07.
+- **Открыто (аудит переключения машин):** тайминг машины (NR 03 b6:4: 48K 224×312,
+  Pentagon 224×320) игнорируется — всегда растр 128K; NR 82-85 хранятся, но порты
+  не отключают; contention на Next нет совсем; AY в личности 48K не гасится.
 - **gm_bank** ужат 0x260000→0x25C000 (16K прошивке; банк перепровиженится).
 - **Цена ветки: +14 KB статического RAM** (231.9K → 246.2K) — на PICO_DV это
   съело весь запас кучи у VIDEO::Init: P1024+NeoGS перестал грузиться (OOM-

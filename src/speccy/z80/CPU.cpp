@@ -757,7 +757,7 @@ IRAM_ATTR void CPU::loop() {
         while (tstates < sliceEnd && NextReg::lineIrqEnabled) {
             const uint8_t m = ESPectrum::multiplicator;
             const uint32_t lines = (statesInFrame >> m) / VIDEO::tStatesPerLine;
-            int32_t ws = (int32_t)((((NextReg::lineIrqLine + 63) % lines) * VIDEO::tStatesPerLine) << m)
+            int32_t ws = (int32_t)((((NextReg::lineIrqLine + NextReg::paperLine()) % lines) * VIDEO::tStatesPerLine) << m)
                          - (int32_t)CPU::latetiming;
             if (ws < 0) ws = 0;
             const uint32_t s0 = (uint32_t)ws, e0 = s0 + (32u << m);
@@ -1675,7 +1675,7 @@ IRAM_ATTR bool Z80Ops::isActiveINT(void) {
             uint32_t lines = (CPU::statesInFrame >> m) / VIDEO::tStatesPerLine;
             // reg 0x23 counts line 0 as the first pixel line; the frame
             // tstate origin is 63 border/sync lines earlier (128K timing)
-            uint32_t startTs = (((NextReg::lineIrqLine + 63) % lines) * VIDEO::tStatesPerLine) << m;
+            uint32_t startTs = (((NextReg::lineIrqLine + NextReg::paperLine()) % lines) * VIDEO::tStatesPerLine) << m;
             uint32_t endTs = startTs + (32u << m);
             if ((uint32_t)tmp >= startTs && (uint32_t)tmp < endTs)
                 return true;

@@ -44,6 +44,7 @@ visit https://zxespectrum.speccy.org/contacto
 using namespace std;
 
 #include "Tape.h"
+#include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Timex.h"
 #include "fs/FileUtils.h"
 #include "speccy/z80/CPU.h"
@@ -352,6 +353,13 @@ void StopRealPlayer(void) {
 // Every machine whose ROM the in-ROM trap and the loader snapshots were made for.
 // Shared by the two gates below, which differ only in what tape wear does to them.
 static inline bool tapeFastMachineOk() {
+    // Spectrum Next: NextZXOS owns tape loading while its divMMC tape trap is
+    // armed (.tapein + automap at #056A, which maps AFTER the fetch — so the
+    // CP A at #056A runs from ROM and our in-ROM trap at #056B always won the
+    // race, feeding LD-BYTES the image left in OUR deck instead of the file the
+    // Browser chose: a foreign header, then "M RAMTOP no good" — hw 2026-10-07).
+    // BIOS personalities without it (48K/128K/Pentagon) keep our fast load.
+    if (Config::arch == A_NEXT && NextReg::osTapeTrapArmed()) return false;
     return Config::arch != A_ALF &&
            Config::romSet != R_ZX81P && Config::romSet != R_48K_CS &&
            Config::romSet != R_128K_CS;
@@ -382,8 +390,10 @@ bool Tape::autoRunAvailable() {
     // ATM-Turbo: the loader snapshots map MemESP::rom[] banks, which this machine's
     // memory manager does not use — the in-ROM trap still works (its 48 BASIC keeps
     // the Sinclair LD-BYTES addresses), only the auto-typed LOAD "" is off.
+    // Spectrum Next: no loader snapshot either (loader128 would only reset the
+    // machine — a reboot of the personality); LOAD "" is typed by the user.
     return (Config::flashload || Config::tape_wear != 0) && tapeFastMachineOk() &&
-           Config::arch != A_ATM;
+           Config::arch != A_ATM && Config::arch != A_NEXT;
 }
 
 void Tape::LoadTape(const string& mFile_) {

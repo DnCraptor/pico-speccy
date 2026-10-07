@@ -468,6 +468,7 @@ public:
     static uint8_t* nextRomBase;     // 64K NextZXOS ROM set (null = 128K fallback)
     static uint8_t* nextDivRomBase;  // 8K Next MMC ROM (null = esxdos fallback)
     static uint8_t  next_rom_mask;   // bit N: slot N (0/1) has ROM mapped
+    static bool     next_rom3;       // Next: ROM in 0000-3FFF counts as ROM3 for divMMC automap (NextReg applyRomSelect)
     static bool loadNextRoms();      // load ROM files from SD (after buildNextRam)
 
     // Alt-ROM (nextreg 0x8C): two hidden 16K RAM banks that can replace the

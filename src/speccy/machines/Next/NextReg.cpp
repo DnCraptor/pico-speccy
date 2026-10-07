@@ -214,6 +214,8 @@ void next_trace_dump(uint32_t frames) {
 #define NT_EV(k, r, v) ((void)0)
 #endif
 
+static void applyRomSelect();
+
 void NextReg::reset(bool hard) {
     // The zxnext.vhd reset block (~4900-5111) runs on BOTH reset types — a
     // soft reset restores the nextreg defaults too (zx_go pins this with
@@ -224,13 +226,20 @@ void NextReg::reset(bool hard) {
     // Alt-ROM first: reset PROMOTES the staged nibble (bits 3:0) into the
     // active one (bits 7:4) — zxnext.vhd:2255, both reset types.
     uint8_t altStaged = reg[0x8C] & 0x0F;
+    // Peripheral setup the BIOS writes before its soft reset into a
+    // personality: zxnext.vhd's reset block leaves NR 0x05/0x06/0x08/0x09/0x0A
+    // and the port-decode enables 0x82-0x85 alone apart from a few bits
+    // (hotkeys, contention-disable, sprite tie; 0x82-0x85 only when 0x85 bit 7
+    // asks for it). Zeroing them on a soft reset threw the BIOS setup away —
+    // the divMMC automap enable among it.
+    static const uint8_t kKeep[] = { 0x05, 0x06, 0x08, 0x09, 0x0A, 0x82, 0x83, 0x84, 0x85 };
+    uint8_t kept[sizeof(kKeep)];
+    for (unsigned i = 0; i < sizeof(kKeep); i++) kept[i] = reg[kKeep[i]];
     for (int i = 0; i < 256; i++) reg[i] = 0;
     selected = 0;
     reg[0x8C] = (uint8_t)((altStaged << 4) | altStaged);
     MemESP::altrom_rd  = (reg[0x8C] & 0x80) && !(reg[0x8C] & 0x40);
     MemESP::altrom_wr  = (reg[0x8C] & 0x80) && (reg[0x8C] & 0x40);
-    MemESP::altrom_sel = (reg[0x8C] & 0x20) ? 1 :
-                         (reg[0x8C] & 0x10) ? 0 : (MemESP::romInUse & 1);
     if (hard) {
         // TBBLUE power-on: bootrom readable + config_mode = 1 — but only when
         // the boot chain is armed (TBBLUE.FW found on SD, see ESPectrum::setup).
@@ -265,9 +274,25 @@ void NextReg::reset(bool hard) {
     reg[0x56] = 0;    reg[0x57] = 1;
     reg[0x07] = 0;    // 3.5 MHz
     // Reset defaults pinned to the FPGA VHDL (zx_go VHDL_CONFORMANCE.md)
-    reg[0x05] = 0x01; // periph1: 50Hz
-    reg[0x06] = 0xA0; // periph2: hotkeys enabled
-    reg[0x08] = 0x10; // periph3: AY enabled
+    if (hard) {
+        reg[0x05] = 0x01; // periph1: 50Hz
+        reg[0x06] = 0xA0; // periph2: hotkeys enabled
+        reg[0x08] = 0x10; // periph3: AY enabled
+        // DivMMC automap enable: power-on 0, set by the BIOS (TBBLUE.FW
+        // PERIPH5 bit 4). The direct enNextZX boot has no BIOS to do it.
+        reg[0x0A] = MemESP::nextBootRom ? 0x00 : 0x10;
+        reg[0x82] = reg[0x83] = reg[0x84] = 0xFF;   // every internal port on
+        reg[0x85] = 0x8F;
+    } else {
+        for (unsigned i = 0; i < sizeof(kKeep); i++) reg[kKeep[i]] = kept[i];
+        reg[0x06] |= 0xA0;                // hotkey CPU speed / 50-60 Hz re-enabled
+        reg[0x08] &= (uint8_t)~0x40;      // contention disable cleared
+        reg[0x09] &= (uint8_t)~0x10;      // sprite tie cleared
+        if (reg[0x85] & 0x80) {           // "reset the enables on soft reset"
+            reg[0x82] = reg[0x83] = reg[0x84] = 0xFF;
+            reg[0x85] = 0x8F;
+        }
+    }
     reg[0x12] = 0x08; // Layer 2 bank
     reg[0x13] = 0x0B; // Layer 2 shadow bank
     reg[0x42] = 0x07; // ULANext attribute format
@@ -288,6 +313,9 @@ void NextReg::reset(bool hard) {
     reg[0x4C] = 0x0F; // tilemap transparency index
     reg[0x03] = reg03Compose();
     reg[0x04] = MemESP::nextConfigPage;
+    // ROM index / ROM3 / Alt-ROM half from the reset latches (7FFD/1FFD = 0)
+    MemESP::romLatch = 0;
+    applyRomSelect();
     MemESP::applyNextConfigWindow();
 }
 
@@ -298,14 +326,20 @@ uint16_t NextReg::activeLine() {
     uint32_t ts = CPU::tstates >> ESPectrum::multiplicator;
     uint32_t line = ts / VIDEO::tStatesPerLine;
     // ULA paper starts 64 lines into the frame on 128K timing (63 border
-    // lines + sync); the Next counts video lines from paper start.
-    const uint32_t paperStart = 63;
+    // lines + sync); the Next counts video lines from paper start. At 60 Hz
+    // the top border is 26 lines shorter (NEXTVID::computeGeometry).
+    const uint32_t paperStart = paperLine();
     uint32_t total = CPU::statesInFrame >> ESPectrum::multiplicator;
     uint32_t lines = total / VIDEO::tStatesPerLine;
     return (uint16_t)((line + lines - paperStart) % lines);
 }
 
 static void applyRomSelect();
+uint8_t NextReg::machineType() { return s_machineType; }
+bool NextReg::osTapeTrapArmed() {
+    return (reg[0x0A] & 0x10) && (reg[0x83] & 0x01) && (reg[0xBB] & 0x20) &&
+           (MemESP::next_rom_mask & 1) && MemESP::next_rom3;
+}
 static void applyBankC000();
 
 // 28 MHz is beyond what the emulation core keeps up with today — the frame
@@ -355,6 +389,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
                 uint8_t t = v & 7;
                 if (t >= 1 && t <= 4) s_machineType = t;
             }
+            applyRomSelect();   // the machine type decides the ROM / ROM3 rule
             // config_mode: 111 re-enters, other non-zero exits, 000 no change
             switch (v & 7) {
                 case 0: break;
@@ -455,10 +490,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
                      // bit4 lock ROM0; bits 3:0 staged (promoted on soft reset)
             MemESP::altrom_rd = (v & 0x80) && !(v & 0x40);
             MemESP::altrom_wr = (v & 0x80) && (v & 0x40);
-            MemESP::altrom_sel = (v & 0x20) ? 1 :
-                                 (v & 0x10) ? 0 : (MemESP::romInUse & 1);
-            if (MemESP::mmu[0] == 0xFF) MemESP::applyMMU(0, 0xFF);
-            if (MemESP::mmu[1] == 0xFF) MemESP::applyMMU(1, 0xFF);
+            applyRomSelect();   // lock bits move ROM / ROM3 / the Alt-ROM half
             break;
         }
         case 0x60: NEXTVID::copperDataWrite(v);   break;
@@ -577,21 +609,38 @@ void NextReg::updateLayer2Window() {
 // ===== Legacy Spectrum paging, Next-style (implemented on top of the MMU) =====
 
 static void applyRomSelect() {
-    // ROM select: 0x7FFD bit 4 = low bit, 0x1FFD bit 2 = high bit. With the
-    // NextZXOS ROM set loaded from SD all four 16K ROMs are available;
-    // otherwise clamp to the two-ROM 128K fallback.
-    uint8_t romsel = (MemESP::romLatch & 0x01) | ((NextReg::port1FFD >> 1) & 0x02);
-    MemESP::romInUse = MemESP::nextRomBase ? romsel : (romsel & 0x01);
-    // Alt-ROM half tracks the LIVE ROM select when no lock bit is set —
-    // NextZXOS writes 0x8C once (e.g. 0xC0 write-redirect), then pages
-    // ROM0/ROM3 via 7FFD to choose which half it is rewriting. A sel frozen
-    // at 0x8C-write time put both halves' data into one bank (hw: boot died
-    // in a RET-chain reading garbage Alt-ROM at 0x0003/0x0068).
-    {
-        uint8_t a = NextReg::reg[0x8C];
-        MemESP::altrom_sel = (a & 0x20) ? 1 : (a & 0x10) ? 0
-                                             : (MemESP::romInUse & 1);
+    // zxnext.vhd "rom address computation": which 16K ROM, whether it is
+    // "ROM3" (the 48K BASIC — gates the divMMC tape/RST entry points) and which
+    // Alt-ROM half (alt_128_n: 1 = the 48K half) all follow the MACHINE TYPE
+    // (nextreg 0x03, set in config mode), with the 0x8C lock bits overriding:
+    //   48K       : ROM 0 always, ROM3 = 1
+    //   +3 / Next : ROM = 1FFD.2:7FFD.4, ROM3 = both set
+    //   128K/Pent : ROM = 0:7FFD.4,      ROM3 = 7FFD.4
+    // NextZXOS's TAP Loader (48K/128K/Pentagon modes) runs 48 BASIC as ROM1 of
+    // a 128K-type machine; testing "ROM index == 3" never armed its #056A tape
+    // trap there and every .tap loaded in real time (hw 2026-10-07).
+    const uint8_t a   = NextReg::reg[0x8C];
+    const bool    l1  = a & 0x20, l0 = a & 0x10;       // lock ROM1 / lock ROM0
+    const uint8_t r7  = MemESP::romLatch & 0x01;         // 7FFD bit 4
+    const uint8_t r1  = (NextReg::port1FFD >> 2) & 0x01; // 1FFD bit 2
+    const uint8_t mt  = NextReg::machineType();
+    uint8_t rom; bool rom3, alt128n;
+    if (mt <= 1) {                                       // 48K
+        rom = 0; rom3 = true; alt128n = !(!l1 && l0);
+    } else if (mt == 2 || mt == 4) {                     // 128K / Pentagon
+        if (l1 || l0) { rom = l1 ? 1 : 0; rom3 = l1; alt128n = l1; }
+        else          { rom = r7;         rom3 = r7; alt128n = r7; }
+    } else {                                             // +3 / Next
+        if (l1 || l0) { rom = (l1 ? 2 : 0) | (l0 ? 1 : 0); rom3 = l1 && l0; alt128n = l1; }
+        else          { rom = (r1 << 1) | r7;              rom3 = r1 && r7; alt128n = r7; }
     }
+    // Without the NextZXOS set only the two-ROM 128K fallback exists.
+    if (!MemESP::nextRomBase) { rom &= 1; rom3 = rom == 1; }
+    MemESP::romInUse = rom;
+    MemESP::altrom_sel = alt128n ? 1 : 0;
+    // divMMC automap "rom3" entry points: the Alt-ROM stands in for ROM3 when
+    // it is the 48K half (sram_divmmc_automap_rom3_en).
+    MemESP::next_rom3 = MemESP::altrom_rd ? alt128n : rom3;
     if (MemESP::mmu[0] == 0xFF) MemESP::applyMMU(0, 0xFF);
     if (MemESP::mmu[1] == 0xFF) MemESP::applyMMU(1, 0xFF);
 }

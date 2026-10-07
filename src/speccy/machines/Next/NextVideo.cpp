@@ -551,14 +551,33 @@ void NEXTVID::Reset() {
 
     totalLines = CPU::statesInFrame ?
         ((CPU::statesInFrame >> ESPectrum::multiplicator) / VIDEO::tStatesPerLine) : 311;
-    firstVisibleLine = (VIDEO::tStatesBorder + VIDEO::tStatesPerLine / 2) / VIDEO::tStatesPerLine;
-    paperTopRow = (VIDEO::tStatesScreen + VIDEO::tStatesPerLine / 2) / VIDEO::tStatesPerLine
-                  - firstVisibleLine;
+    computeGeometry();
     xPaperOff = ((int)VIDEO::vga.xres - 256) / 2;
     lineIdx = 0;
     nextLineTstate = (uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator;
     skipFrame = false;
     framePacing.reset(time_us_32());
+}
+
+// Which raster line is fb row 0, and which fb row the paper starts on. The
+// anchors are the 128K 50 Hz ones VIDEO::Reset sets. At 60 Hz (nextreg 0x05
+// bit 2) the frame is 262 lines and the TOP border is 26 lines shorter: the
+// paper starts 38 lines after the INT instead of 64 (z88dk zxn copper table —
+// 50 Hz: 192 display + 56 bottom + 8 vsync + 56 top = 312; 60 Hz: 192 + 32 +
+// 8 + 30 = 262). Keeping the 50 Hz anchor at 60 Hz put fb row 0 on line 39, so
+// only 262 - 39 = 223 rows were ever rendered and rows 223..239 kept whatever
+// was drawn there last — the menu footer, under NextZXOS (hw 2026-10-07).
+// Returns true when the geometry moved.
+bool NEXTVID::computeGeometry() {
+    const int tpl = VIDEO::tStatesPerLine;
+    const int shift = (NextReg::reg[0x05] & 0x04) ? 26 : 0;
+    int fv = (VIDEO::tStatesBorder + tpl / 2) / tpl - shift;
+    if (fv < 0) fv = 0;
+    const int paper = (VIDEO::tStatesScreen + tpl / 2) / tpl - shift;
+    const bool moved = fv != firstVisibleLine || paper - fv != paperTopRow;
+    firstVisibleLine = fv;
+    paperTopRow = paper - fv;
+    return moved;
 }
 
 // nextreg 0x07 can switch the CPU clock MID-FRAME; the pending line
@@ -584,10 +603,34 @@ IRAM_ATTR void NEXTVID::haltAdvanceTo(uint32_t stEnd) {
     }
 }
 
+#if NEXT_TRACE
+void nxErrPoll();   // Z80_JLS.cpp: ERR_NR turning #15 -> dump the RST 8 ring
+#endif
 IRAM_ATTR void NEXTVID::EndFrame() {
 #if NEXT_TRACE
+    nxErrPoll();
     if (!skipFrame) ++g_nextvid_frames;
 #endif
+    // fb rows the raster never reaches this frame (a 288-row fb at 60 Hz:
+    // 262 lines for 288 rows) are drawn here from the last line's state, or
+    // they would keep whatever was painted there before — UI included.
+    if (!skipFrame) {
+        int row = (int)totalLines - firstVisibleLine;
+        if (row < 0) row = 0;
+        for (; row < (int)VIDEO::vga.yres; row++) emitRow(row);
+    }
+    // nextreg 0x05 bit 2 (50/60 Hz) moves the raster anchors: apply at the
+    // frame boundary, after core1 has drawn every row of the old geometry
+    // (RenderLayers reads paperTopRow live).
+    {
+        static uint8_t s_hz = 0xFF;
+        const uint8_t hz = NextReg::reg[0x05] & 0x04;
+        if (hz != s_hz) {
+            s_hz = hz;
+            c1Drain();
+            computeGeometry();
+        }
+    }
     // A fixed 1-in-64 skip made the BIOS update at <1 Hz even when the CPU
     // managed 50 emulated frames/s. Bound skipping by wall time instead;
     // when emulation is slow, every frame is drawn.
@@ -644,46 +687,50 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::ScanlineWork() {
         uint32_t paperStart = (uint32_t)(firstVisibleLine + paperTopRow);
         copperLine((uint16_t)((lineIdx + totalLines - paperStart) % totalLines));
         int row = (int)lineIdx - firstVisibleLine;
-        if (!skipFrame && row >= 0 && row < (int)VIDEO::vga.yres) {
-            if (g_next_c1_live) {
-                // Post the line: capture, and open a new state slot only when
-                // something the renderer reads has moved since the last line.
-                NextLineState st;
-                captureLine(st);
-                if (!nx_have || !nxSameState(st, nx_st[nx_cur])) {
-                    const uint32_t k = (nx_cur + 1) % NEXT_C1_STATES;
-                    nxWaitUntil(nx_st_job[k]);
-                    nx_st[k] = st;
-                    nx_cur = k;
-                    nx_have = true;
-                }
-                if (nx_w - nx_r >= NEXT_C1_RING) nxWaitUntil(nx_w - NEXT_C1_RING + 1);
-            }
-            if (g_next_c1_live) {
-                nx_ring[nx_w % NEXT_C1_RING] = (uint32_t)row | (nx_cur << 16);
-                __dmb();                    // job + state visible before the index
-                nx_w = nx_w + 1;
-                nx_st_job[nx_cur] = nx_w;
-            } else {
-                captureLine(nx_sync);
-                LS = &nx_sync;
-#if NEXT_TRACE
-                if ((lineIdx & 15) == 0) {
-                    uint64_t t0 = time_us_64();
-                    nx_layer_sample = true;
-                    RenderLine(row);
-                    nx_layer_sample = false;
-                    g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
-                } else
-#endif
-                RenderLine(row);
-            }
-        }
+        if (!skipFrame && row >= 0 && row < (int)VIDEO::vga.yres) emitRow(row);
         lineIdx++;
         nextLineTstate = (lineIdx + 1) * ((uint32_t)VIDEO::tStatesPerLine << m);
     } else {
         // frame over-run (turbo tail) — wait for EndFrame to restart
         nextLineTstate = 0xFFFFFFFF;
+    }
+}
+
+// One fb row: posted to core1 with a register snapshot, or drawn here.
+// noinline: ScanlineWork and EndFrame's tail fill both call it.
+__attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
+    if (g_next_c1_live) {
+        // Post the line: capture, and open a new state slot only when
+        // something the renderer reads has moved since the last line.
+        NextLineState st;
+        captureLine(st);
+        if (!nx_have || !nxSameState(st, nx_st[nx_cur])) {
+            const uint32_t k = (nx_cur + 1) % NEXT_C1_STATES;
+            nxWaitUntil(nx_st_job[k]);
+            nx_st[k] = st;
+            nx_cur = k;
+            nx_have = true;
+        }
+        if (nx_w - nx_r >= NEXT_C1_RING) nxWaitUntil(nx_w - NEXT_C1_RING + 1);
+    }
+    if (g_next_c1_live) {
+        nx_ring[nx_w % NEXT_C1_RING] = (uint32_t)row | (nx_cur << 16);
+        __dmb();                    // job + state visible before the index
+        nx_w = nx_w + 1;
+        nx_st_job[nx_cur] = nx_w;
+    } else {
+        captureLine(nx_sync);
+        LS = &nx_sync;
+#if NEXT_TRACE
+        if ((row & 15) == 0) {
+            uint64_t t0 = time_us_64();
+            nx_layer_sample = true;
+            RenderLine(row);
+            nx_layer_sample = false;
+            g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
+        } else
+#endif
+        RenderLine(row);
     }
 }
 

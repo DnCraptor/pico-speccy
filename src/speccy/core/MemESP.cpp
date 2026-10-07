@@ -895,6 +895,7 @@ uint8_t* MemESP::nextRomBase = nullptr;
 uint8_t* MemESP::nextDivRomBase = nullptr;
 uint8_t  MemESP::next_rom_mask = 0;
 uint8_t* MemESP::altRomBase = nullptr;
+bool     MemESP::next_rom3 = false;
 bool     MemESP::altrom_rd = false;
 bool     MemESP::altrom_wr = false;
 uint8_t  MemESP::altrom_sel = 0;

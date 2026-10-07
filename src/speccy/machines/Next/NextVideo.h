@@ -116,6 +116,8 @@ public:
 private:
     static void captureLine(NextLineState& s);
     static void ScanlineWork();
+    static void emitRow(int row);          // post / draw one fb row
+    static bool computeGeometry();         // firstVisibleLine/paperTopRow (50/60 Hz)
     static void RenderLine(int row);
     static void RenderLayers(uint8_t* fb, int row);   // RenderLine's body, linear pixel order
     static void RenderSpritesLine(uint8_t* fb, int y);

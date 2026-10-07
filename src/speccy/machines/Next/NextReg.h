@@ -62,6 +62,14 @@ public:
 
     // Raster position for reg 0x1E/0x1F reads
     static uint16_t activeLine();
+    static uint8_t machineType();
+    // NextZXOS's own tape trap is live: divMMC automap enabled (NR 0x0A b4,
+    // NR 0x83 b0), the #056A entry point armed (NR 0xBB b5) and ROM in slot 0
+    // counting as ROM3. Our in-ROM fast load must stand aside then.
+    static bool osTapeTrapArmed();   // nextreg 0x03 machine type (1 48K, 2 128K, 3 +3/Next, 4 Pentagon)
+    // Raster line (from the frame INT) of pixel line 0: 63 at 50 Hz, 26 lower
+    // at 60 Hz (nextreg 0x05 bit 2 — shorter top border, NEXTVID::computeGeometry).
+    static inline uint32_t paperLine() { return (reg[0x05] & 0x04) ? 63 - 26 : 63; }
 
     // Timex/SCLD port 0xFF (Next decodes the full low byte). bit 6 disables
     // the ULA frame interrupt (zxnext.vhd port_ff_interrupt_disable — zx_go's

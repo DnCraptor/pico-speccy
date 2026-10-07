@@ -2145,7 +2145,11 @@ void Z80::decodeOpcode76()
         }
     }
 #endif
-    if ((((REG_PC == 0x56b || REG_PC == 0x56d || REG_PC == 0x57d)) && !Z80Ops::isTc2068)
+    // On the Next, NextZXOS's own tape trap (automap at #056A) gets the block
+    // whenever it is armed — see NextReg::osTapeTrapArmed(). BIOS personalities
+    // without it (48K/128K/Pentagon, divmmc off) keep our fast load.
+    if ((((REG_PC == 0x56b || REG_PC == 0x56d || REG_PC == 0x57d)) && !Z80Ops::isTc2068
+         && !(Z80Ops::isNext && NextReg::osTapeTrapArmed()))
         || tcTrap) {
 
         if ((Tape::tapeFileType == TAPE_FTYPE_TAP || Tape::tapeFileType == TAPE_FTYPE_TZX || Tape::tapeFileType == TAPE_FTYPE_PZX) && (Tape::tapeFileName != "none")) {
@@ -2778,7 +2782,73 @@ void Z80::decodeCALLcc() { /* CALL cc,nn */
     REG_PC = REG_PC + 2;
 }
 
+#if NEXT_TRACE
+// ---- Next: who raised error M? -------------------------------------------
+// Each RST 8 (PC, the byte after it = the error code or the esxDOS call id,
+// DE/HL/SP, the ROM/MMU state) lands in a 64-entry ring. An RST 8 followed by
+// #15 is logged on the spot with the BASIC sysvars; nxErrPoll() (once a frame,
+// NEXTVID::EndFrame) catches ERR_NR turning #15 by any other route (JP to an
+// error routine, RAM code) and dumps the ring. One-shot budgets: a trace, not
+// a flood.
+struct NxRst8 { uint16_t pc, de, hl, sp; uint8_t b, rom, m0, m1, p7, p1; };
+static NxRst8 s_nx_rst[64];
+static uint32_t s_nx_rst_w = 0;
+static uint16_t nxW(uint16_t a) {
+    return (uint16_t)(MemESP::dbgPeek(a) | (MemESP::dbgPeek((uint16_t)(a + 1)) << 8));
+}
+static Z80_COLD void nxSysvars(const char* tag) {
+    Debug::log("[NXERR] %s STKEND=%04X P_RAMT=%04X RAMTOP=%04X VARS=%04X PROG=%04X "
+               "E_LINE=%04X WORKSP=%04X CH_ADD=%04X PPC=%04X SUB=%u ERR_SP=%04X",
+               tag, nxW(0x5C65), nxW(0x5CB4), nxW(0x5CB2), nxW(0x5C4B), nxW(0x5C53),
+               nxW(0x5C59), nxW(0x5C61), nxW(0x5C5D), nxW(0x5C45),
+               (unsigned)MemESP::dbgPeek(0x5C47), nxW(0x5C3D));
+    char hx[140]; int p = 0;
+    const uint16_t e = nxW(0x5C59);
+    for (int i = 0; i < 48 && p < (int)sizeof(hx) - 3; i++)
+        p += snprintf(hx + p, sizeof(hx) - p, "%02X", MemESP::dbgPeek((uint16_t)(e + i)));
+    Debug::log("[NXERR]   E_LINE: %s", hx);
+}
+static Z80_COLD void nxRst8Note() {
+    NxRst8& r = s_nx_rst[s_nx_rst_w++ & 63];
+    r.pc = (uint16_t)(Z80::getRegPC() - 1); r.de = Z80::getRegDE(); r.hl = Z80::getRegHL(); r.sp = Z80::getRegSP();
+    r.b = MemESP::dbgPeek(Z80::getRegPC()); r.rom = (uint8_t)MemESP::romInUse;
+    r.m0 = MemESP::mmu[0]; r.m1 = MemESP::mmu[1];
+    r.p7 = NextReg::port7FFD; r.p1 = NextReg::port1FFD;
+    static uint8_t n = 0;
+    if (r.b == 0x15 && n < 4) {
+        n++;
+        Debug::log("[NXERR] RST 8/#15 at %04X rom=%u mmu=%02X.%02X 7FFD=%02X 1FFD=%02X "
+                   "DE=%04X HL=%04X BC=%04X SP=%04X [sp]=%04X %04X %04X %04X",
+                   r.pc, r.rom, r.m0, r.m1, r.p7, r.p1, Z80::getRegDE(), Z80::getRegHL(), Z80::getRegBC(), Z80::getRegSP(),
+                   nxW(Z80::getRegSP()), nxW(Z80::getRegSP() + 2), nxW(Z80::getRegSP() + 4), nxW(Z80::getRegSP() + 6));
+        nxSysvars("  at RST:");
+    }
+}
+Z80_COLD void nxErrPoll() {
+    static uint8_t last = 0xFF, n = 0;
+    const uint8_t e = MemESP::dbgPeek(0x5C3A);
+    if (e == last) return;
+    last = e;
+    if (e != 0x15 || n >= 3) return;
+    n++;
+    Debug::log("[NXERR] ERR_NR=#15 (M) seen at frame end, PC=%04X rom=%u, last RST 8s (oldest first):",
+               (unsigned)Z80::getRegPC(), (unsigned)MemESP::romInUse);
+    const uint32_t cnt = s_nx_rst_w < 24 ? s_nx_rst_w : 24;
+    for (uint32_t i = 0; i < cnt; i++) {
+        const NxRst8& r = s_nx_rst[(s_nx_rst_w - cnt + i) & 63];
+        Debug::log("[NXERR]   %04X b=%02X rom=%u mmu=%02X.%02X 7FFD=%02X 1FFD=%02X DE=%04X HL=%04X SP=%04X",
+                   r.pc, r.b, r.rom, r.m0, r.m1, r.p7, r.p1, r.de, r.hl, r.sp);
+    }
+    nxSysvars("  now:");
+}
+#endif
+
 void Z80::decodeRST() {    /* RST p */
+#if NEXT_TRACE
+    // Every RST 8 on the Next goes into a ring for nxErrPoll() (error M hunt,
+    // 2026-10-07: NextZXOS's TAP loader ends in "M RAMTOP no good").
+    if (Z80Ops::isNext && opCode == 0xCF) nxRst8Note();
+#endif
 #if ZC_PORT_TRACE || ATM_PAGE_TRACE
     // ATM: an RST #38 executed with interrupts ENABLED enters the IM1 handler without
     // the IFF1 clear an accepted INT does — the NedoOS sys_sysint nesting (2026-09-28).

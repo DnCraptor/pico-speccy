@@ -255,6 +255,18 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
         // low addresses the traps watch.
         if (MemESP::nextBootRomActive || MemESP::nextConfigMode) return;
         const uint8_t* nr = NextReg::reg;
+        // zxnext.vhd: divmmc_automap_reset while NR 0x0A bit 4 (DivMMC automap
+        // enable — the BIOS "divmmc" setting) or NR 0x83 bit 0 (divMMC port
+        // enable) is clear. The BIOS 128K/Pentagon personalities run with it
+        // off; without this gate their IM1 interrupt at #0038 mapped enNxtmmc
+        // in for good (black paper, white border — hw 2026-10-07).
+        if (!(nr[0x0A] & 0x10) || !(nr[0x83] & 0x01)) {
+            if (automap) {
+                automap = false;
+                if (!conmem) applyMapping();
+            }
+            return;
+        }
         // Cold boot: on real hardware the FPGA bootrom overlays $0000-$3FFF,
         // so the reset fetch at $0000 does NOT automap — enNextZX's reset
         // entry must run from the machine ROM (zx_go's divmmc.go documents
@@ -266,10 +278,10 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
             if (pc != 0x0000) g_next_automap_armed = true;
         }
         if (!automap) {
-            // "ROM3" = the 48K BASIC ROM: 3 of the 4-ROM NextZXOS set,
-            // 1 of the two-ROM 128K fallback pair.
-            bool rom3 = (MemESP::next_rom_mask & 1) &&
-                        (MemESP::romInUse & 3) == (MemESP::nextRomBase ? 3 : 1);
+            // "ROM3" = the 48K BASIC ROM as zxnext.vhd defines it: depends on
+            // the machine type and the Alt-ROM (NextReg applyRomSelect) — ROM3
+            // of a +3/Next, ROM1 of a 128K/Pentagon, ROM0 of a 48K.
+            bool rom3 = (MemESP::next_rom_mask & 1) && MemESP::next_rom3;
             if (pc <= 0x0038 && (pc & 7) == 0) {
                 uint8_t bit = (uint8_t)(1u << (pc >> 3));
                 if (pc == 0x0000 && !g_next_automap_armed) bit = 0;
