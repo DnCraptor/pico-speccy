@@ -1280,6 +1280,7 @@ void ESPectrum::setup() {
     // while NR 07 says 3.5 MHz (93 ms for the first frame on hardware).
     // CPU::reset() and VIDEO::Reset() below derive timing from this value.
     ESPectrum::multiplicator = 0;
+    NextReg::contendRecalc();   // NextReg::reset ran at the OLD clock (TBBLUE turbo)
     MemESP::resetNextMapping();
   }
 
@@ -1791,6 +1792,7 @@ void ESPectrum::nextRasterApply() {
     CPU::tstates = (uint32_t)((int32_t)CPU::tstates + (int32_t)(CPU::statesInFrame - old));
     nextAudioSet();
     VIDEO::pickMachineVideoMode();   // the display frame follows the raster (V-Sync pacing)
+    NextReg::contendRecalc();        // contention window anchor + bank rule
     const NextReg::Raster r = NextReg::raster();
     Debug::log("NEXT raster: %s %u T x %u lines%s, %u us",
                r.kind == 0 ? "48K" : r.kind == 2 ? "Pentagon" : "128K/+3",
@@ -1987,6 +1989,7 @@ void ESPectrum::reset(uint8_t romInUse) {
     // reg 0x07 resets to 3.5MHz — keep the live clock in step (CPU::reset
     // below re-derives the frame timings from this)
     multiplicator = 0;
+    NextReg::contendRecalc();   // NextReg::reset ran at the OLD clock (TBBLUE turbo)
   }
 
   // Re-load STS 7.5 into RAM bank 7 at offset 0x1B00 (= 0xDB00 - 0xC000)
@@ -3776,6 +3779,9 @@ void ESPectrum::loop() {
           CPU::updateStatesInFrame();
           NEXTVID::onClockChange();
         }
+        // The BIOS soft-resets into a personality from TURBO: contention was
+        // derived at the old clock and stayed off until F11 (hw 2026-10-07).
+        NextReg::contendRecalc();
         Z80::reset();
       }
     }

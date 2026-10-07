@@ -33,6 +33,7 @@ visit https://zxespectrum.speccy.org/contacto
 
 */
 
+#include "speccy/machines/Next/NextReg.h"
 #include "MemESP.h"
 #include "app/Debug.h"
 #include "app/Buffer.h"
@@ -991,6 +992,17 @@ bool MemESP::loadNextRoms() {
     return nextRomBase != nullptr;
 }
 
+// Spectrum Next: re-derive every slot's contention flag after the bank rule
+// changed (machine timing, CPU speed, NR 0x08 bit 6). Slots 0/1 under the
+// config window or the divMMC window, and ROM slots, are never contended.
+void MemESP::nextContendRefresh() {
+    for (uint8_t s = 0; s < 8; s++) {
+        bool c = !(next_rom_mask & (1u << s)) && NextReg::pageContended(mmu[s]);
+        if (s <= 1 && (divmmc_mapped || nextBootRomActive || nextConfigMode)) c = false;
+        ramContended[s] = c;
+    }
+}
+
 void MemESP::applyMMU(uint8_t slot, uint8_t page) {
     slot &= 7;
     mmu[slot] = page;
@@ -1017,7 +1029,10 @@ void MemESP::applyMMU(uint8_t slot, uint8_t page) {
     // divMMC paged in: the window, not the MMU page, is what 0x0000-0x3FFF
     // shows (see nextDivPlug) — mmu[]/next_rom_mask above still track the MMU.
     if (slot <= 1 && divmmc_mapped) ramCurrent[slot] = slot ? page0_hi : page0_lo;
-    ramContended[slot] = false; // Next has no contention
+    // Contention by the PHYSICAL page the slot shows (zxnext.vhd mem_contend):
+    // ROM and the divMMC window are never contended.
+    ramContended[slot] = !(next_rom_mask & (1u << slot)) && !(slot <= 1 && divmmc_mapped) &&
+                         NextReg::pageContended(page);
     // Next pages are direct pointers (SRAM or butter XIP) — no pool
     // write-back tracking, so the write hooks must not touch a stale
     // pool page's flags through this slot.
@@ -1035,7 +1050,6 @@ void MemESP::resetNextMapping() {
 // ===== TBBLUE boot chain: config-mode window over 0x0000-0x3FFF =====
 
 #include "speccy/devices/storage/DivMMC.h"
-#include "speccy/machines/Next/NextReg.h"
 
 // The 16K backing store the NR 0x04 RAMPAGE page maps to, per the TBBlue
 // firmware's hardware.h layout (pinned by zx_go configModePageBacking):

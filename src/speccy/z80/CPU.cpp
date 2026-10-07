@@ -415,6 +415,8 @@ void CPU::reset() {
         ESPectrum::target = MICROS_PER_FRAME_PENTAGON;
     }
 
+    Ports::ulaIoContendRecalc();
+
     // 16col is Pentagon-only — auto-disable when switching to non-Pentagon arch.
     if (!(Z80Ops::isPentagon || Z80Ops::isProfi)) {
         if (Config::mode16col_onoff) {

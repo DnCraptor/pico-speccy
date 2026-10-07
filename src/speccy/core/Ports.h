@@ -39,9 +39,12 @@ visit https://zxespectrum.speccy.org/contacto
 #include <inttypes.h>
 #include "app/ESPectrum.h"
 
+extern bool g_ula_io_contend;   // Ports::ulaIoContendRecalc
+
 class Ports {
 
 public:
+    static void ulaIoContendRecalc();   // flash: g_ula_io_contend from the machine flags
 
     static uint8_t input(uint16_t address);
     static void output(uint16_t address, uint8_t data);

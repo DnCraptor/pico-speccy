@@ -40,7 +40,21 @@ public:
     // VIDEO::Draw replacements
     static void Tick(unsigned int statestoadd, bool contended);
     static void Tick_Opcode(bool contended);
-    static void DrawBorderNop();
+
+    // ULA contention (zxnext.vhd 4481-4492, zxula.vhd 583-600), set by
+    // NextReg::contendRecalc: bit0 = memory contended, bit1 = ports too (48K /
+    // 128K timing; +3 timing stretches memory only, via WAIT). Zero unless the
+    // machine timing is 48K/128K/+3, the CPU runs at 3.5 MHz and NR 0x08 bit 6
+    // is clear. The window: 192 lines x 128 T, the first one starting at line
+    // contLine, column contCol (= VIDEO::tStatesScreen, 26 lines earlier at
+    // 60 Hz); contWait is the 8-T pattern (48K/128K 6,5,4,3,2,1,0,0; +3
+    // 1,0,7,6,5,4,3,2 — the same phase convention as Video.cpp wait_st_tab).
+    static uint8_t contend;
+    static int16_t contLine;
+    static int16_t contCol;
+    static uint8_t contWait[8];   // RAM: read per contended access
+    static unsigned contendWait();   // wait states of a contended access starting now
+    static void borderMark();   // VIDEO::DrawBorder: a #FE colour change (old colour)
 
     // nextreg palette interface (regs 0x40/0x41/0x43/0x44)
     static uint8_t palRead8();

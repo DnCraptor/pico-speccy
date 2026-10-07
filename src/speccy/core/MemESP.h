@@ -331,6 +331,7 @@ public:
     // 8 slots of 8K each (Next MMU granularity); legacy 16K pages occupy
     // slot pairs via plug16()/plugPtr16(). Hot paths index by addr >> 13.
     static uint8_t* ramCurrent[8];
+    static void nextContendRefresh();   // Next: ramContended[] from mmu[] (NextReg::contendRecalc)
     static bool ramContended[8];
 
     // Plug a 16K block into 16K bank s16 (0..3) — both 8K slots at once.

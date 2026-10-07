@@ -137,6 +137,7 @@ void contendApply() {
                     ESPectrum::multiplicator == 0;
     MemESP::ramContended[2] = MemESP::ramContended[3] = g_evo_contend;
     MemESP::ramContended[6] = MemESP::ramContended[7] = g_evo_contend && Config::isEvo128Raster() && (p7ffd & 1);
+    Ports::ulaIoContendRecalc();
 }
 
 // Scroll Lock = the AVR's raster switch (avr/baseconf zx.c: case 0x7E cycles the

@@ -1181,7 +1181,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
   }
   // ULA PORT
   if ((address & 0x0001) == 0) {
-    VIDEO::Draw(3, !(Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion || Z80Ops::isTsconf || (Z80Ops::isAtm && !g_evo_contend))); // I/O Contention (Late)
+    VIDEO::Draw(3, g_ula_io_contend); // I/O Contention (Late)
     if (ia && p8 == 0xFE) {
       data = nes_pad2_for_alf(); // default port value is 0xFF.
     } else {
@@ -3228,7 +3228,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
             g_brd_delta = CPU::tstates - g_int_last_t; } }
 #endif
       VIDEO::brdChange = true;
-      if (!(Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion || Z80Ops::isTsconf || (Z80Ops::isAtm && !g_evo_contend)))
+      if (g_ula_io_contend)
         // VIDEO::Draw(0, false); // Flush video rendering without adding contention
         VIDEO::Draw(0, true); // Apply contention to align border change with ULA character cell
       VIDEO::DrawBorder();
@@ -3257,10 +3257,10 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     if ((ESPectrum::AY_emu) && ((address & 0x8002) == 0x8000)) {
       LED::touchW(LED::AY);
       ayPortWrite(address, data, true);     // A8 decode: old-TS second chip
-      VIDEO::Draw(3, !(Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion || Z80Ops::isTsconf || (Z80Ops::isAtm && !g_evo_contend))); // I/O Contention (Late)
+      VIDEO::Draw(3, g_ula_io_contend); // I/O Contention (Late)
       return;
     }
-    VIDEO::Draw(3, !(Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion || Z80Ops::isTsconf || (Z80Ops::isAtm && !g_evo_contend))); // I/O Contention (Late)
+    VIDEO::Draw(3, g_ula_io_contend); // I/O Contention (Late)
   } else {
     // ZX Next ports (machines/Next/NextPorts.cpp, flash)
     if (Z80Ops::isNext && NextPorts::output(address, data)) {
@@ -4217,6 +4217,20 @@ IRAM_ATTR void Ports::pitGenSound(uint8_t *buf, int bufsize) {
     }
     *buf++ = mix;
   }
+}
+
+// The ULA's own port contention (even ports, the border-change alignment): on
+// for the Sinclair-ULA machines, off for Pentagon / Profi / Scorpion / TS-Conf /
+// ATM, on for a ZX-Evo 48K/128K raster at 3.5 MHz (g_evo_contend) and for a
+// Spectrum Next in 48K/128K timing at 3.5 MHz (NEXTVID::contend bit 1 — the +3
+// timing stretches memory only). One flag the hot decoders read, re-derived by
+// whoever moves an input: CPU::reset, EvoBase::contendApply,
+// NextReg::contendRecalc.
+bool g_ula_io_contend = true;
+void Ports::ulaIoContendRecalc() {
+    g_ula_io_contend = !(Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isScorpion ||
+                         Z80Ops::isTsconf || (Z80Ops::isAtm && !g_evo_contend) ||
+                         (Z80Ops::isNext && !(NEXTVID::contend & 2)));
 }
 
 IRAM_ATTR void Ports::ioContentionLate(bool contend) {

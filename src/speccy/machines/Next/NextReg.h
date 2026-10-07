@@ -49,6 +49,19 @@ public:
         PE_ULAP = 1u << 24, PE_DMA0B = 1u << 25, PE_EFF7 = 1u << 26, PE_CTC = 1u << 27,
     };
     static uint32_t portEn;
+
+    // Contended 16K banks 0-7 as a bitmask (zxnext.vhd mem_contend 4489): 48K
+    // timing bank 5, 128K odd banks, +3 banks 4-7, banks 8+ never; 0 while
+    // contention is off (Pentagon timing, CPU above 3.5 MHz, NR 0x08 bit 6).
+    static uint8_t contendBanks;
+    static inline bool pageContended(uint8_t page8k) {
+        return page8k < 16 && ((contendBanks >> (page8k >> 1)) & 1);
+    }
+    // Re-derive contendBanks, NEXTVID's contention window and every slot's
+    // MemESP::ramContended, and the fast memory path gate (it bypasses Draw, so
+    // it must be off while anything is contended). Called on NR 0x03 / 0x07 /
+    // 0x08, the raster change and reset.
+    static void contendRecalc();
     static inline bool portOn(uint32_t m) { return (portEn & m) != 0; }
     static void portEnRecalc() {
         portEn = (uint32_t)reg[0x82] | ((uint32_t)reg[0x83] << 8) |

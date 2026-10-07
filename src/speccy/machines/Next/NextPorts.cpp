@@ -12,6 +12,38 @@
 #include "NextReg.h"
 #include "NextVideo.h"
 #include "app/ESPectrum.h"
+#include "speccy/z80/CPU.h"
+#include "speccy/video/Video.h"
+
+// The ULA floating bus on port #FF (zxnext.vhd 2813 / 4513, zxula.vhd 573):
+// only in 48K and 128K machine timing — +3 and Pentagon read 0xFF there —
+// with the classic ULA's fetch window, i.e. Ports::getFloatBusData48 / 128
+// (halt2int-verified on those machines) with the paper 26 lines earlier at
+// 60 Hz. Turbo: the T-state count is not the ULA's, read 0xFF.
+static uint8_t nxFloatBus() {
+    if (ESPectrum::multiplicator) return 0xFF;
+    const uint8_t mt = NextReg::machineTiming();   // 1 48K, 2 128K, 3 +3, 4 Pentagon
+    if (mt != 1 && mt != 2) return 0xFF;
+    const bool hz60 = NextReg::raster().hz60;
+    unsigned int line;
+    unsigned char halfpix;
+    if (mt == 1) {
+        const unsigned int ts = CPU::tstates;
+        line = ts / 224 - (hz60 ? 38 : 64);
+        if (line >= 192) return 0xFF;
+        halfpix = (unsigned char)(ts % 224 - 3);
+        if (halfpix >= 125 || (halfpix & 0x04)) return 0xFF;
+    } else {
+        const unsigned int ts = CPU::tstates - 1;
+        line = ts / 228 - (hz60 ? 37 : 63);
+        if (line >= 192) return 0xFF;
+        halfpix = (unsigned char)(ts % 228);
+        if (halfpix >= 128 || (halfpix & 0x04)) return 0xFF;
+    }
+    const int hp = (halfpix >> 2) + ((halfpix >> 1) & 0x01);
+    return (halfpix & 0x01) ? VIDEO::grmem[VIDEO::offAtt[line] + hp]
+                            : VIDEO::grmem[VIDEO::offBmp[line] + hp];
+}
 
 int NextPorts::input(uint16_t address) {
     if (address == 0x243B) return NextReg::selected;
@@ -20,11 +52,14 @@ int NextPorts::input(uint16_t address) {
     if (address == 0x303B && NextReg::portOn(NextReg::PE_SPRITE)) return NEXTVID::spriteFlagsRead();
     // I2C bus (RTC) — no device attached: lines read idle-high
     if (address == 0x103B || address == 0x113B) return 0xFF;
-    // Timex port 0xFF read-back, gated on nextreg 0x08 bit 2 (with the gate
-    // off, or the port undecoded, the read falls through to the floating bus)
-    if ((address & 0xFF) == 0xFF && (NextReg::reg[0x08] & 0x04) &&
-        NextReg::portOn(NextReg::PE_FF))
-        return NextReg::portFF;
+    // Port 0xFF: the Timex register read-back, gated on nextreg 0x08 bit 2 and
+    // the port's own enable; otherwise the ULA floating bus (even with the
+    // port undecoded — zxnext.vhd port_ff_rd_dat ignores port_ff_io_en there).
+    if ((address & 0xFF) == 0xFF) {
+        if ((NextReg::reg[0x08] & 0x04) && NextReg::portOn(NextReg::PE_FF))
+            return NextReg::portFF;
+        return nxFloatBus();
+    }
     return -1;
 }
 

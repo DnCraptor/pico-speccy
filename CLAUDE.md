@@ -289,8 +289,39 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   311/261 строк, экран через 63/37 строк после INT). `NEXTVID::computeGeometry`,
   `NextReg::paperLine()` (line IRQ, NR 1E/1F); без этого 17 нижних строк fb не
   перерисовывались (остался футер меню). hw-confirmed 2026-10-07.
-- **Открыто (аудит переключения машин):** тайминг машины (NR 03 b6:4: 48K 224×312,
-  Pentagon 224×320) игнорируется — всегда растр 128K; contention на Next нет совсем.
+- **Тайминг машины NR 03 b6:4 применяется** (`NextReg::raster()`: 48K 224×312/262,
+  128K/+3 228×311/261, Pentagon 224×320 — CPU, видео, звук; коммит 32d6bb8b).
+- **ULA contention на Next** (2026-10-07, hw-confirmed: FPGA48 / цветные полосы / halt2int в 48K и 128K, `debug/DVp2-next-halt-1.0.9.elf`;
+  zxnext.vhd 4481-4492, zxula.vhd 583-600): включена при тайминге 48K/128K/+3, CPU
+  ровно 3.5 МГц и NR 08 b6 = 0. Банки по ФИЗИЧЕСКОЙ странице MMU (`NextReg::
+  contendBanks`/`pageContended`): 48K — банк 5, 128K — нечётные, +3 — 4-7, 8+ никогда;
+  ROM и окно divMMC — нет (`MemESP::applyMMU` / `nextContendRefresh`). Ожидание —
+  `NEXTVID::Tick`/`Tick_Opcode` по колонке строки (`contLine/contCol` = tStatesScreen,
+  на 60 Гц −26 строк), паттерн 6,5,4,3,2,1,0,0 / +3 1,0,7,6,5,4,3,2 (как wait_st_tab).
+  Порты ULA задерживаются только в 48K/128K (на +3 по VHDL лишь WAIT памяти): общий
+  флаг `g_ula_io_contend` (`Ports::ulaIoContendRecalc`, из CPU::reset / EvoBase /
+  NextReg::contendRecalc) заменил машинное выражение в 4 местах Ports. Быстрый путь
+  памяти Next выключен, пока contention активна (он не вызывает Draw). Пересчёт:
+  NR 03/07/08, сброс, смена растра. Цена +95 B RAM. Не моделировано: +3-окно на 3 T
+  раньше (как у классического +3), I/O-ранняя задержка по старшему байту на +3,
+  вечная contention BF3B/FF3B. Мягкий сброс NR 02 (так BIOS уходит в личность ИЗ
+  ТУРБО) обязан звать `NextReg::contendRecalc()` после обнуления multiplicator —
+  иначе contention выключена до F11 (hw); так же оба пути ESPectrum reset и
+  VIDEO::Reset. HALT в contended-памяти: `NEXTVID::haltAdvanceTo` шагает по M1
+  (`Tick_Opcode(true)` + R+1), как классический `FlushOnHaltTo` (halt2int HALT).
+- **Потактовый бордюр Next** (hw-confirmed тем же прогоном): `VIDEO::DrawBorder` на
+  Next = `NEXTVID::borderMark` — кольцо {T смены, СТАРЫЙ цвет} (32); `emitRow`
+  собирает до 15 отрезков строки (`NextLineState::brd`, 24 B, в очереди core1),
+  окно строки = `L*tpl + s_bcol + x/2` из `VIDEO::tStatesBorder` (константы
+  классического бордюра с их +5), квантование ячейками `s_bstep` = 4 T (48K/128K/+3)
+  / 1 T (Pentagon): ячейка, начавшаяся не позже смены, ещё старого цвета (как
+  TopBorder). Раскраска — `nxPaintBorderRuns` во flash. 7 отрезков было мало: тест
+  цветных полос меняет #FE 8 раз за строку. Debug > Paper off работает и на Next
+  (paper-строки рисуются как бордюр).
+- **Floating bus Next** (hw: halt2int Float): только порт с младшим байтом #FF и
+  только в тайминге 48K/128K на 3.5 МГц (zxnext.vhd 2813/4513), окно как у
+  `getFloatBusData48/128`, на 60 Гц paper на 26 строк раньше; Timex-чтение (NR 08 b2
+  + PE_FF) имеет приоритет. +3-float `#0FFD` не сделан.
 - **NR 0x82-0x85 = разрешения декодирования портов** (2026-10-07,
   `debug/DVp2-next-portdec-1.0.9.elf`; hw-confirmed AY-часть: личность 48K без
   «AY in 48K» — AY молчит, с ней — играет, 128K — играет; 7FFD в 48K-личности

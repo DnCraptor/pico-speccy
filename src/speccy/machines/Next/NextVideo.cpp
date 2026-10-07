@@ -66,6 +66,10 @@ bool     NEXTVID::cop16Second = false;
 uint8_t  NEXTVID::cop16First = 0;
 
 uint32_t NEXTVID::lineIdx = 0;
+uint8_t NEXTVID::contend = 0;
+int16_t NEXTVID::contLine = 0;
+int16_t NEXTVID::contCol = 0;
+uint8_t NEXTVID::contWait[8] = {6, 5, 4, 3, 2, 1, 0, 0};
 uint32_t NEXTVID::totalLines = 311;
 uint32_t& NEXTVID::nextLineTstate = VIDEO::ts_line_t;   // see NextVideo.h
 int  NEXTVID::firstVisibleLine = 0;
@@ -87,6 +91,13 @@ struct NextLineState {
     uint8_t clip[4][4];
     uint8_t r12, r14, r15, r16, r17, r2F, r30, r31, r32, r33, r42, r4A, r4B, r4C, r68, r69, r6B, r6C, r6E, r6F, r70, r71;
     uint8_t p123B, palCtrl, border, flashing, hires, osd;
+    // Border colour changes INSIDE the row (OUT #FE mid-line): segment i ends
+    // at fb x 2*brd.t[i] (T-states into the row, cell-aligned) in colour nibble i of brd.c;
+    // the rest of the row is `border`. n = 0 for an ordinary row (every byte
+    // zero, so it still dedups). 15 runs: a colour-bar test changes #FE eight
+    // times a row, and OUT (C),r every 12 T fits ~15 into the 180-T window.
+    // 24 bytes: 64 queued states = 1.5 KB of heap.
+    struct { uint8_t t[15]; uint8_t n; uint8_t c[8]; } brd;
 };
 static const NextLineState* LS = nullptr;
 static_assert(sizeof(NextLineState) % 4 == 0, "compared a word at a time");
@@ -130,6 +141,62 @@ IRAM_ATTR void NEXTVID::captureLine(NextLineState& st) {
     st.flashing = VIDEO::flashing;
     st.hires = VIDEO::timex_hires_live ? 1 : 0;
     st.osd = VIDEO::OSD;
+    uint32_t* w = (uint32_t*)&st.brd;   // no libc memset on this path (flash)
+    for (unsigned i = 0; i < sizeof st.brd / 4; i++) w[i] = 0;
+}
+
+// ---- per-T border (OUT #FE mid-line) ----
+// The ULA paints the border with the colour of the moment, so a program that
+// rewrites #FE inside a line splits that line into coloured runs (the 48K
+// border tests, rainbow demos). VIDEO::DrawBorder() is called on every colour
+// change with the OLD colour still in VIDEO::borderColor: borderMark() keeps
+// {T of the change, old colour} in a small ring, and emitRow turns the changes
+// inside the row's T window into segments. The window comes from the classic
+// beam renderer's border anchor (VIDEO::tStatesBorder, hw-verified incl. its
+// pipeline correction): fb x of raster line L shows T = L*tpl + s_bcol + x/2.
+#define NX_BRD_N 32
+static uint32_t s_brdT[NX_BRD_N];
+static uint8_t  s_brdC[NX_BRD_N];
+static uint8_t  s_brdHead = 0, s_brdCnt = 0;
+static int16_t  s_bcol = 0;
+// The border is latched in cells of s_bstep T-states — 4 (8 px) on the 48K /
+// 128K / +3 ULA, 1 on Pentagon — the classic renderer's brdcol_step. A cell
+// that STARTS at or before the change still shows the old colour
+// (VIDEO::TopBorder paints every cell with lastBrdTstate <= tstates first).
+static uint8_t  s_bstep = 4;
+
+void NEXTVID::borderMark() {
+    if (s_brdCnt == NX_BRD_N) { s_brdHead = (s_brdHead + 1) % NX_BRD_N; s_brdCnt--; }
+    const uint8_t i = (s_brdHead + s_brdCnt) % NX_BRD_N;
+    s_brdT[i] = CPU::tstates;
+    s_brdC[i] = VIDEO::borderColor & 7;
+    s_brdCnt++;
+}
+
+// Flash: runs only while the ring holds changes (a few per row at most).
+__attribute__((noinline)) static void nxBorderSegs(NextLineState& st, int row, int fvLine) {
+    const uint8_t m = ESPectrum::multiplicator;
+    const int32_t t0 = ((row + fvLine) * (int32_t)VIDEO::tStatesPerLine + s_bcol) * (1 << m);
+    const int32_t t1 = t0 + ((int32_t)VIDEO::vga.xres / 2) * (1 << m);
+    while (s_brdCnt && (int32_t)s_brdT[s_brdHead] < t0) {   // ended before this row
+        s_brdHead = (s_brdHead + 1) % NX_BRD_N; s_brdCnt--;
+    }
+    uint8_t n = 0, k = 0;
+    for (; k < s_brdCnt; k++) {
+        const uint8_t i = (s_brdHead + k) % NX_BRD_N;
+        const int32_t t = (int32_t)s_brdT[i];
+        if (t >= t1) break;
+        if (n < 15) {
+            const int32_t rel = (t - t0) >> m;   // >= 0: earlier changes were dropped
+            st.brd.t[n] = (uint8_t)((rel / s_bstep + 1) * s_bstep);
+            st.brd.c[n >> 1] |= (uint8_t)(s_brdC[i] << ((n & 1) * 4));
+            n++;
+        }
+    }
+    st.brd.n = n;
+    // colour after the last in-row change: the one in force until the next
+    // change (already recorded if it happened before this row was posted)
+    st.border = (k < s_brdCnt) ? s_brdC[(s_brdHead + k) % NX_BRD_N] : (VIDEO::borderColor & 7);
 }
 
 // ---- the core1 line queue (NEXT_C1_*) ----
@@ -577,6 +644,8 @@ bool NEXTVID::computeGeometry() {
     const bool moved = fv != firstVisibleLine || paper - fv != paperTopRow;
     firstVisibleLine = fv;
     paperTopRow = paper - fv;
+    s_bcol = (int16_t)(VIDEO::tStatesBorder - ((VIDEO::tStatesBorder + tpl / 2) / tpl) * tpl);
+    s_bstep = NextReg::raster().kind == 2 ? 1 : 4;
     return moved;
 }
 
@@ -593,6 +662,13 @@ void NEXTVID::onClockChange() {
 // advances by the same count (mod 256 is enough, R is 7-bit), and
 // ScanlineWork runs at the same crossings.
 IRAM_ATTR void NEXTVID::haltAdvanceTo(uint32_t stEnd) {
+    // A HALTed Z80 keeps fetching; in contended memory every fetch waits
+    // (halt2int's HALT column). Step it one M1 at a time then, exactly like
+    // CPU::FlushOnHaltTo does for the classic 48K/128K.
+    if (__builtin_expect(contend, 0) && MemESP::ramContended[Z80::getRegPC() >> 13]) {
+        while (CPU::tstates < stEnd) { Tick_Opcode(true); Z80::incRegR(1); }
+        return;
+    }
     while (CPU::tstates < stEnd) {
         uint32_t tgt = nextLineTstate;
         if (tgt > stEnd) tgt = stEnd;
@@ -620,6 +696,7 @@ IRAM_ATTR void NEXTVID::EndFrame() {
         if (row < 0) row = 0;
         for (; row < (int)VIDEO::vga.yres; row++) emitRow(row);
     }
+    s_brdHead = s_brdCnt = 0;   // the frame's T-states restart
     // The machine timing (nextreg 0x03) and 50/60 Hz (0x05) change the whole
     // frame: apply at the frame boundary, after core1 has drawn every row of
     // the old geometry (RenderLayers reads paperTopRow live). The BIOS writes
@@ -652,7 +729,21 @@ IRAM_ATTR void NEXTVID::EndFrame() {
     }
 }
 
+// Wait states of a contended access starting now. Contention exists only at
+// 3.5 MHz (multiplicator 0), so the line structure is nextLineTstate's: the
+// current line is lineIdx, it began at nextLineTstate - tStatesPerLine. A
+// paper line's 128-T window starts contCol T into the line BEFORE it (48K
+// #14335 = line 63 col 223) and so crosses the line boundary.
+inline __attribute__((always_inline)) unsigned NEXTVID::contendWait() {
+    const int tpl = VIDEO::tStatesPerLine;
+    int idx = (int)CPU::tstates - ((int)nextLineTstate - tpl) - contCol;
+    int k = (int)lineIdx - contLine;
+    if (idx < 0) { idx += tpl; k--; }
+    return ((unsigned)k < 192u && (unsigned)idx < 128u) ? contWait[idx & 7] : 0u;
+}
+
 IRAM_ATTR void NEXTVID::Tick(unsigned int statestoadd, bool contended) {
+    if (__builtin_expect(contended, 0) && contend) statestoadd += contendWait();
     CPU::tstates += statestoadd;
     while (CPU::tstates >= nextLineTstate) ScanlineWork();
 }
@@ -662,11 +753,10 @@ IRAM_ATTR void NEXTVID::lineTick() {
 }
 
 IRAM_ATTR void NEXTVID::Tick_Opcode(bool contended) {
-    CPU::tstates += 4;
+    CPU::tstates += (__builtin_expect(contended, 0) && contend) ? 4u + contendWait() : 4u;
     while (CPU::tstates >= nextLineTstate) ScanlineWork();
 }
 
-void NEXTVID::DrawBorderNop() {}
 
 #if NEXT_TRACE
 // Compositor cost estimate for the 1 Hz NEXT: line: every 16th visible line
@@ -712,6 +802,7 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
         // something the renderer reads has moved since the last line.
         NextLineState st;
         captureLine(st);
+        if (s_brdCnt) nxBorderSegs(st, row, firstVisibleLine);
         if (!nx_have || !nxSameState(st, nx_st[nx_cur])) {
             const uint32_t k = (nx_cur + 1) % NEXT_C1_STATES;
             nxWaitUntil(nx_st_job[k]);
@@ -728,6 +819,7 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
         nx_st_job[nx_cur] = nx_w;
     } else {
         captureLine(nx_sync);
+        if (s_brdCnt) nxBorderSegs(nx_sync, row, firstVisibleLine);
         LS = &nx_sync;
 #if NEXT_TRACE
         if ((row & 15) == 0) {
@@ -827,6 +919,24 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     for (int k = k1; k < words; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
 }
 
+// Mid-line border changes: coloured runs, then the closing colour. Paper rows
+// get the runs under the paper too; the ULA layer overwrites those 256 pixels.
+// Flash: only rows that carry a change come here.
+__attribute__((noinline)) static void nxPaintBorderRuns(uint8_t* fb, int xres, const uint8_t* ulaLut,
+                                                        bool ulaNext, uint8_t borderIdx) {
+    int x = 0;
+    for (int i = 0; i < LS->brd.n; i++) {
+        int xe = 2 * LS->brd.t[i];
+        if (xe > xres) xe = xres;
+        if (xe > x) {
+            const uint8_t c = (LS->brd.c[i >> 1] >> ((i & 1) * 4)) & 7;
+            memset(fb + x, ulaNext ? ulaLut[128 + c] : ulaLut[16 + c], xe - x);
+            x = xe;
+        }
+    }
+    if (x < xres) memset(fb + x, borderIdx, xres - x);
+}
+
 IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     int xres = VIDEO::vga.xres;
     const uint8_t* ulaLut = lut[(LS->palCtrl & 0x08) ? 4 : 0];
@@ -837,8 +947,12 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     int y = row - paperTopRow;
     uint8_t r15 = LS->r15;
 
-    if (y < 0 || y >= 192) {
-        memset(fb, borderIdx, xres);
+    if (LS->brd.n) nxPaintBorderRuns(fb, xres, ulaLut, ulaNext, borderIdx);
+    // Debug > Paper off (VIDEO::paper_off): the paper rows are drawn as border
+    // rows — the border (and its mid-line runs) shows through where the ULA
+    // screen would be; tilemap / Layer 2 / sprites still draw over it.
+    if (y < 0 || y >= 192 || VIDEO::paper_off) {
+        if (!LS->brd.n) memset(fb, borderIdx, xres);
         // tilemap and Layer 2 (320x256 mode) cover the border area of the
         // 320x256 window; sprites reach it with the over-border bit
         if (LS->r6B & 0x80)
@@ -852,8 +966,10 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
 
     NX_LT_BEGIN();
     // left/right border
-    memset(fb, borderIdx, xPaperOff);
-    memset(fb + xPaperOff + 256, borderIdx, xres - xPaperOff - 256);
+    if (!LS->brd.n) {
+        memset(fb, borderIdx, xPaperOff);
+        memset(fb + xPaperOff + 256, borderIdx, xres - xPaperOff - 256);
+    }
 
     // ULA layer (classic attribute mode; ULANext later). ULA can be disabled
     // via nextreg 0x68 bit 7 — border colour shows through. LoRes (128x96,

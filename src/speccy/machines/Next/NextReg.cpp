@@ -6,6 +6,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 
 #include "NextReg.h"
 #include "speccy/core/MemESP.h"
+#include "speccy/core/Ports.h"
 #include "speccy/z80/CPU.h"
 #include "app/ESPectrum.h"
 #include "speccy/video/Video.h"
@@ -33,6 +34,7 @@ uint8_t NextReg::port7FFD = 0;
 uint8_t NextReg::portDFFD = 0;
 uint8_t NextReg::port1FFD = 0;
 uint8_t NextReg::port123B = 0;
+uint8_t  NextReg::contendBanks = 0;
 uint32_t NextReg::portEn = ~0u;   // all decoded; NextReg::reset / CPU::reset own it
 
 uint8_t  NextReg::resetPending = 0;
@@ -319,6 +321,7 @@ void NextReg::reset(bool hard) {
     MemESP::romLatch = 0;
     applyRomSelect();
     MemESP::applyNextConfigWindow();
+    contendRecalc();
 }
 
 // Raster line for reg 0x1E/0x1F and the line interrupt. Line 0 is the first
@@ -403,6 +406,28 @@ void NextReg::applySpeed() {
     else         CPU::tstates >>= (old - m);
     CPU::updateStatesInFrame();
     NEXTVID::onClockChange();
+    contendRecalc();   // contention exists at 3.5 MHz only
+}
+
+void NextReg::contendRecalc() {
+    const uint8_t t = s_machineTiming;   // 1 48K, 2 128K, 3 +3, 4 Pentagon
+    const bool on = !(reg[0x08] & 0x40) && t != 4 && ESPectrum::multiplicator == 0;
+    contendBanks = !on ? 0 : t == 1 ? 0x20 : t == 2 ? 0xAA : 0xF0;
+    NEXTVID::contend = !on ? 0 : (t == 3 ? 1 : 3);
+    static const uint8_t k48[8] = {6, 5, 4, 3, 2, 1, 0, 0};
+    static const uint8_t kP3[8] = {1, 0, 7, 6, 5, 4, 3, 2};
+    memcpy(NEXTVID::contWait, t == 3 ? kP3 : k48, 8);
+    const int tpl = VIDEO::tStatesPerLine;
+    if (tpl > 0) {   // early boot: NextReg::reset may run before VIDEO::Reset
+        const int a = (int)VIDEO::tStatesScreen - (raster().hz60 ? 26 * tpl : 0);
+        NEXTVID::contLine = (int16_t)(a / tpl);
+        NEXTVID::contCol  = (int16_t)(a % tpl);
+    } else {
+        NEXTVID::contend = 0;
+    }
+    MemESP::nextContendRefresh();
+    VIDEO::tsFastMemRecalc();
+    Ports::ulaIoContendRecalc();
 }
 
 void NextReg::write(uint8_t r, uint8_t v) {
@@ -562,6 +587,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
             // read NextReg::reg[] directly as they are implemented.
             break;
     }
+    if (r == 0x03 || r == 0x08) contendRecalc();   // timing / contention disable
 }
 
 uint8_t NextReg::read(uint8_t r) {
