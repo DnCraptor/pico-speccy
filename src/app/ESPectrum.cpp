@@ -1416,7 +1416,7 @@ void ESPectrum::setup() {
         Debug::log2SD("setup: Midi::init mode=%d", (int)Midi::enabled);
         Midi::init();
     }
-    if (Config::dma_mode) {
+    if (Config::dma_mode || Config::arch == A_NEXT) {   // the Next's zxnDMA is always on
         Debug::log2SD("setup: Z80DMA::reset");
         Z80DMA::reset();
     }
@@ -2096,7 +2096,9 @@ void ESPectrum::reset(uint8_t romInUse) {
     SAA_emu = Config::SAA1099;
     Midi::enabled = Config::midi;
     if (Midi::enabled) Midi::init();
-    if (Config::dma_mode) Z80DMA::reset();
+    // dma.vhd: the DMA resets with the machine — on the Next even with
+    // Config::dma_mode off (a paced transfer must not survive F11 / NR 02).
+    if (Config::dma_mode || Config::arch == A_NEXT) Z80DMA::reset();
 
   // Set samples per frame and AY_emu flag depending on arch
   // Profi shares the 48K frame timing (69888 T / 624 samples) — it MUST take the
@@ -3792,6 +3794,7 @@ void ESPectrum::loop() {
         NextReg::reset(false);           // also reg[0x02] = 0x01 (last = soft)
         MemESP::resetNextMapping();
         NEXTVID::softReset();
+        Z80DMA::reset();                 // dma.vhd reset_i: both reset types
         // divMMC: overlay off. Its RAM survives (NextZXOS keeps boot-stage
         // state there), but port 0xE3 does NOT: zxnext.vhd ~4177 clears
         // port_e3_reg on every reset, soft included. TBBLUE.FW runs with

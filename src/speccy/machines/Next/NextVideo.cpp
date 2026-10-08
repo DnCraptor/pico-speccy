@@ -23,6 +23,7 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 #include "app/TryAlloc.h"
 #include "app/Buffer.h"
 #include "app/Config.h"
+#include "speccy/devices/Z80DMA.h"
 
 // Hot render path in SRAM, like the rest of the video code
 #undef IRAM_ATTR
@@ -99,7 +100,9 @@ struct NextLineState {
     uint8_t clip[4][4];
     uint8_t r12, r14, r15, r16, r17, r2F, r30, r31, r32, r33, r42, r4A, r4B, r4C, r68, r69, r6B, r6C, r6E, r6F, r70, r71;
     uint8_t p123B, palCtrl, border, flashing, hires, osd;
-    uint8_t gigs, _pad[3];   // Gigascreen this frame (s_gigs), kept word-aligned
+    uint8_t gigs;            // Gigascreen this frame (s_gigs)
+    uint8_t attOvr;          // 1 = attr[] replaces the ULA attribute row (DMA multicolour)
+    uint8_t _pad[2];         // kept word-aligned
     // Border colour changes INSIDE the row (OUT #FE mid-line): segment i ends
     // at fb x 2*brd.t[i] (T-states into the row, cell-aligned) in colour nibble i of brd.c;
     // the rest of the row is `border`. n = 0 for an ordinary row (every byte
@@ -107,6 +110,11 @@ struct NextLineState {
     // times a row, and OUT (C),r every 12 T fits ~15 into the 180-T window.
     // 24 bytes: 64 queued states = 1.5 KB of heap.
     struct { uint8_t t[15]; uint8_t n; uint8_t c[8]; } brd;
+    // The ULA attribute row as the per-scanline DMA left it (Z80DMA's write-
+    // order shadow, see captureAttrAfterTransfer): copied when the line is
+    // posted, because core1 reads guest RAM later, when the charrow already
+    // holds its LAST row (NaPICu: 8x8 blocks instead of 8x1 art, hw 2026-10-08).
+    uint8_t attr[32];
 };
 static const NextLineState* LS = nullptr;
 // Per-layer RGB line buffers of the compositor (RenderLayers), [384] each, in the Next heap block.
@@ -153,9 +161,26 @@ IRAM_ATTR void NEXTVID::captureLine(NextLineState& st) {
     st.hires = VIDEO::timex_hires_live ? 1 : 0;
     st.osd = VIDEO::OSD;
     st.gigs = s_gigs;
-    st._pad[0] = st._pad[1] = st._pad[2] = 0;
+    st.attOvr = 0;
+    st._pad[0] = st._pad[1] = 0;
     uint32_t* w = (uint32_t*)&st.brd;   // no libc memset on this path (flash)
     for (unsigned i = 0; i < sizeof st.brd / 4; i++) w[i] = 0;
+    w = (uint32_t*)st.attr;
+    for (unsigned i = 0; i < sizeof st.attr / 4; i++) w[i] = 0;
+}
+
+// The DMA attribute shadow for this row, if the per-scanline DMA wrote one
+// into the page on show (Pentagon applies the same rule in MainScreen_Blank).
+// Only reached while the shadow exists (a DMA into an attribute area).
+__attribute__((noinline)) static void nxAttrShadow(NextLineState& st, int row, int paperTop) {
+    const int y = row - paperTop;
+    if (y < 0 || y >= 192 || !Z80DMA::dma_attr_valid[y]) return;
+    if (Z80DMA::dma_attr_page[y >> 3] != st.grmem) return;
+    if ((st.r69 & 0x43) && !(st.r69 & 0x40)) return;   // Timex screen 1 / hi-colour: other bytes
+    const uint32_t* src = (const uint32_t*)&Z80DMA::dma_attr_shadow[y * 32];
+    uint32_t* d = (uint32_t*)st.attr;
+    for (int i = 0; i < 8; i++) d[i] = src[i];
+    st.attOvr = 1;
 }
 
 // ---- per-T border (OUT #FE mid-line) ----
@@ -881,6 +906,7 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
         NextLineState st;
         captureLine(st);
         if (s_brdCnt) nxBorderSegs(st, row, firstVisibleLine);
+        if (Z80DMA::dma_attr_valid) nxAttrShadow(st, row, paperTopRow);
         if (!nx_have || !nxSameState(st, nx_st[nx_cur])) {
             const uint32_t k = (nx_cur + 1) % NEXT_C1_STATES;
             nxWaitUntil(nx_st_job[k]);
@@ -898,6 +924,7 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
     } else {
         captureLine(nx_sync);
         if (s_brdCnt) nxBorderSegs(nx_sync, row, firstVisibleLine);
+        if (Z80DMA::dma_attr_valid) nxAttrShadow(nx_sync, row, paperTopRow);
         LS = &nx_sync;
 #if NEXT_TRACE
         if ((row & 15) == 0) {
@@ -1096,7 +1123,8 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
         const uint8_t tm = (LS->r69 & 0x40) ? 0 : (LS->r69 & 0x03);
         const uint16_t pOff = VIDEO::offBmp[y];
         const uint8_t* bmp = LS->grmem + pOff + ((tm & 1) << 13);
-        const uint8_t* att = LS->grmem + ((tm & 2) ? 0x2000 + pOff
+        const uint8_t* att = LS->attOvr ? LS->attr
+                           : LS->grmem + ((tm & 2) ? 0x2000 + pOff
                                                    : VIDEO::offAtt[y] + ((tm & 1) << 13));
         if (ulaNext) {
             // ink = attr & format; paper = 128 + the bits above the format;

@@ -18,6 +18,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "NextRtc.h"
 #include "NextInt.h"
 #include "NextMf.h"
+#include "speccy/devices/Z80DMA.h"
 #include "app/Debug.h"
 #include "speccy/z80/z80.h"
 #include "speccy/devices/storage/DivMMC.h"
@@ -466,6 +467,7 @@ void NextReg::applySpeed() {
     if (m > old) CPU::tstates <<= (m - old);
     else         CPU::tstates >>= (old - m);
     ESPectrum::beeperClockRescale(old, m);   // the beeper's own T-state cursor
+    Z80DMA::nxClockRescale(old, m);           // a paced DMA's next byte
     CPU::updateStatesInFrame();
     NEXTVID::onClockChange();
     contendRecalc();   // contention exists at 3.5 MHz only

@@ -41,6 +41,21 @@ public:
     static bool nextZ80Mode;
     static void executeTransfer();
 
+    // ---- Spectrum Next: paced transfers (dma.vhd) --------------------------
+    // A transfer with a prescaler (WR2 R2_BYTE_1) or auto-restart cannot run
+    // inside the OUT that enables it: one byte goes every prescaler * 32 ticks
+    // of 28 MHz (= prescaler * 4 T at 3.5 MHz, << multiplicator), and in burst
+    // mode (WR4 bits 6:5 = 10) the CPU runs in between. CPU::loop's Next frame
+    // treats the next byte as an event: nxPending + nxNextT (CPU::tstates).
+    // nxStall: the DMA holds the bus (continuous, or no prescaler) — the CPU
+    // does not execute until the block ends; time still passes.
+    static bool     nxPending;
+    static bool     nxStall;
+    static uint32_t nxNextT;
+    static void nxService(uint32_t limit);   // transfer what is due, up to limit
+    static void nxFrameEnd(uint32_t statesInFrame);
+    static void nxClockRescale(uint8_t om, uint8_t nm);
+
 private:
     // Configured state (from WR0-WR5)
     static uint8_t transfer_dir;    // 0=A->B, 1=B->A
@@ -55,8 +70,12 @@ private:
     static int8_t port_b_inc;
     static uint8_t port_b_cycles;
 
-    static uint8_t prescalar;       // 0=continuous, >0=burst
+    static uint8_t prescalar;       // WR2 R2_BYTE_1 (0 = no wait between bytes)
     static bool auto_restart;
+    static uint8_t r4_mode;         // WR4 bits 6:5: 00 byte, 01 continuous, 10 burst
+    // dma.vhd dma_counter_s: counts UP from 0 (zxn) / 0xFFFF (Zilog) and the
+    // block ends when it is no longer < the length — read back as such.
+    static uint16_t nx_counter;
 
     // Working state (active transfer)
     static uint16_t cur_port_a;
@@ -102,6 +121,10 @@ private:
     static void doDisable();
     // executeTransfer() moved to public (for MB-02 deferred DMA)
     static void transferOneByte();
+    static void nxOneByte();
+    static void nxRunSync();
+    static bool nxBlockDone();
+    static void nxReload();
     static uint8_t getStatusByte();
 };
 

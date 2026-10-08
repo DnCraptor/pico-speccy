@@ -772,6 +772,15 @@ IRAM_ATTR void CPU::loop() {
                 BREAKPOINTS
                 continue;
             }
+            // Paced zxnDMA (Z80DMA.h): a byte that is due, or a DMA holding the
+            // bus (the CPU does not execute then) — slices below end at nxNextT.
+            if (__builtin_expect(Z80DMA::nxPending, 0) &&
+                (Z80DMA::nxStall || tstates >= Z80DMA::nxNextT)) {
+                Z80DMA::nxService(sliceEnd);
+                BREAKPOINTS
+                continue;
+            }
+            const uint32_t dmaT = Z80DMA::nxPending ? Z80DMA::nxNextT : 0xFFFFFFFFu;
             if (NextInt::ex) {
                 if (Z80::isIFF1() && NextInt::intLine()) {
                     // at a boundary take it at once (execute() would run one
@@ -782,7 +791,8 @@ IRAM_ATTR void CPU::loop() {
                     BREAKPOINTS
                     continue;
                 }
-                const uint32_t target = Z80::isIFF1() ? NextInt::nextEventT(sliceEnd) : sliceEnd;
+                uint32_t target = Z80::isIFF1() ? NextInt::nextEventT(sliceEnd) : sliceEnd;
+                if (dmaT < target) target = dmaT;
                 if (Z80::isHalted()) {
                     if (!stamped) { tstates_active = tstates; stamped = true; }
                     halted = true;
@@ -797,14 +807,15 @@ IRAM_ATTR void CPU::loop() {
                     }
                 }
             } else {
+                const uint32_t end = dmaT < sliceEnd ? dmaT : sliceEnd;
                 if (!Z80::isHalted()) {
-                    stFrame = sliceEnd;
+                    stFrame = end;
                     Z80::exec_nocheck();
-                    if (stFrame != 0) { BREAKPOINTS continue; }   // ended early: ex raised mid-slice
+                    if (stFrame != 0) { BREAKPOINTS continue; }   // ended early: ex raised / DMA due
                 }
                 if (!stamped) { tstates_active = tstates; stamped = true; }
                 halted = true;
-                NEXTVID::haltAdvanceTo(sliceEnd);
+                NEXTVID::haltAdvanceTo(end);
             }
             BREAKPOINTS
         }
@@ -857,7 +868,10 @@ IRAM_ATTR void CPU::loop() {
     global_tstates += statesInFrame; // increase global Tstates
     tstates_frame = tstates;
     if (!halted) tstates_active = tstates_frame; // no HALT this frame: full load
-    if (Z80Ops::isNext) NextInt::frameEnd();     // before the wrap, see NextInt.h
+    if (Z80Ops::isNext) {
+        NextInt::frameEnd();                     // before the wrap, see NextInt.h
+        Z80DMA::nxFrameEnd(statesInFrame);       // paced DMA's next byte, frame-relative
+    }
     tstates -= statesInFrame;
 
     CPU::prev_tstates = tstates;

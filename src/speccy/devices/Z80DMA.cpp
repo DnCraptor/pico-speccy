@@ -18,6 +18,9 @@
 #include "speccy/video/Video.h"
 #include "speccy/z80/z80.h"
 #include "speccy/core/Rzx.h"
+#include "speccy/machines/Next/NextInt.h"
+#include "app/ESPectrum.h"
+#include "app/TryAlloc.h"
 
 #undef IRAM_ATTR
 #define IRAM_ATTR __not_in_flash("z80dma")
@@ -42,6 +45,11 @@ uint8_t  Z80DMA::port_b_cycles = 3;  // FPGA default: "01" = 3
 
 uint8_t  Z80DMA::prescalar = 0;
 bool     Z80DMA::auto_restart = false;
+uint8_t  Z80DMA::r4_mode = 1;       // dma.vhd reset: "01" continuous
+uint16_t Z80DMA::nx_counter = 0;
+bool     Z80DMA::nxPending = false;
+bool     Z80DMA::nxStall = false;
+uint32_t Z80DMA::nxNextT = 0;
 
 // Working state
 uint16_t Z80DMA::cur_port_a = 0;
@@ -90,6 +98,11 @@ bool*    Z80DMA::dma_attr_valid     = nullptr;
 const uint8_t** Z80DMA::dma_attr_page = nullptr;
 bool*    Z80DMA::dma_charrow_active = nullptr;
 
+static void captureAttrAfterTransfer(uint16_t dest_start);
+#if NEXT_TRACE
+extern volatile uint32_t g_dma_n, g_dma_bytes, g_dma_endframes;
+#endif
+
 // Decode WR1/WR2 address increment from bits 4:3
 static inline int8_t decodeIncrement(uint8_t bits) {
     // bits = (reg >> 3) & 0x03
@@ -128,6 +141,10 @@ void Z80DMA::reset() {
 
     prescalar = 0;
     auto_restart = false;
+    r4_mode = 1;
+    nx_counter = 0;
+    nxPending = false;
+    nxStall = false;
 
     cur_port_a = 0;
     cur_port_b = 0;
@@ -163,7 +180,7 @@ void Z80DMA::resetAttrShadow() {
 
 bool Z80DMA::ensureAttrShadow() {
     if (!g_dma_buf) {
-        g_dma_buf = (DmaAttrBuf*)calloc(1, sizeof(DmaAttrBuf));
+        g_dma_buf = (DmaAttrBuf*)tryCalloc(sizeof(DmaAttrBuf));   // calloc panics on NULL
         if (!g_dma_buf) {
             dma_attr_shadow = nullptr;
             dma_attr_valid = nullptr;
@@ -318,6 +335,8 @@ void Z80DMA::processWR4(uint8_t data) {
     // FPGA: WR4 pattern bit7=1, bits[1:0]=01
     // bit 2 = Port B addr LOW follows (R4_BYTE_0)
     // bit 3 = Port B addr HIGH follows (R4_BYTE_1)
+    // bits 6:5 = mode (dma.vhd R4_mode_s): 00 byte, 01 continuous, 10 burst
+    r4_mode = (data >> 5) & 0x03;
     param_mask = (data >> 2) & 0x03;
     if (param_mask) {
         write_state = WS_PARAM_BYTE;
@@ -335,6 +354,7 @@ IRAM_ATTR void Z80DMA::processWR6(uint8_t cmd) {
     switch (cmd) {
         case 0xC3: // RESET
             transfer_active = false;
+            nxPending = false;
             transfer_started = false;
             block_end = false;
             port_a_cycles = 3;
@@ -369,12 +389,13 @@ IRAM_ATTR void Z80DMA::processWR6(uint8_t cmd) {
             break;
         case 0xBF: // Read Status Byte
             read_sequence_active = false;
+            read_index = 0;            // Next: the sequence restarts at the status byte
             break;
         case 0x8B: // Reinitialize Status
             block_end = false;
             transfer_started = false;
             break;
-        case 0xA7: // Initialize Read Sequence
+        case 0xA7: // Initialize Read Sequence (dma.vhd: the first set mask bit)
             read_index = 0;
             read_sequence_active = true;
             break;
@@ -458,6 +479,7 @@ static inline bool z80Mode() {
 void Z80DMA::doLoad() {
     cur_port_a = port_a_addr;
     cur_port_b = port_b_addr;
+    nx_counter = z80Mode() ? 0xFFFF : 0;   // dma.vhd: "z80 dma loads -1"
     // FPGA: zxn mode counter starts at 0, z80 mode counter starts at 0xFFFF
     // zxn: transfers block_length bytes; z80: transfers block_length+1 bytes
     byte_counter = block_length;
@@ -467,6 +489,7 @@ void Z80DMA::doLoad() {
 
 void Z80DMA::doContinue() {
     // Reset byte counter but keep current working pointers
+    nx_counter = z80Mode() ? 0xFFFF : 0;
     byte_counter = block_length;
     if (z80Mode()) byte_counter++;
     block_end = false;
@@ -490,15 +513,145 @@ void Z80DMA::doEnable() {
     // Memory↔memory transfers (spriting, blitting) have no external READY signal
     // and must run immediately on ENABLE, just like a plain Z80-DMA load.
     if (mb02_deferred && (port_a_is_io || port_b_is_io)) return;
+    if (Z80Ops::isNext) {
+        // dma.vhd: without a prescaler every byte follows the previous one and
+        // the DMA keeps the bus for the whole block — the CPU is stopped, so
+        // running the block inside this OUT is exact. A prescaler (or an
+        // auto-restart, which never ends) makes it a paced transfer handled by
+        // CPU::loop: the first byte is due now.
+        if (!prescalar && !auto_restart) { nxRunSync(); return; }
+        nxPending = true;
+        nxStall = !(r4_mode == 2 && prescalar);   // burst + prescaler frees the bus
+        nxNextT = CPU::tstates;
+        NextInt::wake();
+        return;
+    }
     executeTransfer();
 }
 
 void Z80DMA::doDisable() {
     transfer_active = false;
+    nxPending = false;
 }
 
-// Called from CPU loop — stub for future burst mode
+// ---- Spectrum Next: dma.vhd byte loop -------------------------------------
+// One byte: the read cycle (source port timing) then the write cycle (dest
+// timing), uncontended as the existing path; then the counter step and the
+// "counter < length" end test of TRANSFERING_WRITE_4. A length of 0 therefore
+// moves one byte (counter 0 -> 1, 1 < 0 false), as on the FPGA.
+void Z80DMA::nxOneByte() {
+    dma_in_progress = true;
+    transfer_started = true;
+    uint8_t val;
+    if (transfer_dir) {
+        VIDEO::Draw(port_a_cycles, false);
+        val = port_a_is_io ? Ports::dmaInput(cur_port_a) : MemESP::readbyte(cur_port_a);
+        VIDEO::Draw(port_b_cycles, false);
+        if (port_b_is_io) Ports::dmaOutput(cur_port_b, val);
+        else MemESP::writebyte(cur_port_b, val);
+    } else {
+        VIDEO::Draw(port_b_cycles, false);
+        val = port_b_is_io ? Ports::dmaInput(cur_port_b) : MemESP::readbyte(cur_port_b);
+        VIDEO::Draw(port_a_cycles, false);
+        if (port_a_is_io) Ports::dmaOutput(cur_port_a, val);
+        else MemESP::writebyte(cur_port_a, val);
+    }
+    cur_port_a += port_a_inc;
+    cur_port_b += port_b_inc;
+    nx_counter++;
+    dma_in_progress = false;
+}
+
+bool Z80DMA::nxBlockDone() { return !(nx_counter < block_length); }
+
+// FINISH_DMA with auto-restart: the start addresses and the counter reload;
+// status_endofblock_n stays low (only LOAD / CONTINUE / 0x8B raise it).
+void Z80DMA::nxReload() {
+    cur_port_a = port_a_addr;
+    cur_port_b = port_b_addr;
+    nx_counter = z80Mode() ? 0xFFFF : 0;
+}
+
+void Z80DMA::nxRunSync() {
+    const uint16_t dest_start = transfer_dir ? cur_port_b : cur_port_a;
+    // A memory DMA into an attribute area: the per-scanline multicolour shadow
+    // (NaPICu and the like), taken on the first such transfer of the session.
+    if (!dma_attr_shadow && !(transfer_dir ? port_b_is_io : port_a_is_io) &&
+        (uint16_t)((dest_start & 0x3FFF) - 0x1800) < 0x300) {
+        if (ensureAttrShadow()) Debug::log("[DMA] Next: attribute shadow on (dest %04X)", dest_start);
+    }
+#if NEXT_TRACE
+    g_dma_n++;
+#endif
+    while (transfer_active) {
+        nxOneByte();
+#if NEXT_TRACE
+        g_dma_bytes++;
+#endif
+        if (CPU::tstates >= CPU::statesInFrame) {   // frame boundary mid-transfer
+#if NEXT_TRACE
+            g_dma_endframes++;
+#endif
+            VIDEO::EndFrame();
+            CPU::global_tstates += CPU::statesInFrame;
+            CPU::tstates -= CPU::statesInFrame;
+        }
+        if (nxBlockDone()) break;
+    }
+    captureAttrAfterTransfer(dest_start);
+    block_end = true;
+    transfer_active = false;
+}
+
+// Paced transfer, from CPU::loop's Next frame (and handleDMA in the checked
+// windows). Burst + prescaler: one byte per call when due, the CPU runs in
+// between. Holding the bus: bytes and the waits between them back to back, the
+// CPU not executing, until the block ends or `limit` (the slice end) is reached.
+void Z80DMA::nxService(uint32_t limit) {
+    while (nxPending) {
+        if (CPU::tstates < nxNextT) {
+            if (!nxStall) return;
+            const uint32_t to = nxNextT < limit ? nxNextT : limit;
+            if (CPU::tstates < to) VIDEO::Draw(to - CPU::tstates, false);
+            if (CPU::tstates < nxNextT) return;   // slice end: still holding the bus
+        }
+        const uint32_t t0 = CPU::tstates;
+        nxOneByte();
+#if NEXT_TRACE
+        g_dma_bytes++;
+#endif
+        if (nxBlockDone()) {
+            block_end = true;
+            if (auto_restart && transfer_active) {
+                nxReload();
+            } else {
+                transfer_active = false;
+                nxPending = false;
+                return;
+            }
+        }
+        // DMA_timer restarts at the byte's first cycle: the next byte goes when
+        // prescaler * 32 ticks of 28 MHz have passed since then.
+        nxNextT = prescalar ? t0 + (((uint32_t)prescalar * 4u) << ESPectrum::multiplicator)
+                            : CPU::tstates;
+        if (CPU::tstates >= limit) return;
+    }
+}
+
+void Z80DMA::nxFrameEnd(uint32_t statesInFrame) {
+    if (!nxPending) return;
+    nxNextT = nxNextT > statesInFrame ? nxNextT - statesInFrame : 0;
+}
+
+void Z80DMA::nxClockRescale(uint8_t om, uint8_t nm) {
+    if (!nxPending || om == nm) return;
+    nxNextT = nm > om ? nxNextT << (nm - om) : nxNextT >> (om - nm);
+}
+
+// Called after every instruction in the checked windows of CPU::loop: a paced
+// Next transfer whose byte is due inside them (the frame's head / tail).
 IRAM_ATTR void Z80DMA::handleDMA() {
+    if (__builtin_expect(nxPending, 0) && CPU::tstates >= nxNextT) nxService(CPU::statesInFrame);
 }
 
 // Per-scanline attribute shadow for 8x1 "DMA multicolour" (one 32-byte DMA into an
@@ -737,7 +890,9 @@ uint8_t Z80DMA::getStatusByte() {
 }
 
 IRAM_ATTR uint8_t Z80DMA::readPort() {
-    if (!read_sequence_active) {
+    // dma.vhd: the read sequence always runs (from the status byte after a
+    // reset, 0xBF or a mask with bit 0), and the byte counter is the up-count.
+    if (!read_sequence_active && !Z80Ops::isNext) {
         return getStatusByte();
     }
 
@@ -759,8 +914,8 @@ IRAM_ATTR uint8_t Z80DMA::readPort() {
     uint8_t result;
     switch (read_index) {
         case 0: result = getStatusByte(); break;
-        case 1: result = byte_counter & 0xFF; break;
-        case 2: result = byte_counter >> 8; break;
+        case 1: result = Z80Ops::isNext ? (uint8_t)nx_counter : byte_counter & 0xFF; break;
+        case 2: result = Z80Ops::isNext ? (uint8_t)(nx_counter >> 8) : byte_counter >> 8; break;
         case 3: result = cur_port_a & 0xFF; break;
         case 4: result = cur_port_a >> 8; break;
         case 5: result = cur_port_b & 0xFF; break;
