@@ -585,6 +585,15 @@ void Z80DMA::nxRunSync() {
     const uint32_t holdT0 = CPU::tstates;
 #endif
     while (transfer_active) {
+        if (NextInt::dmaDelay()) {
+            // im2_dma_delay (NR 0xCC-0xCE): give the bus back so the CPU can run
+            // the interrupt; CPU::loop resumes the block once it clears.
+            nxPending = true;
+            nxStall = true;
+            nxNextT = CPU::tstates;
+            NextInt::wake();
+            return;
+        }
         nxOneByte();
 #if NEXT_TRACE
         g_dma_bytes++;
@@ -629,13 +638,15 @@ void Z80DMA::nxRunSync() {
 // windows). Burst + prescaler: one byte per call when due, the CPU runs in
 // between. Holding the bus: bytes and the waits between them back to back, the
 // CPU not executing, until the block ends or `limit` (the slice end) is reached.
-void Z80DMA::nxService(uint32_t limit) {
+bool Z80DMA::nxService(uint32_t limit) {
+    const uint32_t start = CPU::tstates;
     while (nxPending) {
+        if (NextInt::dmaDelay()) break;   // the CPU owns the bus (im2_dma_delay)
         if (CPU::tstates < nxNextT) {
-            if (!nxStall) return;
+            if (!nxStall) return CPU::tstates != start;
             const uint32_t to = nxNextT < limit ? nxNextT : limit;
             if (CPU::tstates < to) VIDEO::Draw(to - CPU::tstates, false);
-            if (CPU::tstates < nxNextT) return;   // slice end: still holding the bus
+            if (CPU::tstates < nxNextT) return true;   // slice end: still holding the bus
         }
         const uint32_t t0 = CPU::tstates;
         nxOneByte();
@@ -649,15 +660,16 @@ void Z80DMA::nxService(uint32_t limit) {
             } else {
                 transfer_active = false;
                 nxPending = false;
-                return;
+                return true;
             }
         }
         // DMA_timer restarts at the byte's first cycle: the next byte goes when
         // prescaler * 32 ticks of 28 MHz have passed since then.
         nxNextT = prescalar ? t0 + (((uint32_t)prescalar * 4u) << ESPectrum::multiplicator)
                             : CPU::tstates;
-        if (CPU::tstates >= limit) return;
+        if (CPU::tstates >= limit) return true;
     }
+    return CPU::tstates != start;
 }
 
 void Z80DMA::nxFrameEnd(uint32_t statesInFrame) {

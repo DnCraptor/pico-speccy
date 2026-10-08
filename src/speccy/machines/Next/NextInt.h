@@ -70,6 +70,13 @@ bool nmiStackless(uint16_t pc);
 // RETN with retnArmed: the address from NR 0xC2/0xC3 (SP still moves).
 uint16_t stacklessRetn();
 
+// zxnext.vhd 1957-2007 im2_dma_delay: the zxnDMA gives the bus back to the CPU
+// while a source whose NR 0xCC-0xCE "DMA interruption" bit is set is requested
+// or in service (hardware IM2 only — im2_device is held in S_0 otherwise), or
+// an NMI is active with NR 0xCC bit 7. dma.vhd waits in START_DMA and returns
+// there after every byte while it is up; RETI / RETN end it (wake()).
+bool dmaDelay();
+
 bool     lineEnabled();
 int32_t  linePosT();      // line event, frame-relative 3.5 MHz T (-1 none)
 uint16_t lineNumber();

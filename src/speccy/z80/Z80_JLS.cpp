@@ -41,6 +41,7 @@
 #include "speccy/devices/disk/wd1793.h"
 
 #include "speccy/devices/storage/DivMMC.h"
+#include "speccy/devices/Z80DMA.h"
 #include "speccy/devices/disk/MB02.h"
 #include "speccy/machines/Timex.h"   // g_timex_mmu + Timex::rd/read8 (TC2068 SCLD window, exec_nocheck fetch)
 #include "speccy/machines/TsConf/TsConf.h"
@@ -3826,7 +3827,8 @@ void Z80::decodeED(void) {
             else if (Z80Ops::isNext && DivMMC::enabled) DivMMC::nextRetn();
             check_trdos();
             if (Z80Ops::isTsconf && ffIFF1) TsConf::intEnableHook();
-            if (Z80Ops::isNext && ffIFF1 && NextInt::ex) NextInt::wake();
+            // a zxnDMA paused for the NMI (NR 0xCC bit 7) resumes after RETN
+            if (Z80Ops::isNext && ((ffIFF1 && NextInt::ex) || Z80DMA::nxPending)) NextInt::wake();
             break;
         }
         case 0x46:

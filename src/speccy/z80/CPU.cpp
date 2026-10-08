@@ -780,13 +780,15 @@ IRAM_ATTR void CPU::loop() {
             }
             // Paced zxnDMA (Z80DMA.h): a byte that is due, or a DMA holding the
             // bus (the CPU does not execute then) — slices below end at nxNextT.
+            // nxService answers false when NR 0xCC-0xCE hand the bus to the CPU
+            // (an interrupt in service): the CPU runs until RETI / RETN wakes us.
             if (__builtin_expect(Z80DMA::nxPending, 0) &&
-                (Z80DMA::nxStall || tstates >= Z80DMA::nxNextT)) {
-                Z80DMA::nxService(sliceEnd);
+                (Z80DMA::nxStall || tstates >= Z80DMA::nxNextT) &&
+                Z80DMA::nxService(sliceEnd)) {
                 BREAKPOINTS
                 continue;
             }
-            const uint32_t dmaT = Z80DMA::nxPending ? Z80DMA::nxNextT : 0xFFFFFFFFu;
+            const uint32_t dmaT = (Z80DMA::nxPending && !NextInt::dmaDelay()) ? Z80DMA::nxNextT : 0xFFFFFFFFu;
             if (NextInt::ex) {
                 if (Z80::isIFF1() && NextInt::intLine()) {
                     // at a boundary take it at once (execute() would run one

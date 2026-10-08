@@ -1,6 +1,8 @@
 // ZX Spectrum Next interrupt controller + CTC — see NextInt.h.
 #include "NextInt.h"
 #include "NextReg.h"
+#include "NextMf.h"
+#include "speccy/devices/storage/DivMMC.h"
 #include "app/ESPectrum.h"
 #include "speccy/z80/CPU.h"
 #include "speccy/z80/z80.h"
@@ -439,7 +441,7 @@ bool nrRead(uint8_t r, uint8_t& out) {
             out = e;
             return true;
         }
-        case 0xC6: case 0xCE: out = NextReg::reg[r] & 0x77; return true;
+        case 0xC6: case 0xCE: out = NextReg::reg[r] & 0x77; return true;   // zxnext.vhd 6263
         case 0xCC: out = NextReg::reg[r] & 0x83; return true;
         case 0xC8: {
             sync();
@@ -455,6 +457,22 @@ bool nrRead(uint8_t r, uint8_t& out) {
         case 0xCA: out = 0; return true;   // no UART
         default: return false;
     }
+}
+
+bool dmaDelay() {
+    const uint8_t cc = NextReg::reg[0xCC], cd = NextReg::reg[0xCD], ce = NextReg::reg[0xCE];
+    if ((cc & 0x80) && (NextMf::active() || DivMMC::next_nmi_hold || DivMMC::next_nmi_btn)) return true;
+    if (!im2Hw()) return false;
+    // im2_dma_int_en(13:0), zxnext.vhd 1957: 13 UART1 TX, 12 UART0 TX, 11 ULA,
+    // 10:3 CTC 7..0, 2 UART1 RX, 1 UART0 RX, 0 line.
+    const uint16_t en = (uint16_t)(((ce >> 6) & 1) << 13 | ((ce >> 2) & 1) << 12 | (cc & 1) << 11 |
+                                   (uint16_t)cd << 3 | ((ce & 0x30) ? 1 : 0) << 2 |
+                                   ((ce & 0x03) ? 1 : 0) << 1 | ((cc >> 1) & 1));
+    if (!en) return false;
+    sync();
+    for (int d = 0; d < D_NUM; d++)
+        if (((en >> d) & 1) && (s_st[d] != S_0 || ((s_req >> d) & 1))) return true;
+    return false;
 }
 
 uint8_t ctcRead(uint8_t ch) {

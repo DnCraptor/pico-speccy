@@ -52,7 +52,7 @@ public:
     static bool     nxPending;
     static bool     nxStall;
     static uint32_t nxNextT;
-    static void nxService(uint32_t limit);   // transfer what is due, up to limit
+    static bool nxService(uint32_t limit);   // transfer what is due, up to limit; false = nothing moved
     static void nxFrameEnd(uint32_t statesInFrame);
     static void nxClockRescale(uint8_t om, uint8_t nm);
 
