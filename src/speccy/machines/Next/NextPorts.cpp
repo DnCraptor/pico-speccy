@@ -22,6 +22,7 @@
 #include "speccy/devices/sound/AySound.h"
 #include "speccy/devices/tape/Tape.h"
 #include "ui/LEDIndicators.h"
+#include "speccy/devices/zifi/ZiFi.h"
 #include "app/Config.h"
 #include "speccy/z80/z80.h"
 #include "speccy/core/Ports.h"
@@ -181,7 +182,13 @@ bool NextPorts::ayWrite(uint16_t address, uint8_t data) {
 // instead of hanging in a busy poll (hw 2026-10-08, Pogie prints its banner
 // through 0x133B at start and waited for ever). Transmitted bytes go to the
 // debug log a line at a time. Deviations: no baud timing, no FIFO, no IM2
-// UART interrupts (NR 0xC6), no ESP bridge (§6 of the plan).
+// UART interrupts (NR 0xC6).
+// UART 0 (the ESP) is bridged to the ZiFi ESP whenever that link is up (WiFi on
+// or Network > ZiFi NIC): Tx goes to its FIFO, Rx and the status bits come from
+// it (status = break framing 9th tx_empty near_full overflow tx_full rx_avail,
+// uart.vhd 359). The guest's prescaler is not applied: the link keeps the rate
+// the NIC set (an AT+UART from the guest would break it, as on the ZX-Uno
+// bridge). Without a link UART 0 stays the unconnected stub above.
 static uint8_t s_uartSel = 0;               // 0 = ESP (UART 0), 1 = Pi (UART 1)
 static uint8_t s_uartPrescMsb[2] = {0, 0};
 static uint8_t s_uartFrame[2] = {0x18, 0x18};
@@ -204,6 +211,7 @@ static inline bool uartPort(uint16_t address) {
 
 static void uartTx(uint8_t v) {
     const int u = s_uartSel;
+    if (u == 0 && ZiFi::bridgeLive()) { ZiFi::bridgeTx(v); return; }
     char* line = s_uartLine[u];
     if (v == 0x0D || v == 0x0A || s_uartLen[u] >= 80) {
         if (s_uartLen[u]) {
@@ -218,6 +226,13 @@ static void uartTx(uint8_t v) {
 
 static int uartRead(uint16_t address) {
     const int u = s_uartSel;
+    if (u == 0 && ZiFi::bridgeLive()) {
+        switch ((address >> 8) & 3) {
+            case 0: { const int b = ZiFi::bridgeRx(); return b < 0 ? 0x00 : b; }
+            case 3: return (ZiFi::bridgeTxFull() ? 0x02 : 0x10) | (ZiFi::bridgeRxReady() ? 0x01 : 0x00);
+            default: break;
+        }
+    }
     switch ((address >> 8) & 3) {
         case 0:  return 0x00;                                     // Rx: nothing received
         case 1:  return (u ? 0x40 : 0x00) | s_uartPrescMsb[u];    // select + prescaler MSB

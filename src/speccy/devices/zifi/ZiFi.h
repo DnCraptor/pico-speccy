@@ -49,6 +49,13 @@ public:
     // TX_BUSY); #C8/#C9 (UART2 on EP4CE10 boards) read as absent. Bridges to
     // the same ESP FIFOs as the ZIFI-API and 16550 windows. dataPort selects
     // #FD3B (true) vs #FC3B (false).
+    // Byte-level bridge for UARTs that are not one of the windows above (the
+    // Spectrum Next UART 0, NextPorts.cpp): the same ESP FIFOs, same pumping.
+    static bool    bridgeLive();      // the ESP link is up (WiFi or the NIC brought it up)
+    static int     bridgeRx();        // next received byte, -1 = none
+    static bool    bridgeRxReady();
+    static bool    bridgeTxFull();
+    static void    bridgeTx(uint8_t data);
     static uint8_t unoUartRead(bool dataPort);
     static void    unoUartWrite(bool dataPort, uint8_t data);
 

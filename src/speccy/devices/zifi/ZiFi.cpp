@@ -1017,6 +1017,24 @@ void __not_in_flash("zifi") ZiFi::unoUartWrite(bool dataPort, uint8_t data) {
     LED::touchW(LED::NET); // TX activity → up arrow (red)
 }
 
+// ─── Plain byte bridge (Spectrum Next UART 0) ─────────────────────────────────
+// Flash: called through the Next port decoder, which is flash itself.
+// The link alone, not the NIC switch: on the Next the ESP is part of the board,
+// and the link is up whenever WiFi or the NIC brought it up.
+bool ZiFi::bridgeLive()    { return hw_initialized; }
+int  ZiFi::bridgeRx()      { cdcPump(); return rxPop(); }
+bool ZiFi::bridgeRxReady() { cdcPump(); return rxAvailable(); }
+bool ZiFi::bridgeTxFull()  { return fifo_full(zifi_out_head, zifi_out_tail); }
+void ZiFi::bridgeTx(uint8_t data) {
+    if (!fifo_full(zifi_out_head, zifi_out_tail))
+        zifi_out_buf[zifi_out_head++] = data;
+    while (g_uart && !fifo_empty(zifi_out_head, zifi_out_tail) && uart_is_writable(g_uart)) {
+        uart_get_hw(g_uart)->dr = zifi_out_buf[zifi_out_tail++];
+        tx_bytes++;
+    }
+    LED::touchW(LED::NET);
+}
+
 // ─── USB-CDC transport (CH340/CP210x/FTDI dongle) ─────────────────────────────
 // A USB-serial dongle carries the ESP-01 over the host port instead of a GPIO
 // UART. TinyUSB's cdc_host serial drivers (CH34X/CP210X/FTDI, enabled in
