@@ -69,8 +69,6 @@ uint8_t* NEXTVID::copperMem = nullptr;
 uint16_t NEXTVID::copIndex = 0;
 uint16_t NEXTVID::copPC = 0;
 uint8_t  NEXTVID::copCtrl = 0;
-bool     NEXTVID::copWaiting = false;
-uint16_t NEXTVID::copWaitLine = 0;
 bool     NEXTVID::cop16Second = false;
 uint8_t  NEXTVID::cop16First = 0;
 
@@ -251,6 +249,18 @@ static uint32_t       nx_cur = 0;
 static bool           nx_have = false;
 static volatile uint32_t nx_w = 0, nx_r = 0;
 static NextLineState  nx_sync;               // the queue-off path
+// Mid-line palette writes by the copper (copper.vhd WAIT H, 8-pixel steps):
+// recorded between the paper's left edge and the line end with the fb x they
+// take effect at; the row is then drawn in segments (renderRowSegments).
+struct NxPalDelta { uint16_t x; uint8_t pal, idx; uint16_t old, neu; };
+static constexpr int NX_PAL_DELTAS = 32;
+static NxPalDelta s_pd[NX_PAL_DELTAS];
+static uint8_t  s_pdn = 0;
+static bool     s_pdRec = false;       // ScanlineWork is inside the line's copper span
+static int32_t  s_copT = 0;            // copper clock, 28 MHz = 1/4 hc_ula, in the line being run
+static int16_t  s_copXBase = 0;        // fb x of hc_ula 0 for the line being run
+static const NextLineState* s_preCap = nullptr;   // emitRow: state already captured
+static bool     s_lineReady = false;   // RenderLine: lineBuf already composed
 // Tested by core1's render_core loop on every machine: one byte in .data.
 extern "C" volatile bool g_next_c1_live = false;
 
@@ -365,6 +375,11 @@ void NEXTVID::rebuildPairMap() {
 
 void NEXTVID::setLutEntry(uint8_t pal, uint8_t idx, uint16_t rgb333) {
     c1Drain();
+    if (s_pdRec && s_pdn < NX_PAL_DELTAS) {
+        const int x = s_copXBase + (s_copT >> 2);
+        if (x < (int)VIDEO::vga.xres)
+            s_pd[s_pdn++] = { (uint16_t)(x < 0 ? 0 : x), pal, idx, rawPal[pal][idx], rgb333 };
+    }
     rawPal[pal][idx] = rgb333;
     lut[pal][idx] = remap[rgb333 & 0x1FF];
 }
@@ -542,10 +557,7 @@ void NEXTVID::copperControl(uint8_t v) {
     copCtrl = v;
     // copper.vhd 70-77: a mode change restarts the list only into 01 (run
     // once) or 11 (loop each frame); 10 resumes where the copper stopped.
-    if (mode != prevMode && (mode & 1)) {
-        copPC = 0;
-        copWaiting = false;
-    }
+    if (mode != prevMode && (mode & 1)) copPC = 0;
 }
 
 void NEXTVID::copperData16Write(uint8_t v) {
@@ -562,32 +574,37 @@ void NEXTVID::copperData16Write(uint8_t v) {
     }
 }
 
-// Execute the copper program for one raster line: run MOVEs until an
-// unsatisfied WAIT. Instructions are big-endian:
-//   MOVE: 0RRRRRRR VVVVVVVV  — write V to nextreg R
-//   WAIT: 1HHHHHHL LLLLLLLL  — wait for line (H = horizontal, line granularity)
-IRAM_ATTR void NEXTVID::copperLine(uint16_t rasterLine) {
-    uint8_t mode = copCtrl >> 6;
-    if (mode == 0) return;
-    if (copWaiting) {
-        if (copWaitLine != rasterLine) return;
-        copWaiting = false;
-    }
-    int guard = 1024;
-    while (guard--) {
-        uint8_t hi = copperMem[copPC * 2];
-        uint8_t lo = copperMem[copPC * 2 + 1];
-        copPC = (copPC + 1) & 0x3FF;
+// The copper (copper.vhd), one 28 MHz clock per step: a WAIT that is due
+// takes a clock, a MOVE two (the write, then the strobe clear), a NOP one.
+// Instructions are big-endian:
+//   MOVE: 0RRRRRRR VVVVVVVV  — write V to nextreg R; register 0 = NOP
+//   WAIT: 1HHHHHHL LLLLLLLL  — wait until cvc == L and hc_ula >= H*8 + 12
+// hc_ula (zxula_timing.vhd 422-438, 7 MHz) is 0 twelve pixels before the
+// paper's left edge, so WAIT H lands on paper pixel H*8; cvc steps (and NR
+// 0x64 offsets it) at hc_ula 0, which is why the left border of a display
+// row still belongs to the previous copper line (MrKWatkins !Copper, test 2).
+// PC stays ON a pending WAIT, so the next span re-tests it.
+IRAM_ATTR void NEXTVID::copperRun(uint16_t cvc, uint16_t from, uint16_t to) {
+    if ((copCtrl >> 6) == 0) return;
+    const int32_t end = (int32_t)to << 2;
+    if (s_copT < ((int32_t)from << 2)) s_copT = (int32_t)from << 2;
+    int guard = 2048;
+    while (guard-- && s_copT < end) {
+        const uint8_t hi = copperMem[copPC * 2];
+        const uint8_t lo = copperMem[copPC * 2 + 1];
         if (hi & 0x80) {
-            uint16_t wl = ((uint16_t)(hi & 0x01) << 8) | lo;
-            if (wl != rasterLine) {
-                copWaiting = true;
-                copWaitLine = wl;
-                return;
-            }
-        } else if (hi | lo) { // 0x0000 = NOOP
+            const uint16_t wl = ((uint16_t)(hi & 0x01) << 8) | lo;
+            const int32_t tgt = (int32_t)(((hi >> 1) & 0x3F) * 8 + 12) << 2;
+            if (wl != cvc || tgt >= end) return;   // not due in this span
+            if (tgt > s_copT) s_copT = tgt;
+            s_copT += 1;
+        } else if (hi & 0x7F) {
             NextReg::write(hi & 0x7F, lo);
+            s_copT += 2;
+        } else {
+            s_copT += 1;
         }
+        copPC = (copPC + 1) & 0x3FF;
     }
 }
 
@@ -606,7 +623,6 @@ void NEXTVID::softReset() {
     copIndex = 0;
     copPC = 0;
     copCtrl = 0;
-    copWaiting = false;
     cop16Second = false;
 }
 
@@ -685,7 +701,6 @@ void NEXTVID::Reset() {
     copIndex = 0;
     copPC = 0;
     copCtrl = 0;
-    copWaiting = false;
     cop16Second = false;
 
     totalLines = CPU::statesInFrame ?
@@ -839,10 +854,6 @@ IRAM_ATTR void NEXTVID::EndFrame() {
     nextLineTstate = (uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator;
     totalLines = (CPU::statesInFrame >> ESPectrum::multiplicator) / VIDEO::tStatesPerLine;
     gigsFrame();
-    if ((copCtrl >> 6) == 3) { // mode %11: restart the copper on vertical blank
-        copPC = 0;
-        copWaiting = false;
-    }
 }
 
 // Wait states of a contended access starting now. Contention exists only at
@@ -897,11 +908,52 @@ static bool nx_layer_sample = false;
 __attribute__((noinline)) IRAM_ATTR void NEXTVID::ScanlineWork() {
     uint8_t m = ESPectrum::multiplicator;
     if (lineIdx < totalLines) {
-        // Copper runs before the line is drawn; raster line 0 = paper start
-        uint32_t paperStart = (uint32_t)(firstVisibleLine + paperTopRow);
-        copperLine((uint16_t)((lineIdx + totalLines - paperStart) % totalLines));
+        // Copper, in time order across the display row (copper.vhd /
+        // zxula_timing.vhd): the row's left border is the tail of the PREVIOUS
+        // copper line (hc_ula >= uL), its paper and right border the head of
+        // this one. cvc = raster line - paper top + NR 0x64. Mode 11 restarts
+        // at hc_ula 0 of copper line 0. Registers are captured mid-paper (one
+        // snapshot per row); palette writes are recorded with their fb x and
+        // the row is then drawn in segments (renderRowSegments).
+        const uint32_t paperStart = (uint32_t)(firstVisibleLine + paperTopRow);
+        const uint32_t off = NextReg::reg[0x64];
+        const uint16_t cur = (uint16_t)((lineIdx + totalLines - paperStart + off) % totalLines);
+        const uint16_t prev = (uint16_t)((lineIdx + 2 * totalLines - 1 - paperStart + off) % totalLines);
+        const uint16_t hcEnd = (uint16_t)(VIDEO::tStatesPerLine * 2);
+        const int uL = (int)hcEnd - (xPaperOff - 12);       // hc_ula of fb x 0
         int row = (int)lineIdx - firstVisibleLine;
-        if (!skipFrame && row >= 0 && row < (int)VIDEO::vga.yres) emitRow(row);
+        const bool draw = !skipFrame && row >= 0 && row < (int)VIDEO::vga.yres;
+        if ((copCtrl >> 6) != 0) {
+            s_pdn = 0;
+            s_pdRec = draw;
+            s_copXBase = (int16_t)(xPaperOff - 12 - (int)hcEnd);
+            copperRun(prev, (uint16_t)uL, hcEnd);
+            s_copT -= (int32_t)hcEnd << 2;                  // hc_ula wraps, cvc steps
+            if (s_copT < 0) s_copT = 0;
+            s_copXBase = (int16_t)(xPaperOff - 12);
+            if ((copCtrl >> 6) == 3 && cur == 0) copPC = 0;
+            copperRun(cur, 0, 140);                         // up to paper x 128
+            NextLineState st;
+            if (draw) {
+                captureLine(st);
+                if (s_brdCnt) nxBorderSegs(st, row, firstVisibleLine);
+                if (Z80DMA::dma_attr_valid) nxAttrShadow(st, row, paperTopRow);
+            }
+            copperRun(cur, 140, (uint16_t)uL);
+            s_pdRec = false;
+            if (draw) {
+                if (s_pdn) {
+                    nx_sync = st;
+                    renderRowSegments(row);
+                } else {
+                    s_preCap = &st;
+                    emitRow(row);
+                    s_preCap = nullptr;
+                }
+            }
+        } else if (draw) {
+            emitRow(row);
+        }
         lineIdx++;
         nextLineTstate = (lineIdx + 1) * ((uint32_t)VIDEO::tStatesPerLine << m);
     } else {
@@ -917,9 +969,12 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
         // Post the line: capture, and open a new state slot only when
         // something the renderer reads has moved since the last line.
         NextLineState st;
-        captureLine(st);
-        if (s_brdCnt) nxBorderSegs(st, row, firstVisibleLine);
-        if (Z80DMA::dma_attr_valid) nxAttrShadow(st, row, paperTopRow);
+        if (s_preCap) st = *s_preCap;
+        else {
+            captureLine(st);
+            if (s_brdCnt) nxBorderSegs(st, row, firstVisibleLine);
+            if (Z80DMA::dma_attr_valid) nxAttrShadow(st, row, paperTopRow);
+        }
         if (!nx_have || !nxSameState(st, nx_st[nx_cur])) {
             const uint32_t k = (nx_cur + 1) % NEXT_C1_STATES;
             nxWaitUntil(nx_st_job[k]);
@@ -935,9 +990,12 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
         nx_w = nx_w + 1;
         nx_st_job[nx_cur] = nx_w;
     } else {
-        captureLine(nx_sync);
-        if (s_brdCnt) nxBorderSegs(nx_sync, row, firstVisibleLine);
-        if (Z80DMA::dma_attr_valid) nxAttrShadow(nx_sync, row, paperTopRow);
+        if (s_preCap) nx_sync = *s_preCap;
+        else {
+            captureLine(nx_sync);
+            if (s_brdCnt) nxBorderSegs(nx_sync, row, firstVisibleLine);
+            if (Z80DMA::dma_attr_valid) nxAttrShadow(nx_sync, row, paperTopRow);
+        }
         LS = &nx_sync;
 #if NEXT_TRACE
         if ((row & 15) == 0) {
@@ -992,9 +1050,47 @@ extern "C" IRAM_ATTR void next_render_core1_pump(void) { NEXTVID::c1Pump(); }
 // which ESPectrum::loop repaints only after EndFrame — tsRenderLine's and
 // Update_Border_DS80's rectangle. The box is word-aligned (168/188 and 144 are
 // multiples of 4), so it is a range of whole words.
+// A row the copper re-coloured mid-line (MrKWatkins !Copper: Swedish flags
+// drawn by rewriting PAPER/BORDER 7 every 8 pixels). The palette now holds the
+// line-END values; each recorded write knows its fb x and the value it
+// replaced. Roll the palette back to the line start, then compose the row once
+// per palette state and keep each pass's span. core0, after a drain — core1
+// must not read the palette while it is rolled back. Flash: rare rows.
+__attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
+    c1Drain();
+    LS = &nx_sync;
+    uint8_t acc[400];
+    const int xres = VIDEO::vga.xres;
+    for (int i = s_pdn - 1; i >= 0; i--) {
+        rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].old;
+        lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].old & 0x1FF];
+    }
+    int x0 = 0, i = 0;
+    while (x0 < xres) {
+        // apply every write that takes effect at or before x0
+        while (i < s_pdn && s_pd[i].x <= x0) {
+            rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].neu;
+            lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].neu & 0x1FF];
+            i++;
+        }
+        const int x1 = (i < s_pdn && s_pd[i].x < xres) ? s_pd[i].x : xres;
+        RenderLayers(lineBuf, row);
+        for (int x = x0; x < x1; x++) acc[x] = lineBuf[x];
+        x0 = x1;
+    }
+    for (; i < s_pdn; i++) {   // writes past the visible line: still the final palette
+        rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].neu;
+        lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].neu & 0x1FF];
+    }
+    for (int x = 0; x < xres; x++) lineBuf[x] = acc[x];
+    s_lineReady = true;
+    RenderLine(row);
+    s_lineReady = false;
+}
+
 IRAM_ATTR void NEXTVID::RenderLine(int row) {
     uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
-    RenderLayers(lineBuf, row);
+    if (!s_lineReady) RenderLayers(lineBuf, row);
     if (LS->hires) {
         // Packed-pair frame (Timex hi-res): the ULA left HIRES_MARK where its
         // 512-pixel line goes (hiresRow, already pair slots); everything else

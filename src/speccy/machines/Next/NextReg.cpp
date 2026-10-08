@@ -404,7 +404,10 @@ uint16_t NextReg::activeLine() {
     const uint32_t paperStart = paperLine();
     uint32_t total = CPU::statesInFrame >> ESPectrum::multiplicator;
     uint32_t lines = total / VIDEO::tStatesPerLine;
-    return (uint16_t)((line + lines - paperStart) % lines);
+    // zxnext.vhd 5983-5986 read cvc: offset by NR 0x64 and stepping at hc 128
+    // (64 T into the line, the paper's left edge — zxula_timing.vhd 455-472)
+    if (ts % VIDEO::tStatesPerLine < 64) line += lines - 1;
+    return (uint16_t)((line + lines - paperStart + reg[0x64]) % lines);
 }
 
 static void applyRomSelect();

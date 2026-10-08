@@ -136,6 +136,7 @@ private:
     static void captureLine(NextLineState& s);
     static void ScanlineWork();
     static void emitRow(int row);          // post / draw one fb row
+    static void renderRowSegments(int row); // core0: a row with mid-line copper palette writes
     static bool computeGeometry();         // firstVisibleLine/paperTopRow (50/60 Hz)
     static void RenderLine(int row);
     static void RenderLayers(uint8_t* fb, int row);   // RenderLine's body, linear pixel order
@@ -185,7 +186,9 @@ private:
     static void     resolveSprites();
 
     // copper state
-    static void copperLine(uint16_t rasterLine);
+    // Run the copper over hc_ula [from, to) of the copper line `cvc`
+    // (copper.vhd / zxula_timing.vhd: hc_ula 0 = 12 pixels before the paper).
+    static void copperRun(uint16_t cvc, uint16_t from, uint16_t to);
     static void RenderTilemapLine(int row);
     static void RenderL2Line(int row);
     static bool palHasPrio[8];           // palette contains L2 priority entries
@@ -193,8 +196,6 @@ private:
     static uint16_t copIndex;            // write index (bytes)
     static uint16_t copPC;               // instruction counter
     static uint8_t  copCtrl;             // reg 0x62 latch (bits 7:6 = mode)
-    static bool     copWaiting;
-    static uint16_t copWaitLine;
     static bool     cop16Second;
     static uint8_t  cop16First;
 
