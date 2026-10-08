@@ -19,6 +19,7 @@ banks stored in order 5,2,0,1,3,4,6,7,8...111.
 #include "fs/FileUtils.h"
 #include "speccy/z80/z80.h"
 #include "app/Debug.h"
+#include "app/TryAlloc.h"
 #include <string.h>
 
 using namespace std;
@@ -37,10 +38,14 @@ static bool skipBytes(FIL* f, FSIZE_t len) {
 // so the CPU write path keeps the cache coherent (banks 0-7 are plain SRAM
 // and could read directly, but one path keeps this simple).
 static bool readPage(FIL* f, uint8_t* dst) {
-    static uint8_t bounce[2048];
-    for (int off = 0; off < 0x2000; off += sizeof(bounce)) {
-        if (!readExact(f, bounce, sizeof(bounce))) return false;
-        memcpy(dst + off, bounce, sizeof(bounce));
+    // Heap for the read, not a static: the 2 KB used to be paid by every machine.
+    constexpr int kBounce = 2048;
+    ScopedHeap hb(kBounce);
+    uint8_t* bounce = (uint8_t*)hb.p;
+    if (!bounce) return false;
+    for (int off = 0; off < 0x2000; off += kBounce) {
+        if (!readExact(f, bounce, kBounce)) return false;
+        memcpy(dst + off, bounce, kBounce);
     }
     return true;
 }

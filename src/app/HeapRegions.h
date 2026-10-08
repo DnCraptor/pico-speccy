@@ -26,7 +26,7 @@ typedef struct { char* lo; char* hi; char* hwm; } HrRegion;   // hwm = highest c
 typedef struct { char* ws; char* we; int loaded; } HrWindow;   // a code window, loaded = resident
 
 typedef struct {
-    HrRegion reg[4];
+    HrRegion reg[6];
     unsigned n;         // regions in address order
     unsigned cur;       // region the cursor is in
     char*    cursor;    // the sbrk cursor

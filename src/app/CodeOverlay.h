@@ -128,7 +128,8 @@ namespace CodeOverlay {
 // condition that gates the single GS::init() call site, which is why the GS
 // window needs no runtime claim: Audio > General Sound is AC_REBOOT, so a guest
 // can never bring the card up on a session that released its window.
-void apply(bool tsconf, bool gs, bool dma, bool ngs, bool vdac2);
+// next = "this boot may come up as the ZX Next" (the Next renderer window).
+void apply(bool tsconf, bool gs, bool dma, bool ngs, bool vdac2, bool next);
 
 // Enabling a feature OUTSIDE that window: load its overlay if the window is
 // still untouched (the heap grows upward and rarely reaches the top tens of KB,
@@ -138,10 +139,11 @@ void apply(bool tsconf, bool gs, bool dma, bool ngs, bool vdac2);
 // toggle with no reboot of its own.
 bool claimForTsconf();
 bool claimForDma();
+bool claimForNext();
 
 // Diagnostics for Hardware/Memory Info: window size, bytes used by the content,
 // and whether the window is currently code (true) or heap (false).
-enum Which { WIN_TS = 0, WIN_DMA, WIN_GS, WIN_NGS, WIN_FT };
+enum Which { WIN_TS = 0, WIN_DMA, WIN_GS, WIN_NGS, WIN_FT, WIN_NX };
 unsigned windowBytes(Which w);
 unsigned contentBytes(Which w);
 bool     loaded(Which w);

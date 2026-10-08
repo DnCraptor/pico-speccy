@@ -305,6 +305,7 @@ SECTIONS
     __dmaovl_win_size  = @DMAOVL_WIN_SIZE_EFFECTIVE@;
     __tsovl_win_size   = @TSOVL_WIN_SIZE_EFFECTIVE@;
     __ftovl_win_size   = @FTOVL_WIN_SIZE_EFFECTIVE@;
+    __nxovl_win_size   = @NXOVL_WIN_SIZE_EFFECTIVE@;
     __gsovl_win_start  = ORIGIN(RAM) + LENGTH(RAM) - __mos_mailbox - SIZEOF(.stack_dummy) - __gsovl_win_size;
     __gsovl_win_end    = __gsovl_win_start + __gsovl_win_size;
     /* NeoGS-only window directly under .gsovl: a classic-GS or GS-off boot
@@ -319,11 +320,16 @@ SECTIONS
        and a TS-Conf boot without VDAC2 gets it as a longer base heap region. */
     __ftovl_win_start  = __tsovl_win_start - __ftovl_win_size;
     __ftovl_win_end    = __ftovl_win_start + __ftovl_win_size;
+    /* ZX Next renderer window, now the LOWEST: resident only on a Next boot (never
+       together with .tsovl/.ftovl); on every other boot it extends the base heap. */
+    __nxovl_win_start  = __ftovl_win_start - __nxovl_win_size;
+    __nxovl_win_end    = __nxovl_win_start + __nxovl_win_size;
 
 @GSOVL_SECTION@
 @NGSOVL_SECTION@
 @DMAOVL_SECTION@
 @TSOVL_SECTION@
+@NXOVL_SECTION@
     ASSERT(__ngsovl_bss_end <= __ngsovl_win_end,
         "ERROR: .ngsovl overflowed the NeoGS overlay window. Re-link with -DNGSOVL_WIN_SIZE=16384, read the real size from `arm-none-eabi-size -A <elf> | grep ngsovl`, then fix the AUTO arithmetic in CMakeLists.txt")
     ASSERT(__gsovl_bss_end <= __gsovl_win_end,
@@ -334,7 +340,9 @@ SECTIONS
         "ERROR: .tsovl overflowed the TS-Conf code overlay window. Re-link with -DTSOVL_WIN_SIZE=24576, read the real size from `arm-none-eabi-size -A <elf> | grep .tsovl`, then fix the AUTO arithmetic in CMakeLists.txt")
     ASSERT(__ftovl_end <= __ftovl_win_end,
         "ERROR: .ftovl overflowed the VDAC2 overlay window. Re-link with -DFTOVL_WIN_SIZE=32768, read the real size from `arm-none-eabi-size -A <elf> | grep ftovl`, then fix the AUTO arithmetic in cmake/memory-layout.cmake")
-    ASSERT(__end__ <= __ftovl_win_start,
+    ASSERT(__nxovl_end <= __nxovl_win_end,
+        "ERROR: .nxovl overflowed the ZX Next renderer overlay window. Re-link with -DNXOVL_WIN_SIZE=32768, read the real size from `arm-none-eabi-size -A <elf> | grep nxovl`, then fix the AUTO arithmetic in cmake/memory-layout.cmake")
+    ASSERT(__end__ <= __nxovl_win_start,
         "ERROR: .bss/heap start reaches into the code overlay windows")
     .flash_end : {
         KEEP(*(.embedded_end_block*))

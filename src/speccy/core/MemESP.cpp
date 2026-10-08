@@ -961,13 +961,18 @@ bool MemESP::buildNextRam() {
 // executes garbage (hw: black screen on the first NextZXOS ROM boot).
 // CPU memcpy through the cached alias is coherent by construction.
 static bool readFileToButter(const char* path, uint8_t* dst, size_t len) {
+    // Heap for the duration of the read: a static 2 KB here was paid by every
+    // machine for a buffer only the Next boot ever uses.
+    constexpr size_t kBounce = 2048;
+    ScopedHeap hb(kBounce);
+    uint8_t* bounce = (uint8_t*)hb.p;
+    if (!bounce) return false;
     FIL* f = fopen2(path, FA_READ);
     if (!f) return false;
-    static uint8_t bounce[2048];
     size_t got = 0;
     bool ok = true;
     while (got < len) {
-        UINT chunk = (len - got) > sizeof(bounce) ? sizeof(bounce) : (UINT)(len - got);
+        UINT chunk = (len - got) > kBounce ? (UINT)kBounce : (UINT)(len - got);
         UINT br = 0;
         if (f_read(f, bounce, chunk, &br) != FR_OK || br != chunk) { ok = false; break; }
         memcpy(dst + got, bounce, chunk);

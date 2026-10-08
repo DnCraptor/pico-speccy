@@ -55,6 +55,7 @@ option(GS_CODE_OVERLAY "General Sound/NeoGS: put src/speccy/devices/gs/'s SRAM-r
 # heap on every other boot. It sits BELOW .tsovl, so a TS-Conf boot without VDAC2
 # simply has a longer base heap region.
 option(VDAC2_CODE_OVERLAY "TS-Conf VDAC2: put the FT812 hot code (coprocessor, inflate, MJPEG) in a fixed-VMA SRAM overlay loaded only when VDAC2 is on" ON)
+option(NEXT_CODE_OVERLAY "ZX Spectrum Next: put NextVideo.cpp's SRAM-resident renderer in a fixed-VMA overlay loaded only on a Next boot (~20 KB of heap back on every other machine)" ON)
 option(DMA_CODE_OVERLAY "Z80 DMA / zxnDMA: put Z80DMA.cpp's SRAM-resident code in a fixed-VMA overlay, handed to the heap when DMA is Off (~5 KB)" ON)
 # The AY stereo slot is a different shape from the three windows above: it is not
 # "reserved or released" but "one of four bodies loaded". ABC, ACB, BAC and
@@ -85,6 +86,7 @@ set(TSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the TS-Conf code overlay window,
 set(GSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the GS/NeoGS code overlay window, or AUTO (rp2350-memmap.ld)")
 set(NGSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the NeoGS-only code overlay window, or AUTO (rp2350-memmap.ld)")
 set(FTOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the VDAC2 (FT812) code overlay window, or AUTO (rp2350-memmap.ld)")
+set(NXOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the ZX Next renderer code overlay window, or AUTO (rp2350-memmap.ld)")
 set(DMAOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the Z80 DMA code overlay window, or AUTO (rp2350-memmap.ld)")
 
 if (TSOVL_WIN_SIZE STREQUAL "AUTO")
@@ -208,6 +210,17 @@ if (NOT VDAC2_CODE_OVERLAY)
     set(FTOVL_WIN_SIZE_EFFECTIVE 0)
 endif()
 
+if (NXOVL_WIN_SIZE STREQUAL "AUTO")
+    # NextVideo.cpp's .time_critical (the scanline renderer, sprites, tilemap, layer
+    # mix, copper). Lowest window: on every other boot it simply extends the base heap.
+    # 16 608 measured (DVp2, 2026-10-09) + headroom. On a Next boot the slack is heap lost.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 18432)
+else()
+    set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})
+endif()
+if (NOT NEXT_CODE_OVERLAY)
+    set(NXOVL_WIN_SIZE_EFFECTIVE 0)
+endif()
 if (DMAOVL_WIN_SIZE STREQUAL "AUTO")
     set(DMAOVL_WIN_SIZE_EFFECTIVE 6144)   # 5 656 measured (zxnDMA paths for the Next) + headroom
 else()
@@ -225,6 +238,9 @@ if (GS_CODE_OVERLAY)
 endif()
 if (DMA_CODE_OVERLAY)
     set(OVL_EXCLUDE_OBJECTS "${OVL_EXCLUDE_OBJECTS} *Z80DMA.cpp.o*")
+endif()
+if (NEXT_CODE_OVERLAY)
+    set(OVL_EXCLUDE_OBJECTS "${OVL_EXCLUDE_OBJECTS} *NextVideo.cpp.o*")
 endif()
 string(STRIP "${OVL_EXCLUDE_OBJECTS}" OVL_EXCLUDE_OBJECTS)
 
@@ -333,6 +349,23 @@ else()
     __psramrom_end = ADDR(.psramroms) + SIZEOF(.psramroms);\n")
 endif()
 
+if (NEXT_CODE_OVERLAY)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NEXT_CODE_OVERLAY=1)
+    set(NXOVL_SECTION "\
+    .nxovl __nxovl_win_start : {\n\
+        __nxovl_start = .;\n\
+        *NextVideo.cpp.o*(.time_critical*)\n\
+        . = ALIGN(4);\n\
+        __nxovl_end = .;\n\
+    } AT > FLASH\n\
+    __nxovl_source = LOADADDR(.nxovl);\n")
+else()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE NEXT_CODE_OVERLAY=0)
+    set(NXOVL_SECTION "\
+    PROVIDE(__nxovl_start  = __nxovl_win_start);\n\
+    PROVIDE(__nxovl_end    = __nxovl_win_start);\n\
+    PROVIDE(__nxovl_source = __nxovl_win_start);\n")
+endif()
 if (DMA_CODE_OVERLAY)
     target_compile_definitions(${PROJECT_NAME} PRIVATE DMA_CODE_OVERLAY=1)
     set(DMAOVL_SECTION "\
@@ -390,7 +423,7 @@ else()
     target_compile_definitions(${PROJECT_NAME} PRIVATE AY_STEREO_SLOT=0)
     set(AYOVL_SECTION "")
 endif()
-message(STATUS "Code overlays: .ftovl ${FTOVL_WIN_SIZE_EFFECTIVE} B, .tsovl ${TSOVL_WIN_SIZE_EFFECTIVE} B, .dmaovl ${DMAOVL_WIN_SIZE_EFFECTIVE} B, .ngsovl ${NGSOVL_WIN_SIZE_EFFECTIVE} B, .gsovl ${GSOVL_WIN_SIZE_EFFECTIVE} B")
+message(STATUS "Code overlays: .nxovl ${NXOVL_WIN_SIZE_EFFECTIVE} B, .ftovl ${FTOVL_WIN_SIZE_EFFECTIVE} B, .tsovl ${TSOVL_WIN_SIZE_EFFECTIVE} B, .dmaovl ${DMAOVL_WIN_SIZE_EFFECTIVE} B, .ngsovl ${NGSOVL_WIN_SIZE_EFFECTIVE} B, .gsovl ${GSOVL_WIN_SIZE_EFFECTIVE} B")
 
 
 # The GM.DLS bank is everything above the firmware, to the top of flash — a dynamic

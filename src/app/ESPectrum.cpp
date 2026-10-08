@@ -842,7 +842,10 @@ void ESPectrum::setup() {
   CodeOverlay::apply(Config::arch == A_TSCONF, Config::gs_enabled != 0, dmaWin,
                      Config::gs_enabled == 2,    // NeoGS-only code/data window
                      Config::tsconf_vdac2        // VDAC2 window (with TS-Conf only); its load
-                       && FlashRoms::intact());  // image is in .psramroms, gone once traded
+                       && FlashRoms::intact(),   // image is in .psramroms, gone once traded
+                     // Next renderer window: same rule as the zxnDMA half of dmaWin
+                     Config::arch == A_NEXT ||
+                       (Config::ram_file == NO_RAM_FILE && Config::pref_arch == A_NEXT));
   // Framebuffer re-check: the block was already claimed at the top of setup(), from
   // a pristine heap and for the DEFAULT mode. This is where the mode the user
   // actually picked is honoured — a no-op when it matches, a resize when it does
@@ -1072,8 +1075,8 @@ void ESPectrum::setup() {
   // Backstop for the overlay decision above: the Next cannot run without the
   // zxnDMA code. The heap has barely grown by now, so the claim normally
   // succeeds; if it does not, fall back rather than jump into heap data.
-  if (Config::arch == A_NEXT && !CodeOverlay::claimForDma()) {
-    Debug::log2SD("setup: Next needs the Z80 DMA code window, heap took it - falling back to 128K");
+  if (Config::arch == A_NEXT && (!CodeOverlay::claimForDma() || !CodeOverlay::claimForNext())) {
+    Debug::log2SD("setup: Next needs the Z80 DMA / renderer code windows, heap took one - falling back to 128K");
     Config::arch = A_128K;
     Config::romSet = R_128K;
     Config::romSet128 = R_128K;
