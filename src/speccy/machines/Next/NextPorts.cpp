@@ -277,6 +277,12 @@ static int joyRead(uint8_t lo) {
     return (m0 >= 5) ? v : (v & 0x3F);
 }
 
+// ULA+ (zxnext.vhd 4523-4583): 0xBF3B = mode 7:6 + index 5:0 (index kept in
+// mode 00 only), 0xFF3B = palette entry in mode 00, enable bit 0 in mode 01.
+// The enable is one latch with NR 0x68 bit 3.
+static uint8_t s_ulapMode = 0, s_ulapIdx = 0;
+void NextPorts::ulapReset() { s_ulapMode = 0; s_ulapIdx = 0; }
+
 int NextPorts::input(uint16_t address) {
     if (address == 0x243B) return NextReg::selected;
     if (address == 0x253B) return NextReg::read(NextReg::selected);
@@ -288,6 +294,11 @@ int NextPorts::input(uint16_t address) {
           if (v >= 0) return v;
       } }
     if (address == 0x123B && NextReg::portOn(NextReg::PE_LAYER2)) return NextReg::port123B;
+    if (address == 0xFF3B && NextReg::portOn(NextReg::PE_ULAP)) {
+        LED::touchR(LED::ULAPLUS);
+        if (s_ulapMode == 0) return NEXTVID::ulapRead(s_ulapIdx);
+        return (NextReg::reg[0x68] >> 3) & 1;
+    }
     { const uint8_t lo = (uint8_t)address;
       if (lo == 0x1F || lo == 0x37 || lo == 0xDF) {
           const int v = joyRead(lo);
@@ -325,6 +336,18 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
     }
     if (uartPort(address) && NextReg::portOn(NextReg::PE_UART)) {
         uartWrite(address, data);
+        return true;
+    }
+    if ((address == 0xBF3B || address == 0xFF3B) && NextReg::portOn(NextReg::PE_ULAP)) {
+        LED::touchW(LED::ULAPLUS);
+        if (address == 0xBF3B) {
+            s_ulapMode = data >> 6;
+            if (s_ulapMode == 0) s_ulapIdx = data & 0x3F;
+        } else if (s_ulapMode == 0) {
+            NEXTVID::ulapWrite(s_ulapIdx, data);
+        } else if (s_ulapMode == 1) {
+            NextReg::reg[0x68] = (uint8_t)((NextReg::reg[0x68] & ~0x08) | ((data & 1) << 3));
+        }
         return true;
     }
     if (address == 0x303B && NextReg::portOn(NextReg::PE_SPRITE)) {

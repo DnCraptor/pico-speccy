@@ -63,6 +63,10 @@ public:
 
     // nextreg palette interface (regs 0x40/0x41/0x43/0x44)
     static uint8_t palRead8();
+    // ULA+ data port 0xFF3B (zxnext.vhd 4741-4745, 6958): entry 192+idx of the
+    // ULA palette NR 0x43 writes, value GGGRRRBB
+    static void    ulapWrite(uint8_t idx, uint8_t v);
+    static uint8_t ulapRead(uint8_t idx);
     static uint8_t palRead9();
     static void palIndex(uint8_t v);
     static void palValue8(uint8_t v);

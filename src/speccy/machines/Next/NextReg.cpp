@@ -364,6 +364,7 @@ void NextReg::reset(bool hard) {
     portEnRecalc();
     NextPorts::audioReset();   // turbosound select/pans, DACs (both reset types)
     NextPorts::uartReset(hard);
+    NextPorts::ulapReset();
     reg[0x12] = 0x08; // Layer 2 bank
     reg[0x13] = 0x0B; // Layer 2 shadow bank
     reg[0x42] = 0x07; // ULANext attribute format

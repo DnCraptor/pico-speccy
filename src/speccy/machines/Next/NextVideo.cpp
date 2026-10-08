@@ -434,6 +434,20 @@ uint8_t NEXTVID::palRead9() {
     return (uint8_t)(((raw & 0x8000) ? 0x80 : 0) | (raw & 1));
 }
 
+void NEXTVID::ulapWrite(uint8_t idx, uint8_t v) {
+    // the nextreg 0xFF stream: GGGRRRBB -> RRRGGGBB, blue lsb = B1 | B0
+    const uint8_t pal = (palCtrl & 0x40) ? 4 : 0;
+    const uint8_t rgb = (uint8_t)(((v & 0x1C) << 3) | ((v & 0xE0) >> 3) | (v & 0x03));
+    setLutEntry(pal, (uint8_t)(0xC0 | (idx & 0x3F)), rgb332_to_333(rgb));
+}
+
+uint8_t NEXTVID::ulapRead(uint8_t idx) {
+    if (!rawPal) return 0;
+    const uint16_t e = rawPal[(palCtrl & 0x40) ? 4 : 0][0xC0 | (idx & 0x3F)];
+    // port_ff3b_dat = dat(5:3) & dat(8:6) & dat(2:1)  (GGG RRR BB)
+    return (uint8_t)((((e >> 3) & 7) << 5) | (((e >> 6) & 7) << 2) | ((e >> 1) & 3));
+}
+
 void NEXTVID::palIndex(uint8_t v) {
     palIdx = v;
     pal9Second = false;
@@ -1198,10 +1212,13 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
     const uint16_t fallback = rgb332_to_333(LS->r4A);
     // border colours 0..7: ULANext paper base 128 (format 0xFF selects the
     // fallback colour, ula_select_bgnd), classic ULA the paper entries 16..23
+    // ULA+ (NR 0x68 bit 3 = port FF3B mode 01, zxula.vhd 531-540): index
+    // 11 & attr 7:6 & paper & colour — the border is attr 00, paper: 192+8+c.
+    const bool ulap = !ulaNext && (LS->r68 & 0x08);
     uint16_t bc[8];
     for (int c = 0; c < 8; c++)
         bc[c] = (uint16_t)(ulaNext ? (mask == 0xFF ? fallback : nxRgb(raw[128 + c], tr))
-                                   : nxRgb(raw[16 + c], tr));
+                                   : nxRgb(raw[(ulap ? 200 : 16) + c], tr));
     for (int c = 0; c < 8; c++) if (!(bc[c] & NX_TR)) bc[c] |= NX_BRD;
     const uint16_t borderV = bc[LS->border & 7];
     if (LS->brd.n) nxPaintBorderRuns(u, xres, bc, borderV);
@@ -1283,6 +1300,16 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
                 const uint8_t a = att[col], b = bmp[col];
                 const uint16_t ink = nxRgb(raw[a & mask], tr);
                 const uint16_t pap = bgnd ? fallback : nxRgb(raw[128 + (a >> shift)], tr);
+                for (int bit = 0; bit < 8; bit++) p[bit] = (b & (0x80 >> bit)) ? ink : pap;
+                p += 8;
+            }
+        } else if (ulap) {
+            // no FLASH, no BRIGHT: attr 7:6 picks one of four 16-entry groups
+            for (int col = 0; col < 32; col++) {
+                const uint8_t a = att[col], b = bmp[col];
+                const uint8_t grp = (uint8_t)(0xC0 | ((a >> 6) << 4));
+                const uint16_t ink = nxRgb(raw[grp | (a & 7)], tr);
+                const uint16_t pap = nxRgb(raw[grp | 8 | ((a >> 3) & 7)], tr);
                 for (int bit = 0; bit < 8; bit++) p[bit] = (b & (0x80 >> bit)) ? ink : pap;
                 p += 8;
             }
