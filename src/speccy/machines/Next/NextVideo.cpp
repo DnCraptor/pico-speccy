@@ -421,6 +421,15 @@ void NEXTVID::defaultPalettes() {
 
 static inline uint8_t writePalSel_(uint8_t ctrl) { return (ctrl >> 4) & 7; }
 
+int NEXTVID::nrRead(uint8_t r) {
+    switch (r) {
+        case 0x40: return palIdx;                                   // auto-incremented index
+        case 0x61: return copIndex & 0xFF;                          // copper write address 7:0
+        case 0x62: return (copCtrl & 0xC0) | ((copIndex >> 8) & 7); // mode & 000 & address 10:8
+        default:   return -1;
+    }
+}
+
 uint8_t NEXTVID::palRead8() {
     // nextreg 0x41 read: bits 8:1 of the current entry (RRRGGGBB)
     if (!rawPal) return 0;

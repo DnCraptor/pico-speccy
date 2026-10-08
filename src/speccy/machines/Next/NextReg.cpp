@@ -290,10 +290,14 @@ void NextReg::reset(bool hard) {
     // (hotkeys, contention-disable, sprite tie; 0x82-0x85 only when 0x85 bit 7
     // asks for it). Zeroing them on a soft reset threw the BIOS setup away —
     // the divMMC automap enable among it.
-    static const uint8_t kKeep[] = { 0x05, 0x06, 0x08, 0x09, 0x0A, 0x82, 0x83, 0x84, 0x85 };
+    static const uint8_t kKeep[] = { 0x05, 0x06, 0x08, 0x09, 0x0A, 0x82, 0x83, 0x84, 0x85,
+                                     0x86, 0x87, 0x88, 0x89 };
     uint8_t kept[sizeof(kKeep)];
     for (unsigned i = 0; i < sizeof(kKeep); i++) kept[i] = reg[kKeep[i]];
-    const uint8_t user7F = reg[0x7F];   // not in the VHDL reset block
+    // NR 0x7F is not in the VHDL reset block: FF at power-on only
+    static bool s_powered = false;
+    const uint8_t user7F = s_powered ? reg[0x7F] : 0xFF;
+    s_powered = true;
     for (int i = 0; i < 256; i++) reg[i] = 0;
     reg[0x7F] = user7F;
     selected = 0;
@@ -351,6 +355,8 @@ void NextReg::reset(bool hard) {
         if (!MemESP::nextBootRom) { reg[0x06] |= 0x01; reg[0x08] |= 0x0A; }
         reg[0x82] = reg[0x83] = reg[0x84] = 0xFF;   // every internal port on
         reg[0x85] = 0x8F;
+        reg[0x86] = reg[0x87] = reg[0x88] = 0xFF;   // expansion-bus port enables
+        reg[0x89] = 0x8F;                           // (zxnext.vhd 1231-1235)
     } else {
         for (unsigned i = 0; i < sizeof(kKeep); i++) reg[kKeep[i]] = kept[i];
         reg[0x06] |= 0xA0;                // hotkey CPU speed / 50-60 Hz re-enabled
@@ -359,6 +365,10 @@ void NextReg::reset(bool hard) {
         if (reg[0x85] & 0x80) {           // "reset the enables on soft reset"
             reg[0x82] = reg[0x83] = reg[0x84] = 0xFF;
             reg[0x85] = 0x8F;
+        }
+        if (!(reg[0x89] & 0x80)) {        // zxnext.vhd 5061: bus enables on reset_type 0
+            reg[0x86] = reg[0x87] = reg[0x88] = 0xFF;
+            reg[0x89] |= 0x0F;
         }
     }
     portEnRecalc();
@@ -735,6 +745,15 @@ uint8_t NextReg::read(uint8_t r) {
         case 0x2C: case 0x2D: case 0x2E:
             return 0x00;   // Pi I2S sample bits (zxnext.vhd 6008-6015) — no Pi here
         case 0x68: return reg[0x68] & 0xFD;   // bit 1 reads 0 (zxnext.vhd NR 0x68 read)
+        case 0x09: return reg[0x09] & 0xF7;   // bit 3 (mapram reset strobe) reads 0
+        case 0x6E: case 0x6F: return reg[r] & 0xBF;   // bit 6 reads 0
+        case 0x89: return reg[0x89] & 0x8F;
+        case 0x40: case 0x61: case 0x62: return (uint8_t)NEXTVID::nrRead(r);
+        case 0x8E: // zxnext.vhd 6158: DFFD 0, 7FFD 2:0, 1, 1FFD 0, 1FFD 2, ROM bit
+            return (uint8_t)(((portDFFD & 1) << 7) | ((port7FFD & 7) << 4) | 0x08 |
+                             ((port1FFD & 1) << 2) | (((port1FFD >> 2) & 1) << 1) |
+                             ((((port7FFD >> 4) & 1) & ~port1FFD & 1) |
+                              (((port1FFD >> 1) & 1) & port1FFD & 1)));
         case 0x08: // bit 7 reads "not locked" (zxnext.vhd 5906)
             return (uint8_t)((reg[0x08] & 0x7F) | (MemESP::pagingLock ? 0 : 0x80));
         case 0x07: { // bits 5:4 = actual speed, 1:0 = programmed
