@@ -1251,7 +1251,10 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
         // polarity-insensitive).
         data |= 0x40;
       } else {
-        if (port254 & 0x10)
+        // Spectrum Next: NR 08 bit 0 = issue 2 keyboard, MIC (bit 3) feeds the
+        // EAR input too (zxnext.vhd 1636, 3459).
+        if ((port254 & 0x10) ||
+            (Z80Ops::isNext && (NextReg::reg[0x08] & 0x01) && (port254 & 0x08)))
           data |= 0x40;
       }
       if (Tape::tapeEarBit)

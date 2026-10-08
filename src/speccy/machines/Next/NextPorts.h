@@ -18,6 +18,7 @@ namespace NextPorts {
     void dacNr(uint8_t r, uint8_t v);                   // NR 0x2C-0x2E
     void audioRegWrite(uint8_t r, uint8_t old);         // NR 0x06/0x08/0x09 written
     void audioReset();                                  // machine reset (both types)
+    void psgModeApply();                                // NR 0x06 bit 0: YM / AY on every AY
     void uartReset(bool hard);                          // UART select / frame / prescaler
     void ulapReset();                                   // ULA+ mode / index, EFF7 (both reset types)
     uint8_t eff7();                                     // port 0xEFF7 bits 3:2 (MF read-back)

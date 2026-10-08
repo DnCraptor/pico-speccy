@@ -90,6 +90,7 @@ public:
     static void spriteAttrWrite(uint8_t v);    // port 0x57 write
     static void spritePatternWrite(uint8_t v); // port 0x5B write
     static void spriteNrSelect(uint8_t v);     // nextreg 0x34
+    static uint8_t spriteNrIndex();            // NR 0x34 read: sprite_mirror_id
     // nextreg 0x35-0x39 (inc=false) / 0x75-0x79 (inc=true: advance the sprite)
     static void spriteAttrDirect(uint8_t byteIdx, uint8_t v, bool inc = false);
 

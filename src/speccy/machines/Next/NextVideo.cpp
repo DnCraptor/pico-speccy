@@ -554,6 +554,10 @@ void NEXTVID::spriteNrSelect(uint8_t v) {
     else sprNrSlot = v & 0x7F;
 }
 
+uint8_t NEXTVID::spriteNrIndex() {
+    return (NextReg::reg[0x09] & 0x10) ? sprAttrSlot : sprNrSlot;
+}
+
 void NEXTVID::spriteAttrDirect(uint8_t byteIdx, uint8_t v, bool inc) {
     c1Drain();
     const bool lock = NextReg::reg[0x09] & 0x10;

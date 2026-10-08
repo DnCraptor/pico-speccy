@@ -170,6 +170,11 @@ public:
     uint8_t selReg() const { return selectedRegister; }
 
     void init();
+    // Spectrum Next NR 0x06 bits 1:0 (ym2149.vhd ctrl_aymode): 0 = YM (32-step
+    // volume table, full register read-back, registers 16-31 read 0xFF), 1 = AY
+    // (16-step table, unused bits read 0, 16-31 alias 0-15); -1 = not a Next
+    // (the generic log table and the AY read-back).
+    void setNextPsgMode(int8_t m);
     int set_chip_type(ayemu_chip_t chip, int *custom_table);
     void set_chip_freq(int chipfreq);
     int set_stereo(ayemu_stereo_t stereo, int *custom_eq);
@@ -228,6 +233,7 @@ private:
 
     uint8_t regs[16];
     uint8_t selectedRegister;
+    int8_t next_psg = -1;            // see setNextPsgMode
 
     // Bit-bang UART decoder for MIDI via AY IOPortA (reg 14, bit 2)
     int8_t midi_bitbang_pos;   // -1=idle, 0=start received, 1-8=data bits, 9=stop

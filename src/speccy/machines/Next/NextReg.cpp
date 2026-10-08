@@ -349,7 +349,7 @@ void NextReg::reset(bool hard) {
         reg[0x05] = 0x41; // periph1: joy0 Kempston 1, joy1 Sinclair 2, 50 Hz, scandoubler
                           // (zxnext.vhd nr_05_joy0 := "001", joy1 := "000")
         reg[0x06] = 0xA0; // periph2: hotkeys enabled
-        reg[0x08] = 0x10; // periph3: AY enabled
+        reg[0x08] = 0x10; // periph3: internal speaker on (nr_08_internal_speaker_en)
         // DivMMC automap enable: power-on 0, set by the BIOS (TBBLUE.FW
         // PERIPH5 bit 4). The direct enNextZX boot has no BIOS to do it.
         reg[0x0A] = MemESP::nextBootRom ? 0x00 : 0x10;
@@ -598,6 +598,10 @@ void NextReg::write(uint8_t r, uint8_t v) {
             MemESP::nextConfigPage = v;
             MemESP::applyNextConfigWindow();
             break;
+        case 0x0A: // zxnext.vhd 5191-5198: MF type (7:6) and SD swap (5) only in
+                   // config mode; automap, mouse button reverse and DPI always
+            if (!MemESP::nextConfigMode) reg[0x0A] = (uint8_t)((old & 0xE0) | (v & 0x1F));
+            break;
         case 0x02: // Reset request: bit1 = hard, bit0 = soft. NextZXOS uses a
                    // soft reset to restart into the freshly configured state
                    // at the end of each boot stage — latching only left the
@@ -743,7 +747,7 @@ uint8_t NextReg::read(uint8_t r) {
         case 0x00: return 10;    // machine ID: ZX Spectrum Next
         case 0x01: return 0x32;  // core major.minor = 3.2
         case 0x03: return reg03Compose();
-        case 0x02: return (uint8_t)((reg[0x02] & ~0x18) | NextMf::nr02Bit() | (s_ioTrapCause ? 0x10 : 0));
+        case 0x02: return (uint8_t)((reg[0x02] & ~0x78) | NextMf::nr02Bit() | (s_ioTrapCause ? 0x10 : 0));
         case 0xD8: return reg[0xD8] & 0x01;
         case 0xDA: return s_ioTrapCause;
         case 0x0E: return 0x03;  // core sub-minor: report 3.02.03 — the
@@ -803,7 +807,38 @@ uint8_t NextReg::read(uint8_t r) {
             uint8_t o;
             return NextInt::nrRead(r, o) ? o : reg[r];
         }
-        default:   return reg[r];
+        // Read masks for the registers kept raw in reg[] (zxnext.vhd read mux
+        // 5880-6290): bits a register does not hold read 0.
+        case 0x0A: return reg[0x0A] & 0xFB;
+        case 0x0F: return reg[0x0F] & 0x0F;
+        case 0x11: return reg[0x11] & 0x07;
+        case 0x12: case 0x13: return reg[r] & 0x7F;
+        case 0x2F: return reg[0x2F] & 0x03;
+        case 0x34: // sprite_mirror_id: the live nextreg sprite index (auto-increments)
+            return NEXTVID::spriteNrIndex();
+        case 0x4C: return reg[0x4C] & 0x0F;
+        case 0x6A: return reg[0x6A] & 0x3F;
+        case 0x70: return reg[0x70] & 0x3F;
+        case 0x71: return reg[0x71] & 0x01;
+        case 0x81: return reg[0x81] & 0x78;   // speed bits forced 00, no bus ROMCS
+        case 0x85: return reg[0x85] & 0x8F;
+        case 0x8A: return reg[0x8A] & 0x3F;
+        case 0x8F: return reg[0x8F] & 0x03;
+        case 0x90: return reg[0x90] & 0xFC;
+        case 0x93: return reg[0x93] & 0x0F;
+        case 0xA0: return reg[0xA0] & 0x39;
+        case 0xA2: return (uint8_t)((reg[0xA2] & 0xDD) | 0x02);
+        case 0xA8: return reg[0xA8] & 0x01;
+        case 0xF8: return reg[0xF8] & 0x7F;
+        case 0x98: case 0x99: case 0x9A: case 0x9B:   // Pi GPIO inputs: no Pi
+        case 0xA9:                                    // ESP GPIO inputs
+        case 0xB2:                                    // MD extra buttons: none
+            return 0x00;
+        default: {
+            // Registers missing from the read mux read 0 ("when others").
+            static const uint8_t kReadable[32] = { 0xEF, 0xCF, 0xFF, 0xDF, 0xCD, 0xF1, 0x1F, 0x00, 0x1F, 0x1C, 0xFF, 0x00, 0x16, 0xDF, 0x03, 0x80, 0xFF, 0xD7, 0x0F, 0x0F, 0x05, 0x03, 0x07, 0x0F, 0x7D, 0x77, 0x00, 0x07, 0x00, 0x00, 0x01, 0x07 };
+            return (kReadable[r >> 3] >> (r & 7)) & 1 ? reg[r] : 0x00;
+        }
     }
 }
 

@@ -108,8 +108,16 @@ static void tsSelectReset() {
     ay_next_pan[0] = ay_next_pan[1] = ay_next_pan[2] = 3;
 }
 
+// NR 0x06 bits 1:0 -> ym2149.vhd ctrl_aymode = bit 0 (zxnext.vhd 6389): 00/10 YM,
+// 01/11 AY (11 also holds them in reset). Volume curve and register read-back.
+void NextPorts::psgModeApply() {
+    const int8_t m = NextReg::reg[0x06] & 1;
+    for (int i = 0; i < 3; i++) if (chips[i]) chips[i]->setNextPsgMode(m);
+}
+
 void NextPorts::audioReset() {
     tsSelectReset();
+    psgModeApply();
     ayModesApply();
     dacReset();
 }
@@ -126,6 +134,7 @@ void NextPorts::audioRegWrite(uint8_t r, uint8_t old) {
             for (int i = 0; i < 3; i++) if (chips[i]) chips[i]->reset();
             tsSelectReset();
         }
+        psgModeApply();
         return;
     }
     if (r == 0x08 && !(NextReg::reg[0x08] & 0x08) && (old & 0x08)) dacReset();

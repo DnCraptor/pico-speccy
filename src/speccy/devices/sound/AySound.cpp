@@ -245,6 +245,20 @@ int AySound::set_chip_type(ayemu_chip_t type, int *custom_table)
     //     table[n] = Rampa_AY_table[n / 2];
     //     // table[n] = SoftSpec48_AY_table[n / 2];
     
+    // Spectrum Next: the FPGA's own tables (ym2149.vhd volTableYm / volTableAy),
+    // scaled to the same full level. Our index is the 5-bit YM level (fixed
+    // volume v -> 2v+1, envelope 0..31); the AY uses its top four bits, so a
+    // 16-step envelope and the same fixed levels.
+    if (next_psg >= 0) {
+        static const uint8_t ym[32] = {
+            0x00,0x01,0x01,0x02,0x02,0x03,0x03,0x04, 0x06,0x07,0x09,0x0a,0x0c,0x0e,0x11,0x13,
+            0x17,0x1b,0x20,0x25,0x2c,0x35,0x3e,0x47, 0x54,0x66,0x77,0x88,0xa1,0xc0,0xe0,0xff };
+        static const uint8_t ay[16] = {
+            0x00,0x03,0x04,0x06,0x0a,0x0f,0x15,0x22, 0x28,0x41,0x5b,0x72,0x90,0xb5,0xd7,0xff };
+        for (int v = 0; v < 32; v++)
+            table[v] = int(max_volume * (next_psg ? ay[v >> 1] : ym[v]) / 255.0f);
+    }
+
     type = AYEMU_AY;
 
     default_chip_flag = 0;
@@ -655,19 +669,39 @@ void AySound::updIOPortB() {
     ayregs.IOPortB = regs[15] & 0xff;
 }
 
+void AySound::setNextPsgMode(int8_t m)
+{
+    if (next_psg == m) return;
+    next_psg = m;
+    default_chip_flag = 1;      // set_chip_type rebuilds the table at the next prepare
+    dirty = 1;
+    prepare_generation();
+}
+
 uint8_t AySound::getRegisterData()
 {
+    // Spectrum Next (ym2149.vhd p_rdata): the register number latch is 5 bits.
+    // YM mode reads every register whole and 16-31 as 0xFF; AY mode aliases
+    // 16-31 onto 0-15 and masks the unused bits (the generic path below).
+    uint8_t sel = selectedRegister;
+    if (next_psg >= 0 && sel < 32) {
+        if (next_psg == 0) {
+            if (sel >= 16) return 0xFF;
+            if (sel < 14) return regs[sel];
+        }
+        sel &= 15;
+    }
 
     // Registers past 15 don't exist: the TSFM select codes (#F8..#FF) and any
     // YM2203 FM register number park the latch out of range, and the shift
-    // below is undefined once (selectedRegister - 8) reaches 32.
-    if (selectedRegister >= 16) return 0xFF;
-    if ((selectedRegister >= 14) && ((regs[7] >> (selectedRegister - 8)) & 1) == 0) {
-        // printf("getAYRegister %d: %02X\n", selectedRegister, 0xFF);
+    // below is undefined once (sel - 8) reaches 32.
+    if (sel >= 16) return 0xFF;
+    if ((sel >= 14) && ((regs[7] >> (sel - 8)) & 1) == 0) {
+        // printf("getAYRegister %d: %02X\n", sel, 0xFF);
         return 0xFF;
     }
 
-    switch(selectedRegister) {
+    switch(sel) {
       case 0x00: return ayregs.tone_a & 0xff;
       case 0x01: return (ayregs.tone_a >> 8) & 0x0f;
       case 0x02: return ayregs.tone_b & 0xff;

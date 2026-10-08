@@ -108,6 +108,7 @@ extern "C" volatile uint32_t hdmi_au_late_write_ct;
 #include "speccy/machines/EvoBase.h"
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Next/NextVideo.h"
+#include "speccy/machines/Next/NextPorts.h"
 #include "speccy/core/roms.h"      // gb_rom_tbblue_loader (Next TBBLUE boot chain)
 #include "CodeOverlay.h"
 #include "speccy/devices/gs/NgsSd.h"
@@ -2217,6 +2218,7 @@ void ESPectrum::reset(uint8_t romInUse) {
     chip2->reset();
     ay_next_pan[0] = ay_next_pan[1] = ay_next_pan[2] = 3;
   }
+  if (Config::arch == A_NEXT) NextPorts::psgModeApply();   // YM / AY tables (NR 0x06)
 
   // Reset the TurboSound FM halves. The sample rate can have changed with the
   // arch (48K/Profi run at 30469 Hz, Pentagon at 31250), and every phase and
@@ -4177,6 +4179,7 @@ void ESPectrum::loop() {
         bool mix_chip2 = AY_emu && Z80Ops::isNext && chip2;
         bool p0L = true, p0R = true, p1L = true, p1R = true;
         bool p2L = ay_next_pan[2] & 2, p2R = ay_next_pan[2] & 1;
+        bool nx_beep_off = false, nx_mute = false;
         if (Z80Ops::isNext) {
           // turbosound.vhd: with TurboSound off only the AY last selected is
           // heard; NR 0x06 PSG mode 11 holds all three in reset (silent).
@@ -4188,6 +4191,13 @@ void ESPectrum::loop() {
           mix_chip2 = mix_chip2 && !held && (ts || sel == 2);
           p0L = ay_next_pan[0] & 2; p0R = ay_next_pan[0] & 1;
           p1L = ay_next_pan[1] & 2; p1R = ay_next_pan[1] & 1;
+          // zxnext.vhd 6504 + audio_mixer.vhd: NR 06 bit 6 AND NR 08 bit 4 send the
+          // beeper (EAR/MIC) to the internal speaker ONLY; it leaves the mixed PCM.
+          // We have no internal speaker, so it is simply not heard.
+          nx_beep_off = (NextReg::reg[0x06] & 0x40) && (NextReg::reg[0x08] & 0x10);
+          // NR 09 bit 2 = HDMI audio off (o_AUDIO_HDMI_AUDIO_EN). Only HDMI is muted
+          // on the board; here that is our output when the audio driver is HDMI.
+          nx_mute = (NextReg::reg[0x09] & 0x04) && Config::audio_driver == 4;
         }
         bool mix_covox = CovoxSubsys::enabled && audioBufferCovoxL;
         bool mix_saa = SaaSubsys::enabled && saaChip;
@@ -4202,7 +4212,7 @@ void ESPectrum::loop() {
         int flat_mn = 255, flat_mx = 0;
         for (int i = 0; i < samplesPerFrame; i++)
         {
-          int beeper_L = overSamplebuf[i];
+          int beeper_L = nx_beep_off ? 0 : overSamplebuf[i];
           if (mix_pit) beeper_L += audioBufferPIT[i];
           if (mix_fdd) beeper_L += getFDDSample(i);
           if (ftv) beeper_L += ftv[i] >> 1;
@@ -4285,6 +4295,7 @@ void ESPectrum::loop() {
           }
           // GS is mixed live in the audio timer IRQ (pcm_call_inner),
           // not here — burst-sampling on core0 would time-compress it.
+          if (nx_mute) beeper_L = beeper_R = 0;
           audioBuffer_L[i] = beeper_L > 255 ? 255 : (beeper_L < 0 ? 0 : beeper_L);
           audioBuffer_R[i] = beeper_R > 255 ? 255 : (beeper_R < 0 ? 0 : beeper_R);
           if (audioBuffer_L[i] < flat_mn) flat_mn = audioBuffer_L[i];
