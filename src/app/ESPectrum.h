@@ -299,6 +299,10 @@ public:
     // beam-locked multicolor effects), Profi ROMain forces 7 MHz via #028B.
     static uint8_t multUser;
     static uint32_t lastBeeperTstates;
+    // A guest clock switch mid-frame (Next NR 0x07, TS-Conf ZCLK) rescales
+    // CPU::tstates; the beeper's T-state cursor and partial sample must move
+    // with it (beeperClockRescale), or the next delta wraps negative.
+    static void beeperClockRescale(uint8_t om, uint8_t nm);
     static uint32_t accumulatorFP;
     static uint32_t tstatesPerSampleFP;
     static uint32_t beeperSampleAccum;

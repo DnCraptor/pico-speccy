@@ -407,6 +407,17 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   брал старое 5BD3, `RET` уходил на 0000, а ROM3 NextZXOS по 0000 = `JP 3BE8` = NR 02 = 01 →
   меню. Признак «тест запускается и выходит в меню» = падение на 0000 в 48 BASIC; кольцо
   `[NXJMP]` (NEXT_TRACE) печатается на записи сброса в NR 02 и перевзводится каждым запуском MF.
+- **Смена частоты посреди кадра обязана двигать курсор бипера** (2026-10-08, hw-confirmed:
+  Browser NextZXOS, курсор за край каталога = BEEP; `debug/DVp2-next-beep-1.0.9.elf`).
+  NextZXOS пишет NR 07 = 0 вокруг BEEPER и 3 после; `applySpeed` сдвигал `CPU::tstates`, а
+  `ESPectrum::lastBeeperTstates` оставался в старых единицах → delta < 0 = ~4e9 → цикл
+  `BeeperGetSample` писал далеко за `overSamplebuf` (640 B) и портил указатель кольца
+  HDMI-аудио и таблицу строк кадра: SIGBUS на ОБОИХ ядрах сразу (под GDB обработчик не
+  успевает в UART — смотреть BFAR в перемешанных строках или Call Stack). Теперь
+  `ESPectrum::beeperClockRescale(old,new)` из `NextReg::applySpeed` и `tsClockRescale`
+  (TS-Conf — та же дыра), и цикл ограничен размером буфера (в условии цикла: проверка
+  внутри раздувала RAM-функцию на 992 B). Pentagon #EFF7 / Profi #028B / GMX #7EFD
+  tstates не пересчитывают вовсе — там курсор бипера согласован, но см. TS-Conf ZCLK.
 - **Gigascreen на Next** (2026-10-08, hw: «работает»): свой, в `NEXTVID` — только строки
   с одним классическим ULA (Layer 2 / спрайты / тайлмап / ULANext / LoRes / hi-res его
   выключают), prev = 4 бита/пиксель paper (24 КБ PSRAM), смесь 16x16 → ближайший индекс

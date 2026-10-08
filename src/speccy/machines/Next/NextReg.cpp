@@ -465,6 +465,7 @@ void NextReg::applySpeed() {
     ESPectrum::multiplicator = m;
     if (m > old) CPU::tstates <<= (m - old);
     else         CPU::tstates >>= (old - m);
+    ESPectrum::beeperClockRescale(old, m);   // the beeper's own T-state cursor
     CPU::updateStatesInFrame();
     NEXTVID::onClockChange();
     contendRecalc();   // contention exists at 3.5 MHz only

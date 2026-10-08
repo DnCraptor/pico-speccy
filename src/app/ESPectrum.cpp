@@ -3032,6 +3032,23 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
   }
 }
 
+// The beeper keeps the one absolute T-state cursor of the audio mixers (AY,
+// Covox and the rest derive their position from CPU::tstates itself). A guest
+// that drops the clock mid-frame — NextZXOS's Browser writes NR 0x07 = 0 around
+// its error BEEP and back to 3 after it — has CPU::tstates shifted right while
+// lastBeeperTstates stays in the old units: the next delta wrapped to ~4e9,
+// the sample loop below ran past overSamplebuf (640 B) for good and corrupted
+// the HDMI audio ring pointer and the frame-buffer row table behind it —
+// SIGBUS on both cores at once (hw 2026-10-08). Same shift as the caller's.
+void ESPectrum::beeperClockRescale(uint8_t om, uint8_t nm) {
+  if (om == nm) return;
+  auto sc = [&](uint32_t v) { return nm > om ? v << (nm - om) : v >> (om - nm); };
+  lastBeeperTstates     = sc(lastBeeperTstates);
+  beeperTstatesInSample = sc(beeperTstatesInSample);
+  beeperSampleAccum     = sc(beeperSampleAccum);
+  accumulatorFP         = sc(accumulatorFP);
+}
+
 __not_in_flash("audio") void ESPectrum::BeeperGetSample() {
   uint32_t currentTstates = CPU::tstates;
   uint32_t delta = currentTstates - lastBeeperTstates;
@@ -3046,7 +3063,9 @@ __not_in_flash("audio") void ESPectrum::BeeperGetSample() {
   accumulatorFP += (delta << 8);
 
   // Generate completed output samples
-  while (accumulatorFP >= effectiveFP) {
+  // Bounded by the buffer: a T-state cursor that ever goes wrong must cost a
+  // click, not the memory behind overSamplebuf (see beeperClockRescale).
+  while (accumulatorFP >= effectiveFP && audbufcntover < ESP_AUDIO_SAMPLES_PENTAGON) {
     accumulatorFP -= effectiveFP;
     // Overflow tstates belong to next sample
     uint32_t overflowTstates = accumulatorFP >> 8;

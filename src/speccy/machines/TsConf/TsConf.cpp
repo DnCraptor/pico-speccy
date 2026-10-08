@@ -1780,6 +1780,7 @@ static void tsClockRescale(uint8_t om, uint8_t nm) {
     s_poll_steal     = tsRescaleT(s_poll_steal, om, nm);
     s_poll_t         = tsRescaleT(s_poll_t, om, nm);
     VIDEO::ts_line_t = tsRescaleT(VIDEO::ts_line_t, om, nm);   // whole-line renderer clock
+    ESPectrum::beeperClockRescale(om, nm);                     // beeper T-state cursor
 }
 
 void TsConf::applyZclk(bool fromGuest) {
