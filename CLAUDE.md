@@ -397,8 +397,16 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   бордюр. `rom=` в строке NEXT: после запуска врёт честно: NR 8C = A0 → читается AltROM (48 BASIC).
   Цена: +320 B RAM (проверка встроена в preOpcFetch). Не сделано: кнопка M1 (NMI-меню MF),
   повторное включение окна по выборке #0066 внутри активного NMI. `[NXJMP]` под NEXT_TRACE
-  печатает кольцо переходов через 192 после RETN MF. Ещё не проверено: .snx, .z80, переход
-  в 128 BASIC из меню NextZXOS (тот же путь по zx_go).
+  печатает кольцо на записи сброса в NR 02 (перевзводится каждым запуском MF). Проверено
+  на железе 2026-10-08: DIHalt.sna, LmixLoRs/L2Port/L2Scroll/L2Colour.snx, .z80. Ещё не
+  проверено: переход в 128 BASIC из меню NextZXOS (тот же путь по zx_go).
+- **Окно divMMC главнее окна записи Layer 2** (2026-10-08, hw-confirmed: LmixLoRs.snx из
+  Browser, `debug/DVp2-next-mf6-1.0.9.elf`): zxnext.vhd ~3085 обслуживает `divmmc_rom_en` /
+  `divmmc_ram_en` раньше `sram_layer2_map_en`. В `MemESP::writebyte` было наоборот: IM1
+  esxDOS под игрой с портом 0x123B сохранял SP в 25B8 — в Layer 2, на выходе `LD SP,(25B8)`
+  брал старое 5BD3, `RET` уходил на 0000, а ROM3 NextZXOS по 0000 = `JP 3BE8` = NR 02 = 01 →
+  меню. Признак «тест запускается и выходит в меню» = падение на 0000 в 48 BASIC; кольцо
+  `[NXJMP]` (NEXT_TRACE) печатается на записи сброса в NR 02 и перевзводится каждым запуском MF.
 - **Gigascreen на Next** (2026-10-08, hw: «работает»): свой, в `NEXTVID` — только строки
   с одним классическим ULA (Layer 2 / спрайты / тайлмап / ULANext / LoRes / hi-res его
   выключают), prev = 4 бита/пиксель paper (24 КБ PSRAM), смесь 16x16 → ближайший индекс

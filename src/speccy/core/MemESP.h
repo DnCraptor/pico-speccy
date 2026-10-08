@@ -591,10 +591,6 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
     if (__builtin_expect(Config::numMemWriteBP != 0, 0))
         checkMemWriteBP(addr);
     uint8_t slot = addr >> 13;
-    if (slot <= 1 && wr_overlay_active) { // Next Layer 2 write window (port 0x123B)
-        wrOverlay[slot][addr & 0x1fff] = data;
-        return;
-    }
     if (slot <= 1 && ramCurrent[0] == g_alfWindow) return; // ALF lazy cart: page 0 is ROM
     if (slot <= 1 && divmmc_mapped) {
         if (slot == 0) {
@@ -616,6 +612,15 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
             if (divmmc_hi_dirty) *divmmc_hi_dirty = true;
             else if (mb02_page_dirty) *mb02_page_dirty = true; // pool frame → mark for write-back
         }
+        return;
+    }
+    // Next Layer 2 write window (port 0x123B) / TBBLUE config window. AFTER the
+    // divMMC window: zxnext.vhd ~3085 serves divmmc_rom_en / divmmc_ram_en
+    // before sram_layer2_map_en. The other way round, an esxDOS IM1 handler
+    // under a Layer 2 game saved its SP into Layer 2 instead of divMMC RAM
+    // and returned to 0x0000 (hw 2026-10-08, LmixLoRs.snx -> NextZXOS menu).
+    if (slot <= 1 && wr_overlay_active) {
+        wrOverlay[slot][addr & 0x1fff] = data;
         return;
     }
     // Next ROM lives in writable PSRAM — enforce read-only (after DivMMC:

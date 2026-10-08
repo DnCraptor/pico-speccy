@@ -154,7 +154,7 @@ void NextMf::retn() {
     setMem(false);
     note("RETN: paged out");
 #if NEXT_TRACE
-    nxJumpArmAfter(192);
+    nxJumpArmAfter(0);   // re-arm the [NXJMP] ring for this launch
 #endif
 }
 

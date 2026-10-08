@@ -2906,7 +2906,9 @@ static bool s_nx_jmp_done = false;
 static int32_t s_nx_after = -1;   // >0: dump the ring this many transfers later
 // NextMf::retn(): the snapshot launch ends in the Multiface's RETN — what runs
 // after it is the question, so dump the ring 192 transfers later.
-Z80_COLD void nxJumpArmAfter(int n) { if (!s_nx_jmp_done && s_nx_after < 0) s_nx_after = n; }
+// Every Multiface launch re-arms the ring: n > 0 dumps n transfers later,
+// n == 0 only waits for the next landing / NR 02 reset write.
+Z80_COLD void nxJumpArmAfter(int n) { s_nx_jmp_done = false; s_nx_after = n > 0 ? n : -1; }
 static void nxJumpDump(const char* why);
 // A nextreg write into the same ring: to = reg<<8 | value, sp = PC.
 Z80_COLD void nxNrNote(uint8_t r, uint8_t v) {
@@ -2918,6 +2920,9 @@ Z80_COLD void nxNrNote(uint8_t r, uint8_t v) {
     j.p7 = NextReg::port7FFD; j.p1 = NextReg::port1FFD;
     j.iff = (uint8_t)(Z80::isIFF1() | (Z80::isIFF2() << 1));
     j.dm = (uint8_t)(MemESP::divmmc_mapped | (DivMMC::automap << 1) | (DivMMC::conmem << 2));
+    // NextZXOS's 48 BASIC turns 0x0000 into NR 02 = 01 (ROM3 #0000 -> #3BE8):
+    // a snapshot that crashes returns to the menu through here.
+    if (r == 0x02 && (v & 0x03)) nxJumpDump("NR 02 reset request");
 }
 Z80_COLD void nxJumpNote(char t) {
     if (s_nx_jmp_done) return;
