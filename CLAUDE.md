@@ -357,9 +357,21 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   копер — RAM палитр/спрайтов/копера переживает); раньше оставались line IRQ, спрайты,
   L2, тайлмап. NR 0x7F reset не трогает. (5) DMA WR3: байты mask/match потребляются, бит 6
   на Next стартует передачу (dma.vhd 572-591); (6) NR 0x8E: 7FFD бит 4 <- d0 при d2=0, 1FFD
-  = {d1,d0,d2}. Полный список расхождений с VHDL — в ответе сессии 2026-10-08 (прерывания
-  IM2/CTC, порядок слоёв 2-7 и blend, прозрачность NR 0x14 по RGB, prescaler DMA, UART,
-  TurboSound select, ULA scroll, 0x123B).
+  = {d1,d0,d2}. Полный список расхождений с VHDL со статусами (сделано / hw-confirmed) —
+  **`~/.claude/plans/next-vhdl-gaps.md`**; отмечать там каждый пункт по мере работы.
+- **Контроллер прерываний + CTC** (2026-10-08, NOT hw-tested, `debug/DVp2-next-int1-1.0.9.elf`;
+  план `~/.claude/plans/next-vhdl-gaps.md` §1): `machines/Next/NextInt.{h,cpp}` (flash) — 14
+  источников по VHDL (0 line, 3-6 CTC 0-3, 11 ULA; UART нет), pulse-режим (32/36 CPU-тактов)
+  и hw IM2 (NR 0xC0 b0: защёлка, вектор {C0 7:5, источник, 0}, daisy chain, RETI ED 4D), NR
+  0x20/0xC0-0xCE, CTC 0x183B-0x1F3B (28 МГц, /16 /256, цепочка счётчиков, trigger),
+  stackless NMI (C2/C3 ловят адрес на каждом NMI). Время — абсолютный 28 МГц такт из
+  `CPU::tstates * (8 >> multiplicator)`, переживает смену скорости. Line IRQ теперь на
+  hc_ula 255 строки ПЕРЕД заданной (~100 T раньше) с NR 0x64. NR 0x22 b2 = #FF b6 = NOT C4 b0
+  — одна защёлка (`NextReg::portFFIntDisable`, `ulaIrqDisabled` удалён). CPU::loop: середина
+  кадра Next — один цикл слайсов до `NextInt::nextEventT` при `NextInt::ex` (бывшая только-line
+  нарезка); EI/RETI/RETN и взводящие записи режут слайс (`NextInt::wake`). Хост-тест
+  `tools/nextint_test.cpp` (рецепт в шапке, стабы `tools/nextint_stub/`) — гонять после
+  любых правок NextInt. Не сделано: DMA уступает прерываниям (NR 0xCC-0xCE только хранятся).
 - **Декод #7FFD/#1FFD/#DFFD по VHDL** (2026-10-08, hw-confirmed: EYEACHE через esxDOS в
   личности Pentagon; zxnext.vhd 2578-2599): port_fd =
   A1:0 = 01; #7FFD = A15=0 и (A14=1 ИЛИ тайминг не +3) и не #1FFD; #1FFD = A15:12 = 0001;

@@ -68,10 +68,8 @@ public:
                  ((uint32_t)reg[0x84] << 16) | ((uint32_t)(reg[0x85] & 0x0F) << 24);
     }
 
-    // Line interrupt state (nextreg 0x22/0x23)
-    static bool     lineIrqEnabled;
-    static bool     ulaIrqDisabled;
-    static uint16_t lineIrqLine;
+    // The line interrupt (NR 0x22/0x23), the hardware-IM2 controller and the
+    // CTC live in NextInt (NextInt.h).
 
     static void reset(bool hard);
     // nextreg 0x02 write latches a reset request; ESPectrum::loop performs
@@ -81,9 +79,6 @@ public:
     // Re-derive the live clock from nextreg 0x07 under Config::next_clk_cap
     // (the menu's CPU cap hook; also the body of a 0x07 write).
     static void applySpeed();
-    // A write to NR 0x22/0x23 moves (or arms) the line interrupt: end the
-    // running unchecked exec_nocheck slice so CPU::loop re-derives the window.
-    static void lineIrqReslice();
     static uint8_t read(uint8_t r);
 
     // Legacy paging on Next (called from Ports.cpp with Next decodes)
@@ -133,9 +128,10 @@ public:
     static void applyRasterPaper();   // recompute paperLineV from raster()
 
     // Timex/SCLD port 0xFF (Next decodes the full low byte). bit 6 disables
-    // the ULA frame interrupt (zxnext.vhd port_ff_interrupt_disable — zx_go's
-    // conformance matrix flagged it as boot-relevant); bits 5:0 mirror
-    // nextreg 0x69 bits 5:0. Reads are gated on nextreg 0x08 bit 2.
+    // the ULA frame interrupt (zxnext.vhd port_ff_interrupt_disable) and is ONE
+    // latch with NR 0x22 bit 2 and NOT NR 0xC4 bit 0 (zxnext.vhd 3612-3624,
+    // last write wins); bits 5:0 mirror nextreg 0x69 bits 5:0. Reads are gated
+    // on nextreg 0x08 bit 2.
     static uint8_t portFF;
     static bool    portFFIntDisable;
     static void writePortFF(uint8_t v);

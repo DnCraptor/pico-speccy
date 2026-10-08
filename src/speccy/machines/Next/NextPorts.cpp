@@ -12,6 +12,7 @@
 #include "NextReg.h"
 #include "NextVideo.h"
 #include "NextRtc.h"
+#include "NextInt.h"
 #include "app/ESPectrum.h"
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
@@ -55,6 +56,10 @@ int NextPorts::input(uint16_t address) {
     // I2C bus + DS1307 (NextRtc.cpp); NR 0x83 bit 2 undecodes both ports
     if (address == 0x103B && NextReg::portOn(NextReg::PE_I2C)) return NextRtc::readScl();
     if (address == 0x113B && NextReg::portOn(NextReg::PE_I2C)) return NextRtc::readSda();
+    // CTC channels 0x183B-0x1F3B: A15:11 = 00011, A10:8 = channel (zxnext.vhd
+    // 2690); channels 4-7 do not exist on the board and read 0.
+    if ((address & 0xF8FF) == 0x183B && NextReg::portOn(NextReg::PE_CTC))
+        return NextInt::ctcRead((uint8_t)((address >> 8) & 7));
     // Port 0xFF: the Timex register read-back, gated on nextreg 0x08 bit 2;
     // otherwise the ULA floating bus. zxnext.vhd also needs port_ff_io_en
     // (NR 0x82 bit 0) for the read-back — ignored here like the write
@@ -82,6 +87,10 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
     // I2C bus + DS1307 (NextRtc.cpp)
     if (address == 0x103B && NextReg::portOn(NextReg::PE_I2C)) { NextRtc::writeScl(data); return true; }
     if (address == 0x113B && NextReg::portOn(NextReg::PE_I2C)) { NextRtc::writeSda(data); return true; }
+    if ((address & 0xF8FF) == 0x183B && NextReg::portOn(NextReg::PE_CTC)) {
+        NextInt::ctcWrite((uint8_t)((address >> 8) & 7), data);
+        return true;
+    }
 
     // Next DACs (Covox/SpecDrum/Soundrive ports): A/B = left, C/D = right,
     // routed through the stereo Covox channel. Each port is gated by its

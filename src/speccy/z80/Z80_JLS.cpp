@@ -46,6 +46,7 @@
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/core/Rzx.h"     // Rzx::mode / onIn: RZX playback substitutes every IN
 #include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextInt.h"
 #include "speccy/z80/next_memory.h"
 
 
@@ -1162,7 +1163,9 @@ void Z80::interrupt(void) {
         // INT-ack bus byte: the Karabas serial-mouse hw_int drives 0xE7
         // (RST20H) while its request is asserted; the ULA default is 0xFF.
         // TS-Conf drives a per-source vector (#FF FRAME / #FD LINE / #FB DMA).
+        // Next hardware IM2 (NR 0xC0 bit 0): {NR 0xC0 7:5, source, 0}.
         uint8_t busByte = Z80Ops::isTsconf ? tsVect
+                        : (Z80Ops::isNext && NextInt::ex) ? NextInt::ack()
                         : (Ports::serialMouseIntAsserted() ? 0xE7 : 0xFF);
         REG_PC = Z80Ops::peek16((regI << 8) | busByte); // +6 t-estados
 
@@ -1231,6 +1234,13 @@ Z80_COLD void Z80::nmi(void) {
 
     regR++;
     ffIFF1 = false;
+    // Next: NR 0xC2/0xC3 capture the return address on every NMI; with NR 0xC0
+    // bit 3 (stackless NMI) the two stack writes are suppressed, SP still moves
+    // (zxnext.vhd 2050-2085).
+    if (Z80Ops::isNext && NextInt::nmiStackless(REG_PC)) {
+        VIDEO::Draw(6, false);
+        REG_SP = (uint16_t)(REG_SP - 2);
+    } else
     push(REG_PC); // 3+3 t-estados + contended si procede
     REG_PC = REG_WZ = 0x0066;
 
@@ -2627,6 +2637,7 @@ void Z80::decodeOpcodefb() /* EI */
     ffIFF1 = ffIFF2 = true;
     pendingEI = true;
     if (Z80Ops::isTsconf) TsConf::intEnableHook();
+    if (Z80Ops::isNext && NextInt::ex) NextInt::wake();
 }
 
 
@@ -3710,6 +3721,7 @@ void Z80::decodeED(void) {
             REG_PC = REG_WZ = pop();
             check_trdos();
             if (Z80Ops::isTsconf && ffIFF1) TsConf::intEnableHook();
+            if (Z80Ops::isNext && NextInt::ex) NextInt::reti();   // the source in service leaves it
             break;
         }
         case 0x45:
@@ -3721,10 +3733,17 @@ void Z80::decodeED(void) {
         case 0x7D:
         { /* RETN */
             ffIFF1 = ffIFF2;
-            REG_PC = REG_WZ = pop();
+            if (Z80Ops::isNext && NextInt::retnArmed) {
+                // stackless NMI (NR 0xC0 bit 3): the address comes from NR
+                // 0xC2/0xC3, the stack read is suppressed, SP still moves
+                VIDEO::Draw(6, false);
+                REG_SP = (uint16_t)(REG_SP + 2);
+                REG_PC = REG_WZ = NextInt::stacklessRetn();
+            } else REG_PC = REG_WZ = pop();
             if (Z80Ops::isNext && DivMMC::enabled) DivMMC::nextRetn();
             check_trdos();
             if (Z80Ops::isTsconf && ffIFF1) TsConf::intEnableHook();
+            if (Z80Ops::isNext && ffIFF1 && NextInt::ex) NextInt::wake();
             break;
         }
         case 0x46:

@@ -58,6 +58,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/core/Rzx.h"
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Next/NextVideo.h"
+#include "speccy/machines/Next/NextInt.h"
 #if PERF_TRACE && PERF_HIST
 // TS-Conf guest-memory access histogram by PHYSICAL page (the page each CPU
 // bank is mapped to), fetch + peek8 + poke8. Tells which pages a title hammers,
@@ -748,53 +749,57 @@ IRAM_ATTR void CPU::loop() {
     }
     BREAKPOINTS
     bool halted = Z80::isHalted();
-#ifndef NEXT_LINEIRQ_SLICE
-#define NEXT_LINEIRQ_SLICE 1
-#endif
-    if (Z80Ops::isNext && NextReg::lineIrqEnabled && !NEXT_LINEIRQ_SLICE) {
-        halted = false;   // bisect build: the whole frame through execute()
-    } else
-    if (Z80Ops::isNext && NextReg::lineIrqEnabled) {
-        // Line IRQ armed: the frame is sliced around its 32-T window instead
-        // of running execute() (an INT check per instruction) for the whole
-        // frame — that cost TX-1696 half its speed (cpu 31 ms/fr with a 15 ms
-        // render, 32 fps). Unchecked slices up to the window and after it,
-        // checked execute() only inside it, a HALT fast-forwarded to the next
-        // event without flushing the frame (NEXTVID renders by line). A write
-        // to NR 0x22/0x23 inside a slice ends it (NextReg), so a moved window
-        // is re-derived here.
-        halted = false;
-        // The last IntEnd T stay with the checked tail loop below (the frame
-        // INT straddles the frame boundary there), as on the unsliced path.
+    if (Z80Ops::isNext) {
+        // Next: the middle of the frame (up to the tail window) as slices to the
+        // next interrupt event. With nothing beyond the classic frame INT armed
+        // (NextInt::ex = 0) that is one unchecked run, exactly the shape every
+        // other machine has. Otherwise — line interrupt, hardware IM2, a CTC
+        // channel with its interrupt on — unchecked slices up to each event, one
+        // checked instruction while /INT is up, and HALT fast-forwarded to the
+        // next event without flushing the frame (NEXTVID renders by line). A
+        // write that arms a source mid-slice ends the slice (NextInt::wake), as
+        // do EI / RETI / RETN, so the loop re-derives the next event. The cost
+        // of running the whole frame checked instead was TX-1696 at half speed.
         const uint32_t sliceEnd = statesInFrame - IntEnd;
-        while (tstates < sliceEnd && NextReg::lineIrqEnabled) {
-            const uint8_t m = ESPectrum::multiplicator;
-            const uint32_t lines = (statesInFrame >> m) / VIDEO::tStatesPerLine;
-            int32_t ws = (int32_t)((((NextReg::lineIrqLine + NextReg::paperLine()) % lines) * VIDEO::tStatesPerLine) << m)
-                         - (int32_t)CPU::latetiming;
-            if (ws < 0) ws = 0;
-            const uint32_t s0 = (uint32_t)ws, e0 = s0 + (32u << m);
-            if (tstates >= s0 && tstates < e0) {
-                // inside the window: at a boundary take the INT at once
-                // (execute() would run one more instruction first)
-                if (Z80::atInstrBoundary()) Z80::checkINT();
-                Z80::execute();
-                BREAKPOINTS
-                continue;
-            }
-            uint32_t target = (tstates < s0) ? s0 : sliceEnd;
-            if (target > sliceEnd) target = sliceEnd;
-            if (Z80::isHalted()) {
-                halted = true;
-                NEXTVID::haltAdvanceTo(target);
+        bool stamped = false;
+        halted = false;
+        while (tstates < sliceEnd) {
+            if (NextInt::ex) {
+                if (Z80::isIFF1() && NextInt::intLine()) {
+                    // at a boundary take it at once (execute() would run one
+                    // more instruction first); pendingEI / a fetched prefix fall
+                    // through to execute(), whose own checkINT takes it
+                    if (Z80::atInstrBoundary()) Z80::checkINT();
+                    if (Z80::isIFF1()) Z80::execute();
+                    BREAKPOINTS
+                    continue;
+                }
+                const uint32_t target = Z80::isIFF1() ? NextInt::nextEventT(sliceEnd) : sliceEnd;
+                if (Z80::isHalted()) {
+                    if (!stamped) { tstates_active = tstates; stamped = true; }
+                    halted = true;
+                    NEXTVID::haltAdvanceTo(target);
+                } else {
+                    stFrame = target;
+                    Z80::exec_nocheck();
+                    if (stFrame == 0) {
+                        if (!stamped) { tstates_active = tstates; stamped = true; }
+                        halted = true;
+                        NEXTVID::haltAdvanceTo(target);
+                    }
+                }
             } else {
-                stFrame = target;
-                Z80::exec_nocheck();
-                if (stFrame == 0) { halted = true; NEXTVID::haltAdvanceTo(target); }
+                if (!Z80::isHalted()) {
+                    stFrame = sliceEnd;
+                    Z80::exec_nocheck();
+                    if (stFrame != 0) { BREAKPOINTS continue; }   // ended early: ex raised mid-slice
+                }
+                if (!stamped) { tstates_active = tstates; stamped = true; }
+                halted = true;
+                NEXTVID::haltAdvanceTo(sliceEnd);
             }
             BREAKPOINTS
         }
-        if (halted) tstates_active = tstates;
     } else
     if (!halted) {
         stFrame = statesInFrame - IntEnd;
@@ -843,6 +848,7 @@ IRAM_ATTR void CPU::loop() {
     global_tstates += statesInFrame; // increase global Tstates
     tstates_frame = tstates;
     if (!halted) tstates_active = tstates_frame; // no HALT this frame: full load
+    if (Z80Ops::isNext) NextInt::frameEnd();     // before the wrap, see NextInt.h
     tstates -= statesInFrame;
 
     CPU::prev_tstates = tstates;
@@ -1675,25 +1681,11 @@ IRAM_ATTR bool Z80Ops::isActiveINT(void) {
     int32_t tmp = (int32_t)CPU::tstates + CPU::latetiming;
     if (tmp >= (int32_t)CPU::statesInFrame) tmp -= CPU::statesInFrame;
     if (Z80Ops::isNext) {
-        // Frame (ULA) interrupt, unless masked via nextreg 0x22 bit 2 or
-        // Timex port 0xFF bit 6 (SCLD interrupt disable — the same gate on
-        // real hardware, zxnext.vhd port_ff_interrupt_disable)
-        if (!NextReg::ulaIrqDisabled && !NextReg::portFFIntDisable &&
-            (tmp >= CPU::IntStart) && (tmp < CPU::IntEnd))
-            return true;
-        // Line interrupt (nextreg 0x22/0x23): asserted for ~32 base T-states
-        // at the start of the programmed raster line
-        if (NextReg::lineIrqEnabled) {
-            uint8_t m = ESPectrum::multiplicator;
-            uint32_t lines = (CPU::statesInFrame >> m) / VIDEO::tStatesPerLine;
-            // reg 0x23 counts line 0 as the first pixel line; the frame
-            // tstate origin is 63 border/sync lines earlier (128K timing)
-            uint32_t startTs = (((NextReg::lineIrqLine + NextReg::paperLine()) % lines) * VIDEO::tStatesPerLine) << m;
-            uint32_t endTs = startTs + (32u << m);
-            if ((uint32_t)tmp >= startTs && (uint32_t)tmp < endTs)
-                return true;
-        }
-        return false;
+        // Line interrupt, hardware IM2, CTC, NR 0x20 pulses: NextInt (flash).
+        if (NextInt::ex) return NextInt::intLine();
+        // Frame (ULA) interrupt, unless masked by port 0xFF bit 6 (= NR 0x22
+        // bit 2 = NOT NR 0xC4 bit 0, one latch: zxnext.vhd port_ff_interrupt_disable)
+        return !NextReg::portFFIntDisable && (tmp >= CPU::IntStart) && (tmp < CPU::IntEnd);
     }
     return (tmp >= CPU::IntStart) && (tmp < CPU::IntEnd);
 }

@@ -16,6 +16,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "hardware/regs/addressmap.h"
 #include "NextVideo.h"
 #include "NextRtc.h"
+#include "NextInt.h"
 #include "app/Debug.h"
 #include "speccy/z80/z80.h"
 #include "speccy/devices/storage/DivMMC.h"
@@ -39,9 +40,6 @@ uint8_t  NextReg::contendBanks = 0;
 uint32_t NextReg::portEn = ~0u;   // all decoded; NextReg::reset / CPU::reset own it
 
 uint8_t  NextReg::resetPending = 0;
-bool     NextReg::lineIrqEnabled = false;
-bool     NextReg::ulaIrqDisabled = false;
-uint16_t NextReg::lineIrqLine = 0;
 uint8_t  NextReg::portFF = 0;
 bool     NextReg::portFFIntDisable = false;
 
@@ -167,7 +165,7 @@ void next_trace_dump(uint32_t frames) {
         Debug::log("NEXT cpu: %u.%ums/fr vid=%u.%ums/fr li=%u line=%u clk=%u MHz fps=%u draw=%u max=%u",
             (unsigned)(d / f / 1000u), (unsigned)(d / f % 1000u / 100u),
             (unsigned)(g_nextvid_us / f / 1000u), (unsigned)(g_nextvid_us / f % 1000u / 100u),
-            (unsigned)NextReg::lineIrqEnabled, (unsigned)NextReg::lineIrqLine,
+            (unsigned)NextInt::lineEnabled(), (unsigned)NextInt::lineNumber(),
             (unsigned)(ESPectrum::multiplicator == 0 ? 3 : 7u << (ESPectrum::multiplicator - 1)),
             (unsigned)frames, (unsigned)g_nextvid_frames,
             (unsigned)ESPectrum::maxSpeed);
@@ -304,9 +302,7 @@ void NextReg::reset(bool hard) {
     port1FFD = 0;
     port123B = 0;
     MemESP::wr_overlay_active = false;
-    lineIrqEnabled = false;
-    ulaIrqDisabled = false;
-    lineIrqLine = 0;
+    NextInt::reset(hard);   // interrupt block + CTC: both reset types (reg[0xC0-0xCE] too)
     // MMU defaults: ROM in slots 0/1, banks 5,2,0 in RAM slots
     reg[0x50] = 0xFF; reg[0x51] = 0xFF;
     reg[0x52] = 10;   reg[0x53] = 11;
@@ -571,15 +567,9 @@ void NextReg::write(uint8_t r, uint8_t v) {
         case 0x07: // CPU speed: 0=3.5, 1=7, 2=14, 3=28 MHz
             applySpeed();
             break;
-        case 0x22: // Line interrupt control
-            ulaIrqDisabled = v & 0x04;
-            lineIrqEnabled = v & 0x02;
-            lineIrqLine = (lineIrqLine & 0xFF) | ((v & 0x01) << 8);
-            lineIrqReslice();
-            break;
-        case 0x23: // Line interrupt value LSB
-            lineIrqLine = (lineIrqLine & 0x100) | v;
-            lineIrqReslice();
+        case 0x20: case 0x22: case 0x23: case 0x64:   // interrupts (NextInt.cpp)
+        case 0xC0: case 0xC4: case 0xC5: case 0xC8: case 0xC9:
+            NextInt::nrWrite(r, v);
             break;
         case 0x12: case 0x13: // Layer 2 active/shadow bank
             updateLayer2Window();
@@ -703,6 +693,12 @@ uint8_t NextReg::read(uint8_t r) {
         case 0x50: case 0x51: case 0x52: case 0x53:
         case 0x54: case 0x55: case 0x56: case 0x57:
             return MemESP::mmu[r - 0x50];
+        case 0x20: case 0x22: case 0x23:
+        case 0xC0: case 0xC4: case 0xC5: case 0xC6: case 0xC8:
+        case 0xC9: case 0xCA: case 0xCC: case 0xCE: {
+            uint8_t o;
+            return NextInt::nrRead(r, o) ? o : reg[r];
+        }
         default:   return reg[r];
     }
 }
@@ -865,9 +861,3 @@ void NextReg::write1FFD(uint8_t v) {
 
 
 
-// stFrame 0 means "HALT" to CPU::loop, so the slice ends one T later at the
-// earliest; a slice already ending sooner is left alone.
-void NextReg::lineIrqReslice() {
-    const uint32_t cut = CPU::tstates + 1;
-    if (CPU::stFrame > cut) CPU::stFrame = cut;
-}

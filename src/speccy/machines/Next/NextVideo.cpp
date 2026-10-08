@@ -1255,6 +1255,25 @@ IRAM_ATTR void NEXTVID::RenderL2Line(uint8_t* fb, int row, bool prioPass) {
     // mode 2 (640x256x4bpp) is a documented non-goal (scanout is 360px max)
 }
 
+// Tilemap text mode (NR 0x6B bit 3) — one tile's span of a line. 1bpp: pixel
+// = bit (7 - x) of the row byte, palette index = attr 7:1 + pixel; never the
+// NR 0x4C index test: a text pixel is transparent when its colour equals NR 0x14
+// (tilemap.vhd 385-386, zxnext.vhd 7109). 80 columns are drawn at half width,
+// so the pixel pair is ORed and 1-pixel strokes of the font survive (deviation).
+// Flash on purpose: text mode is rare and this keeps ~1 KB out of every board's
+// SRAM (RenderTilemapLine is RAM-resident).
+__attribute__((noinline)) static void tmTextSpan(uint8_t* o, int n, uint8_t b, int u0, int step,
+                                                 uint8_t palHi, const uint8_t* lutTM,
+                                                 const uint16_t* rawTM, uint8_t r14) {
+    for (int k = 0; k < n; k++) {
+        const int u = u0 + k * step;
+        uint8_t bit = (b >> (7 - u)) & 1;
+        if (step == 2 && u < 7) bit |= (b >> (6 - u)) & 1;
+        const uint8_t idx = (uint8_t)(palHi | bit);
+        if (((rawTM[idx] & 0x1FF) >> 1) != r14) o[k] = lutTM[idx];
+    }
+}
+
 // Tilemap: 40x32 (or 80x32 rendered horizontally halved) tiles of 8x8x4bpp.
 // Map and tile definitions live in bank 5 (offsets from nextreg 0x6E/0x6F).
 // The tilemap window is 320x256 and covers the border area around the paper.
@@ -1266,11 +1285,20 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
 
     bool cols80 = ctrl & 0x40;
     bool noAttr = ctrl & 0x20;
-    const uint8_t* lutTM = lut[(ctrl & 0x10) ? 7 : 3];
+    // tilemap.vhd 191-195: bit 3 text mode (1bpp, 8 bytes a tile, attr 7:1 =
+    // palette, no mirror/rotate), bit 1 512 tiles (attr bit 0 = tile bit 8, and
+    // the tilemap goes UNDER the ULA), bit 0 tilemap always on top of the ULA.
+    const bool text = ctrl & 0x08, m512 = ctrl & 0x02, onTop = ctrl & 0x01;
+    const uint8_t palNo = (ctrl & 0x10) ? 7 : 3;
+    const uint8_t* lutTM = lut[palNo];
+    const uint16_t* rawTM = rawPal[palNo];
     uint8_t transp = LS->r4C & 0x0F;
-    const uint8_t* bank = MemESP::ram[5].direct();
-    const uint8_t* map  = bank + (uint16_t)(LS->r6E & 0x3F) * 256;
-    const uint8_t* defs = bank + (uint16_t)(LS->r6F & 0x3F) * 256;
+    // NR 0x6E/0x6F: bit 7 = bank 7 instead of bank 5, bits 5:0 = 256-byte
+    // offset; the address wraps inside the 16K bank (tilemap.vhd 399-401).
+    const uint8_t* mapBank  = MemESP::ram[(LS->r6E & 0x80) ? 7 : 5].direct();
+    const uint8_t* defsBank = MemESP::ram[(LS->r6F & 0x80) ? 7 : 5].direct();
+    const uint16_t defsOff = (uint16_t)(LS->r6F & 0x3F) << 8;
+    const uint8_t* map  = mapBank + (uint16_t)(LS->r6E & 0x3F) * 256;
     uint16_t scrollX = ((LS->r2F & 3) << 8) | LS->r30;
     uint8_t sy = (uint8_t)(ty + LS->r31); // wraps at 256
     int cols = cols80 ? 80 : 40;
@@ -1301,20 +1329,29 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
         const uint8_t* e = mrow + (sx >> 3) * entrySz;
         const uint8_t tile = e[0];
         const uint8_t attr = noAttr ? LS->r6C : e[1];
-        // attr bit 0: the ULA is drawn OVER this tile. With the ULA layer
-        // off (NR 0x68 bit 7) there is nothing over it, so the tile shows.
-        if (!(attr & 0x01) || ulaOff) {
-            const bool xm = attr & 0x08, ym = attr & 0x04, rot = attr & 0x02;
-            const uint8_t* def = defs + (uint16_t)tile * 32;
-            const uint8_t palHi = attr & 0xF0;
-            for (int k = 0; k < n; k++) {
-                uint8_t u = (uint8_t)(u0 + k * step), vv = inRow;
-                if (xm) u = 7 - u;                                       // X mirror
-                if (ym) vv = 7 - vv;                                     // Y mirror
-                if (rot) { const uint8_t t = u; u = vv; vv = 7 - t; }    // rotate
-                const uint8_t b = def[vv * 4 + (u >> 1)];
-                const uint8_t pix = (u & 1) ? (b & 0x0F) : (b >> 4);
-                if (pix != transp) out[tx + k] = lutTM[pix | palHi];
+        // The ULA is drawn OVER this tile when attr bit 0 is set (512-tile
+        // mode: always), unless the tilemap is forced on top (tilemap.vhd 388).
+        // With the ULA layer off (NR 0x68 bit 7) there is nothing over it.
+        // (Approximation: our ULA has no transparent pixels, so "under" = hidden.)
+        const bool below = !onTop && ((attr & 0x01) || m512);
+        const uint16_t tnum = (uint16_t)(tile | ((m512 && (attr & 0x01)) ? 0x100 : 0));
+        if (!below || ulaOff) {
+            if (text) {
+                tmTextSpan(out + tx, n, defsBank[(uint16_t)(defsOff + tnum * 8 + inRow) & 0x3FFF],
+                           u0, step, (uint8_t)(attr & 0xFE), lutTM, rawTM, LS->r14);
+            } else {
+                const bool xm = attr & 0x08, ym = attr & 0x04, rot = attr & 0x02;
+                const uint16_t defBase = (uint16_t)(defsOff + tnum * 32);
+                const uint8_t palHi = attr & 0xF0;
+                for (int k = 0; k < n; k++) {
+                    uint8_t u = (uint8_t)(u0 + k * step), vv = inRow;
+                    if (xm) u = 7 - u;                                       // X mirror
+                    if (ym) vv = 7 - vv;                                     // Y mirror
+                    if (rot) { const uint8_t t = u; u = vv; vv = 7 - t; }    // rotate
+                    const uint8_t b = defsBank[(uint16_t)(defBase + vv * 4 + (u >> 1)) & 0x3FFF];
+                    const uint8_t pix = (u & 1) ? (b & 0x0F) : (b >> 4);
+                    if (pix != transp) out[tx + k] = lutTM[pix | palHi];
+                }
             }
         }
         tx += n;
