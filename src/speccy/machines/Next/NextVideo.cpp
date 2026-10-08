@@ -101,6 +101,7 @@ struct NextLineState {
     uint8_t gigs;            // Gigascreen this frame (s_gigs)
     uint8_t attOvr;          // 1 = attr[] replaces the ULA attribute row (DMA multicolour)
     uint8_t r26, r27;        // ULA scroll X / Y (keeps the struct word-aligned)
+    uint8_t r6A, _pad6A[3];  // LoRes: Radastan, display-file XOR, palette offset
     // Border colour changes INSIDE the row (OUT #FE mid-line): segment i ends
     // at fb x 2*brd.t[i] (T-states into the row, cell-aligned) in colour nibble i of brd.c;
     // the rest of the row is `border`. n = 0 for an ordinary row (every byte
@@ -161,6 +162,8 @@ IRAM_ATTR void NEXTVID::captureLine(NextLineState& st) {
     st.gigs = s_gigs;
     st.attOvr = 0;
     st.r26 = r[0x26];
+    st.r6A = r[0x6A];
+    st._pad6A[0] = st._pad6A[1] = st._pad6A[2] = 0;
     st.r27 = r[0x27];
     uint32_t* w = (uint32_t*)&st.brd;   // no libc memset on this path (flash)
     for (unsigned i = 0; i < sizeof st.brd / 4; i++) w[i] = 0;
@@ -1215,12 +1218,32 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
     const int sy = LS->r27 ? (y + LS->r27) % 192 : y;
 
     if (LS->r15 & 0x80) {          // LoRes 128x96 replaces the paper (not ULA-clipped)
-        uint8_t ly = (uint8_t)((y + LS->r33) % 192) >> 1;
-        const uint8_t* base = LS->grmem +
-            (ly < 48 ? ly * 128 : 0x2000 + (uint16_t)(ly - 48) * 128);
-        uint8_t sxl = LS->r32;
-        for (int x = 0; x < 256; x++)
-            p[x] = nxRgb(raw[base[(uint8_t)(x + sxl) >> 1]], tr);
+        // lores.vhd: rows wrap at 192, columns at 256 (scroll NR 0x32/0x33).
+        // Standard: one byte a pixel, rows of 128 in two halves (0x0000 /
+        // 0x2000), index = (high nibble + NR 0x6A offset) & low nibble.
+        // Radastan (NR 0x6A bit 5): 4bpp, 64 bytes a row, display file =
+        // port FF bit 0 XOR NR 0x6A bit 4 (+0x2000), index = offset (or 11 &
+        // offset 1:0 with ULA+, NR 0x68 bit 3) & the pixel nibble.
+        const uint8_t ly = (uint8_t)((y + LS->r33) % 192);
+        const uint8_t sxl = LS->r32, ofs = LS->r6A & 0x0F;
+        if (LS->r6A & 0x20) {
+            const uint8_t hiN = (uint8_t)(((LS->r68 & 0x08) ? (0x0C | (ofs & 3)) : ofs) << 4);
+            const bool df = ((LS->r69 ^ (LS->r6A >> 4)) & 1) != 0;
+            const uint8_t* base = LS->grmem + (df ? 0x2000 : 0) + (ly >> 1) * 64;
+            for (int x = 0; x < 256; x++) {
+                const uint8_t xx = (uint8_t)(x + sxl);
+                const uint8_t b = base[xx >> 2];
+                p[x] = nxRgb(raw[hiN | ((xx & 2) ? (b & 0x0F) : (b >> 4))], tr);
+            }
+        } else {
+            const uint8_t ry = ly >> 1;
+            const uint8_t* base = LS->grmem +
+                (ry < 48 ? ry * 128 : 0x2000 + (uint16_t)(ry - 48) * 128);
+            for (int x = 0; x < 256; x++) {
+                const uint8_t b = base[(uint8_t)(x + sxl) >> 1];
+                p[x] = nxRgb(raw[(uint8_t)(((b + (ofs << 4)) & 0xF0) | (b & 0x0F))], tr);
+            }
+        }
         return;
     }
     // Timex screen mode = port FF / NR 0x69 bits 2:0, forced to 000 while the
