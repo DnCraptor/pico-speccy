@@ -364,6 +364,10 @@ public:
         }
     }
     static uint8_t  joystick;
+    // The joystick type the pad drives NOW: `joystick`, except on the Spectrum
+    // Next, where NR 0x05 (set by TBBLUE.FW from config.ini) owns it.
+    static uint8_t  joyLive();
+    static uint8_t  kempPortLive();
     static uint16_t joydef[14];
     // True when pad control `slot` is assigned a KEYBOARD key (not None, not a
     // joystick action): the control then presses that key and nothing else.

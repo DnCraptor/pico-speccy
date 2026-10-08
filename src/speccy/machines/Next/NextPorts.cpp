@@ -22,6 +22,9 @@
 #include "speccy/devices/sound/AySound.h"
 #include "speccy/devices/tape/Tape.h"
 #include "ui/LEDIndicators.h"
+#include "app/Config.h"
+#include "speccy/z80/z80.h"
+#include "speccy/core/Ports.h"
 
 // The ULA floating bus on port #FF (zxnext.vhd 2813 / 4513, zxula.vhd 573):
 // only in 48K and 128K machine timing — +3 and Pentagon read 0xFF there —
@@ -235,6 +238,45 @@ static void uartWrite(uint16_t address, uint8_t v) {
     }
 }
 
+// ===== Joysticks (zxnext.vhd 3472-3506, NR 0x05 decode 5157) =====
+// Mode per joystick: bit 2 = NR 0x05 bit 3 (joy0) / bit 1 (joy1), bits 1:0 =
+// NR 0x05 bits 7:6 / 5:4. Kempston 1 / MD 1 answer on 0x1F, Kempston 2 / MD 2
+// on 0x37; a port neither joystick selects is not decoded at all. Kempston
+// gives bits 5:0 (R L D U B C), Mega Drive adds 7:6 (A, Start). The keyboard
+// modes press keys (keyboard.cpp joyMap through Config::joyLive).
+uint8_t NextPorts::joyMode(int n) {
+    const uint8_t r = NextReg::reg[0x05];
+    return n == 0 ? (uint8_t)(((r >> 1) & 4) | ((r >> 6) & 3))
+                  : (uint8_t)(((r << 1) & 4) | ((r >> 4) & 3));
+}
+uint8_t NextPorts::joyType() {
+    static const uint8_t t[8] = { JOY_SINCLAIR2, JOY_KEMPSTON, JOY_CURSOR, JOY_SINCLAIR1,
+                                  JOY_KEMPSTON, JOY_KEMPSTON, JOY_KEMPSTON, JOY_NONE };
+    return t[joyMode(0)];
+}
+uint8_t NextPorts::kempPort() {
+    const uint8_t m = joyMode(0);
+    return (m == 4 || m == 6) ? 0x37 : 0x1F;
+}
+uint8_t Config::joyLive()      { return Z80Ops::isNext ? NextPorts::joyType()  : joystick; }
+uint8_t Config::kempPortLive() { return Z80Ops::isNext ? NextPorts::kempPort() : kempstonPort; }
+
+static int joyRead(uint8_t lo) {
+    const uint8_t m0 = NextPorts::joyMode(0), m1 = NextPorts::joyMode(1);
+    auto on1f = [](uint8_t m) { return m == 1 || m == 5; };
+    auto on37 = [](uint8_t m) { return m == 4 || m == 6; };
+    bool port1f = false, port37 = false;
+    if (lo == 0x1F || (lo == 0xDF && NextReg::portOn(NextReg::PE_DAC_DF) && !NextReg::portOn(NextReg::PE_MOUSE)))
+        port1f = (on1f(m0) || on1f(m1)) && NextReg::portOn(NextReg::PE_1F);
+    else if (lo == 0x37)
+        port37 = (on37(m0) || on37(m1)) && NextReg::portOn(NextReg::PE_37);
+    if (!port1f && !port37) return -1;
+    LED::touchR(LED::KEMPJOY);
+    if (port1f ? !on1f(m0) : !on37(m0)) return 0x00;   // the right joystick: not connected
+    const uint8_t v = Ports::port[port1f ? 0x1F : 0x37];
+    return (m0 >= 5) ? v : (v & 0x3F);
+}
+
 int NextPorts::input(uint16_t address) {
     if (address == 0x243B) return NextReg::selected;
     if (address == 0x253B) return NextReg::read(NextReg::selected);
@@ -246,6 +288,11 @@ int NextPorts::input(uint16_t address) {
           if (v >= 0) return v;
       } }
     if (address == 0x123B && NextReg::portOn(NextReg::PE_LAYER2)) return NextReg::port123B;
+    { const uint8_t lo = (uint8_t)address;
+      if (lo == 0x1F || lo == 0x37 || lo == 0xDF) {
+          const int v = joyRead(lo);
+          if (v >= 0) return v;
+      } }
     if (uartPort(address) && NextReg::portOn(NextReg::PE_UART)) return uartRead(address);
     if (address == 0x303B && NextReg::portOn(NextReg::PE_SPRITE)) return NEXTVID::spriteFlagsRead();
     // I2C bus + DS1307 (NextRtc.cpp); NR 0x83 bit 2 undecodes both ports

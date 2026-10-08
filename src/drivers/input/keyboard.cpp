@@ -373,6 +373,7 @@ inline static void joyMap(const VirtualKeyItem& it) {
   const bool raw = slot >= 8;
   const uint16_t target = Config::joydef[slot];
   const bool keyTarget = Config::joyKeyTarget(slot);
+  const uint8_t jt = Config::joyLive();   // NR 0x05 on the Next
 
   // "Keyboard mapping": a control assigned a keyboard key presses that key, on
   // every joystick type. The joystick action it would otherwise have is
@@ -389,7 +390,7 @@ inline static void joyMap(const VirtualKeyItem& it) {
       joyPushData((VirtualKey)target, it.down);
   }
 
-  if (Config::joystick == JOY_KEMPSTON || Config::joystick == JOY_FULLER || Config::joystick == JOY_CUSTOM) {
+  if (jt == JOY_KEMPSTON || jt == JOY_FULLER || jt == JOY_CUSTOM) {
     // VK_DPAD_* always map to their VK_JOY_* counterparts, so isVKDown(VK_JOY_B)
     // etc. tracks the physical button whatever joydef says (JoyTest relies on it).
     // Aliasing a button onto another Kempston bit (C -> Joy.A) is resolved in the
@@ -412,9 +413,9 @@ inline static void joyMap(const VirtualKeyItem& it) {
   const int k = act <= 3 ? act : act == 6 ? 4 : -1;   // left, right, up, down, fire
   if (k < 0) return;
   VirtualKey zx;
-  if (Config::joystick == JOY_SINCLAIR2)      zx = s2[k];
-  else if (Config::joystick == JOY_SINCLAIR1) zx = s1[k];
-  else if (Config::joystick == JOY_CURSOR)    zx = cur[k];
+  if (jt == JOY_SINCLAIR2)      zx = s2[k];
+  else if (jt == JOY_SINCLAIR1) zx = s1[k];
+  else if (jt == JOY_CURSOR)    zx = cur[k];
   else return;
   // Key STATE only, never a queued event. The ZX matrix reads m_VKMap
   // (processKeyboard copies it after the DPAD event that got us here), but a

@@ -19,4 +19,10 @@ namespace NextPorts {
     void audioRegWrite(uint8_t r, uint8_t old);         // NR 0x06/0x08/0x09 written
     void audioReset();                                  // machine reset (both types)
     void uartReset(bool hard);                          // UART select / frame / prescaler
+
+    // Joysticks (NR 0x05). Our one pad is the LEFT joystick (joy0).
+    uint8_t joyMode(int n);    // 0 Sinclair 2, 1 Kempston 1, 2 Cursor, 3 Sinclair 1,
+                               // 4 Kempston 2, 5 MD 1, 6 MD 2, 7 user-defined keys
+    uint8_t joyType();         // joy0 as a Config JOY_* type (Config::joyLive)
+    uint8_t kempPort();        // 0x1F or 0x37: where joy0's Kempston byte lives
 }

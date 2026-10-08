@@ -336,7 +336,8 @@ void NextReg::reset(bool hard) {
     reg[0x07] = 0;    // 3.5 MHz
     // Reset defaults pinned to the FPGA VHDL (zx_go VHDL_CONFORMANCE.md)
     if (hard) {
-        reg[0x05] = 0x01; // periph1: 50Hz
+        reg[0x05] = 0x41; // periph1: joy0 Kempston 1, joy1 Sinclair 2, 50 Hz, scandoubler
+                          // (zxnext.vhd nr_05_joy0 := "001", joy1 := "000")
         reg[0x06] = 0xA0; // periph2: hotkeys enabled
         reg[0x08] = 0x10; // periph3: AY enabled
         // DivMMC automap enable: power-on 0, set by the BIOS (TBBLUE.FW
@@ -609,7 +610,11 @@ void NextReg::write(uint8_t r, uint8_t v) {
             }
             break;
         case 0x05: // Peripheral 1: bit 2 = 50/60 Hz — the frame changes at the
-                   // next frame boundary (NEXTVID::EndFrame -> ESPectrum::nextRasterApply)
+                   // next frame boundary (NEXTVID::EndFrame -> ESPectrum::nextRasterApply).
+                   // Bits 7:6/3 and 5:4/1 = joystick modes (NextPorts::joyMode): the
+                   // pad's Kempston byte may move between 0x1F and 0x37, start both idle.
+            Ports::port[0x1F] = 0;
+            Ports::port[0x37] = 0;
             break;
         case 0x07: // CPU speed: 0=3.5, 1=7, 2=14, 3=28 MHz
             applySpeed();

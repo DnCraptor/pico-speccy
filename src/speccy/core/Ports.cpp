@@ -1921,7 +1921,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     // (0x37, 0x5F) is selected for boards that also map joystick reads there.
     // Karabas-Pro manual p.24: gate is "CPM=0 & DOS=0" — in CP/M mode the
     // port #1F belongs to the FDC and Kempston must stay off the bus.
-    if (Config::joystick == JOY_KEMPSTON &&
+    if (Config::joystick == JOY_KEMPSTON && !Z80Ops::isNext &&   // Next: NextPorts::joyRead
         !(PROFI && (portDFFD & 0x20)) &&
         NextReg::portOn(p8 == 0x37 ? NextReg::PE_37 : NextReg::PE_1F)) {
       if (((p8 & 0x20) == 0) || (p8 == Config::kempstonPort)) {

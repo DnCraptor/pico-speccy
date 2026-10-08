@@ -109,6 +109,7 @@ int Config::numMemWriteBP = 0;
 int Config::numMemReadBP = 0;
 
 uint8_t  Config::joystick = JOY_KEMPSTON;
+// Config::joyLive / kempPortLive: NextPorts.cpp (they need the Next register file)
 uint16_t Config::joydef[14] = {
     fabgl::VK_DPAD_LEFT,  // 0
     fabgl::VK_DPAD_RIGHT, // 1

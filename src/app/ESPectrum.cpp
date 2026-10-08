@@ -1560,8 +1560,8 @@ void ESPectrum::setup() {
   // Set Ports starting values
   for (int i = 0; i < 128; i++)
     Ports::port[i] = 0xBF;
-  if (Config::joystick == JOY_KEMPSTON)
-    Ports::port[Config::kempstonPort] = 0; // Kempston
+  if (Config::joyLive() == JOY_KEMPSTON)
+    Ports::port[Config::kempPortLive()] = 0; // Kempston
   if (Config::joystick == JOY_FULLER)
     Ports::port[0x7f] = 0xff; // Fuller
 
@@ -1859,8 +1859,8 @@ void ESPectrum::reset(uint8_t romInUse) {
   // sampled the half-rows.
   for (int i = 8; i < 128; i++)
     Ports::port[i] = 0xBF;
-  if (Config::joystick == JOY_KEMPSTON)
-    Ports::port[Config::kempstonPort] = 0; // Kempston
+  if (Config::joyLive() == JOY_KEMPSTON)
+    Ports::port[Config::kempPortLive()] = 0; // Kempston
   else if (Config::joystick == JOY_FULLER)
     Ports::port[0x7f] = 0xff; // Fuller
   Ports::portAFF7 = 0;
@@ -2630,12 +2630,14 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
         }
       }
 
-      if (Config::joystick == JOY_KEMPSTON)
-        Ports::port[Config::kempstonPort] = 0;
-      else if (Config::joystick == JOY_FULLER)
+      const uint8_t jt = Config::joyLive();         // NR 0x05 on the Next
+      const uint8_t kp = Config::kempPortLive();
+      if (jt == JOY_KEMPSTON)
+        Ports::port[kp] = 0;
+      else if (jt == JOY_FULLER)
         Ports::port[0x7f] = 0xff;
 
-      if (Config::joystick == JOY_KEMPSTON) {
+      if (jt == JOY_KEMPSTON) {
         // Kempston 8-bit: 0=right,1=left,2=down,3=up,4=A/fire,5=B/altfire,6=X,7=Start.
         // The 4 direction codes always drive their own bit. Extra buttons (A,B,C,X,Y,Z,L2,R2)
         // are aliased via joydef slots 6..13: joydef[slot] gives the target action which
@@ -2647,7 +2649,7 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
         for (int i = fabgl::VK_JOY_RIGHT; i <= fabgl::VK_JOY_UP; i++)
           if (Kbd->isVKDown((fabgl::VirtualKey)i) &&
               !Config::joyKeyTarget(dirSlot[i - fabgl::VK_JOY_RIGHT]))
-            bitWrite(Ports::port[Config::kempstonPort], i - fabgl::VK_JOY_RIGHT, 1);
+            bitWrite(Ports::port[kp], i - fabgl::VK_JOY_RIGHT, 1);
         // extra buttons A,B,C,X,Y,Z,L2,R2 -> joydef slots 6..13
         static const fabgl::VirtualKey extraRaw[8] = {
           fabgl::VK_JOY_A, fabgl::VK_JOY_B, fabgl::VK_JOY_C, fabgl::VK_JOY_X,
@@ -2680,12 +2682,12 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
             default: break;
           }
           if (bit >= 0)
-            bitWrite(Ports::port[Config::kempstonPort], bit, 1);
+            bitWrite(Ports::port[kp], bit, 1);
         }
         // Start is not in extraRaw (it flows via joydef[4] → VK_JOY_START separately)
         if (Kbd->isVKDown(fabgl::VK_JOY_START) && !Config::joyKeyTarget(4))
-          bitWrite(Ports::port[Config::kempstonPort], 7, 1);
-      } else if (Config::joystick == JOY_FULLER) { // Fuller
+          bitWrite(Ports::port[kp], 7, 1);
+      } else if (jt == JOY_FULLER) { // Fuller
         if (Kbd->isVKDown(fabgl::VK_JOY_RIGHT) && !Config::joyKeyTarget(1)) {
           bitWrite(Ports::port[0x7f], 3, 0);
         }
