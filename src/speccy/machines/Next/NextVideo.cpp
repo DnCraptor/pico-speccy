@@ -1464,8 +1464,14 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
             if ((v >> 1) != transp) *q = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0));
             q++;
         }
-    } else if (mode == 1) {
-        // 320x256, column-major (byte offset = x*256 + y), covers the border
+    } else {
+        // 320x256 (mode 1) and 640x256x4bpp (modes 2/3), both column-major
+        // (byte offset = x*256 + y, layer2.vhd 160) and covering the border.
+        // 640: the byte is two pixels, high nibble left, index = (offset + 0) & nibble
+        // (layer2.vhd 202-203). Our fb pixel is a 320-wide one, so the pair is
+        // shown as its left pixel, or the right one where the left is
+        // transparent (deviation, like the 80-column tilemap).
+        const bool hires = mode & 2;
         int ty = row - (paperTopRow - 32);
         if (ty < 0 || ty >= 256) return;
         int cy1 = LS->clip[0][2], cy2 = LS->clip[0][3];
@@ -1484,13 +1490,24 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
             uint32_t off = (uint32_t)sx * 256 + sy;
             uint16_t page = bank + (off >> 13);
             if (page >= MemESP::NEXT_PAGES) continue;
-            const uint16_t e = raw[(uint8_t)(MemESP::nextRamPtr[page][off & 0x1FFF] + palOfs)];
-            const uint16_t v = e & 0x1FF;
+            const uint8_t b = MemESP::nextRamPtr[page][off & 0x1FFF];
+            uint16_t e, v;
+            if (!hires) {
+                e = raw[(uint8_t)(b + palOfs)];
+                v = e & 0x1FF;
+            } else {
+                e = raw[(uint8_t)(palOfs | (b >> 4))];
+                v = e & 0x1FF;
+                if ((v >> 1) == transp) {
+                    e = raw[(uint8_t)(palOfs | (b & 0x0F))];
+                    v = e & 0x1FF;
+                }
+            }
             if ((v >> 1) != transp) out[fx] = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0));
         }
     }
-    // mode 2 (640x256x4bpp) is not drawn yet (plan: Medium)
 }
+
 
 // Tilemap text mode (NR 0x6B bit 3) — one tile's span of a line. 1bpp: pixel
 // = bit (7 - x) of the row byte, palette index = attr 7:1 + pixel; never the

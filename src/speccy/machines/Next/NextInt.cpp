@@ -195,7 +195,9 @@ void sync() {
         g_li_raise++;
         // A pulse already over by the time the loop saw it: the CPU could not
         // take it (bus held by a DMA, or a slice that ran past the event).
-        if (!im2Hw() && now >= s_base28 + s_linePos28 + pulseLen28()) {
+        // With interrupts disabled nothing stops the slice there, and the
+        // pulse is lost on the board too: not counted (RAMTEST runs DI).
+        if (!im2Hw() && Z80::isIFF1() && now >= s_base28 + s_linePos28 + pulseLen28()) {
             g_li_late++;
             g_li_late_by = (uint32_t)((now - s_base28 - s_linePos28) / 8);
         }
