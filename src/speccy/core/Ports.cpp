@@ -3644,7 +3644,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
         }
         if (lo == 0xE7 && NextReg::portOn(NextReg::PE_SPI)) {
           LED::touchW(LED::SD);
-          DivMMC::mmc_cs(data);
+          DivMMC::mmc_cs(Z80Ops::isNext ? NextPorts::e7Select(data) : data);
           return;
         }
       }

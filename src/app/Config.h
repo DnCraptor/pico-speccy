@@ -270,6 +270,7 @@ public:
     static bool     tape_player;
     static volatile bool real_player;
     static bool     profi_ext_keys;  // Profi extended keyboard mode (default false)
+    static bool     next_ext_keys;   // Spectrum Next PS/2 layout: Alt = EXTEND/GRAPH, Tab/\\ = video keys (Alt+~)
     static bool     tape_timing_rg;
     static bool     tape_autostart;  // auto-play tape on load + after F11/boot re-mount (default true)
     // Storage > Tape > Tape wear: 0 off, 1 light, 2 medium, 3 heavy. Emulates a

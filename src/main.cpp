@@ -746,9 +746,10 @@ void kbdExtraMapping(fabgl::VirtualKey virtualKey, bool pressed) {
         // BEFORE the raw VK_SPACE, so a password with a space was accepted half-typed.
         case fabgl::VirtualKey::VK_SPACE:     if (!g_ui_text_entry) joyPushData(fabgl::VirtualKey::VK_MENU_ENTER, pressed); break;
         case fabgl::VirtualKey::VK_TAB:       if (Config::TABasfire1) JPAD(fabgl::VirtualKey::VK_DPAD_FIRE, pressed); break;
-        case fabgl::VirtualKey::VK_LALT:
+        // Cursor-as-joystick fire on Left Ctrl (Right Ctrl = alt fire, above).
+        // It was Left Alt, which is the hot-key modifier and, on the Next, EXTEND.
+        case fabgl::VirtualKey::VK_LCTRL:
             if (Config::CursorAsJoy) JPAD(fabgl::VirtualKey::VK_DPAD_FIRE, pressed);
-            kbdPushData(fabgl::VirtualKey::VK_LALT, pressed);
             break;
         case fabgl::VirtualKey::VK_RETURN:    joyPushData(fabgl::VirtualKey::VK_MENU_ENTER, pressed); break;
 

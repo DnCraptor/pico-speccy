@@ -1,5 +1,6 @@
 // Spectrum Next Multiface — see NextMf.h. Flash code: every entry is a cold
 // path (an NMI, a RETN, a port access to 0x3F/0xBF/0x1F/0x9F on the Next).
+#include "NextPorts.h"
 #include "NextMf.h"
 #include "NextReg.h"
 #include "NextInt.h"
@@ -69,7 +70,7 @@ uint8_t portData(uint16_t address) {
         case 0x1: return NextReg::port1FFD & 0x0F;            // motor + paging bits
         case 0x7: return NextReg::port7FFD;
         case 0xD: return NextReg::portDFFD & 0x5F;
-        case 0xE: return 0;                                   // EFF7 bits 3/2: not modelled
+        case 0xE: return NextPorts::eff7();                   // EFF7 bits 3:2 (multiface.vhd / zxnext.vhd 4315)
         default:  return VIDEO::borderColor & 0x07;
     }
 }

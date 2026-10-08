@@ -171,6 +171,7 @@ extern "C" void graphics_set_dither(bool enabled);
 extern "C" volatile bool profi_ds80_active;
 extern "C" const uint32_t profi_default_palette16[16];
 #include "speccy/devices/storage/DivMMC.h"
+#include "speccy/machines/Next/NextMf.h"
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/devices/storage/IDE.h"
 #include "speccy/devices/disk/MB02.h"
@@ -2231,10 +2232,17 @@ static uint8_t hotkeyChooser(const string& menu) {
 
 void OSD::nmiAction() {
     if (Z80Ops::isNext) {
-        // The Next's DivMMC NMI ("drive" button): enNxtmmc's NMI menu, or the
-        // esxDOS NMI browser with ESXMMC.BIN as the divMMC ROM.
-        const uint8_t r = NextReg::divNmiRequest(true);
-        if (r == 1) notify(" DivMMC NMI disabled (NR 06) ", LEVEL_INFO, 1200);
+        // The Next has two NMI buttons (zxnext.vhd 6348-6349: F9 = M1, F10 =
+        // Drive), each enabled by its own NR 0x06 bit. One hot key picks the one
+        // the running system enabled: only Drive (bit 4, not bit 3) = an esxDOS
+        // personality -> the divMMC NMI (enNxtmmc / the esxDOS NMI browser);
+        // anything else, NextZXOS included -> the Multiface NMI (NextMf).
+        const uint8_t r06 = NextReg::reg[0x06];
+        if ((r06 & 0x10) && !(r06 & 0x08)) {
+            NextReg::divNmiRequest(true);
+        } else if (!NextMf::request()) {
+            notify(" Multiface NMI refused (NR 06) ", LEVEL_INFO, 1200);
+        }
         return;
     }
     if (DivMMC::enabled) {
@@ -2367,6 +2375,12 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
             Config::profi_ext_keys = !Config::profi_ext_keys;
             Config::save();
             notify(Config::profi_ext_keys ? " XT keyboard ON " : " XT keyboard OFF ", LEVEL_INFO, 900);
+            return;
+        }
+        if (Config::arch == A_NEXT) {
+            Config::next_ext_keys = !Config::next_ext_keys;
+            Config::save();
+            notify(Config::next_ext_keys ? " Next keyboard ON " : " Next keyboard OFF ", LEVEL_INFO, 900);
             return;
         }
         if (Z80Ops::isTsconf || (Z80Ops::isAtm && Atm::evo)) {

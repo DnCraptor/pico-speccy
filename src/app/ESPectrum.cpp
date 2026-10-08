@@ -2376,7 +2376,45 @@ static uint8_t pqdosScancode(fabgl::VirtualKey vk) {
   }
 }
 
-IRAM_ATTR void ESPectrum::processKeyboard() {
+IRAM_ATTR // Spectrum Next extended keys (membrane.vhd, keymaps.vhd 83-94). The 16 keys a
+// Next keyboard has beyond the 40-key matrix: they press their Spectrum combo
+// in the matrix AND show in NR 0xB0/0xB1 (NextReg::extKeys, bit = 2*row +
+// col-5 of membrane.vhd's extra columns). With Config::next_ext_keys (Alt+~)
+// the PS/2 layout is the board's: Left Alt EXTEND, Right Alt GRAPH, Tab TRUE
+// VIDEO, \ INV VIDEO; off, our usual one (Tab = Extend, Alt free for hot keys).
+// Not modelled: NR 0x68 bit 4 (cancel the matrix combos) — stored only.
+static void nextExtKeys(fabgl::Keyboard* Kbd, uint8_t* cols) {
+    const bool on = Config::next_ext_keys;
+    auto dn = [Kbd](fabgl::VirtualKey vk) { return vk != fabgl::VK_NONE && Kbd->isVKDown(vk); };
+    const bool lalt = on && dn(fabgl::VK_LALT), ralt = on && dn(fabgl::VK_RALT);
+    const bool tab = dn(fabgl::VK_TAB), bsl = on && dn(fabgl::VK_BACKSLASH);
+    uint16_t e = 0;
+    if (on ? lalt : dn(ESPectrum::VK_ESPECTRUM_TAB)) e |= 1u << 0;      // EXTEND
+    if (dn(fabgl::VK_UP))                             e |= 1u << 1;
+    if (dn(fabgl::VK_CAPSLOCK))                       e |= 1u << 2;
+    if (ralt)                                         e |= 1u << 3;      // GRAPH
+    if (on && tab)                                    e |= 1u << 4;      // TRUE VIDEO
+    if (bsl)                                          e |= 1u << 5;      // INV VIDEO
+    if (dn(fabgl::VK_ESCAPE))                         e |= 1u << 6;      // BREAK
+    if (dn(ESPectrum::VK_ESPECTRUM_GRAVEACCENT))      e |= 1u << 7;      // EDIT
+    if (dn(fabgl::VK_SEMICOLON))                      e |= 1u << 8;
+    if (dn(fabgl::VK_QUOTE))                          e |= 1u << 9;
+    if (dn(fabgl::VK_COMMA))                          e |= 1u << 10;
+    if (dn(fabgl::VK_PERIOD))                         e |= 1u << 11;
+    if (dn(fabgl::VK_BACKSPACE))                      e |= 1u << 12;     // DELETE
+    if (dn(fabgl::VK_RIGHT))                          e |= 1u << 13;
+    if (dn(fabgl::VK_LEFT))                           e |= 1u << 14;
+    if (dn(fabgl::VK_DOWN))                           e |= 1u << 15;
+    NextReg::extKeys = e;
+    if (!on) return;
+    // the board-layout combos our usual matrix code does not make
+    if (lalt) { cols[0] &= ~1; cols[7] &= ~2; }        // EXTEND = CS + SS
+    if (ralt) { cols[0] &= ~1; cols[4] &= ~2; }        // GRAPH  = CS + 9
+    if (tab)  { cols[0] &= ~1; cols[3] &= ~4; }        // TRUE VIDEO = CS + 3
+    if (bsl)  { cols[0] &= ~1; cols[3] &= ~8; }        // INV VIDEO  = CS + 4
+}
+
+void ESPectrum::processKeyboard() {
   static uint8_t PS2cols[8] = {0xbf, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf};
   auto Kbd = PS2Controller.keyboard();
   fabgl::VirtualKeyItem NextKey;
@@ -2724,12 +2762,15 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
         jShift = false;
         j[7] = jShift;
       }
+      // Spectrum Next keyboard mode (Alt+~): Tab is TRUE VIDEO there, not Extend
+      const fabgl::VirtualKey tabExt =
+          (Z80Ops::isNext && Config::next_ext_keys) ? fabgl::VK_NONE : VK_ESPECTRUM_TAB;
       // Check keyboard status and map it to Spectrum Ports
       bitWrite(PS2cols[0], 0,
                (jShift) & (!Kbd->isVKDown(fabgl::VK_BACKSPACE)) &
                    (!Kbd->isVKDown(fabgl::VK_CAPSLOCK))         // Caps lock
                    & (!Kbd->isVKDown(VK_ESPECTRUM_GRAVEACCENT)) // Edit
-                   & (!Kbd->isVKDown(VK_ESPECTRUM_TAB))         // Extended mode
+                   & (!Kbd->isVKDown(tabExt))         // Extended mode
                    & (!Kbd->isVKDown(fabgl::VK_ESCAPE))         // Break
       );                                                        // CAPS SHIFT
       bitWrite(PS2cols[0], 1,
@@ -2835,7 +2876,7 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
                    & (!Kbd->isVKDown(fabgl::VK_PERIOD))    // Period
                    & (!Kbd->isVKDown(fabgl::VK_SEMICOLON)) // Semicolon
                    & (!Kbd->isVKDown(fabgl::VK_QUOTE))     // Double quote
-                   & (!Kbd->isVKDown(VK_ESPECTRUM_TAB))    // Extended mode
+                   & (!Kbd->isVKDown(tabExt))    // Extended mode
       );                                                   // SYMBOL SHIFT
       bitWrite(PS2cols[7], 2,
                (!Kbd->isVKDown(fabgl::VK_M)) & (!Kbd->isVKDown(fabgl::VK_m)) &
@@ -2847,6 +2888,8 @@ IRAM_ATTR void ESPectrum::processKeyboard() {
       );
       bitWrite(PS2cols[7], 4,
                (!Kbd->isVKDown(fabgl::VK_B)) & (!Kbd->isVKDown(fabgl::VK_b)));
+
+      if (Z80Ops::isNext) nextExtKeys(Kbd, PS2cols);
 
       // ── Profi extended keyboard ─────────────────────────────────────────
       // Active when arch=Profi and extended keyboard mode is on.

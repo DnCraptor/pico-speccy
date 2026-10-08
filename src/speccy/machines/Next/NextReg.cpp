@@ -40,6 +40,8 @@ uint8_t NextReg::portDFFD = 0;
 uint8_t NextReg::port1FFD = 0;
 uint8_t NextReg::port123B = 0;
 uint8_t NextReg::l2Offset = 0;
+uint8_t NextReg::s_ioTrapCause = 0;
+uint16_t NextReg::extKeys = 0;
 bool    NextReg::l2MapHigh = false;
 uint8_t  NextReg::contendBanks = 0;
 uint32_t NextReg::portEn = ~0u;   // all decoded; NextReg::reset / CPU::reset own it
@@ -295,11 +297,15 @@ void NextReg::reset(bool hard) {
     uint8_t kept[sizeof(kKeep)];
     for (unsigned i = 0; i < sizeof(kKeep); i++) kept[i] = reg[kKeep[i]];
     // NR 0x7F is not in the VHDL reset block: FF at power-on only
+    const uint8_t old80 = reg[0x80];
     static bool s_powered = false;
     const uint8_t user7F = s_powered ? reg[0x7F] : 0xFF;
     s_powered = true;
     for (int i = 0; i < 256; i++) reg[i] = 0;
     reg[0x7F] = user7F;
+    reg[0x80] = (uint8_t)((old80 << 4) | (old80 & 0x0F));   // zxnext.vhd 2186: 7:4 <= 3:0
+    reg[0x0B] = 0x01;                                       // zxnext.vhd 4939-4941
+    s_ioTrapCause = 0;
     selected = 0;
     reg[0x8C] = (uint8_t)((altStaged << 4) | altStaged);
     MemESP::altrom_rd  = (reg[0x8C] & 0x80) && !(reg[0x8C] & 0x40);
@@ -597,6 +603,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
                    // at the end of each boot stage — latching only left the
                    // boot in an endless crash-restart loop (hw: white flash
                    // blinking). Deferred to the frame boundary.
+            if (!(v & 0x10)) s_ioTrapCause = 0;   // bit 4 = 0 clears the I/O trap (zxnext.vhd 3879)
             if (v & 0x04) divNmiRequest(false);   // generate divMMC NMI
             NextMf::nr02(v & 0x08);               // bit 3: generate Multiface NMI (NextMf.h)
             if (v & 0x02) resetPending = 2;
@@ -736,7 +743,9 @@ uint8_t NextReg::read(uint8_t r) {
         case 0x00: return 10;    // machine ID: ZX Spectrum Next
         case 0x01: return 0x32;  // core major.minor = 3.2
         case 0x03: return reg03Compose();
-        case 0x02: return (uint8_t)((reg[0x02] & ~0x08) | NextMf::nr02Bit());
+        case 0x02: return (uint8_t)((reg[0x02] & ~0x18) | NextMf::nr02Bit() | (s_ioTrapCause ? 0x10 : 0));
+        case 0xD8: return reg[0xD8] & 0x01;
+        case 0xDA: return s_ioTrapCause;
         case 0x0E: return 0x03;  // core sub-minor: report 3.02.03 — the
                                   // current NextZXOS distro gates boot on
                                   // >= 3.02.03 (hw: 3.02.00 failed the check
@@ -745,6 +754,15 @@ uint8_t NextReg::read(uint8_t r) {
         case 0x2C: case 0x2D: case 0x2E:
             return 0x00;   // Pi I2S sample bits (zxnext.vhd 6008-6015) — no Pi here
         case 0x68: return reg[0x68] & 0xFD;   // bit 1 reads 0 (zxnext.vhd NR 0x68 read)
+        case 0x0B: return reg[0x0B] & 0xB1;
+        case 0xB0: // ; " , . UP DOWN LEFT RIGHT (zxnext.vhd 6206-6208)
+            return (uint8_t)((((extKeys >> 8) & 1) << 7) | (((extKeys >> 9) & 1) << 6) |
+                             (((extKeys >> 10) & 1) << 5) | (((extKeys >> 11) & 1) << 4) |
+                             (((extKeys >> 1) & 1) << 3) | (((extKeys >> 15) & 1) << 2) |
+                             (((extKeys >> 14) & 1) << 1) | ((extKeys >> 13) & 1));
+        case 0xB1: // DELETE EDIT BREAK INV TRUE GRAPH CAPSLOCK EXTEND (6210-6212)
+            return (uint8_t)((((extKeys >> 12) & 1) << 7) | (((extKeys >> 2) & 0x3F) << 1) |
+                             (extKeys & 1));
         case 0x09: return reg[0x09] & 0xF7;   // bit 3 (mapram reset strobe) reads 0
         case 0x6E: case 0x6F: return reg[r] & 0xBF;   // bit 6 reads 0
         case 0x89: return reg[0x89] & 0x8F;
@@ -884,6 +902,23 @@ void NextReg::updateLayer2Window() {
     const bool high = ((wr | rd) & 0x3C) != 0;
     if (high != l2MapHigh) { l2MapHigh = high; VIDEO::tsFastMemRecalc(); }
     if (touch) ts_fastrd_recalc();
+}
+
+// ===== I/O traps (zxnext.vhd 2601-2602, 3835-3895) =====
+// With NR 0xD8 bit 0 the +3 FDC ports 0x2FFD (read) and 0x3FFD (read/write)
+// raise a Multiface NMI instead of reaching a controller: NextZXOS emulates
+// the +3 disk that way. The cause is latched only while no NMI is in progress
+// (nmi_accept_cause); NR 0xD9 keeps the byte a 0x3FFD write carried.
+bool NextReg::ioTrap(uint16_t address, bool write, uint8_t data) {
+    if (!(reg[0xD8] & 0x01) || (address & 0xC003) != 0x0001) return false;
+    const uint8_t a = (address >> 12) & 3;           // A13:12
+    if (a < 2 || (a == 2 && write)) return false;    // 0x2FFD is trapped on read only
+    if (!NextMf::active()) {
+        s_ioTrapCause = (uint8_t)(a == 2 ? 1 : write ? 3 : 2);
+        if (write) reg[0xD9] = data;
+    }
+    NextMf::request();
+    return true;
 }
 
 // ===== Legacy Spectrum paging, Next-style (implemented on top of the MMU) =====

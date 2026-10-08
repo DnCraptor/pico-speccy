@@ -339,9 +339,9 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   `#E3` (FW работает с MAPRAM → банк 3 вместо ESXMMC) — VHDL обнуляет его на любом сбросе,
   плюс NR 09 b3; (4) `$0000`-трап разоружён после сброса из TBBLUE.FW и после F11 — esxDOS
   не делал холодный init (теперь armed при `nextBootRom`); (5) RAM Next при старте — нули
-  (как Karabas/Evo; к NMI не относилось, решение владельца). NextZXOS сама гасит NR 06 b3/b4
-  (ROM p2 #0852) — тост «DivMMC NMI disabled» там верный, её NMI-меню — Multiface (не
-  эмулирован). Карта: FW ищет `/machines/next/esxmmc.bin`, нужен `divmmc=1`; LFN Browser
+  (как Karabas/Evo; к NMI не относилось, решение владельца). NextZXOS гасит NR 06 b4 (ROM p2 #0852) — тост «DivMMC NMI disabled» там верный; b3
+  (M1) в NextZXOS включён, её NMI-меню — Multiface: Alt+F10 на Next шлёт NMI Multiface, если не
+  «только Drive» (NR 06 b4=1, b3=0 — личности с esxDOS), hw 2026-10-08. Карта: FW ищет `/machines/next/esxmmc.bin`, нужен `divmmc=1`; LFN Browser
   выходит сразу без `/bin/browse.cfg` (`.brwscfg` → Advanced → Auto detect device).
   Диагностика `[NMIT]` (NEXT_TRACE): после NMI 1500 событий в UART — map/unmap, `#E3`,
   RST 8 с кодом функции, сектора SD, AF/HL.

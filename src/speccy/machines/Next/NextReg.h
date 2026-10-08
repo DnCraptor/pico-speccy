@@ -34,6 +34,10 @@ public:
     static uint8_t port123B;     // Layer 2 access port: the control latches as read back
     static uint8_t l2Offset;     // its bank offset (written with bit 4 set, bits 2:0)
     static bool    l2MapHigh;    // Layer 2 mapped above 0x3FFF (segment 3): no fast writes
+    static uint16_t extKeys;      // NR 0xB0/0xB1 source: membrane.vhd o_extended_keys (ESPectrum)
+    static uint8_t s_ioTrapCause; // NR 0xDA: 1 = 2FFD read, 2 = 3FFD read, 3 = 3FFD write
+    // +3 FDC port I/O trap (NR 0xD8): true = the access was trapped (MF NMI raised)
+    static bool    ioTrap(uint16_t address, bool write, uint8_t data);
 
     // Internal port decode enables, NR 0x82-0x85 packed as zxnext.vhd's
     // internal_port_enable(27:0) (2397-2442): a clear bit means the FPGA does

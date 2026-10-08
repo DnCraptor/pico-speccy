@@ -296,7 +296,17 @@ static int joyRead(uint8_t lo) {
 // mode 00 only), 0xFF3B = palette entry in mode 00, enable bit 0 in mode 01.
 // The enable is one latch with NR 0x68 bit 3.
 static uint8_t s_ulapMode = 0, s_ulapIdx = 0;
-void NextPorts::ulapReset() { s_ulapMode = 0; s_ulapIdx = 0; }
+static uint8_t s_eff7 = 0;
+uint8_t NextPorts::eff7() { return s_eff7; }
+// Port 0xE7 (zxnext.vhd 3300-3332): the SD card behind our divMMC is SD0. It
+// is selected only by bits 1:0 = 10 (01 with NR 0x0A bit 5 = SD swap); 01 /
+// FB / F7 / 7F pick SD1, the Pis or the flash, anything else deselects all.
+uint8_t NextPorts::e7Select(uint8_t v) {
+    const bool swap = NextReg::reg[0x0A] & 0x20;
+    const bool sd0 = (v & 3) == (swap ? 1 : 2);
+    return sd0 ? 0xFE : 0xFF;
+}
+void NextPorts::ulapReset() { s_ulapMode = 0; s_ulapIdx = 0; s_eff7 = 0; }
 
 int NextPorts::input(uint16_t address) {
     if (address == 0x243B) return NextReg::selected;
@@ -309,6 +319,17 @@ int NextPorts::input(uint16_t address) {
           if (v >= 0) return v;
       } }
     if (address == 0x123B && NextReg::portOn(NextReg::PE_LAYER2)) return NextReg::port123B;
+    // +3 FDC ports trapped by NR 0xD8 (NextReg::ioTrap): no data driven
+    if ((address & 0xC003) == 0x0001 && NextReg::ioTrap(address, false, 0)) return 0x00;
+    // AY register read on 0xBFF5 always, 0xBFFD in +3 timing (zxnext.vhd 2648-2649,
+    // 2771: "bffd is readable equivalent to fffd on +3")
+    if ((address & 0xC007) == 0x8005 && ESPectrum::AY_emu && NextReg::portOn(NextReg::PE_AY) &&
+        (!(address & 0x0008) || NextReg::machineTiming() == 3)) {
+        AySound* chip = chips[AySound::selected_chip];
+        if (!chip) chip = chips[0];
+        LED::touchR(LED::AY);
+        return chip ? chip->getRegisterData() : 0xFF;
+    }
     if (address == 0xFF3B && NextReg::portOn(NextReg::PE_ULAP)) {
         LED::touchR(LED::ULAPLUS);
         if (s_ulapMode == 0) return NEXTVID::ulapRead(s_ulapIdx);
@@ -351,6 +372,16 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
     }
     if (uartPort(address) && NextReg::portOn(NextReg::PE_UART)) {
         uartWrite(address, data);
+        return true;
+    }
+    if ((address & 0xC003) == 0x0001 && NextReg::ioTrap(address, true, data)) return true;
+    // 0xEFF7 (zxnext.vhd 2604, 3778-3782, 4636): bit 3 puts RAM 0 (MMU 0/1 = 0/1)
+    // over the ROM, else the ROM (FF); bit 2 only disables the Pentagon-1024
+    // mapping of NR 0x8F, which is not modelled — kept for the MF read-back.
+    if ((address & 0xF0FF) == 0xE0F7 && NextReg::portOn(NextReg::PE_EFF7)) {
+        s_eff7 = data & 0x0C;
+        NextReg::write(0x50, (data & 0x08) ? 0x00 : 0xFF);
+        NextReg::write(0x51, (data & 0x08) ? 0x01 : 0xFF);
         return true;
     }
     if ((address == 0xBF3B || address == 0xFF3B) && NextReg::portOn(NextReg::PE_ULAP)) {
