@@ -799,8 +799,9 @@ static void applyTimexMode(uint8_t v) {
     const uint8_t pm = VIDEO::timex_mode, pi = VIDEO::timex_hires_ink;
     VIDEO::timex_mode = v & 0x07;
     VIDEO::timex_hires_ink = (v >> 3) & 0x07;
-    if ((VIDEO::timex_mode == 6) != (pm == 6))
-        VIDEO::timexHiresRequest(VIDEO::timex_mode == 6);
+    // zxula.vhd: mode bit 2 is hi-res (4-7), not just 6
+    if (((VIDEO::timex_mode & 4) != 0) != ((pm & 4) != 0))
+        VIDEO::timexHiresRequest((VIDEO::timex_mode & 4) != 0);
     else if (VIDEO::timex_hires_ink != pi && VIDEO::timex_hires_live)
         VIDEO::timexHiresColour();
 }

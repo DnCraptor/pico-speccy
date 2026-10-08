@@ -1202,6 +1202,21 @@ static IRAM_ATTR void nxRotL(uint16_t* a, int n) {
     nxRev(a, 0, n); nxRev(a, n, 256); nxRev(a, 0, 256);
 }
 
+// Nearest of the 16 ZX colours (the only ones a packed-pair hi-res frame can
+// show) to a 9-bit RRRGGGBBB palette colour. Twice a hi-res line.
+__attribute__((noinline)) static uint8_t nxZxNearest(uint16_t v) {
+    static const uint8_t zxlvl[2] = { 205, 255 };
+    const int tr = ((v >> 6) & 7) * 255 / 7, tg = ((v >> 3) & 7) * 255 / 7, tb = (v & 7) * 255 / 7;
+    uint32_t bestd = 0xFFFFFFFFu; uint8_t best = 0;
+    for (int c = 0; c < 16; c++) {
+        const int l = zxlvl[(c >> 3) & 1];
+        const int dr = tr - ((c & 2) ? l : 0), dg = tg - ((c & 4) ? l : 0), db = tb - ((c & 1) ? l : 0);
+        const uint32_t d = (uint32_t)(dr * dr * 3 + dg * dg * 6 + db * db);
+        if (d < bestd) { bestd = d; best = (uint8_t)c; }
+    }
+    return best;
+}
+
 IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
     const int xres = VIDEO::vga.xres;
     uint16_t* const u = nxU;
@@ -1220,8 +1235,32 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
         bc[c] = (uint16_t)(ulaNext ? (mask == 0xFF ? fallback : nxRgb(raw[128 + c], tr))
                                    : nxRgb(raw[(ulap ? 200 : 16) + c], tr));
     for (int c = 0; c < 8; c++) if (!(bc[c] & NX_TR)) bc[c] |= NX_BRD;
-    const uint16_t borderV = bc[LS->border & 7];
-    if (LS->brd.n) nxPaintBorderRuns(u, xres, bc, borderV);
+    // Timex hi-res (port FF mode 1xx, zxula.vhd border_clr_tmx): the ULA's
+    // attribute is fixed at 01 & ~ink & ink — BRIGHT, paper = the inverse of
+    // the ink in port FF 5:3 — and the border takes that paper colour too.
+    // Ink / paper go through whatever palette the ULA uses (classic, ULANext,
+    // ULA+) like any attribute.
+    const bool hr = LS->hires && !(LS->r69 & 0x40);
+    uint16_t hrInk = 0, hrPap = 0;
+    if (hr) {
+        const uint8_t ink = (LS->r69 >> 3) & 7;
+        const uint8_t a = (uint8_t)(0x40 | ((~ink & 7) << 3) | ink);
+        if (ulaNext) {
+            uint8_t shift = 0;
+            for (uint8_t m = mask; m; m >>= 1) shift++;
+            const bool bgnd = (mask & (uint8_t)(mask + 1)) != 0 || mask == 0xFF || mask == 0;
+            hrInk = raw[a & mask] & 0x1FF;
+            hrPap = bgnd ? (fallback & 0x1FF) : (raw[128 + (a >> shift)] & 0x1FF);
+        } else if (ulap) {
+            hrInk = raw[0xD0 | ink] & 0x1FF;
+            hrPap = raw[0xD8 | ((a >> 3) & 7)] & 0x1FF;
+        } else {
+            hrInk = raw[8 | ink] & 0x1FF;
+            hrPap = raw[16 + (8 | ((a >> 3) & 7))] & 0x1FF;
+        }
+    }
+    const uint16_t borderV = hr ? (uint16_t)(hrPap | NX_BRD) : bc[LS->border & 7];
+    if (LS->brd.n && !hr) nxPaintBorderRuns(u, xres, bc, borderV);
     else for (int x = 0; x < xres; x++) u[x] = borderV;
 
     const int y = row - paperTopRow;
@@ -1266,18 +1305,31 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
     // Timex screen mode = port FF / NR 0x69 bits 2:0, forced to 000 while the
     // shadow screen (bank 7, NR 0x69 bit 6 = port 7FFD bit 3) is displayed —
     // zxula.vhd: "limit timex modes to bank 5 as bank 7 only has 8k bram".
-    if (LS->hires && !(LS->r69 & 0x40)) {
-        // Timex hi-res 512x192: screen 0 (0x4000) gives the left 8 pixels of
-        // each 16-pixel column, screen 1 (0x6000) the right 8 (VIDEO's TC2048
-        // nibble LUT). hiresRow gets the pair slots; the paper carries
-        // HIRES_MARK as a ready fb slot so layers drawn over the ULA win.
-        const uint16_t* hl = VIDEO::timexHiresLut();
-        const uint8_t* bmp = LS->grmem + VIDEO::offBmp[sy];
-        uint32_t* hr = (uint32_t*)hiresRow;
+    if (hr) {
+        // Timex hi-res 512x192 (zxula.vhd vram_a, shift_reg_32): each 16-pixel
+        // column is the "pixel" byte (left 8) then the "attribute" byte (right
+        // 8), fetched per mode bits 1:0 — mode 6: 0x4000 / 0x6000 pixels (the
+        // usual hi-res), 7: 0x6000 twice, 4: 0x4000 pixels / 0x5800 attributes,
+        // 5: 0x6000 pixels / 0x7800 attributes. hiresRow gets pair slots of
+        // the nearest ZX colours of ink / paper; the paper carries HIRES_MARK
+        // as a ready fb slot so layers drawn over the ULA win.
+        const uint8_t m = LS->r69 & 7;
+        const uint8_t ci = nxZxNearest(hrInk), cp = nxZxNearest(hrPap);
+        uint16_t hl[16];
+        for (int n = 0; n < 16; n++) {
+            const uint8_t c3 = (n & 8) ? ci : cp, c2 = (n & 4) ? ci : cp;
+            const uint8_t c1 = (n & 2) ? ci : cp, c0 = (n & 1) ? ci : cp;
+            hl[n] = (uint16_t)(VIDEO::profi_pair_lookup[c3][c2]
+                  | ((uint16_t)VIDEO::profi_pair_lookup[c1][c0] << 8));
+        }
+        const uint8_t* lb = LS->grmem + ((m & 1) << 13) + VIDEO::offBmp[sy];
+        const uint8_t* rb = (m & 2) ? LS->grmem + 0x2000 + VIDEO::offBmp[sy]
+                                    : LS->grmem + ((m & 1) << 13) + VIDEO::offAtt[sy];
+        uint32_t* hrw = (uint32_t*)hiresRow;
         for (int col = 0; col < 32; col++) {
-            const uint8_t e = bmp[col], o = bmp[col + 0x2000];
-            hr[2 * col]     = (uint32_t)hl[e >> 4] | ((uint32_t)hl[e & 0x0F] << 16);
-            hr[2 * col + 1] = (uint32_t)hl[o >> 4] | ((uint32_t)hl[o & 0x0F] << 16);
+            const uint8_t e = lb[col], o = rb[col];
+            hrw[2 * col]     = (uint32_t)hl[e >> 4] | ((uint32_t)hl[e & 0x0F] << 16);
+            hrw[2 * col + 1] = (uint32_t)hl[o >> 4] | ((uint32_t)hl[o & 0x0F] << 16);
         }
         for (int x = 0; x < 256; x++) p[x] = NX_SLOT | HIRES_MARK;
     } else {
