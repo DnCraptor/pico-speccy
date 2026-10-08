@@ -28,7 +28,11 @@ struct NextLineState;   // NextVideo.cpp: the per-line render inputs
 
 class NEXTVID {
 public:
-    static void Reset();       // machine reset: geometry, default palettes
+    static void Reset();
+    // NR 0x02 soft reset: the renderer latches the zxnext.vhd reset block
+    // covers (clip windows + indices, palette index / NR 0x43, copper mode +
+    // address). Palette, sprite and copper RAM survive, as on the board.
+    static void softReset();       // machine reset: geometry, default palettes
     static void gigsFrame();   // EndFrame: Gigascreen state for the next frame
     static void EndFrame();    // frame restart (called from VIDEO::EndFrame)
     static void onClockChange(); // nextreg 0x07 turbo switch: rescale line boundary

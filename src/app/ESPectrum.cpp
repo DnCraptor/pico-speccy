@@ -3758,21 +3758,21 @@ void ESPectrum::loop() {
         NextReg::reset(true);
         ESPectrum::reset();
       } else {
-        NextReg::reg[0x02] = 0x01;   // sticky: last reset was soft
-        // Alt-ROM staged nibble 3:0 -> active 7:4 (zxnext.vhd reset promote)
-        uint8_t a = (uint8_t)((NextReg::reg[0x8C] & 0x0F) << 4) |
-                    (NextReg::reg[0x8C] & 0x0F);
-        NextReg::write(0x8C, a);
-        // ROM select back to bank 0; upper MMU slots survive as-is
+        // The board asserts the core reset on a soft reset too
+        // (zxnext_top_issue5.vhd 880: reset <= reset_hard or reset_soft;
+        // zxnext.vhd 1730), so the whole NR reset block (4930-5111) runs:
+        // layer order, clip windows, line IRQ, scroll, palette index / NR
+        // 0x43, copper, transparency, tilemap, Layer 2, MMU (4610-4617).
+        // NextReg::reset(false) keeps what that block keeps (NR 0x03 and the
+        // config/bootrom flags, NR 0x05-0x0A and 0x82-0x85 per their own
+        // rules, 0x7F) and promotes the Alt-ROM nibble. RAM, palette RAM,
+        // sprite and copper RAM survive. It used to leave every register as
+        // the program had set it (line IRQ armed, sprites/tilemap/L2 on).
         MemESP::romInUse = 0;
         MemESP::romLatch = 0;
-        NextReg::port7FFD = 0;
-        NextReg::portDFFD = 0;
-        NextReg::port1FFD = 0;
-        NextReg::port123B = 0;
-        MemESP::wr_overlay_active = false;
-        MemESP::applyMMU(0, 0xFF);
-        MemESP::applyMMU(1, 0xFF);
+        NextReg::reset(false);           // also reg[0x02] = 0x01 (last = soft)
+        MemESP::resetNextMapping();
+        NEXTVID::softReset();
         // divMMC: overlay off. Its RAM survives (NextZXOS keeps boot-stage
         // state there), but port 0xE3 does NOT: zxnext.vhd ~4177 clears
         // port_e3_reg on every reset, soft included. TBBLUE.FW runs with

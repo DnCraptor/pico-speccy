@@ -234,13 +234,20 @@ IRAM_ATTR void Z80DMA::processCommand(uint8_t data) {
         processWR4(data);
         return;
     }
-    // WR3: bit7=1, bits[1:0]=00
-    // Bit 6 = enable DMA flag. On real HW this starts bus request sequence
-    // but transfer doesn't happen until bus is granted. In our sequential
-    // model, actual transfer is triggered by WR6 ENABLE (0x87).
+    // WR3: bit7=1, bits[1:0]=00 (dma.vhd 572-591, 802-813). Bit 3 = a mask
+    // byte follows, bit 4 = a match byte follows (both consumed and unused
+    // — search is not implemented on the FPGA either); without consuming
+    // them they were decoded as new commands. Bit 6 = enable DMA: on the
+    // Next it starts the transfer exactly like WR6 0x87 (dma_seq_s <=
+    // START_DMA). Kept Next-only: the MB-02 path is hw-tuned on 0x87.
     if ((data & 0x83) == 0x80) {
-        // bits 3,4 may indicate mask/match parameter bytes follow
-        // (not implemented — ignored)
+        param_mask = (data >> 3) & 0x03;
+        if (param_mask) {
+            write_state = WS_PARAM_BYTE;
+            current_wr = 3;
+            param_index = 0;
+        }
+        if ((data & 0x40) && Z80Ops::isNext) doEnable();
         return;
     }
     // WR1: bit7=0, bits[2:0]=100 (mask 0x87 == 0x04)
@@ -419,8 +426,9 @@ IRAM_ATTR void Z80DMA::collectParam(uint8_t data) {
         if (data & 0x20) {
             wr2_prescalar_pending = true; // next byte is prescalar
         }
-    } else if (current_wr == 10) {
-        // Dummy: discard WR1 prescalar byte (not used per FPGA)
+    } else if (current_wr == 10 || current_wr == 3) {
+        // Dummy: discard WR1 prescalar byte (not used per FPGA) / WR3
+        // mask and match bytes (dma.vhd R3_BYTE_0/1, commented out there)
     } else if (current_wr == 4) {
         // WR4 params: bit2=portB addr low, bit3=portB addr high
         switch (param_index) {

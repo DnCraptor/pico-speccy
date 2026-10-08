@@ -15,6 +15,7 @@
 #include "app/ESPectrum.h"
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
+#include "speccy/core/MemESP.h"
 
 // The ULA floating bus on port #FF (zxnext.vhd 2813 / 4513, zxula.vhd 573):
 // only in 48K and 128K machine timing — +3 and Pentagon read 0xFF there —
@@ -118,9 +119,14 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
     if (a8 == 0x5B && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spritePatternWrite(data); return true; }
     // zxnext.vhd 2596-2599: port_dffd = A15:12 = 1101 and A1:0 = 01;
     // port_1ffd = A15:12 = 0001 and A1:0 = 01 (it also masks port_7ffd).
-    if ((address & 0xF003) == 0xD001 && NextReg::portOn(NextReg::PE_DFFD)) { NextReg::writeDFFD(data); return true; }
+    // Both are frozen by the 0x7FFD bit-5 lock like 0x7FFD itself (zxnext.vhd
+    // 3691, 3718) — the decode still consumes the write.
+    if ((address & 0xF003) == 0xD001 && NextReg::portOn(NextReg::PE_DFFD)) {
+        if (!MemESP::pagingLock) NextReg::writeDFFD(data);
+        return true;
+    }
     if ((address & 0xF003) == 0x1001 && NextReg::portOn(NextReg::PE_1FFD)) {   // 0x1FFD (+3 paging)
-        NextReg::write1FFD(data);
+        if (!MemESP::pagingLock) NextReg::write1FFD(data);
         return true;
     }
     // AY #FFFD/#BFFD undecoded (NR 0x84 bit 0 — the 48K personality without

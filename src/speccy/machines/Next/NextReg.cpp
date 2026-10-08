@@ -273,7 +273,9 @@ void NextReg::reset(bool hard) {
     static const uint8_t kKeep[] = { 0x05, 0x06, 0x08, 0x09, 0x0A, 0x82, 0x83, 0x84, 0x85 };
     uint8_t kept[sizeof(kKeep)];
     for (unsigned i = 0; i < sizeof(kKeep); i++) kept[i] = reg[kKeep[i]];
+    const uint8_t user7F = reg[0x7F];   // not in the VHDL reset block
     for (int i = 0; i < 256; i++) reg[i] = 0;
+    reg[0x7F] = user7F;
     selected = 0;
     reg[0x8C] = (uint8_t)((altStaged << 4) | altStaged);
     MemESP::altrom_rd  = (reg[0x8C] & 0x80) && !(reg[0x8C] & 0x40);
@@ -635,20 +637,27 @@ void NextReg::write(uint8_t r, uint8_t v) {
         case 0x61: NEXTVID::copperIndexLo(v);     break;
         case 0x62: NEXTVID::copperControl(v);     break;
         case 0x63: NEXTVID::copperData16Write(v); break;
+        case 0x08: // bit 7 = unlock 0x7FFD paging (clears 0x7FFD bit 5, 3654)
+            if (v & 0x80) {
+                port7FFD &= ~0x20;
+                MemESP::pagingLock = 0;
+            }
+            break;
         case 0x8E: { // Spectrum memory mapping (atomic 0x7FFD/0x1FFD write)
-            // bit 3 = apply bank bits 7:4 to 0xC000; bit 2 = paging mode
-            // (0 normal / 1 +3 all-RAM); bits 1:0 = ROM select or all-RAM map
+            // zxnext.vhd 3662-3670 / 3696-3703 / 3726-3734, never locked:
+            // bit 3 = apply bank bits 7:4 (7FFD 2:0, DFFD bit 0 <- d7, DFFD
+            // bit 3 cleared); 1FFD bit 2 <- d1, bit 1 <- d0, bit 0 <- d2
+            // (special); with d2 = 0 also 0x7FFD bit 4 <- d0 (ROM select).
             if (v & 0x08) {
                 port7FFD = (port7FFD & ~0x07) | ((v >> 4) & 0x07);
                 portDFFD = (portDFFD & ~0x0F) | ((v >> 7) & 0x01);
                 applyBankC000();
             }
-            if (v & 0x04) {
-                write1FFD(0x01 | ((v & 0x03) << 1)); // all-RAM map
-            } else {
+            if (!(v & 0x04)) {
+                port7FFD = (uint8_t)((port7FFD & ~0x10) | ((v & 0x01) << 4));
                 MemESP::romLatch = v & 0x01;
-                write1FFD((v & 0x02) << 1);          // normal, ROM high bit
             }
+            write1FFD((uint8_t)(((v >> 2) & 0x01) | ((v & 0x03) << 1)));
             break;
         }
         default:
@@ -669,6 +678,8 @@ uint8_t NextReg::read(uint8_t r) {
                                   // >= 3.02.03 (hw: 3.02.00 failed the check
                                   // at ROM PC=0E13 → 1.4s restart loop);
                                   // same stable version zx_go settled on
+        case 0x08: // bit 7 reads "not locked" (zxnext.vhd 5906)
+            return (uint8_t)((reg[0x08] & 0x7F) | (MemESP::pagingLock ? 0 : 0x80));
         case 0x07: { // bits 5:4 = actual speed, 1:0 = programmed
             uint8_t actual = reg[0x07] & 3;
             if (actual > Config::next_clk_cap) actual = Config::next_clk_cap;
@@ -793,8 +804,10 @@ static void applyBankC000() {
 }
 
 void NextReg::write7FFD(uint8_t v) {
-    // nextreg 0x08 bit 6 releases the 0x7FFD paging lock
-    if (MemESP::pagingLock && !(reg[0x08] & 0x40)) return;
+    // 0x7FFD bit 5 locks 0x7FFD, 0x1FFD and 0xDFFD (zxnext.vhd 3651, 3691,
+    // 3718); only a NEXTREG 0x08 write with bit 7 set unlocks it (3654). It
+    // used to test NR 0x08 bit 6 — that is the contention disable.
+    if (MemESP::pagingLock) return;
     NT_EV('7', 0x7F, v);
     port7FFD = v;
     applyBankC000();

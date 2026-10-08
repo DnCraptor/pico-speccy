@@ -345,6 +345,21 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   выходит сразу без `/bin/browse.cfg` (`.brwscfg` → Advanced → Auto detect device).
   Диагностика `[NMIT]` (NEXT_TRACE): после NMI 1500 событий в UART — map/unmap, `#E3`,
   RST 8 с кодом функции, сектора SD, AF/HL.
+- **VHDL-сверка 2026-10-08, первая партия исправлений** (`debug/DVp2-next-vhdlfix1-1.0.9.elf`,
+  NOT hw-tested): (1) NR 0x43 — активные палитры бит 3 спрайты / бит 2 L2 / бит 1 ULA
+  (zxnext.vhd 5391-5393), у нас 3 и 1 были перепутаны; (2) замок #7FFD (бит 5) снимает
+  только NR 0x08 бит 7 (3654), чтение NR 0x08 бит 7 = «не заперто» (5906); замок держит и
+  #1FFD/#DFFD (3691/3718), NR 0x8E — нет; раньше проверялся NR 0x08 бит 6 (это contention);
+  (3) копер: смена режима сбрасывает PC только в 01/11, 10 = продолжить (copper.vhd 70-77);
+  (4) **мягкий сброс NR 0x02 = полный NR reset-блок** (zxnext_top_issue5.vhd 880 `reset <=
+  reset_hard or reset_soft`, zxnext.vhd 4930-5111 и MMU 4610-4617): `NextReg::reset(false)`
+  + `MemESP::resetNextMapping()` + `NEXTVID::softReset()` (клипы, индекс палитры/NR 43,
+  копер — RAM палитр/спрайтов/копера переживает); раньше оставались line IRQ, спрайты,
+  L2, тайлмап. NR 0x7F reset не трогает. (5) DMA WR3: байты mask/match потребляются, бит 6
+  на Next стартует передачу (dma.vhd 572-591); (6) NR 0x8E: 7FFD бит 4 <- d0 при d2=0, 1FFD
+  = {d1,d0,d2}. Полный список расхождений с VHDL — в ответе сессии 2026-10-08 (прерывания
+  IM2/CTC, порядок слоёв 2-7 и blend, прозрачность NR 0x14 по RGB, prescaler DMA, UART,
+  TurboSound select, ULA scroll, 0x123B).
 - **Декод #7FFD/#1FFD/#DFFD по VHDL** (2026-10-08, hw-confirmed: EYEACHE через esxDOS в
   личности Pentagon; zxnext.vhd 2578-2599): port_fd =
   A1:0 = 01; #7FFD = A15=0 и (A14=1 ИЛИ тайминг не +3) и не #1FFD; #1FFD = A15:12 = 0001;

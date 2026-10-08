@@ -512,7 +512,9 @@ void NEXTVID::copperControl(uint8_t v) {
     copIndex = ((v & 0x07) << 8) | (copIndex & 0xFF);
     uint8_t prevMode = copCtrl >> 6, mode = v >> 6;
     copCtrl = v;
-    if (mode != prevMode && mode != 0) {
+    // copper.vhd 70-77: a mode change restarts the list only into 01 (run
+    // once) or 11 (loop each frame); 10 resumes where the copper stopped.
+    if (mode != prevMode && (mode & 1)) {
         copPC = 0;
         copWaiting = false;
     }
@@ -562,6 +564,23 @@ IRAM_ATTR void NEXTVID::copperLine(uint16_t rasterLine) {
 }
 
 // ===== geometry / frame control =====
+
+void NEXTVID::softReset() {
+    c1Drain();
+    palIdx = 0; pal9Second = false; palCtrl = 0;
+    static const uint8_t defclip[4][4] = {
+        { 0, 255, 0, 191 }, { 0, 255, 0, 191 }, { 0, 255, 0, 191 }, { 0, 159, 0, 255 },
+    };
+    for (int w = 0; w < 4; w++) {
+        for (int i = 0; i < 4; i++) clip[w][i] = defclip[w][i];
+        clipIdx[w] = 0;
+    }
+    copIndex = 0;
+    copPC = 0;
+    copCtrl = 0;
+    copWaiting = false;
+    cop16Second = false;
+}
 
 void NEXTVID::Reset() {
     c1Drain();
@@ -717,17 +736,17 @@ __attribute__((noinline)) void NEXTVID::gigsFrame() {
         want = true;
     }
     if (want && !s_gigsSeed) {
-        // ULA palette (NR 0x43 bit 3 picks the second): the average of every
+        // ULA palette (NR 0x43 bit 1 picks the second): the average of every
         // pair of its 16 ink colours, to the nearest renderable index. Rebuilt
         // per blended frame — 256 entries, and the palette may have moved.
-        const uint16_t* pal = rawPal[(palCtrl & 0x08) ? 4 : 0];
+        const uint16_t* pal = rawPal[(palCtrl & 0x02) ? 4 : 0];
         for (int i = 0; i < 16; i++)
             for (int j = 0; j < 16; j++) {
                 const uint16_t a = pal[i] & 0x1FF, b = pal[j] & 0x1FF;
                 const unsigned r = (((a >> 6) & 7) + ((b >> 6) & 7) + 1) >> 1;
                 const unsigned g = (((a >> 3) & 7) + ((b >> 3) & 7) + 1) >> 1;
                 const unsigned bl = ((a & 7) + (b & 7) + 1) >> 1;
-                gigsBlend[(i << 4) | j] = (i == j) ? lut[(palCtrl & 0x08) ? 4 : 0][i]
+                gigsBlend[(i << 4) | j] = (i == j) ? lut[(palCtrl & 0x02) ? 4 : 0][i]
                                                    : remap[(r << 6) | (g << 3) | bl];
             }
         s_gigs = 1;
@@ -994,7 +1013,9 @@ __attribute__((noinline)) static void nxPaintBorderRuns(uint8_t* fb, int xres, c
 
 IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     int xres = VIDEO::vga.xres;
-    const uint8_t* ulaLut = lut[(LS->palCtrl & 0x08) ? 4 : 0];
+    // NR 0x43 active palettes (zxnext.vhd 5391-5393): bit 3 sprites,
+    // bit 2 Layer 2, bit 1 ULA, bit 0 ULANext. (Bits 3 and 1 were swapped.)
+    const uint8_t* ulaLut = lut[(LS->palCtrl & 0x02) ? 4 : 0];
 
     bool ulaNext = LS->palCtrl & 0x01;
     uint8_t borderIdx = ulaNext ? ulaLut[128 + (LS->border & 7)]
@@ -1379,7 +1400,7 @@ IRAM_ATTR void NEXTVID::resolveSprites() {
 // clipped to the paper area for now (sprites-over-border comes later).
 IRAM_ATTR void NEXTVID::RenderSpritesLine(uint8_t* fb, int y) {
     if (sprDirty) resolveSprites();   // attribute writers drain core1 first
-    const uint8_t* sprLut = lut[(LS->palCtrl & 0x02) ? 6 : 2];
+    const uint8_t* sprLut = lut[(LS->palCtrl & 0x08) ? 6 : 2];   // NR 0x43 bit 3
     const uint8_t transp = LS->r4B;
     const int sline = y + 32;
     if (sline < 0 || sline > 255) return;
