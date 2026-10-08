@@ -47,6 +47,7 @@
 #include "speccy/core/Rzx.h"     // Rzx::mode / onIn: RZX playback substitutes every IN
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Next/NextInt.h"
+#include "speccy/machines/Next/NextMf.h"
 #include "speccy/z80/next_memory.h"
 
 
@@ -115,6 +116,9 @@ uint8_t Z80::sz53pn_subTable[256];
 // ahead of the object-wide RAM rule (rp2350-memmap.ld). Z80::interrupt() is NOT
 // cold: TS-Conf's LINE INT takes it up to 320 times a frame. (2026-09-22, -824 B)
 #define Z80_COLD __attribute__((section(".z80cold"), noinline))
+#if NEXT_TRACE
+void nxJumpNote(char t);
+#endif
 Z80_COLD void Z80::create() {
 
     bool evenBits;
@@ -895,7 +899,12 @@ IRAM_ATTR void Z80::check_trdos() {
     // automap there, and rom[4] is never assigned (hw: the NMI-DOS restore
     // below ran on a stale flag and plugged a garbage rom[4] over the MMU —
     // the NextZXOS loader then CALLed into an empty ROM2 region and wedged).
-    if (Z80Ops::isNext) return;
+    if (Z80Ops::isNext) {
+#if NEXT_TRACE
+        nxJumpNote('J');
+#endif
+        return;
+    }
 
     // Detect NMI-DOS handler return: exact PC and SP match after planted RET at 0x5C00
     if (nmiDosInProgress && REG_PC == nmiDos_savedPC && REG_SP == nmiDos_savedSP) {
@@ -1243,6 +1252,10 @@ Z80_COLD void Z80::nmi(void) {
     } else
     push(REG_PC); // 3+3 t-estados + contended si procede
     REG_PC = REG_WZ = 0x0066;
+    if (Z80Ops::isNext) NextMf::nmiTaken();   // the MF supplies the 0x0066 fetch
+#if NEXT_TRACE
+    if (Z80Ops::isNext) nxJumpNote('N');
+#endif
 
 }
 
@@ -2880,6 +2893,59 @@ static Z80_COLD void nxRst8Note() {
         nxSysvars("  at RST:");
     }
 }
+// ---- Next: who jumped to 0x0000 in ROM 2? ----------------------------------
+// NextZXOS's SPECTRUM snapshot executor (.sna/.z80/.snx from the Browser) ends
+// in ROM 2's reset trap (NOP / JR 0) on a black screen (2026-10-08). Every
+// control transfer the core routes through check_trdos (JP/RET/CALLcc/JP(HL)/
+// RETI), every NMI and every RETN lands in a 256-entry ring; the first time a
+// transfer lands on 0x0000 with ROM 2 paged the ring is printed once.
+struct NxJmp { uint16_t to, sp, af, bc, de, hl; uint8_t t, rom, m0, m1, p7, p1, iff, dm; };
+static NxJmp s_nx_jmp[256];
+static uint32_t s_nx_jmp_w = 0;
+static bool s_nx_jmp_done = false;
+static int32_t s_nx_after = -1;   // >0: dump the ring this many transfers later
+// NextMf::retn(): the snapshot launch ends in the Multiface's RETN — what runs
+// after it is the question, so dump the ring 192 transfers later.
+Z80_COLD void nxJumpArmAfter(int n) { if (!s_nx_jmp_done && s_nx_after < 0) s_nx_after = n; }
+static void nxJumpDump(const char* why);
+// A nextreg write into the same ring: to = reg<<8 | value, sp = PC.
+Z80_COLD void nxNrNote(uint8_t r, uint8_t v) {
+    if (s_nx_jmp_done) return;
+    NxJmp& j = s_nx_jmp[s_nx_jmp_w++ & 255];
+    j.t = 'n'; j.to = (uint16_t)(r << 8 | v); j.sp = Z80::getRegPC();
+    j.af = Z80::getRegAF(); j.bc = Z80::getRegBC(); j.de = Z80::getRegDE(); j.hl = Z80::getRegHL();
+    j.rom = (uint8_t)MemESP::romInUse; j.m0 = MemESP::mmu[0]; j.m1 = MemESP::mmu[1];
+    j.p7 = NextReg::port7FFD; j.p1 = NextReg::port1FFD;
+    j.iff = (uint8_t)(Z80::isIFF1() | (Z80::isIFF2() << 1));
+    j.dm = (uint8_t)(MemESP::divmmc_mapped | (DivMMC::automap << 1) | (DivMMC::conmem << 2));
+}
+Z80_COLD void nxJumpNote(char t) {
+    if (s_nx_jmp_done) return;
+    NxJmp& j = s_nx_jmp[s_nx_jmp_w++ & 255];
+    j.t = (uint8_t)t; j.to = Z80::getRegPC(); j.sp = Z80::getRegSP();
+    j.af = Z80::getRegAF(); j.bc = Z80::getRegBC(); j.de = Z80::getRegDE(); j.hl = Z80::getRegHL();
+    j.rom = (uint8_t)MemESP::romInUse; j.m0 = MemESP::mmu[0]; j.m1 = MemESP::mmu[1];
+    j.p7 = NextReg::port7FFD; j.p1 = NextReg::port1FFD;
+    j.iff = (uint8_t)(Z80::isIFF1() | (Z80::isIFF2() << 1));
+    j.dm = (uint8_t)(MemESP::divmmc_mapped | (DivMMC::automap << 1) | (DivMMC::conmem << 2));
+    if (s_nx_after > 0 && --s_nx_after == 0) { nxJumpDump("192 transfers after the Multiface RETN"); return; }
+    if (j.to != 0 || j.rom != 2) return;
+    nxJumpDump("landed on 0000 in ROM 2");
+}
+static void nxJumpDump(const char* why) {
+    s_nx_jmp_done = true;
+    Debug::log("[NXJMP] %s, C0=%02X C2=%02X C3=%02X retnArmed=%d (dm: 1 window 2 automap 4 conmem); last transfers:",
+               why, NextReg::reg[0xC0], NextReg::reg[0xC2], NextReg::reg[0xC3], (int)NextInt::retnArmed);
+    const uint32_t cnt = s_nx_jmp_w < 256 ? s_nx_jmp_w : 256;
+    for (uint32_t i = 0; i < cnt; i++) {
+        const NxJmp& r = s_nx_jmp[(s_nx_jmp_w - cnt + i) & 255];
+        Debug::log("[NXJMP] %c %04X sp=%04X af=%04X bc=%04X de=%04X hl=%04X rom=%u m=%02X.%02X 7FFD=%02X 1FFD=%02X iff=%u dm=%u",
+                   r.t, r.to, r.sp, r.af, r.bc, r.de, r.hl, r.rom, r.m0, r.m1, r.p7, r.p1, r.iff, r.dm);
+        if ((i & 7) == 7) Debug::uartFlushSync();   // 4 KB ring: the machine is dead anyway
+    }
+    Debug::uartFlushSync();
+}
+
 Z80_COLD void nxErrPoll() {
     static uint8_t last = 0xFF, n = 0;
     const uint8_t e = MemESP::dbgPeek(0x5C3A);
@@ -3733,14 +3799,26 @@ void Z80::decodeED(void) {
         case 0x7D:
         { /* RETN */
             ffIFF1 = ffIFF2;
+            // zxnext.vhd 4111: while the Multiface is active its RETN pages the
+            // MF out and does NOT reach the divMMC (divmmc_retn_seen).
+            const bool mfRetn = Z80Ops::isNext && NextMf::active();
             if (Z80Ops::isNext && NextInt::retnArmed) {
                 // stackless NMI (NR 0xC0 bit 3): the address comes from NR
                 // 0xC2/0xC3, the stack read is suppressed, SP still moves
                 VIDEO::Draw(6, false);
                 REG_SP = (uint16_t)(REG_SP + 2);
                 REG_PC = REG_WZ = NextInt::stacklessRetn();
-            } else REG_PC = REG_WZ = pop();
-            if (Z80Ops::isNext && DivMMC::enabled) DivMMC::nextRetn();
+#if NEXT_TRACE
+                nxJumpNote('S');
+#endif
+            } else {
+                REG_PC = REG_WZ = pop();
+#if NEXT_TRACE
+                if (Z80Ops::isNext) nxJumpNote('R');
+#endif
+            }
+            if (mfRetn) NextMf::retn();
+            else if (Z80Ops::isNext && DivMMC::enabled) DivMMC::nextRetn();
             check_trdos();
             if (Z80Ops::isTsconf && ffIFF1) TsConf::intEnableHook();
             if (Z80Ops::isNext && ffIFF1 && NextInt::ex) NextInt::wake();

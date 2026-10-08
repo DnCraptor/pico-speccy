@@ -109,6 +109,8 @@ struct NextLineState {
     struct { uint8_t t[15]; uint8_t n; uint8_t c[8]; } brd;
 };
 static const NextLineState* LS = nullptr;
+// Per-layer RGB line buffers of the compositor (RenderLayers), [384] each, in the Next heap block.
+static uint16_t *nxU, *nxT, *nxL, *nxS;
 static_assert(sizeof(NextLineState) % 4 == 0, "compared a word at a time");
 // memcmp is libc in FLASH; 12 words compared inline instead, once per line.
 static inline __attribute__((always_inline)) bool nxSameState(const NextLineState& a, const NextLineState& b) {
@@ -602,9 +604,9 @@ void NEXTVID::Reset() {
         // One block, Next-boot only, never freed (the Next boundary reboots).
         // Layout: patterns 16K | copper 2K | rawPal 4K | lut 2K | sprAttr 640 |
         // lineBuf 384 | pairMap 256 | hiresRow 256 | sprRes 1280 | sprVis 128 |
-        // remap 512 (all word-aligned: 27136 is a multiple of 4)
+        // remap 512 | layer lines 4 x 384 x 2 (all word-aligned: 27136 is a multiple of 4)
         static_assert(sizeof(SprRes) == 10, "sprRes is sized 128 x 10 in the block");
-        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512 + 1408 + 512);
+        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512 + 1408 + 512 + 4 * 768);
         sprPatterns = blk;
         copperMem   = blk + 16384;
         rawPal      = (uint16_t(*)[256])(blk + 16384 + 2048);
@@ -616,7 +618,9 @@ void NEXTVID::Reset() {
         sprRes      = (SprRes*)(hiresRow + 256);
         sprVis      = hiresRow + 256 + 1280;
         remap       = sprVis + 128;
-        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512 + 1408 + 512);
+        nxU = (uint16_t*)(remap + 512);
+        nxT = nxU + 384; nxL = nxT + 384; nxS = nxL + 384;
+        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512 + 1408 + 512 + 4 * 768);
     }
     buildRemap();
     defaultPalettes();
@@ -993,85 +997,89 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     for (int k = k1; k < words; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
 }
 
+// ---- Layer compositor (zxnext.vhd 6940-7350, zxula.vhd 470-565) ----
+// Every layer renders its line into its own buffer of 9-bit RGB (palette
+// applied), in framebuffer x; the mixer then picks per pixel by NR 0x15 bits
+// 4:2 exactly as the board does, with transparency decided on the COLOUR after
+// the palette (NR 0x14) for the ULA / LoRes, Layer 2 and text-mode tiles, on
+// the index for sprites (NR 0x4B) and standard tiles (NR 0x4C), and the
+// fallback colour (NR 0x4A) where nothing is opaque. Flags above the RGB:
+static constexpr uint16_t NX_TR    = 0x8000;   // transparent
+static constexpr uint16_t NX_SLOT  = 0x4000;   // low byte already a fb slot (Timex hi-res mark, Gigascreen blend)
+static constexpr uint16_t NX_BRD   = 0x2000;   // ULA border pixel (layer orders 3-5)
+static constexpr uint16_t NX_BELOW = 0x1000;   // tilemap pixel under the ULA (attr bit 0 / 512-tile mode)
+static constexpr uint16_t NX_PRIO  = 0x0800;   // Layer 2 palette priority (bit 15 of the entry)
+
+static inline __attribute__((always_inline)) void nxFillTr(uint16_t* b, int n) {
+    uint32_t* w = (uint32_t*)b;
+    for (int i = 0, e = (n + 1) >> 1; i < e; i++) w[i] = 0x80008000u;
+}
+// palette entry -> 9-bit RGB, or transparent when it equals NR 0x14
+static inline __attribute__((always_inline)) uint16_t nxRgb(uint16_t raw, uint8_t tr) {
+    const uint16_t v = raw & 0x1FF;
+    return ((v >> 1) == tr) ? NX_TR : v;
+}
+
 // Mid-line border changes: coloured runs, then the closing colour. Paper rows
 // get the runs under the paper too; the ULA layer overwrites those 256 pixels.
 // Flash: only rows that carry a change come here.
-__attribute__((noinline)) static void nxPaintBorderRuns(uint8_t* fb, int xres, const uint8_t* ulaLut,
-                                                        bool ulaNext, uint8_t borderIdx) {
+__attribute__((noinline)) static void nxPaintBorderRuns(uint16_t* u, int xres, const uint16_t* bc,
+                                                        uint16_t borderV) {
     int x = 0;
     for (int i = 0; i < LS->brd.n; i++) {
         int xe = 2 * LS->brd.t[i];
         if (xe > xres) xe = xres;
         if (xe > x) {
-            const uint8_t c = (LS->brd.c[i >> 1] >> ((i & 1) * 4)) & 7;
-            memset(fb + x, ulaNext ? ulaLut[128 + c] : ulaLut[16 + c], xe - x);
-            x = xe;
+            const uint16_t c = bc[(LS->brd.c[i >> 1] >> ((i & 1) * 4)) & 7];
+            for (; x < xe; x++) u[x] = c;
         }
     }
-    if (x < xres) memset(fb + x, borderIdx, xres - x);
+    for (; x < xres; x++) u[x] = borderV;
 }
 
-IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
-    int xres = VIDEO::vga.xres;
-    // NR 0x43 active palettes (zxnext.vhd 5391-5393): bit 3 sprites,
-    // bit 2 Layer 2, bit 1 ULA, bit 0 ULANext. (Bits 3 and 1 were swapped.)
-    const uint8_t* ulaLut = lut[(LS->palCtrl & 0x02) ? 4 : 0];
+// The ULA layer (zxula.vhd): border, then the paper — classic / ULANext /
+// LoRes / Timex hi-res / Gigascreen. NR 0x68 bit 7 (ULA off) is applied by the
+// mixer, not here: blend mode 00 still sees the ULA colour.
+IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
+    const int xres = VIDEO::vga.xres;
+    uint16_t* const u = nxU;
+    const uint16_t* raw = rawPal[(LS->palCtrl & 0x02) ? 4 : 0];
+    const uint8_t tr = LS->r14;
+    const bool ulaNext = LS->palCtrl & 0x01;
+    const uint8_t mask = LS->r42;
+    const uint16_t fallback = rgb332_to_333(LS->r4A);
+    // border colours 0..7: ULANext paper base 128 (format 0xFF selects the
+    // fallback colour, ula_select_bgnd), classic ULA the paper entries 16..23
+    uint16_t bc[8];
+    for (int c = 0; c < 8; c++)
+        bc[c] = (uint16_t)(ulaNext ? (mask == 0xFF ? fallback : nxRgb(raw[128 + c], tr))
+                                   : nxRgb(raw[16 + c], tr));
+    for (int c = 0; c < 8; c++) if (!(bc[c] & NX_TR)) bc[c] |= NX_BRD;
+    const uint16_t borderV = bc[LS->border & 7];
+    if (LS->brd.n) nxPaintBorderRuns(u, xres, bc, borderV);
+    else for (int x = 0; x < xres; x++) u[x] = borderV;
 
-    bool ulaNext = LS->palCtrl & 0x01;
-    uint8_t borderIdx = ulaNext ? ulaLut[128 + (LS->border & 7)]
-                                : ulaLut[16 + (LS->border & 7)];
-    int y = row - paperTopRow;
-    uint8_t r15 = LS->r15;
+    const int y = row - paperTopRow;
+    if (y < 0 || y >= 192 || VIDEO::paper_off) return;
+    uint16_t* p = u + xPaperOff;
 
-    if (LS->brd.n) nxPaintBorderRuns(fb, xres, ulaLut, ulaNext, borderIdx);
-    // Debug > Paper off (VIDEO::paper_off): the paper rows are drawn as border
-    // rows — the border (and its mid-line runs) shows through where the ULA
-    // screen would be; tilemap / Layer 2 / sprites still draw over it.
-    if (y < 0 || y >= 192 || VIDEO::paper_off) {
-        if (!LS->brd.n) memset(fb, borderIdx, xres);
-        // tilemap and Layer 2 (320x256 mode) cover the border area of the
-        // 320x256 window; sprites reach it with the over-border bit
-        if (LS->r6B & 0x80)
-            RenderTilemapLine(fb, row);
-        if ((LS->p123B & 0x02) || (LS->r69 & 0x80))
-            RenderL2Line(fb, row, false);
-        if ((r15 & 0x03) == 0x03) // sprites enabled + over border
-            RenderSpritesLine(fb, y);
-        return;
-    }
-
-    NX_LT_BEGIN();
-    // left/right border
-    if (!LS->brd.n) {
-        memset(fb, borderIdx, xPaperOff);
-        memset(fb + xPaperOff + 256, borderIdx, xres - xPaperOff - 256);
-    }
-
-    // ULA layer (classic attribute mode; ULANext later). ULA can be disabled
-    // via nextreg 0x68 bit 7 — border colour shows through. LoRes (128x96,
-    // reg 0x15 bit 7) replaces the ULA output.
-    uint8_t* p = fb + xPaperOff;
-    // NR 0x68 bit 7 disables the ULA layer, LoRes included (LoRes REPLACES the
-    // ULA screen). TX-1696 runs NR 0x15 = 0x81 (LoRes on) with NR 0x68 = 0x80
-    // and a tilemap: drawing LoRes anyway showed its 2x2 garbage through every
-    // "ULA over" tile of the menu.
-    if ((LS->r15 & 0x80) && !(LS->r68 & 0x80)) {
+    if (LS->r15 & 0x80) {          // LoRes 128x96 replaces the paper (not ULA-clipped)
         uint8_t ly = (uint8_t)((y + LS->r33) % 192) >> 1;
         const uint8_t* base = LS->grmem +
             (ly < 48 ? ly * 128 : 0x2000 + (uint16_t)(ly - 48) * 128);
         uint8_t sxl = LS->r32;
         for (int x = 0; x < 256; x++)
-            p[x] = ulaLut[base[(uint8_t)(x + sxl) >> 1]];
+            p[x] = nxRgb(raw[base[(uint8_t)(x + sxl) >> 1]], tr);
+        return;
     }
     // Timex screen mode = port FF / NR 0x69 bits 2:0, forced to 000 while the
     // shadow screen (bank 7, NR 0x69 bit 6 = port 7FFD bit 3) is displayed —
     // zxula.vhd: "limit timex modes to bank 5 as bank 7 only has 8k bram".
-    else if (!(LS->r68 & 0x80) && LS->hires && !(LS->r69 & 0x40)) {
+    if (LS->hires && !(LS->r69 & 0x40)) {
         // Timex hi-res 512x192: screen 0 (0x4000) gives the left 8 pixels of
-        // each 16-pixel column, screen 1 (0x6000) the right 8 — the TC2048
-        // layout VIDEO's renderer uses, and its nibble LUT (ink/paper from port
-        // FF bits 5:3, all BRIGHT). hiresRow gets the pair slots in linear
-        // order; the paper carries HIRES_MARK so layers drawn over the ULA win.
+        // each 16-pixel column, screen 1 (0x6000) the right 8 (VIDEO's TC2048
+        // nibble LUT). hiresRow gets the pair slots; the paper carries
+        // HIRES_MARK as a ready fb slot so layers drawn over the ULA win.
         const uint16_t* hl = VIDEO::timexHiresLut();
         const uint8_t* bmp = LS->grmem + VIDEO::offBmp[y];
         uint32_t* hr = (uint32_t*)hiresRow;
@@ -1080,67 +1088,60 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
             hr[2 * col]     = (uint32_t)hl[e >> 4] | ((uint32_t)hl[e & 0x0F] << 16);
             hr[2 * col + 1] = (uint32_t)hl[o >> 4] | ((uint32_t)hl[o & 0x0F] << 16);
         }
-        memset(p, HIRES_MARK, 256);
-    }
-    else if (!(LS->r68 & 0x80)) {
+        for (int x = 0; x < 256; x++) p[x] = NX_SLOT | HIRES_MARK;
+    } else {
         // zxula.vhd vram_a: pixel = mode(0) & pixel address, attribute =
         // '1' & PIXEL address when mode(1) (hi-colour 8x1 attributes at
-        // 0x6000), else mode(0) & attribute address. Mode 1 = the second
-        // screen at 0x6000/0x7800, mode 2 = hi-colour, mode 3 = both (pixel
-        // and attribute from the same 0x6000 byte, as the hardware does).
-        // Hi-res modes (bit 2) other than 6 take this path with bits 1:0.
+        // 0x6000), else mode(0) & attribute address.
         const uint8_t tm = (LS->r69 & 0x40) ? 0 : (LS->r69 & 0x03);
         const uint16_t pOff = VIDEO::offBmp[y];
         const uint8_t* bmp = LS->grmem + pOff + ((tm & 1) << 13);
         const uint8_t* att = LS->grmem + ((tm & 2) ? 0x2000 + pOff
                                                    : VIDEO::offAtt[y] + ((tm & 1) << 13));
         if (ulaNext) {
-            // ULANext attribute format: ink = attr & mask, paper = 128 + rest
-            uint8_t mask = LS->r42;
+            // ink = attr & format; paper = 128 + the bits above the format;
+            // a format that is not 2^n-1 (or 0xFF) gives the fallback paper
             uint8_t shift = 0;
             for (uint8_t m = mask; m; m >>= 1) shift++;
+            const bool bgnd = (mask & (uint8_t)(mask + 1)) != 0 || mask == 0xFF || mask == 0;
             for (int col = 0; col < 32; col++) {
-                uint8_t a = att[col];
-                uint8_t b = bmp[col];
-                uint8_t ink = ulaLut[a & mask];
-                uint8_t pap = (mask == 255)
-                    ? remap[rgb332_to_333(LS->r4A)]
-                    : ulaLut[128 + (a >> shift)];
-                for (int bit = 0; bit < 8; bit++)
-                    p[bit] = (b & (0x80 >> bit)) ? ink : pap;
+                const uint8_t a = att[col], b = bmp[col];
+                const uint16_t ink = nxRgb(raw[a & mask], tr);
+                const uint16_t pap = bgnd ? fallback : nxRgb(raw[128 + (a >> shift)], tr);
+                for (int bit = 0; bit < 8; bit++) p[bit] = (b & (0x80 >> bit)) ? ink : pap;
                 p += 8;
             }
         } else if (LS->gigs && gigsPrev) {
-            // Gigascreen: the line is blended only when the classic ULA is all
-            // there is on it — Layer 2, sprites or the tilemap switch it off
-            // (the row is still recorded, so the next frame has a valid prev).
+            // Gigascreen: blended only when the classic ULA is all there is on
+            // the line (the row is still recorded so the next frame has a prev)
             const bool blend = LS->gigs == 1 && !(LS->r15 & 0x01) && !(LS->r6B & 0x80) &&
-                               !((LS->p123B & 0x02) || (LS->r69 & 0x80));
+                               !((LS->p123B & 0x02) || (LS->r69 & 0x80)) && !(LS->r68 & 0x80);
             uint32_t* gp = (uint32_t*)(gigsPrev + y * 128);
             for (int col = 0; col < 32; col++) {
-                uint8_t a = att[col];
-                uint8_t b = bmp[col] ^ (uint8_t)(-((a & LS->flashing) >> 7));
-                uint8_t bright = (a & 0x40) >> 3;
+                const uint8_t a = att[col];
+                const uint8_t b = bmp[col] ^ (uint8_t)(-((a & LS->flashing) >> 7));
+                const uint8_t bright = (a & 0x40) >> 3;
                 const uint8_t ci = (a & 7) | bright, cp = ((a >> 3) & 7) | bright;
-                const uint8_t ink = ulaLut[ci], pap = ulaLut[16 + cp];
+                const uint16_t ink = nxRgb(raw[ci], tr), pap = nxRgb(raw[16 + cp], tr);
                 const uint32_t prev = gp[col];
                 uint32_t cur = 0;
                 for (int bit = 0; bit < 8; bit++) {
                     const bool on = b & (0x80 >> bit);
                     const uint8_t c = on ? ci : cp;
                     cur |= (uint32_t)c << (bit * 4);
-                    p[bit] = blend ? gigsBlend[((prev >> (bit * 4)) & 15) << 4 | c] : (on ? ink : pap);
+                    p[bit] = blend ? (uint16_t)(NX_SLOT | gigsBlend[((prev >> (bit * 4)) & 15) << 4 | c])
+                                   : (on ? ink : pap);
                 }
                 gp[col] = cur;
                 p += 8;
             }
         } else {
             for (int col = 0; col < 32; col++) {
-                uint8_t a = att[col];
-                uint8_t b = bmp[col] ^ (uint8_t)(-((a & LS->flashing) >> 7));
-                uint8_t bright = (a & 0x40) >> 3;
-                uint8_t ink = ulaLut[(a & 7) | bright];
-                uint8_t pap = ulaLut[16 + (((a >> 3) & 7) | bright)];
+                const uint8_t a = att[col];
+                const uint8_t b = bmp[col] ^ (uint8_t)(-((a & LS->flashing) >> 7));
+                const uint8_t bright = (a & 0x40) >> 3;
+                const uint16_t ink = nxRgb(raw[(a & 7) | bright], tr);
+                const uint16_t pap = nxRgb(raw[16 + (((a >> 3) & 7) | bright)], tr);
                 p[0] = (b & 0x80) ? ink : pap;
                 p[1] = (b & 0x40) ? ink : pap;
                 p[2] = (b & 0x20) ? ink : pap;
@@ -1152,52 +1153,144 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
                 p += 8;
             }
         }
-    } else {
-        memset(fb + xPaperOff, borderIdx, 256);
     }
+    // ULA clip window (NR 0x1A, zxula.vhd 562): paper only, never the border
+    const uint8_t* cw = LS->clip[2];
+    if (y < cw[2] || y > cw[3]) { nxFillTr(u + xPaperOff, 256); return; }
+    for (int x = 0; x < cw[0]; x++) u[xPaperOff + x] = NX_TR;
+    for (int x = cw[1] + 1; x < 256; x++) u[xPaperOff + x] = NX_TR;
+}
 
+// Mixer state for one line (constant across the row)
+struct NxMix { uint8_t* fb; const uint8_t* remap; uint16_t fb9; bool ulaEn, stencil; uint8_t blend; };
+
+static inline __attribute__((always_inline)) uint8_t nxOut(const NxMix& m, uint16_t v) {
+    return (v & NX_SLOT) ? (uint8_t)v : m.remap[v & 0x1FF];
+}
+// ula_final (zxnext.vhd 7112-7136): ULA and tilemap merged, or the stencil
+static inline __attribute__((always_inline)) uint16_t nxUlaFinal(const NxMix& m, uint16_t u, uint16_t t) {
+    const bool uTr = (u & NX_TR) || !m.ulaEn, tTr = t & NX_TR;
+    if (m.stencil) return (uTr || tTr) ? NX_TR : (uint16_t)(u & t & 0x1FF);
+    if (!tTr && (!(t & NX_BELOW) || uTr)) return (uint16_t)(t & 0x1FF);
+    return uTr ? NX_TR : u;
+}
+
+// Layer orders 0..5 (NR 0x15 bits 4:2): S L U / L S U / S U L / L U S / U S L / U L S.
+// One loop for all six (a template per order cost ~3.7 KB of SRAM at -O3).
+IRAM_ATTR __attribute__((noinline, optimize("Os")))
+static void nxMixOrder(const NxMix& m, int xres, int mode) {
+    for (int x = 0; x < xres; x++) {
+        const uint16_t l = nxL[x], s = nxS[x], t = nxT[x], u = nxU[x];
+        const uint16_t uf = nxUlaFinal(m, u, t);
+        const bool lTr = l & NX_TR, sTr = s & NX_TR, uTr = uf & NX_TR;
+        const bool lPrio = !lTr && (l & NX_PRIO);
+        // orders 3-5: a ULA BORDER pixel gives way to a sprite where the tilemap is transparent
+        const bool uOk = !uTr && !((u & NX_BRD) && (t & NX_TR) && !sTr);
+        uint16_t v = m.fb9;
+        switch (mode) {
+            case 0:  if (lPrio) v = l; else if (!sTr) v = s; else if (!lTr) v = l; else if (!uTr) v = uf; break;
+            case 1:  if (!lTr) v = l; else if (!sTr) v = s; else if (!uTr) v = uf; break;
+            case 2:  if (lPrio) v = l; else if (!sTr) v = s; else if (!uTr) v = uf; else if (!lTr) v = l; break;
+            case 3:  if (!lTr) v = l; else if (uOk) v = uf; else if (!sTr) v = s; break;
+            case 4:  if (lPrio) v = l; else if (uOk) v = uf; else if (!sTr) v = s; else if (!lTr) v = l; break;
+            default: if (lPrio) v = l; else if (uOk) v = uf; else if (!lTr) v = l; else if (!sTr) v = s; break;
+        }
+        m.fb[x] = nxOut(m, v);
+    }
+}
+
+// Orders 6/7: Layer 2 + the blend source (NR 0x68 bits 6:5), saturated (6) or
+// minus 5 (7). Flash: rare.
+__attribute__((noinline)) static void nxMixBlend(const NxMix& m, int xres, bool minus5) {
+    for (int x = 0; x < xres; x++) {
+        const uint16_t u = nxU[x], t = nxT[x], l = nxL[x], s = nxS[x];
+        const bool uMixTr = u & NX_TR, uTr = uMixTr || !m.ulaEn, tTr = t & NX_TR, below = t & NX_BELOW;
+        uint16_t mix, top = NX_TR, bot = NX_TR;
+        switch (m.blend) {
+            case 0:  mix = uMixTr ? NX_TR : u;
+                     if (!tTr) { if (below) bot = t; else top = t; }
+                     break;
+            case 2:  mix = nxUlaFinal(m, u, t); break;
+            case 3:  mix = tTr ? NX_TR : t;
+                     if (!uTr) { if (below) top = u; else bot = u; }
+                     break;
+            default: mix = NX_TR;
+                     if (below) { top = uTr ? NX_TR : u; bot = tTr ? NX_TR : t; }
+                     else       { top = tTr ? NX_TR : t; bot = uTr ? NX_TR : u; }
+                     break;
+        }
+        const bool lTr = l & NX_TR, sTr = s & NX_TR, mixTr = mix & NX_TR;
+        const uint16_t lr = lTr ? 0 : l, mr = mixTr ? 0 : mix;
+        int r = ((lr >> 6) & 7) + ((mr >> 6) & 7), g = ((lr >> 3) & 7) + ((mr >> 3) & 7), b = (lr & 7) + (mr & 7);
+        if (!minus5) { if (r > 7) r = 7; if (g > 7) g = 7; if (b > 7) b = 7; }
+        else if (!mixTr) {
+            r = r <= 4 ? 0 : r >= 12 ? 7 : r - 5;
+            g = g <= 4 ? 0 : g >= 12 ? 7 : g - 5;
+            b = b <= 4 ? 0 : b >= 12 ? 7 : b - 5;
+        }
+        const uint16_t sum = (uint16_t)(((r & 7) << 6) | ((g & 7) << 3) | (b & 7));
+        uint16_t v = m.fb9;
+        if (!lTr && (l & NX_PRIO)) v = sum;
+        else if (!(top & NX_TR)) v = top;
+        else if (!sTr) v = s;
+        else if (!(bot & NX_TR)) v = bot;
+        else if (!lTr) v = sum;
+        m.fb[x] = nxOut(m, v);
+    }
+}
+
+IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
+    const int xres = VIDEO::vga.xres;
+    const int y = row - paperTopRow;
+    const uint8_t r15 = LS->r15;
+    NX_LT_BEGIN();
+    RenderUlaLine(row);
     NX_LT_END(0);
-    // Tilemap (over ULA/LoRes, under Layer 2 and sprites)
-    if (LS->r6B & 0x80)
-        RenderTilemapLine(fb, row);
+    const bool tmEn = LS->r6B & 0x80;
+    const bool l2En = (LS->p123B & 0x02) || (LS->r69 & 0x80);
+    if (!tmEn && !l2En && !(r15 & 0x01) && !(LS->r68 & 0x80)) {
+        // ULA alone (NextZXOS, every 48K/128K title): the order is moot, only
+        // transparency -> fallback is left of the mixer
+        const uint16_t fb9 = rgb332_to_333(LS->r4A);
+        for (int x = 0; x < xres; x++) {
+            const uint16_t u = nxU[x];
+            fb[x] = (u & NX_SLOT) ? (uint8_t)u : remap[((u & NX_TR) ? fb9 : u) & 0x1FF];
+        }
+        return;
+    }
+    nxFillTr(nxT, xres);
+    if (tmEn) RenderTilemapLine(row);
     NX_LT_END(1);
-
-    // Layer 2, over ULA
-    bool l2on = (LS->p123B & 0x02) || (LS->r69 & 0x80);
-    uint8_t slu = (r15 >> 2) & 7;
-    bool spritesUnderL2 = (slu == 1 || slu == 4); // L-S-U / L-U-S orders
-
-    if (spritesUnderL2 && (r15 & 0x01)) {
-        RenderSpritesLine(fb, y);
-        NX_LT_END(3);
-    }
-
-    if (l2on)
-        RenderL2Line(fb, row, false);
+    nxFillTr(nxL, xres);
+    if (l2En) RenderL2Line(row);
     NX_LT_END(2);
+    nxFillTr(nxS, xres);
+    if (r15 & 0x01) RenderSpritesLine(y);
+    NX_LT_END(3);
 
-    if (!spritesUnderL2 && (r15 & 0x01)) {
-        RenderSpritesLine(fb, y);
-        NX_LT_END(3);
-    }
-
-    // Layer 2 palette-priority pixels sit above everything
-    if (l2on && palHasPrio[(LS->palCtrl & 0x04) ? 5 : 1])
-        RenderL2Line(fb, row, true);
-    NX_LT_END(2);
+    NxMix m;
+    m.fb = fb;
+    m.remap = remap;
+    m.fb9 = rgb332_to_333(LS->r4A);
+    m.ulaEn = !(LS->r68 & 0x80);
+    m.stencil = (LS->r68 & 0x01) && m.ulaEn && tmEn;
+    m.blend = (LS->r68 >> 5) & 3;
+    const int order = (r15 >> 2) & 7;
+    if (order < 6) nxMixOrder(m, xres, order);
+    else nxMixBlend(m, xres, order == 7);
 }
 
 // Layer 2: 256x192x8bpp (row-major) or 320x256x8bpp (column-major, covers
-// the border window). prioPass re-draws only palette-priority pixels after
-// the sprites so they end up on top.
-IRAM_ATTR void NEXTVID::RenderL2Line(uint8_t* fb, int row, bool prioPass) {
+// the border window). the palette priority bit
+// rides along as NX_PRIO for the mixer.
+IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
     uint8_t pal = (LS->palCtrl & 0x04) ? 5 : 1;
-    const uint8_t* l2Lut = lut[pal];
     const uint16_t* raw = rawPal[pal];
-    uint8_t transp = LS->r14;
+    const uint8_t transp = LS->r14;     // compared with the COLOUR (zxnext.vhd 7123)
     uint8_t mode = (LS->r70 >> 4) & 3;
     uint8_t palOfs = (LS->r70 & 0x0F) << 4;
     uint16_t bank = (uint16_t)(LS->r12 & 0x7F) * 2;
+    uint16_t* const out = nxL;
 
     if (mode == 0) {
         // 256x192, aligned with the paper area
@@ -1210,21 +1303,13 @@ IRAM_ATTR void NEXTVID::RenderL2Line(uint8_t* fb, int row, bool prioPass) {
         if (page >= MemESP::NEXT_PAGES - 1u) return;
         const uint8_t* src = MemESP::nextRamPtr[page] + (sy & 31) * 256;
         uint8_t sx = LS->r16 + LS->clip[0][0];
-        uint8_t* q = fb + xPaperOff + LS->clip[0][0];
+        uint16_t* q = out + xPaperOff + LS->clip[0][0];
         int count = (int)LS->clip[0][1] - (int)LS->clip[0][0] + 1;
-        if (!prioPass) {
-            while (count-- > 0) {
-                uint8_t v = src[sx++]; // uint8 wrap = 256px scroll wrap
-                if (v != transp) *q = l2Lut[(uint8_t)(v + palOfs)];
-                q++;
-            }
-        } else {
-            while (count-- > 0) {
-                uint8_t v = src[sx++];
-                if (v != transp && (raw[(uint8_t)(v + palOfs)] & 0x8000))
-                    *q = l2Lut[(uint8_t)(v + palOfs)];
-                q++;
-            }
+        while (count-- > 0) {
+            const uint16_t e = raw[(uint8_t)(src[sx++] + palOfs)];   // uint8 wrap = 256px scroll wrap
+            const uint16_t v = e & 0x1FF;
+            if ((v >> 1) != transp) *q = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0));
+            q++;
         }
     } else if (mode == 1) {
         // 320x256, column-major (byte offset = x*256 + y), covers the border
@@ -1246,13 +1331,12 @@ IRAM_ATTR void NEXTVID::RenderL2Line(uint8_t* fb, int row, bool prioPass) {
             uint32_t off = (uint32_t)sx * 256 + sy;
             uint16_t page = bank + (off >> 13);
             if (page >= MemESP::NEXT_PAGES) continue;
-            uint8_t v = MemESP::nextRamPtr[page][off & 0x1FFF];
-            if (v == transp) continue;
-            if (prioPass && !(raw[(uint8_t)(v + palOfs)] & 0x8000)) continue;
-            fb[fx] = l2Lut[(uint8_t)(v + palOfs)];
+            const uint16_t e = raw[(uint8_t)(MemESP::nextRamPtr[page][off & 0x1FFF] + palOfs)];
+            const uint16_t v = e & 0x1FF;
+            if ((v >> 1) != transp) out[fx] = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0));
         }
     }
-    // mode 2 (640x256x4bpp) is a documented non-goal (scanout is 360px max)
+    // mode 2 (640x256x4bpp) is not drawn yet (plan: Medium)
 }
 
 // Tilemap text mode (NR 0x6B bit 3) — one tile's span of a line. 1bpp: pixel
@@ -1262,22 +1346,22 @@ IRAM_ATTR void NEXTVID::RenderL2Line(uint8_t* fb, int row, bool prioPass) {
 // so the pixel pair is ORed and 1-pixel strokes of the font survive (deviation).
 // Flash on purpose: text mode is rare and this keeps ~1 KB out of every board's
 // SRAM (RenderTilemapLine is RAM-resident).
-__attribute__((noinline)) static void tmTextSpan(uint8_t* o, int n, uint8_t b, int u0, int step,
-                                                 uint8_t palHi, const uint8_t* lutTM,
-                                                 const uint16_t* rawTM, uint8_t r14) {
+__attribute__((noinline)) static void tmTextSpan(uint16_t* o, int n, uint8_t b, int u0, int step,
+                                                 uint8_t palHi, const uint16_t* rawTM, uint8_t r14,
+                                                 uint16_t below) {
     for (int k = 0; k < n; k++) {
         const int u = u0 + k * step;
         uint8_t bit = (b >> (7 - u)) & 1;
         if (step == 2 && u < 7) bit |= (b >> (6 - u)) & 1;
-        const uint8_t idx = (uint8_t)(palHi | bit);
-        if (((rawTM[idx] & 0x1FF) >> 1) != r14) o[k] = lutTM[idx];
+        const uint16_t v = rawTM[(uint8_t)(palHi | bit)] & 0x1FF;
+        if ((v >> 1) != r14) o[k] = (uint16_t)(v | below);
     }
 }
 
 // Tilemap: 40x32 (or 80x32 rendered horizontally halved) tiles of 8x8x4bpp.
 // Map and tile definitions live in bank 5 (offsets from nextreg 0x6E/0x6F).
 // The tilemap window is 320x256 and covers the border area around the paper.
-IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
+IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
     uint8_t ctrl = LS->r6B;
     int ty = row - (paperTopRow - 32);
     if (ty < 0 || ty >= 256) return;
@@ -1290,7 +1374,6 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
     // the tilemap goes UNDER the ULA), bit 0 tilemap always on top of the ULA.
     const bool text = ctrl & 0x08, m512 = ctrl & 0x02, onTop = ctrl & 0x01;
     const uint8_t palNo = (ctrl & 0x10) ? 7 : 3;
-    const uint8_t* lutTM = lut[palNo];
     const uint16_t* rawTM = rawPal[palNo];
     uint8_t transp = LS->r4C & 0x0F;
     // NR 0x6E/0x6F: bit 7 = bank 7 instead of bank 5, bits 5:0 = 256-byte
@@ -1312,12 +1395,11 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
     if (t0 < -xOrig) t0 = -xOrig;
     if (t1 > 319) t1 = 319;
     if (t1 > xres - 1 - xOrig) t1 = xres - 1 - xOrig;
-    uint8_t* const out = fb + xOrig;
+    uint16_t* const out = nxT + xOrig;
 
     // Tile by tile: one map entry, one attribute decode and the tile's 8
     // source pixels per tile instead of per output pixel. 80-column mode
     // renders 640 source pixels halved: every other source pixel.
-    const bool ulaOff = LS->r68 & 0x80;
     const int step = cols80 ? 2 : 1;
     const int wrap = cols80 ? 640 : 320;
     int tx = t0;
@@ -1330,28 +1412,25 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(uint8_t* fb, int row) {
         const uint8_t tile = e[0];
         const uint8_t attr = noAttr ? LS->r6C : e[1];
         // The ULA is drawn OVER this tile when attr bit 0 is set (512-tile
-        // mode: always), unless the tilemap is forced on top (tilemap.vhd 388).
-        // With the ULA layer off (NR 0x68 bit 7) there is nothing over it.
-        // (Approximation: our ULA has no transparent pixels, so "under" = hidden.)
-        const bool below = !onTop && ((attr & 0x01) || m512);
+        // mode: always), unless the tilemap is forced on top (tilemap.vhd 388);
+        // the mixer decides with the ULA's own transparency.
+        const uint16_t below = (!onTop && ((attr & 0x01) || m512)) ? NX_BELOW : 0;
         const uint16_t tnum = (uint16_t)(tile | ((m512 && (attr & 0x01)) ? 0x100 : 0));
-        if (!below || ulaOff) {
-            if (text) {
-                tmTextSpan(out + tx, n, defsBank[(uint16_t)(defsOff + tnum * 8 + inRow) & 0x3FFF],
-                           u0, step, (uint8_t)(attr & 0xFE), lutTM, rawTM, LS->r14);
-            } else {
-                const bool xm = attr & 0x08, ym = attr & 0x04, rot = attr & 0x02;
-                const uint16_t defBase = (uint16_t)(defsOff + tnum * 32);
-                const uint8_t palHi = attr & 0xF0;
-                for (int k = 0; k < n; k++) {
-                    uint8_t u = (uint8_t)(u0 + k * step), vv = inRow;
-                    if (xm) u = 7 - u;                                       // X mirror
-                    if (ym) vv = 7 - vv;                                     // Y mirror
-                    if (rot) { const uint8_t t = u; u = vv; vv = 7 - t; }    // rotate
-                    const uint8_t b = defsBank[(uint16_t)(defBase + vv * 4 + (u >> 1)) & 0x3FFF];
-                    const uint8_t pix = (u & 1) ? (b & 0x0F) : (b >> 4);
-                    if (pix != transp) out[tx + k] = lutTM[pix | palHi];
-                }
+        if (text) {
+            tmTextSpan(out + tx, n, defsBank[(uint16_t)(defsOff + tnum * 8 + inRow) & 0x3FFF],
+                       u0, step, (uint8_t)(attr & 0xFE), rawTM, LS->r14, below);
+        } else {
+            const bool xm = attr & 0x08, ym = attr & 0x04, rot = attr & 0x02;
+            const uint16_t defBase = (uint16_t)(defsOff + tnum * 32);
+            const uint8_t palHi = attr & 0xF0;
+            for (int k = 0; k < n; k++) {
+                uint8_t u = (uint8_t)(u0 + k * step), vv = inRow;
+                if (xm) u = 7 - u;                                       // X mirror
+                if (ym) vv = 7 - vv;                                     // Y mirror
+                if (rot) { const uint8_t t = u; u = vv; vv = 7 - t; }    // rotate
+                const uint8_t b = defsBank[(uint16_t)(defBase + vv * 4 + (u >> 1)) & 0x3FFF];
+                const uint8_t pix = (u & 1) ? (b & 0x0F) : (b >> 4);
+                if (pix != transp) out[tx + k] = (uint16_t)((rawTM[pix | palHi] & 0x1FF) | below);
             }
         }
         tx += n;
@@ -1435,9 +1514,9 @@ IRAM_ATTR void NEXTVID::resolveSprites() {
 // Render all visible sprites crossing paper line y (0-191). Sprite
 // coordinate space puts (32,32) at the paper top-left corner; rendering is
 // clipped to the paper area for now (sprites-over-border comes later).
-IRAM_ATTR void NEXTVID::RenderSpritesLine(uint8_t* fb, int y) {
+IRAM_ATTR void NEXTVID::RenderSpritesLine(int y) {
     if (sprDirty) resolveSprites();   // attribute writers drain core1 first
-    const uint8_t* sprLut = lut[(LS->palCtrl & 0x08) ? 6 : 2];   // NR 0x43 bit 3
+    const uint16_t* sprRaw = rawPal[(LS->palCtrl & 0x08) ? 6 : 2];   // NR 0x43 bit 3
     const uint8_t transp = LS->r4B;
     const int sline = y + 32;
     if (sline < 0 || sline > 255) return;
@@ -1459,7 +1538,7 @@ IRAM_ATTR void NEXTVID::RenderSpritesLine(uint8_t* fb, int y) {
     if (lo > hi) return;
     uint8_t coverage[40]; // 320-bit line coverage for the collision flag
     memset(coverage, 0, sizeof(coverage));
-    uint8_t* const fbp = fb + xPaperOff;      // indexed by paper x
+    uint16_t* const fbp = nxS + xPaperOff;    // indexed by paper x
     int rendered = 0;
     const int nv = sprVisN;
     uint8_t collided = 0;
@@ -1514,7 +1593,7 @@ IRAM_ATTR void NEXTVID::RenderSpritesLine(uint8_t* fb, int y) {
             const uint8_t mask = 1 << (cbit & 7);
             collided |= coverage[cbit >> 3] & mask;
             coverage[cbit >> 3] |= mask;
-            fbp[xp] = sprLut[c];
+            fbp[xp] = (uint16_t)(sprRaw[c] & 0x1FF);
         }
     }
     if (collided) sprFlags |= 0x01;

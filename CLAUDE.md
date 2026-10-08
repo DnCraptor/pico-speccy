@@ -378,6 +378,27 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   #DFFD = A15:12 = 1101. A14 — только в тайминге +3 (NextZXOS); в личностях
   48K/128K/Pentagon декод неполный, как на самих машинах. Было «всегда A14» — EYEACHE
   (IM2: `LD A,#16 / OUT (#FD),A` = #16FD) не подключал банк плеера и падал.
+- **Multiface Next = запуск снапшотов из Browser** (2026-10-08, hw-confirmed: DIHalt.sna из
+  Browser NextZXOS; `debug/DVp2-next-mf4-1.0.9.elf`): `machines/Next/NextMf.{h,cpp}` по
+  multiface.vhd + проводке zxnext.vhd. Загрузчик банка 2 ставит NR 06 b3 (#0809) и пишет
+  NR 02 = 08 (#0AB6) — MF NMI; обработчик `enNextMf.rom` на #0066 восстанавливает снапшот,
+  пишет адрес в NR C2/C3 (stackless RETN) и NR 8C = A0. Без MF OUT проваливался в #0AB9,
+  `RET NZ` брал со стека 5BFF данные снапшота `00 FF` → PC=FF00 (строка пути) → 0000 в ROM 2.
+  Три правила, каждое стоило раунда: (1) **NMI MF принимается сразу**, не на границе кадра
+  (`NextInt::wake` + проверка `isNMI` в цикле слайсов Next и в двух проверяемых циклах):
+  обработчик идёт по пути запуска только при прерванном PC = #0AB8/#0AB9, иначе открывает
+  свой отладчик ("Navigate to register…"); (2) **пока окно MF подключено, точки входа divMMC
+  молчат** (`sram_divmmc_automap_en` = 0, `g_nxmf_mem` в `DivMMC::preOpcFetch`) — код MF
+  проходит по ним, и автомап esxDOS сделал бы RETN в RAM divMMC (белый экран); (3) RETN
+  при активном MF не трогает divMMC (zxnext.vhd 4111). Память: RAMPAGE 5 = 8K ROM + 8K RAM
+  после AltROM, ROM с SD (`/machines/next/enNextMf.rom`) или из TBBLUE.FW; окно MF идёт через
+  поля окна divMMC (`page0_lo/hi`, `divmmc_mapped`) и перекрывает divMMC, L2 write-over и
+  AltROM. Порты по NR 0A 7:6 (+3: 3F вкл / BF выкл), чтение порта вкл отдаёт 7FFD/1FFD/DFFD/
+  бордюр. `rom=` в строке NEXT: после запуска врёт честно: NR 8C = A0 → читается AltROM (48 BASIC).
+  Цена: +320 B RAM (проверка встроена в preOpcFetch). Не сделано: кнопка M1 (NMI-меню MF),
+  повторное включение окна по выборке #0066 внутри активного NMI. `[NXJMP]` под NEXT_TRACE
+  печатает кольцо переходов через 192 после RETN MF. Ещё не проверено: .snx, .z80, переход
+  в 128 BASIC из меню NextZXOS (тот же путь по zx_go).
 - **Gigascreen на Next** (2026-10-08, hw: «работает»): свой, в `NEXTVID` — только строки
   с одним классическим ULA (Layer 2 / спрайты / тайлмап / ULANext / LoRes / hi-res его
   выключают), prev = 4 бита/пиксель paper (24 КБ PSRAM), смесь 16x16 → ближайший индекс

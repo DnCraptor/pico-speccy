@@ -13,6 +13,7 @@
 #include "NextVideo.h"
 #include "NextRtc.h"
 #include "NextInt.h"
+#include "NextMf.h"
 #include "app/ESPectrum.h"
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
@@ -51,6 +52,13 @@ static uint8_t nxFloatBus() {
 int NextPorts::input(uint16_t address) {
     if (address == 0x243B) return NextReg::selected;
     if (address == 0x253B) return NextReg::read(NextReg::selected);
+    // Multiface enable/disable ports (NextMf.h): the access itself pages the
+    // MF in/out; only a visible MF enable read drives the bus.
+    { const uint8_t lo = (uint8_t)address;
+      if (lo == 0x3F || lo == 0xBF || lo == 0x1F || lo == 0x9F) {
+          const int v = NextMf::portRead(address);
+          if (v >= 0) return v;
+      } }
     if (address == 0x123B && NextReg::portOn(NextReg::PE_LAYER2)) return NextReg::port123B;
     if (address == 0x303B && NextReg::portOn(NextReg::PE_SPRITE)) return NEXTVID::spriteFlagsRead();
     // I2C bus + DS1307 (NextRtc.cpp); NR 0x83 bit 2 undecodes both ports
@@ -76,6 +84,7 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
     const uint8_t a8 = address & 0xFF;
     if (address == 0x243B) { NextReg::selected = data; return true; }
     if (address == 0x253B) { NextReg::write(NextReg::selected, data); return true; }
+    if (a8 == 0x3F || a8 == 0xBF || a8 == 0x1F || a8 == 0x9F) NextMf::portWrite(address);
     if (address == 0x123B && NextReg::portOn(NextReg::PE_LAYER2)) {
         NextReg::writeLayer2Port(data);
         return true;

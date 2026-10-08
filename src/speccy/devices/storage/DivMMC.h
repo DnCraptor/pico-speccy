@@ -275,6 +275,13 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
             }
             return;
         }
+        // Multiface paged in (NextMf.h): zxnext.vhd ~3030 drives
+        // sram_divmmc_automap_en (i_automap_active) low for every access the
+        // MF overlay serves, so divmmc.vhd neither maps nor unmaps on it. The
+        // MF code itself runs at 0x0000-0x3FFF and walks right through the
+        // entry points — without this its fetches automapped esxDOS and the
+        // MF's final RETN landed in divMMC RAM (hw 2026-10-08, white screen).
+        { extern bool g_nxmf_mem; if (g_nxmf_mem) return; }
         // Cold boot: on real hardware the FPGA bootrom overlays $0000-$3FFF,
         // so the reset fetch at $0000 does NOT automap — enNextZX's reset
         // entry must run from the machine ROM (zx_go's divmmc.go documents

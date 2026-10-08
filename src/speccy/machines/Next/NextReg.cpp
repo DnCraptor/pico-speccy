@@ -17,6 +17,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "NextVideo.h"
 #include "NextRtc.h"
 #include "NextInt.h"
+#include "NextMf.h"
 #include "app/Debug.h"
 #include "speccy/z80/z80.h"
 #include "speccy/devices/storage/DivMMC.h"
@@ -302,6 +303,7 @@ void NextReg::reset(bool hard) {
     port1FFD = 0;
     port123B = 0;
     MemESP::wr_overlay_active = false;
+    NextMf::reset();        // multiface.vhd: reset on either reset type
     NextInt::reset(hard);   // interrupt block + CTC: both reset types (reg[0xC0-0xCE] too)
     // MMU defaults: ROM in slots 0/1, banks 5,2,0 in RAM slots
     reg[0x50] = 0xFF; reg[0x51] = 0xFF;
@@ -422,6 +424,7 @@ void NextReg::applyRasterPaper() {
 uint8_t NextReg::divNmiRequest(bool hotkey) {
     if (!DivMMC::enabled || MemESP::nextConfigMode || MemESP::nextBootRomActive) return 1;
     if (!(reg[0x06] & 0x10)) return 1;
+    if (NextMf::active()) return 2;      // zxnext.vhd 2109: not while the MF is master
     if (hotkey && !(reg[0x83] & 0x01)) return 1;
     if (DivMMC::next_nmi_hold) {
         if (DivMMC::next_nmi_btn || DivMMC::automap) return 2;
@@ -497,6 +500,12 @@ void NextReg::write(uint8_t r, uint8_t v) {
     else if (r >= 0x60 && r <= 0x63) s_nt_cop++;
     else if ((r >= 0x34 && r <= 0x39) || (r >= 0x75 && r <= 0x79)) s_nt_spr++;
     else NT_EV('N', r, v);
+    {
+        extern void nxNrNote(uint8_t r, uint8_t v);
+        if (r == 0x02 || r == 0x06 || r == 0x50 || r == 0x51 || r == 0x8E || r == 0xC0 ||
+            r == 0xC2 || r == 0xC3 || r == 0x03 || r == 0x8C || r == 0x0A || r == 0xBB)
+            nxNrNote(r, v);
+    }
 #endif
     switch (r) {
         case 0x03: { // Machine type / display timing / config mode
@@ -537,6 +546,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
                    // boot in an endless crash-restart loop (hw: white flash
                    // blinking). Deferred to the frame boundary.
             if (v & 0x04) divNmiRequest(false);   // generate divMMC NMI
+            NextMf::nr02(v & 0x08);               // bit 3: generate Multiface NMI (NextMf.h)
             if (v & 0x02) resetPending = 2;
             else if (v & 0x01) resetPending = 1;
             if (v & 0x03) {
@@ -622,6 +632,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
             /* fall through */
         case 0x82: case 0x83: case 0x84:
             portEnRecalc();
+            if (!portOn(PE_MF)) NextMf::reset();   // multiface.vhd reset <= not enable_i
             break;
         case 0x60: NEXTVID::copperDataWrite(v);   break;
         case 0x61: NEXTVID::copperIndexLo(v);     break;
@@ -663,6 +674,7 @@ uint8_t NextReg::read(uint8_t r) {
         case 0x00: return 10;    // machine ID: ZX Spectrum Next
         case 0x01: return 0x32;  // core major.minor = 3.2
         case 0x03: return reg03Compose();
+        case 0x02: return (uint8_t)((reg[0x02] & ~0x08) | NextMf::nr02Bit());
         case 0x0E: return 0x03;  // core sub-minor: report 3.02.03 — the
                                   // current NextZXOS distro gates boot on
                                   // >= 3.02.03 (hw: 3.02.00 failed the check
@@ -738,6 +750,7 @@ void NextReg::updateLayer2Window() {
     // The TBBLUE config window owns the write overlay while it is up;
     // applyNextConfigWindow() calls back here the moment it closes.
     if (MemESP::nextBootRomActive || MemESP::nextConfigMode) return;
+    if (NextMf::memOn()) { MemESP::wr_overlay_active = false; return; }   // MF wins (zxnext.vhd ~3030)
     if (port123B & 0x01) { // write enable
         uint8_t bank = (port123B & 0x08) ? reg[0x13] : reg[0x12];
         uint8_t off = (port123B >> 6) & 3;

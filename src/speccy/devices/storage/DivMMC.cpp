@@ -1,4 +1,5 @@
 #include "DivMMC.h"
+#include "speccy/machines/Next/NextMf.h"
 #include "app/Buffer.h"
 #include "speccy/z80/z80.h"
 #include "pico/time.h"
@@ -653,6 +654,10 @@ void DivMMC::applyMapping() {
     // Next: the fast read level (TsFastMem.h) follows the mapping — re-derive
     // it on every change (the window itself is in ramCurrent[0/1] while paged in).
     if (Config::arch == A_NEXT) {
+        // The Next Multiface overlay beats the divMMC window (zxnext.vhd ~3030:
+        // mf_mem_en selects first, override 000) — re-plug it over whatever
+        // the divMMC just did; the automap state itself is kept underneath.
+        if (NextMf::memOn()) NextMf::plug();
         extern void ts_fastrd_recalc();
         ts_fastrd_recalc();
     }

@@ -468,6 +468,12 @@ public:
     // write-protected via next_rom_mask in writebyte().
     static uint8_t* nextRomBase;     // 64K NextZXOS ROM set (null = 128K fallback)
     static uint8_t* nextDivRomBase;  // 8K Next MMC ROM (null = esxdos fallback)
+    // Next Multiface (RAMPAGE 5, NextMf.h): enNextMf.rom (8K, read-only) and
+    // 8K of MF RAM, right after the Alt-ROM banks. mfRomBase stays null until
+    // the ROM is loaded (SD, or TBBLUE.FW writing RAMPAGE 5 in config mode);
+    // an MF NMI is refused without it.
+    static uint8_t* mfRomBase;
+    static uint8_t* mfRamBase;
     static uint8_t  next_rom_mask;   // bit N: slot N (0/1) has ROM mapped
     static bool     next_rom3;       // Next: ROM in 0000-3FFF counts as ROM3 for divMMC automap (NextReg applyRomSelect)
     static bool loadNextRoms();      // load ROM files from SD (after buildNextRam)

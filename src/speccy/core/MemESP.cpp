@@ -896,6 +896,8 @@ uint8_t* MemESP::nextRomBase = nullptr;
 uint8_t* MemESP::nextDivRomBase = nullptr;
 uint8_t  MemESP::next_rom_mask = 0;
 uint8_t* MemESP::altRomBase = nullptr;
+uint8_t* MemESP::mfRomBase = nullptr;
+uint8_t* MemESP::mfRamBase = nullptr;
 bool     MemESP::next_rom3 = false;
 bool     MemESP::altrom_rd = false;
 bool     MemESP::altrom_wr = false;
@@ -924,7 +926,7 @@ static constexpr OpenBusPage open_bus_page;
 // pages — so the carve can never eat DivMMC's banks, GS sample RAM or the
 // minimum arena.
 bool MemESP::buildNextRam() {
-    size_t romExtra = 13 * 0x2000;   // 64K ROM set + 8K MMC + 32K Alt-ROM
+    size_t romExtra = 15 * 0x2000;   // 64K ROM set + 8K MMC + 32K Alt-ROM + 16K Multiface
     size_t needed = (size_t)(NEXT_PAGES - 16) * 0x2000 + romExtra;
     size_t used = (size_t)butter_pages * MEM_PG_SZ;
     if (Buffer::pageBudgetButter() < used + needed) return false;
@@ -942,7 +944,10 @@ bool MemESP::buildNextRam() {
     altRomBase = base + (size_t)(NEXT_PAGES - 16) * 0x2000 + 9 * 0x2000;
     altrom_rd = altrom_wr = false;
     altrom_sel = 0;
-    butter_pages += (NEXT_PAGES - 16 + 13 + 1) / 2; // account in 16K units
+    mfRomBase = nullptr;                          // set once enNextMf.rom is in
+    mfRamBase = altRomBase + 0x8000 + 0x2000;     // Multiface RAM after its ROM
+    memset(mfRamBase, 0, 0x2000);
+    butter_pages += (NEXT_PAGES - 16 + 15 + 1) / 2; // account in 16K units
     nextRamReady = true;
     return true;
 }
@@ -987,8 +992,14 @@ bool MemESP::loadNextRoms() {
     for (int i = 0; i < 2 && !nextDivRomBase; i++)
         if (readFileToButter(mmcPaths[i], romRegion + 0x10000, 0x2000))
             nextDivRomBase = romRegion + 0x10000;
-    Debug::log("Next ROMs: enNextZX %s, enNxtmmc %s",
-               nextRomBase ? "OK" : "missing", nextDivRomBase ? "OK" : "missing");
+    static const char* mfPaths[] = { "/roms/next/enNextMf.rom",
+                                      "/machines/next/enNextMf.rom" };
+    for (int i = 0; i < 2 && !mfRomBase; i++)
+        if (readFileToButter(mfPaths[i], altRomBase + 0x8000, 0x2000))
+            mfRomBase = altRomBase + 0x8000;
+    Debug::log("Next ROMs: enNextZX %s, enNxtmmc %s, enNextMf %s",
+               nextRomBase ? "OK" : "missing", nextDivRomBase ? "OK" : "missing",
+               mfRomBase ? "OK" : "missing (no snapshot launch from the Browser)");
     return nextRomBase != nullptr;
 }
 
@@ -1055,7 +1066,7 @@ void MemESP::resetNextMapping() {
 // firmware's hardware.h layout (pinned by zx_go configModePageBacking):
 //   0x00-0x03  ROM0-3 (the 64K NextZXOS set)
 //   0x04       divMMC ROM (8K, window mirrors it twice)
-//   0x05       Multiface ROM — not present here, unbacked
+//   0x05       Multiface: enNextMf.rom (8K) + MF RAM (8K)
 //   0x06-0x07  Alt-ROM 0/1
 //   0x08-0x0F  divMMC RAM (128K as 8 x 16K windows over the 8K banks)
 //   0x10-0x7F  RAM banks 0-111
@@ -1068,6 +1079,8 @@ uint8_t* MemESP::configBackingHalf(uint8_t page, uint8_t half) {
         return romRegion + (uint32_t)page * 0x4000 + (uint32_t)half * 0x2000;
     if (page == 0x04)
         return romRegion + 0x10000;              // 8K, both halves mirror it
+    if (page == 0x05)
+        return altRomBase ? altRomBase + 0x8000 + (uint32_t)half * 0x2000 : nullptr;
     if (page == 0x06 || page == 0x07)
         return altRomBase ? altRomBase + (uint32_t)(page - 6) * 0x4000
                                         + (uint32_t)half * 0x2000
@@ -1126,6 +1139,7 @@ void MemESP::applyNextConfigWindow() {
         uint8_t* romRegion = nextRamPtr[NEXT_PAGES - 1] + 0x2000;
         if (nextConfigPage <= 0x03 && !nextRomBase)    nextRomBase = romRegion;
         if (nextConfigPage == 0x04 && !nextDivRomBase) nextDivRomBase = romRegion + 0x10000;
+        if (nextConfigPage == 0x05 && !mfRomBase)      mfRomBase = altRomBase + 0x8000;
         wrOverlay[0] = w0;
         wrOverlay[1] = w1;
         wr_overlay_active = true;

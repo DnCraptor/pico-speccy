@@ -139,7 +139,8 @@ private:
     static bool computeGeometry();         // firstVisibleLine/paperTopRow (50/60 Hz)
     static void RenderLine(int row);
     static void RenderLayers(uint8_t* fb, int row);   // RenderLine's body, linear pixel order
-    static void RenderSpritesLine(uint8_t* fb, int y);
+    static void RenderUlaLine(int row);              // ULA / LoRes layer -> RGB line buffer
+    static void RenderSpritesLine(int y);
     static void rebuildLut(uint8_t pal);
     static void setLutEntry(uint8_t pal, uint8_t idx, uint16_t rgb333);
     static void buildRemap();
@@ -185,8 +186,8 @@ private:
 
     // copper state
     static void copperLine(uint16_t rasterLine);
-    static void RenderTilemapLine(uint8_t* fb, int row);
-    static void RenderL2Line(uint8_t* fb, int row, bool prioPass);
+    static void RenderTilemapLine(int row);
+    static void RenderL2Line(int row);
     static bool palHasPrio[8];           // palette contains L2 priority entries
     static uint8_t* copperMem;           // [2048] 1024 big-endian instructions
     static uint16_t copIndex;            // write index (bytes)

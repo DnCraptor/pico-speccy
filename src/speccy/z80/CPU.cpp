@@ -741,6 +741,7 @@ IRAM_ATTR void CPU::loop() {
     while (tstates < IntEnd) {
         Z80::execute();
         if (Config::dma_mode || Z80Ops::isNext) Z80DMA::handleDMA();
+        if (__builtin_expect(Z80Ops::isNext && Z80::isNMI(), 0) && Z80::atInstrBoundary()) Z80::doNMI();
         if (ZiFi::cdcNicActive && tstates >= zifi_pump_due) {
             zifi_pump_due = tstates + 3500;
             ZiFi::cdcPump();
@@ -764,6 +765,13 @@ IRAM_ATTR void CPU::loop() {
         bool stamped = false;
         halted = false;
         while (tstates < sliceEnd) {
+            // A mid-frame NMI (Multiface, NR 02 bit 3) is taken at the boundary
+            // its request ended the slice on — see NextMf::request().
+            if (__builtin_expect(Z80::isNMI(), 0) && Z80::atInstrBoundary()) {
+                Z80::doNMI();
+                BREAKPOINTS
+                continue;
+            }
             if (NextInt::ex) {
                 if (Z80::isIFF1() && NextInt::intLine()) {
                     // at a boundary take it at once (execute() would run one
@@ -812,6 +820,7 @@ IRAM_ATTR void CPU::loop() {
     while (tstates < statesInFrame) {
         Z80::execute();
         if (Config::dma_mode || Z80Ops::isNext) Z80DMA::handleDMA();
+        if (__builtin_expect(Z80Ops::isNext && Z80::isNMI(), 0) && Z80::atInstrBoundary()) Z80::doNMI();
         if (ZiFi::cdcNicActive && tstates >= zifi_pump_due) {
             zifi_pump_due = tstates + 3500;
             ZiFi::cdcPump();

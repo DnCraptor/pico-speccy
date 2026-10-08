@@ -2933,7 +2933,7 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                         OSD::osdCenteredMsg("Enable MB-02+ first", LEVEL_WARN);
                     }
                 }
-                else if (ext == "pss" || ext == "sna" || ext == "z80" || ext == "p" || ext == "spg" || ext == "rzx") {
+                else if (ext == "pss" || ext == "sna" || ext == "z80" || ext == "p" || ext == "spg" || ext == "rzx" || ext == "nex") {
                     // Snapshot (.spg = TS-Conf program, switches the machine)
                     if (!fromZip) FileUtils::SNA_Path = FileUtils::ALL_Path;
                     Config::save();
