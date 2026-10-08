@@ -7,6 +7,11 @@
 #include "speccy/video/Video.h"
 #include <cstdint>
 
+#if NEXT_TRACE
+// NEXT cpu: trace (NextReg.cpp): line pulses raised / already over when seen /
+// by how many 3.5 MHz T, INT acknowledges, the line event's frame position.
+volatile uint32_t g_li_raise = 0, g_li_late = 0, g_li_late_by = 0, g_int_ack = 0;
+#endif
 namespace NextInt {
 uint8_t ex = 0;
 bool retnArmed = false;
@@ -184,8 +189,18 @@ void sync() {
         return;
     }
     const int64_t relPrev = s_last28 - s_base28, relNow = now - s_base28;
-    if (s_lineEn && s_linePos28 >= 0 && s_linePos28 > relPrev && s_linePos28 <= relNow)
+    if (s_lineEn && s_linePos28 >= 0 && s_linePos28 > relPrev && s_linePos28 <= relNow) {
         raise(D_LINE, s_base28 + s_linePos28, true);
+#if NEXT_TRACE
+        g_li_raise++;
+        // A pulse already over by the time the loop saw it: the CPU could not
+        // take it (bus held by a DMA, or a slice that ran past the event).
+        if (!im2Hw() && now >= s_base28 + s_linePos28 + pulseLen28()) {
+            g_li_late++;
+            g_li_late_by = (uint32_t)((now - s_base28 - s_linePos28) / 8);
+        }
+#endif
+    }
     for (auto& c : s_ctc)
         if (c.st >= C_TRIGGER) { ctcAdvance(now); break; }
     s_last28 = now;
@@ -273,6 +288,7 @@ void lineRecalc() {
 }
 
 bool lineEnabled() { return s_lineEn; }
+int32_t linePosT() { return s_linePos28 < 0 ? -1 : (int32_t)(s_linePos28 / 8); }
 uint16_t lineNumber() { return s_lineNum; }
 
 void wake() {
@@ -306,6 +322,9 @@ uint32_t nextEventT(uint32_t limit) {
 
 uint8_t ack() {
     sync();
+#if NEXT_TRACE
+    g_int_ack++;
+#endif
     if (!im2Hw() || !cpuIm2()) return 0xFF;
     const int d = presented();
     if (d < 0) return 0xFF;

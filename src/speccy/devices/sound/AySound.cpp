@@ -39,6 +39,8 @@ visit https://zxespectrum.speccy.org/contacto
 #include "AySound.h"
 #include "app/ESPectrum.h"
 #include "app/Config.h"
+#include "app/Debug.h"
+#include "speccy/z80/CPU.h"
 #include "drivers/sound/PinSerialData_595.h"
 
 #include <pico/platform.h>
@@ -99,6 +101,8 @@ AySound* chip1 = nullptr;
 AySound* chip2 = nullptr;
 AySound* chips[3] = { &chip0, nullptr, nullptr };
 uint8_t ay_next_pan[3] = { 3, 3, 3 };
+// Next per-AY stereo layout (NR 0x08 bit 5 / NR 0x09 bits 7:5), -1 = Config::ayConfig
+int8_t ay_next_mode[3] = { -1, -1, -1 };
 
 /* sound chip volume envelops (will calculated by gen_env()) */
 // static int bEnvGenInit = 0;
@@ -476,10 +480,32 @@ AY_MIX_MONO void AySound::gen_sound_MONO(int sound_bufsize, uint8_t *sound_buf_L
     AY_WRITEBACK()
 }
 
+// Cold path of the bounds check below, in flash: say once who overran.
+static void __attribute__((noinline)) aySpill(unsigned num, int pos, int n) {
+    static bool said = false;
+    if (said) return;
+    said = true;
+    Debug::log("[AY] gen_sound past the buffer: chip %u pos %d n %d (tstates %u, div %u, m %u, frame %u)",
+               num, pos, n, (unsigned)CPU::tstates, (unsigned)ESPectrum::audioAYDivider,
+               (unsigned)ESPectrum::multiplicator, (unsigned)CPU::statesInFrame);
+}
+
 IRAM_ATTR void AySound::gen_sound(int sound_bufsize, int bufpos)
 {
     uint8_t *sound_buf_L = SamplebufAY_L + bufpos;
     uint8_t *sound_buf_R = SamplebufAY_R + bufpos;
+    // A position past the buffer is a caller's sample-clock mismatch. chip0 is a
+    // static object and right after it in .bss lie the USB host's endpoint pool
+    // and hdmi_isr_mode (hw 2026-10-08, Spectrum Next Pogie: USB dead even after
+    // a re-plug and the monitor frozen) — clamp, and say who did it, once.
+    if (__builtin_expect(bufpos < 0 || bufpos + sound_bufsize > ESP_AUDIO_SAMPLES_PENTAGON, 0)) {
+        aySpill(my_num, bufpos, sound_bufsize);
+        if (bufpos < 0 || bufpos >= ESP_AUDIO_SAMPLES_PENTAGON) return;
+        sound_bufsize = ESP_AUDIO_SAMPLES_PENTAGON - bufpos;
+    }
+    // A non-positive count is a caller's sample-position mismatch; the silent
+    // path below would memset((size_t)negative) and wipe RAM.
+    if (sound_bufsize <= 0) return;
     // Silent fast path: with envelope mode off and volume 0 on all three
     // channels every AY_CHVOL term is table[Rampa_AY_table[0]], and table[]
     // is normalized to table[0]==0 ("tie level 0 to silence" in
@@ -496,6 +522,7 @@ IRAM_ATTR void AySound::gen_sound(int sound_bufsize, int bufpos)
         return;
     }
     uint8_t mode = Config::ayConfig;
+    if (my_num < 3 && ay_next_mode[my_num] >= 0) mode = (uint8_t)ay_next_mode[my_num];
     // CBA mirrors ABC; reuse its mixer with the output buffers exchanged.
     if (mode == 4) {
         uint8_t *tmp = sound_buf_L;

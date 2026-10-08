@@ -71,6 +71,7 @@ bool nmiStackless(uint16_t pc);
 uint16_t stacklessRetn();
 
 bool     lineEnabled();
+int32_t  linePosT();      // line event, frame-relative 3.5 MHz T (-1 none)
 uint16_t lineNumber();
 
 }

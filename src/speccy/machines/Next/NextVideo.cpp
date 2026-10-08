@@ -626,18 +626,31 @@ void NEXTVID::Reset() {
     nx_have = false;
     g_next_c1_live = nx_ring != nullptr;
     if (!sprPatterns) {
-        // One block, Next-boot only, never freed (the Next boundary reboots).
-        // Layout: patterns 16K | copper 2K | rawPal 4K | lut 2K | sprAttr 640 |
-        // lineBuf 384 | pairMap 256 | hiresRow 256 | sprRes 1280 | sprVis 128 |
-        // remap 512 | layer lines 4 x 384 x 2 (all word-aligned: 27136 is a multiple of 4)
+        // Two blocks, Next-boot only, never freed (the Next boundary reboots).
+        // It used to be ONE 29 KB malloc, which PANICKED at boot once the heap
+        // had no hole that size (hw 2026-10-08, pico_malloc panics on NULL).
+        // Both go through Buffer::palloc(HOT_SRAM): SRAM when the heap has it,
+        // butter PSRAM otherwise (slower, but the machine starts).
+        // Hot (read per pixel, ~11 KB): rawPal 4K | lut 2K | lineBuf 384 |
+        //   pairMap 256 | hiresRow 256 | sprRes 1280 | sprVis 128 | remap 512 |
+        //   layer lines 4 x 384 x 2.
+        // Cold (~19 KB): sprite patterns 16K | copper 2K | sprAttr 640.
         static_assert(sizeof(SprRes) == 10, "sprRes is sized 128 x 10 in the block");
-        uint8_t* blk = (uint8_t*)malloc(16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512 + 1408 + 512 + 4 * 768);
-        sprPatterns = blk;
-        copperMem   = blk + 16384;
-        rawPal      = (uint16_t(*)[256])(blk + 16384 + 2048);
-        lut         = (uint8_t(*)[256])(blk + 16384 + 2048 + 8*256*2);
-        sprAttr     = (uint8_t(*)[5])(blk + 16384 + 2048 + 8*256*2 + 8*256);
-        lineBuf     = blk + 16384 + 2048 + 8*256*2 + 8*256 + 128*5;
+        const unsigned hotSz  = 8*256*2 + 8*256 + 384 + 512 + 1408 + 512 + 4 * 768;
+        const unsigned coldSz = 16384 + 2048 + 128*5;
+        uint8_t* hot  = (uint8_t*)Buffer::palloc(hotSz,  Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+        Debug::log("[NXV] state: hot %u B @%08X, cold %u B @%08X",
+                   hotSz, (unsigned)(uintptr_t)hot, coldSz, (unsigned)(uintptr_t)cold);
+        if (!hot || !cold) panic("NEXTVID: no memory for the Next video state");
+        memset(hot, 0, hotSz);
+        memset(cold, 0, coldSz);
+        sprPatterns = cold;
+        copperMem   = cold + 16384;
+        sprAttr     = (uint8_t(*)[5])(cold + 16384 + 2048);
+        rawPal      = (uint16_t(*)[256])hot;
+        lut         = (uint8_t(*)[256])(hot + 8*256*2);
+        lineBuf     = hot + 8*256*2 + 8*256;
         pairMap     = lineBuf + 384;
         hiresRow    = pairMap + 256;
         sprRes      = (SprRes*)(hiresRow + 256);
@@ -645,7 +658,6 @@ void NEXTVID::Reset() {
         remap       = sprVis + 128;
         nxU = (uint16_t*)(remap + 512);
         nxT = nxU + 384; nxL = nxT + 384; nxS = nxL + 384;
-        memset(blk, 0, 16384 + 2048 + 8*256*2 + 8*256 + 128*5 + 384 + 512 + 1408 + 512 + 4 * 768);
     }
     buildRemap();
     defaultPalettes();

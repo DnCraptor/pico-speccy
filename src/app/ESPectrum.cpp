@@ -1761,7 +1761,14 @@ void ESPectrum::nextAudioSet() {
         samplesPerFrame = ESP_AUDIO_SAMPLES_EVO60;
         audioOverSampleDivider = ESP_AUDIO_OVERSAMPLES_DIV_EVO60;
         audioSampleDivider = ESP_AUDIO_SAMPLES_DIV_EVO60;
-        audioAYDivider = (r.kind == 1) ? ESP_AUDIO_AY_DIV_128 : ESP_AUDIO_AY_DIV_EVO60;
+        // The AY/Covox divider must not give MORE samples than samplesPerFrame:
+        // the frame-end catch-up is gen_sound(samplesPerFrame - done) and a
+        // negative count reached AySound's silent path as memset((size_t)-3),
+        // wiping RAM (hw 2026-10-08, Pogie: 128K/+3 timing at 60 Hz = 228 x 261
+        // = 59508 T, divider 113 -> 527 samples for 524; HDMI, USB and the
+        // monitor all died on the switch to 60 Hz). ceil(frame / samples): 114
+        // here, 112 for the 48K 60 Hz frame (224 x 262 = 58688, as EVO60).
+        audioAYDivider = (unsigned char)((sif + ESP_AUDIO_SAMPLES_EVO60 - 1) / ESP_AUDIO_SAMPLES_EVO60);
         Audio_freq = ESP_AUDIO_FREQ_EVO60;
     } else if (r.kind == 0) {
         samplesPerFrame = ESP_AUDIO_SAMPLES_48;
@@ -2268,9 +2275,15 @@ void ESPectrum::reset(uint8_t romInUse) {
 //=======================================================================================
 // KEYBOARD / KEMPSTON
 //=======================================================================================
+#if NEXT_TRACE
+volatile uint32_t g_vk_read = 0;   // keys processKeyboard took (NEXT int: trace line)
+#endif
 IRAM_ATTR bool ESPectrum::readKbd(fabgl::VirtualKeyItem *Nextkey) {
 
   bool r = PS2Controller.keyboard()->getNextVirtualKey(Nextkey);
+#if NEXT_TRACE
+  if (r) g_vk_read++;
+#endif
   // Global keys
   if (Nextkey->down) {
     if (Nextkey->vk ==
@@ -3322,7 +3335,7 @@ __not_in_flash("audio") void ESPectrum::AYGetSample() {
     if (audbufpos > audbufcntAY) {
         chip0.gen_sound(audbufpos - audbufcntAY, audbufcntAY);
         // chip1 only present when TurboSubsys::enabled
-    if (Config::twoAyChips() && chip1)
+    if ((Config::twoAyChips() || Z80Ops::isNext) && chip1)   // Next: TurboSound AY 1
             chip1->gen_sound(audbufpos - audbufcntAY, audbufcntAY);
     if (Z80Ops::isNext && chip2)
             chip2->gen_sound(audbufpos - audbufcntAY, audbufcntAY);
@@ -3794,6 +3807,8 @@ void ESPectrum::loop() {
         NextReg::reset(false);           // also reg[0x02] = 0x01 (last = soft)
         MemESP::resetNextMapping();
         NEXTVID::softReset();
+        // turbosound.vhd: all three AYs reset with the core (audio_ay_reset)
+        for (int i = 0; i < 3; i++) if (chips[i]) chips[i]->reset();
         Z80DMA::reset();                 // dma.vhd reset_i: both reset types
         // divMMC: overlay off. Its RAM survives (NextZXOS keeps boot-stage
         // state there), but port 0xE3 does NOT: zxnext.vhd ~4177 clears
@@ -4118,8 +4133,14 @@ void ESPectrum::loop() {
         bool p0L = true, p0R = true, p1L = true, p1R = true;
         bool p2L = ay_next_pan[2] & 2, p2R = ay_next_pan[2] & 1;
         if (Z80Ops::isNext) {
-          mix_chip0 = AY_emu;
-          mix_chip1 = AY_emu && chip1;
+          // turbosound.vhd: with TurboSound off only the AY last selected is
+          // heard; NR 0x06 PSG mode 11 holds all three in reset (silent).
+          const bool ts   = NextReg::reg[0x08] & 0x02;
+          const bool held = (NextReg::reg[0x06] & 3) == 3;
+          const int  sel  = AySound::selected_chip;
+          mix_chip0 = AY_emu && !held && (ts || sel == 0);
+          mix_chip1 = AY_emu && chip1 && !held && (ts || sel == 1);
+          mix_chip2 = mix_chip2 && !held && (ts || sel == 2);
           p0L = ay_next_pan[0] & 2; p0R = ay_next_pan[0] & 1;
           p1L = ay_next_pan[1] & 2; p1R = ay_next_pan[1] & 1;
         }

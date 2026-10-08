@@ -480,6 +480,7 @@ void SAASound::envSetNewData(int env, uint8_t data) {
 IRAM_ATTR void SAASound::gen_sound(int bufsize, int bufpos) {
     uint8_t *buf_L = SamplebufSAA_L + bufpos;
     uint8_t *buf_R = SamplebufSAA_R + bufpos;
+    if (bufsize <= 0) return;   // see AySound::gen_sound: memset((size_t)negative)
 
     // Muted fast path (reg 28 bit0 = 0, the power-on state): the per-sample
     // loop below ticks 2 noise LFSRs + 6 channel counters only to accumulate

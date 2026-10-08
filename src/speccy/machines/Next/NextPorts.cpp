@@ -18,6 +18,10 @@
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
 #include "speccy/core/MemESP.h"
+#include "app/Debug.h"
+#include "speccy/devices/sound/AySound.h"
+#include "speccy/devices/tape/Tape.h"
+#include "ui/LEDIndicators.h"
 
 // The ULA floating bus on port #FF (zxnext.vhd 2813 / 4513, zxula.vhd 573):
 // only in 48K and 128K machine timing — +3 and Pentagon read 0xFF there —
@@ -49,6 +53,188 @@ static uint8_t nxFloatBus() {
                             : VIDEO::grmem[VIDEO::offBmp[line] + hp];
 }
 
+// ── Sound: TurboSound (turbosound.vhd) and the DACs (soundrive.vhd) ─────────
+// NR 0x06 bits 1:0 = PSG mode (11 = all three AYs held in reset), NR 0x08
+// bit 1 = TurboSound enable, bit 3 = DAC enable, bit 5 = ACB stereo (else ABC),
+// NR 0x09 bits 7:5 = mono per AY (bit 5 = AY 0). zxnext.vhd 5162-5189, 6377-6460.
+
+static uint8_t s_dac[4] = { 0x80, 0x80, 0x80, 0x80 };   // A B C D (soundrive.vhd reset)
+// Until a DAC is written after a reset the mix gets 0, not the 0x80 the
+// channels hold: our mixer is unipolar and a standing +128 would only eat
+// headroom (the board's own output is AC-coupled). Deliberate deviation.
+static bool s_dacLive = false;
+
+// Catch the Covox buffer up with the OLD level first, then publish the new one.
+static void dacPublish() {
+    ESPectrum::CovoxGetSample();
+    if (s_dacLive) {
+        ESPectrum::lastCovoxVal  = (uint8_t)((s_dac[0] + s_dac[1]) >> 1);
+        ESPectrum::lastCovoxValR = (uint8_t)((s_dac[2] + s_dac[3]) >> 1);
+    } else {
+        ESPectrum::lastCovoxVal = ESPectrum::lastCovoxValR = 0;
+    }
+}
+
+void NextPorts::dacWrite(uint8_t mask, uint8_t v) {
+    if (!(NextReg::reg[0x08] & 0x08)) return;   // soundrive held in reset (NR 0x08 bit 3 = 0)
+    for (int i = 0; i < 4; i++) if (mask & (1 << i)) s_dac[i] = v;
+    s_dacLive = true;
+    dacPublish();
+}
+
+// The DACs are held in reset while NR 0x08 bit 3 is clear (reset_i = reset or
+// not nr_08_dac_en), and reset with the machine.
+static void dacReset() {
+    s_dac[0] = s_dac[1] = s_dac[2] = s_dac[3] = 0x80;
+    s_dacLive = false;
+    dacPublish();
+}
+
+// Stereo layout per AY, read by AySound::gen_sound. Mono = A+B+C both sides;
+// otherwise ABC (L = A+B, R = C+B) or ACB (L = A+C, R = B+C) for all three.
+static void ayModesApply() {
+    const uint8_t mono = NextReg::reg[0x09] >> 5;
+    const int8_t  st   = (NextReg::reg[0x08] & 0x20) ? 1 : 0;   // AySound modes: 0 ABC, 1 ACB, 2 mono
+    for (int i = 0; i < 3; i++) ay_next_mode[i] = (mono & (1 << i)) ? 2 : st;
+}
+
+// turbosound.vhd reset: AY 0 selected, all pans 11 (L+R).
+static void tsSelectReset() {
+    AySound::selected_chip = 0;
+    ay_next_pan[0] = ay_next_pan[1] = ay_next_pan[2] = 3;
+}
+
+void NextPorts::audioReset() {
+    tsSelectReset();
+    ayModesApply();
+    dacReset();
+}
+
+// An NR 0x06 / 0x08 / 0x09 write: `old` is the register before it. The AY and
+// DAC buffers are caught up first, so the samples already generated keep the
+// layout they were produced with.
+void NextPorts::audioRegWrite(uint8_t r, uint8_t old) {
+    ESPectrum::AYGetSample();
+    if (r == 0x06) {
+        // PSG mode 11 = all three AYs in reset (audio_ay_reset): registers,
+        // select and pans back to power-up, and nothing is heard while held.
+        if ((NextReg::reg[0x06] & 3) == 3 && (old & 3) != 3) {
+            for (int i = 0; i < 3; i++) if (chips[i]) chips[i]->reset();
+            tsSelectReset();
+        }
+        return;
+    }
+    if (r == 0x08 && !(NextReg::reg[0x08] & 0x08) && (old & 0x08)) dacReset();
+    ayModesApply();
+}
+
+// NR 0x2C (left = B), 0x2D (mono = A and D), 0x2E (right = C): soundrive.vhd
+// nextreg mirrors, through the same enable as the ports.
+void NextPorts::dacNr(uint8_t r, uint8_t v) {
+    dacWrite(r == 0x2C ? 2 : r == 0x2E ? 4 : 9, v);
+}
+
+// AY write, A15 = 1 and A1:0 = 01 (zxnext.vhd 2647-2649, 2772-2773):
+// #FFFD = A15:14 = 11 and A2 = 1, #BFFD = A15:14 = 10 and A2 = 1; anything else
+// in the family is no AY on the board and is consumed (it used to reach the
+// loose Pentagon decode). turbosound.vhd: with TurboSound on, a #FFFD byte
+// 1xx111cc selects AY (cc 10 -> 1, 01 -> 2, 11/00 -> 0) and sets its pan from
+// bits 6:5; the register number latches only for d7:5 = 000. With TurboSound
+// off the select is ignored and the AY last selected stays the only one heard.
+bool NextPorts::ayWrite(uint16_t address, uint8_t data) {
+    const uint16_t top = address & 0xC004;
+    if (top != 0xC004 && top != 0x8004) return true;
+    if ((NextReg::reg[0x06] & 3) == 3) return true;          // AYs held in reset
+    AySound* chip = chips[AySound::selected_chip];
+    if (!chip) chip = chips[0];
+    LED::touchW(LED::AY);
+    if (top == 0xC004) {
+        if ((data & 0x9C) == 0x9C) {
+            if (NextReg::reg[0x08] & 0x02) {
+                const uint8_t cc = data & 3;
+                const int n = cc == 2 ? 1 : cc == 1 ? 2 : 0;
+                ESPectrum::AYGetSample();                     // the pan applies from here on
+                AySound::selected_chip = n;
+                ay_next_pan[n] = (data >> 5) & 3;
+            }
+            return true;
+        }
+        if (data & 0xE0) return true;                          // not a register number
+        chip->selectRegister(data);
+    } else {
+        if (Tape::tapeStatus != TAPE_LOADING) ESPectrum::AYGetSample();
+        chip->setRegisterData(data);
+    }
+    return true;
+}
+
+// ── UART (serial/uart.vhd), minimal: no ESP / Pi on the other end ───────────
+// Ports 0x143B Rx (write = prescaler LSB), 0x153B select (bit 6 = UART 1 Pi,
+// bit 4 = write prescaler MSB 2:0), 0x163B frame, 0x133B Tx (read = status):
+// zxnext.vhd 2639 (A15:11 = 00010, A10 xor (A9 and A8), low byte 3B) with the
+// register in A9:8. Nothing is connected: the transmitter is always empty
+// (status 0x10 = tx_empty, not tx_full) and the receiver never has a byte, so
+// a program that prints to the UART runs on and an ESP driver sees no reply
+// instead of hanging in a busy poll (hw 2026-10-08, Pogie prints its banner
+// through 0x133B at start and waited for ever). Transmitted bytes go to the
+// debug log a line at a time. Deviations: no baud timing, no FIFO, no IM2
+// UART interrupts (NR 0xC6), no ESP bridge (§6 of the plan).
+static uint8_t s_uartSel = 0;               // 0 = ESP (UART 0), 1 = Pi (UART 1)
+static uint8_t s_uartPrescMsb[2] = {0, 0};
+static uint8_t s_uartFrame[2] = {0x18, 0x18};
+static char    s_uartLine[2][81];
+static uint8_t s_uartLen[2] = {0, 0};
+
+void NextPorts::uartReset(bool hard) {
+    s_uartSel = 0;
+    if (hard) {
+        s_uartPrescMsb[0] = s_uartPrescMsb[1] = 0;
+        s_uartFrame[0] = s_uartFrame[1] = 0x18;
+    }
+}
+
+static inline bool uartPort(uint16_t address) {
+    if ((address & 0xF8FF) != 0x103B) return false;
+    const uint8_t hi = (uint8_t)(address >> 8);
+    return (((hi >> 2) ^ ((hi >> 1) & hi)) & 1) != 0;
+}
+
+static void uartTx(uint8_t v) {
+    const int u = s_uartSel;
+    char* line = s_uartLine[u];
+    if (v == 0x0D || v == 0x0A || s_uartLen[u] >= 80) {
+        if (s_uartLen[u]) {
+            line[s_uartLen[u]] = 0;
+            Debug::log("[NXUART%d] %s", u, line);
+            s_uartLen[u] = 0;
+        }
+        if (v == 0x0D || v == 0x0A) return;
+    }
+    line[s_uartLen[u]++] = (v >= 0x20 && v < 0x7F) ? (char)v : '.';
+}
+
+static int uartRead(uint16_t address) {
+    const int u = s_uartSel;
+    switch ((address >> 8) & 3) {
+        case 0:  return 0x00;                                     // Rx: nothing received
+        case 1:  return (u ? 0x40 : 0x00) | s_uartPrescMsb[u];    // select + prescaler MSB
+        case 2:  return s_uartFrame[u];
+        default: return 0x10;                                     // status: tx empty
+    }
+}
+
+static void uartWrite(uint16_t address, uint8_t v) {
+    switch ((address >> 8) & 3) {
+        case 0: break;                                            // prescaler LSB: no baud timing
+        case 1:
+            s_uartSel = (v >> 6) & 1;
+            if (v & 0x10) s_uartPrescMsb[s_uartSel] = v & 7;
+            break;
+        case 2: s_uartFrame[s_uartSel] = v; break;
+        default: uartTx(v); break;
+    }
+}
+
 int NextPorts::input(uint16_t address) {
     if (address == 0x243B) return NextReg::selected;
     if (address == 0x253B) return NextReg::read(NextReg::selected);
@@ -60,6 +246,7 @@ int NextPorts::input(uint16_t address) {
           if (v >= 0) return v;
       } }
     if (address == 0x123B && NextReg::portOn(NextReg::PE_LAYER2)) return NextReg::port123B;
+    if (uartPort(address) && NextReg::portOn(NextReg::PE_UART)) return uartRead(address);
     if (address == 0x303B && NextReg::portOn(NextReg::PE_SPRITE)) return NEXTVID::spriteFlagsRead();
     // I2C bus + DS1307 (NextRtc.cpp); NR 0x83 bit 2 undecodes both ports
     if (address == 0x103B && NextReg::portOn(NextReg::PE_I2C)) return NextRtc::readScl();
@@ -89,6 +276,10 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
         NextReg::writeLayer2Port(data);
         return true;
     }
+    if (uartPort(address) && NextReg::portOn(NextReg::PE_UART)) {
+        uartWrite(address, data);
+        return true;
+    }
     if (address == 0x303B && NextReg::portOn(NextReg::PE_SPRITE)) {
         NEXTVID::spriteSlotSelect(data);
         return true;
@@ -101,35 +292,32 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
         return true;
     }
 
-    // Next DACs (Covox/SpecDrum/Soundrive ports): A/B = left, C/D = right,
-    // routed through the stereo Covox channel. Each port is gated by its
-    // NR 0x84 group (zxnext.vhd 2429-2435, 2658-2664): SD1 = 0F/1F/4F/5F,
-    // SD2 = F1/F3/F9/FB, Profi = 3F/5F, Covox = 0F/4F, mono FB (only while SD2
-    // is off), GS B3, SpecDrum DF. With SD2 on, F1/F9 belong to the DAC and
+    // Next DACs (soundrive.vhd, zxnext.vhd 2429-2435 / 2655-2664 / 2775-2778):
+    // four 8-bit channels, A+B = left, C+D = right. Port -> channel:
+    //   A: 1F (SD1), F1 (SD2), 3F (Profi), FB/DF mono      B: 0F (SD1/Covox), F3 (SD2), B3
+    //   C: 4F (SD1/Covox), F9 (SD2), B3                    D: 5F (SD1/Profi), FB (SD2), FB/DF mono
+    // The mono ports write A and D only, GS B3 writes B and C. FB is mono only
+    // while Soundrive 2 is off. Each port honours its NR 0x84 group; a decoded
+    // port is consumed even with the DACs off (NR 0x08 bit 3), the write just
+    // does nothing — the channels are held at 0x80 then. With SD2 on, F1/F9
     // never reach 7FFD (port_fd_conflict_wr) — consumed here first.
-    int8_t dacCh = -1;   // 0..3 = one channel, 4 = mono, 5 = B3 pair
+    uint8_t dacMask = 0;   // bit 0 = A ... bit 3 = D
     switch (a8) {
-        case 0x0F: if (NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_COVOX)) dacCh = 0; break;
-        case 0x1F: if (NextReg::portOn(NextReg::PE_DAC_SD1)) dacCh = 1; break;
-        case 0x4F: if (NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_COVOX)) dacCh = 2; break;
-        case 0x5F: if (NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_PROFI)) dacCh = 3; break;
-        case 0x3F: if (NextReg::portOn(NextReg::PE_DAC_PROFI)) dacCh = 1; break;
-        case 0xF1: if (NextReg::portOn(NextReg::PE_DAC_SD2)) dacCh = 1; break;
-        case 0xF3: if (NextReg::portOn(NextReg::PE_DAC_SD2)) dacCh = 0; break;
-        case 0xF9: if (NextReg::portOn(NextReg::PE_DAC_SD2)) dacCh = 2; break;
-        case 0xFB: if (NextReg::portOn(NextReg::PE_DAC_SD2)) dacCh = 3;
-                   else if (NextReg::portOn(NextReg::PE_DAC_FB)) dacCh = 4; break;
-        case 0xDF: if (NextReg::portOn(NextReg::PE_DAC_DF)) dacCh = 4; break;
-        case 0xB3: if (NextReg::portOn(NextReg::PE_DAC_B3)) dacCh = 5; break;
+        case 0x0F: if (NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_COVOX)) dacMask = 2; break;
+        case 0x1F: if (NextReg::portOn(NextReg::PE_DAC_SD1)) dacMask = 1; break;
+        case 0x4F: if (NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_COVOX)) dacMask = 4; break;
+        case 0x5F: if (NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_PROFI)) dacMask = 8; break;
+        case 0x3F: if (NextReg::portOn(NextReg::PE_DAC_PROFI)) dacMask = 1; break;
+        case 0xF1: if (NextReg::portOn(NextReg::PE_DAC_SD2)) dacMask = 1; break;
+        case 0xF3: if (NextReg::portOn(NextReg::PE_DAC_SD2)) dacMask = 2; break;
+        case 0xF9: if (NextReg::portOn(NextReg::PE_DAC_SD2)) dacMask = 4; break;
+        case 0xFB: if (NextReg::portOn(NextReg::PE_DAC_SD2)) dacMask = 8;
+                   else if (NextReg::portOn(NextReg::PE_DAC_FB)) dacMask = 9; break;
+        case 0xDF: if (NextReg::portOn(NextReg::PE_DAC_DF)) dacMask = 9; break;
+        case 0xB3: if (NextReg::portOn(NextReg::PE_DAC_B3)) dacMask = 6; break;
     }
-    if (dacCh >= 0) {
-        static uint8_t nextDac[4];
-        if (dacCh < 4)       nextDac[dacCh] = data;
-        else if (dacCh == 5) nextDac[0] = nextDac[3] = data;          // stereo pair A/D
-        else nextDac[0] = nextDac[1] = nextDac[2] = nextDac[3] = data; // mono
-        ESPectrum::lastCovoxVal  = (uint8_t)((nextDac[0] + nextDac[1]) >> 1);
-        ESPectrum::lastCovoxValR = (uint8_t)((nextDac[2] + nextDac[3]) >> 1);
-        ESPectrum::CovoxGetSample();
+    if (dacMask) {
+        dacWrite(dacMask, data);
         return true;
     }
     // Sprite upload ports decode the low byte only
@@ -152,5 +340,6 @@ bool NextPorts::output(uint16_t address, uint8_t data) {
     // the AY decode in Ports::output has A15=1, A1=0, so taking it here is
     // the same as taking it there.
     if ((address & 0x8002) == 0x8000 && !NextReg::portOn(NextReg::PE_AY)) return true;
+    if ((address & 0x8003) == 0x8001 && ESPectrum::AY_emu) return ayWrite(address, data);
     return false;
 }

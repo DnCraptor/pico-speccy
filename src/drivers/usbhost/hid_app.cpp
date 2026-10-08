@@ -572,6 +572,7 @@ static bool     kbd_resync_probing  = false;  // current GET_REPORT is the trust
 static bool     kbd_resync_verified = false;  // idle probe answered a clean boot report
 static uint32_t kbd_resync_fixes    = 0;
 static uint32_t kbd_report_seq      = 0;      // interrupt reports processed, ever
+uint32_t usb_kbd_report_count() { return kbd_report_seq; }
 static uint32_t kbd_resync_seq      = 0;      // kbd_report_seq when the GET_REPORT went out
 static uint32_t kbd_resync_stale    = 0;      // replies discarded as overtaken
 static bool     kbd_resync_live      = false; // a reply once confirmed a key we believe held

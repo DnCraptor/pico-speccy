@@ -761,10 +761,16 @@ IRAM_ATTR void CPU::loop() {
         // write that arms a source mid-slice ends the slice (NextInt::wake), as
         // do EI / RETI / RETN, so the loop re-derives the next event. The cost
         // of running the whole frame checked instead was TX-1696 at half speed.
-        const uint32_t sliceEnd = statesInFrame - IntEnd;
+        // Re-read every pass: NR 0x07 changes the clock MID-FRAME and rescales
+        // statesInFrame / IntEnd / tstates (NextReg::applySpeed). A bound taken
+        // once at the frame start stayed in the old units, so after 14 -> 3.5 MHz
+        // the loop ran on far past the frame end (tstates 186074 in a 70908
+        // frame) and the next AY catch-up wrote 1646 samples into a 640 buffer —
+        // over the USB host's endpoint pool and hdmi_isr_mode (hw 2026-10-08).
+        uint32_t sliceEnd = statesInFrame - IntEnd;
         bool stamped = false;
         halted = false;
-        while (tstates < sliceEnd) {
+        while (tstates < (sliceEnd = statesInFrame - IntEnd)) {
             // A mid-frame NMI (Multiface, NR 02 bit 3) is taken at the boundary
             // its request ended the slice on — see NextMf::request().
             if (__builtin_expect(Z80::isNMI(), 0) && Z80::atInstrBoundary()) {

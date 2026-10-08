@@ -18,6 +18,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "NextRtc.h"
 #include "NextInt.h"
 #include "NextMf.h"
+#include "NextPorts.h"
 #include "speccy/devices/Z80DMA.h"
 #include "app/Debug.h"
 #include "speccy/z80/z80.h"
@@ -184,6 +185,23 @@ void next_trace_dump(uint32_t frames) {
                 (unsigned)g_dma_max_dst, (unsigned)g_dma_max_fl);
             g_dma_n = g_dma_bytes = g_dma_endframes = g_dma_maxlen = 0;
         }
+        {   // line interrupt: raised / missed (pulse over when seen, by T) / INT acks;
+            // event position and frame length in 3.5 MHz T; longest DMA bus hold
+            extern volatile uint32_t g_li_raise, g_li_late, g_li_late_by, g_int_ack;
+            extern volatile uint32_t g_dma_hold_max, g_dma_hold_t0, g_dma_hold_len, g_vk_read;
+            extern uint32_t usb_kbd_report_count();
+            static uint32_t s_prevRep = 0;
+            const uint32_t rep = usb_kbd_report_count();
+            Debug::log("NEXT int: li raise=%u late=%u ack=%u pos=%dT frame=%uT | dma hold max=%uT at %uT len=%u | kbd usb=%u vk=%u",
+                (unsigned)g_li_raise, (unsigned)g_li_late, (unsigned)g_int_ack,
+                (int)NextInt::linePosT(), (unsigned)(CPU::statesInFrame >> ESPectrum::multiplicator),
+                (unsigned)g_dma_hold_max, (unsigned)g_dma_hold_t0, (unsigned)g_dma_hold_len,
+                (unsigned)(rep - s_prevRep), (unsigned)g_vk_read);
+            s_prevRep = rep;
+            g_vk_read = 0;
+            g_li_raise = g_li_late = g_li_late_by = g_int_ack = 0;
+            g_dma_hold_max = g_dma_hold_t0 = g_dma_hold_len = 0;
+        }
         Debug::log("NEXT vid: ula=%u.%u tm=%u.%u l2=%u.%u spr=%u.%u ms/fr",
             (unsigned)(g_nextvid_layer_us[0] / f / 1000u), (unsigned)(g_nextvid_layer_us[0] / f % 1000u / 100u),
             (unsigned)(g_nextvid_layer_us[1] / f / 1000u), (unsigned)(g_nextvid_layer_us[1] / f % 1000u / 100u),
@@ -320,6 +338,12 @@ void NextReg::reset(bool hard) {
         // DivMMC automap enable: power-on 0, set by the BIOS (TBBLUE.FW
         // PERIPH5 bit 4). The direct enNextZX boot has no BIOS to do it.
         reg[0x0A] = MemESP::nextBootRom ? 0x00 : 0x10;
+        // Sound: power-on is YM mode, TurboSound and DACs off (zxnext.vhd
+        // 1112-1119); TBBLUE.FW then writes its config.ini defaults — psgmode 1
+        // (AY), turbosound 1, dac 1, stereomode 0 (app/src/config.c
+        // settingDefaults, boot.c PERIPH2/3). The direct enNextZX boot has no
+        // BIOS to do it.
+        if (!MemESP::nextBootRom) { reg[0x06] |= 0x01; reg[0x08] |= 0x0A; }
         reg[0x82] = reg[0x83] = reg[0x84] = 0xFF;   // every internal port on
         reg[0x85] = 0x8F;
     } else {
@@ -333,6 +357,8 @@ void NextReg::reset(bool hard) {
         }
     }
     portEnRecalc();
+    NextPorts::audioReset();   // turbosound select/pans, DACs (both reset types)
+    NextPorts::uartReset(hard);
     reg[0x12] = 0x08; // Layer 2 bank
     reg[0x13] = 0x0B; // Layer 2 shadow bank
     reg[0x42] = 0x07; // ULANext attribute format
@@ -471,6 +497,9 @@ void NextReg::applySpeed() {
     CPU::updateStatesInFrame();
     NEXTVID::onClockChange();
     contendRecalc();   // contention exists at 3.5 MHz only
+    // The running slice's bound (CPU::stFrame) is in the OLD units: end the
+    // slice so CPU::loop re-derives it from the rescaled frame.
+    NextInt::wake();
 }
 
 void NextReg::contendRecalc() {
@@ -495,6 +524,7 @@ void NextReg::contendRecalc() {
 }
 
 void NextReg::write(uint8_t r, uint8_t v) {
+    const uint8_t old = reg[r];
     reg[r] = v;
 #if NEXT_TRACE
     // Flood sources are counted, not recorded (palette / copper / sprite
@@ -670,6 +700,10 @@ void NextReg::write(uint8_t r, uint8_t v) {
             break;
     }
     if (r == 0x03 || r == 0x08) contendRecalc();   // timing / contention disable
+    // Sound: PSG mode, TurboSound / DAC enables, stereo and mono (NextPorts.cpp)
+    if (r == 0x06 || r == 0x08 || r == 0x09) NextPorts::audioRegWrite(r, old);
+    // DAC nextreg mirrors (soundrive.vhd): 0x2C left, 0x2D mono, 0x2E right
+    if (r >= 0x2C && r <= 0x2E) NextPorts::dacNr(r, v);
 }
 
 uint8_t NextReg::read(uint8_t r) {
@@ -683,6 +717,8 @@ uint8_t NextReg::read(uint8_t r) {
                                   // >= 3.02.03 (hw: 3.02.00 failed the check
                                   // at ROM PC=0E13 → 1.4s restart loop);
                                   // same stable version zx_go settled on
+        case 0x2C: case 0x2D: case 0x2E:
+            return 0x00;   // Pi I2S sample bits (zxnext.vhd 6008-6015) — no Pi here
         case 0x08: // bit 7 reads "not locked" (zxnext.vhd 5906)
             return (uint8_t)((reg[0x08] & 0x7F) | (MemESP::pagingLock ? 0 : 0x80));
         case 0x07: { // bits 5:4 = actual speed, 1:0 = programmed

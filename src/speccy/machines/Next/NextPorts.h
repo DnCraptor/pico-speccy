@@ -11,4 +11,12 @@ namespace NextPorts {
     int  input(uint16_t address);
     // true = consumed; the caller charges the I/O cycle and returns
     bool output(uint16_t address, uint8_t data);
+
+    // Sound (TurboSound + DACs), NextPorts.cpp
+    bool ayWrite(uint16_t address, uint8_t data);       // A15=1, A1:0=01 family
+    void dacWrite(uint8_t mask, uint8_t v);             // bit 0 = A .. bit 3 = D
+    void dacNr(uint8_t r, uint8_t v);                   // NR 0x2C-0x2E
+    void audioRegWrite(uint8_t r, uint8_t old);         // NR 0x06/0x08/0x09 written
+    void audioReset();                                  // machine reset (both types)
+    void uartReset(bool hard);                          // UART select / frame / prescaler
 }

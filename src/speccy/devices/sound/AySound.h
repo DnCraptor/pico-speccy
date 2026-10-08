@@ -243,5 +243,6 @@ extern AySound* chip2;
 extern AySound* chips[3];
 // TurboSound Next per-chip panning (bit1 = left, bit0 = right)
 extern uint8_t ay_next_pan[3];
+extern int8_t  ay_next_mode[3];   // Next: 0 ABC, 1 ACB, 2 mono; -1 = Config::ayConfig
 
 #endif // AySound_h

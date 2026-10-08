@@ -582,22 +582,44 @@ void Z80DMA::nxRunSync() {
     }
 #if NEXT_TRACE
     g_dma_n++;
+    const uint32_t holdT0 = CPU::tstates;
 #endif
     while (transfer_active) {
         nxOneByte();
 #if NEXT_TRACE
         g_dma_bytes++;
 #endif
-        if (CPU::tstates >= CPU::statesInFrame) {   // frame boundary mid-transfer
+        if (nxBlockDone()) break;
+        if (CPU::tstates >= CPU::statesInFrame) {
+            // Frame boundary mid-transfer: hand the rest to CPU::loop as a paced
+            // transfer that holds the bus (nxService, no prescaler = back to back),
+            // so the frame ends through the loop's own path — NextInt, the audio
+            // buffers, the renderer, pacing. It used to call VIDEO::EndFrame() and
+            // rewind CPU::tstates right here inside the OUT, skipping all of that
+            // (hw 2026-10-08, Pogie: its 12 KB sprite upload crosses the frame end;
+            // that second the line interrupts were lost and HDMI + USB died).
 #if NEXT_TRACE
             g_dma_endframes++;
 #endif
-            VIDEO::EndFrame();
-            CPU::global_tstates += CPU::statesInFrame;
-            CPU::tstates -= CPU::statesInFrame;
+            nxPending = true;
+            nxStall = true;
+            nxNextT = CPU::tstates;
+            NextInt::wake();
+            return;
         }
-        if (nxBlockDone()) break;
     }
+#if NEXT_TRACE
+    {   // the longest the CPU was held by one block, and where in the frame it began
+        extern volatile uint32_t g_dma_hold_max, g_dma_hold_t0, g_dma_hold_len;
+        const uint32_t m = ESPectrum::multiplicator;
+        const uint32_t held = (CPU::tstates >= holdT0 ? CPU::tstates - holdT0
+                               : CPU::tstates + CPU::statesInFrame - holdT0) >> m;   // across a frame end
+        if (held > g_dma_hold_max) {
+            g_dma_hold_max = held; g_dma_hold_t0 = holdT0 >> m;
+            g_dma_hold_len = block_length;
+        }
+    }
+#endif
     captureAttrAfterTransfer(dest_start);
     block_end = true;
     transfer_active = false;
@@ -733,6 +755,7 @@ static IRAM_ATTR void captureAttrAfterTransfer(uint16_t dest_start) {
 // 1 Hz DMA summary for the Next health line (NextReg.cpp next_trace_dump):
 // transfers, bytes, frames closed mid-transfer, and the longest transfer.
 volatile uint32_t g_dma_n = 0, g_dma_bytes = 0, g_dma_endframes = 0;
+volatile uint32_t g_dma_hold_max = 0, g_dma_hold_t0 = 0, g_dma_hold_len = 0;
 volatile uint32_t g_dma_maxlen = 0, g_dma_max_pc = 0, g_dma_max_src = 0, g_dma_max_dst = 0, g_dma_max_fl = 0;
 #endif
 
