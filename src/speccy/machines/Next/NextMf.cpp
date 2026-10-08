@@ -85,7 +85,7 @@ void NextMf::plug() {
     MemESP::divmmc_mapped = true;
     MemESP::nextDivPlug();
     MemESP::ramContended[0] = MemESP::ramContended[1] = false;
-    MemESP::wr_overlay_active = false;          // MF beats the Layer 2 write-over
+    MemESP::wr_overlay_mask &= (uint8_t)~3;     // MF beats the Layer 2 write-over
     ts_fastrd_recalc();
 }
 

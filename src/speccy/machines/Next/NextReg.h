@@ -31,7 +31,9 @@ public:
     static uint8_t port7FFD;
     static uint8_t portDFFD;
     static uint8_t port1FFD;
-    static uint8_t port123B;     // Layer 2 access port
+    static uint8_t port123B;     // Layer 2 access port: the control latches as read back
+    static uint8_t l2Offset;     // its bank offset (written with bit 4 set, bits 2:0)
+    static bool    l2MapHigh;    // Layer 2 mapped above 0x3FFF (segment 3): no fast writes
 
     // Internal port decode enables, NR 0x82-0x85 packed as zxnext.vhd's
     // internal_port_enable(27:0) (2397-2442): a clear bit means the FPGA does

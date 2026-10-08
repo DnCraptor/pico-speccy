@@ -458,10 +458,18 @@ public:
     }
     static void resetNextMapping();// apply power-on MMU defaults
 
-    // Layer 2 write-through window (port 0x123B): writes to 0x0000-0x3FFF
-    // land in Layer 2 RAM while reads still see the mapped ROM
-    static uint8_t* wrOverlay[2];
-    static bool wr_overlay_active;
+    // Write redirection per 8K slot, bit n = slot n: the Layer 2 window
+    // (port 0x123B, slots 0/1, or 0-5 in the 48K segment mode) and the TBBLUE
+    // config window (slots 0/1). A slot whose READ is mapped to Layer 2 while
+    // its write is not carries the MMU page here, since ramCurrent then points
+    // into Layer 2 (NextReg::updateLayer2Window).
+    static uint8_t* wrOverlay[8];
+    static uint8_t  wr_overlay_mask;
+    // Layer 2 read mapping (port 0x123B bit 2): applyMMU puts these pointers
+    // in ramCurrent for the slots in the mask (the divMMC window still wins).
+    static uint8_t* l2RdPtr[8];      // null = past the RAM: open bus
+    static uint8_t  l2_rd_mask;
+    static uint8_t  l2_wr_mmu_mask;  // read-mapped slots whose writes go to the MMU page
 
     // Next ROMs loaded from SD into butter PSRAM (enNextZX.rom, 4x16K +
     // enNxtmmc.rom, 8K). PSRAM is writable, so ROM-mapped slots 0/1 are
@@ -619,7 +627,7 @@ inline void MemESP::writebyte(uint16_t addr, uint8_t data)
     // before sram_layer2_map_en. The other way round, an esxDOS IM1 handler
     // under a Layer 2 game saved its SP into Layer 2 instead of divMMC RAM
     // and returned to 0x0000 (hw 2026-10-08, LmixLoRs.snx -> NextZXOS menu).
-    if (slot <= 1 && wr_overlay_active) {
+    if ((wr_overlay_mask >> slot) & 1) {
         wrOverlay[slot][addr & 0x1fff] = data;
         return;
     }

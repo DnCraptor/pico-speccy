@@ -890,8 +890,11 @@ void MemESP::dbgPoke(uint16_t addr, uint8_t data) {
 uint8_t* MemESP::nextRamPtr[MemESP::NEXT_PAGES];
 uint8_t  MemESP::mmu[8];
 bool     MemESP::nextRamReady = false;
-uint8_t* MemESP::wrOverlay[2] = { nullptr, nullptr };
-bool     MemESP::wr_overlay_active = false;
+uint8_t* MemESP::wrOverlay[8] = {};
+uint8_t  MemESP::wr_overlay_mask = 0;
+uint8_t* MemESP::l2RdPtr[8] = {};
+uint8_t  MemESP::l2_rd_mask = 0;
+uint8_t  MemESP::l2_wr_mmu_mask = 0;
 uint8_t* MemESP::nextRomBase = nullptr;
 uint8_t* MemESP::nextDivRomBase = nullptr;
 uint8_t  MemESP::next_rom_mask = 0;
@@ -1037,6 +1040,22 @@ void MemESP::applyMMU(uint8_t slot, uint8_t page) {
             p = (uint8_t*)open_bus_page.b;
     }
     ramCurrent[slot] = p;
+    // Layer 2 read mapping (port 0x123B bit 2) over the MMU page / ROM; below
+    // the divMMC window in priority (zxnext.vhd ~3085). With map_wr clear the
+    // slot's writes still belong to the MMU page, which ramCurrent no longer
+    // shows — so they go through the write overlay (ROM / open bus: dropped).
+    if ((l2_rd_mask >> slot) & 1) {
+        ramCurrent[slot] = l2RdPtr[slot] ? l2RdPtr[slot] : (uint8_t*)open_bus_page.b;
+        if ((l2_wr_mmu_mask >> slot) & 1) {
+            const uint8_t bit = (uint8_t)(1u << slot);
+            if (!(next_rom_mask & bit) && p != (uint8_t*)open_bus_page.b) {
+                wrOverlay[slot] = p;
+                wr_overlay_mask |= bit;
+            } else {
+                wr_overlay_mask &= (uint8_t)~bit;
+            }
+        }
+    }
     // divMMC paged in: the window, not the MMU page, is what 0x0000-0x3FFF
     // shows (see nextDivPlug) — mmu[]/next_rom_mask above still track the MMU.
     if (slot <= 1 && divmmc_mapped) ramCurrent[slot] = slot ? page0_hi : page0_lo;
@@ -1142,8 +1161,8 @@ void MemESP::applyNextConfigWindow() {
         if (nextConfigPage == 0x05 && !mfRomBase)      mfRomBase = altRomBase + 0x8000;
         wrOverlay[0] = w0;
         wrOverlay[1] = w1;
-        wr_overlay_active = true;
+        wr_overlay_mask = (uint8_t)((wr_overlay_mask & ~3) | 3);
     } else {
-        wr_overlay_active = false;               // unbacked: writes drop
+        wr_overlay_mask &= (uint8_t)~3;          // unbacked: writes drop
     }
 }

@@ -39,6 +39,8 @@ uint8_t NextReg::port7FFD = 0;
 uint8_t NextReg::portDFFD = 0;
 uint8_t NextReg::port1FFD = 0;
 uint8_t NextReg::port123B = 0;
+uint8_t NextReg::l2Offset = 0;
+bool    NextReg::l2MapHigh = false;
 uint8_t  NextReg::contendBanks = 0;
 uint32_t NextReg::portEn = ~0u;   // all decoded; NextReg::reset / CPU::reset own it
 
@@ -321,7 +323,9 @@ void NextReg::reset(bool hard) {
     portDFFD = 0;
     port1FFD = 0;
     port123B = 0;
-    MemESP::wr_overlay_active = false;
+    l2Offset = 0;
+    MemESP::wr_overlay_mask = 0;
+    MemESP::l2_rd_mask = 0;
     NextMf::reset();        // multiface.vhd: reset on either reset type
     NextInt::reset(hard);   // interrupt block + CTC: both reset types (reg[0xC0-0xCE] too)
     // MMU defaults: ROM in slots 0/1, banks 5,2,0 in RAM slots
@@ -622,6 +626,8 @@ void NextReg::write(uint8_t r, uint8_t v) {
                      // as port 7FFD bit 3 (hw: NextZXOS drew its boot screen
                      // into bank 7 via this and we kept showing blank bank 5)
             applyTimexMode(v & 0x3F);
+            // bit 7 and port 0x123B bit 1 are ONE latch (layer2_en)
+            port123B = (uint8_t)((port123B & ~0x02) | ((v >> 6) & 0x02));
             uint8_t vl = (v >> 6) & 1;
             if (MemESP::videoLatch != vl) {
                 MemESP::videoLatch = vl;
@@ -719,6 +725,7 @@ uint8_t NextReg::read(uint8_t r) {
                                   // same stable version zx_go settled on
         case 0x2C: case 0x2D: case 0x2E:
             return 0x00;   // Pi I2S sample bits (zxnext.vhd 6008-6015) — no Pi here
+        case 0x68: return reg[0x68] & 0xFD;   // bit 1 reads 0 (zxnext.vhd NR 0x68 read)
         case 0x08: // bit 7 reads "not locked" (zxnext.vhd 5906)
             return (uint8_t)((reg[0x08] & 0x7F) | (MemESP::pagingLock ? 0 : 0x80));
         case 0x07: { // bits 5:4 = actual speed, 1:0 = programmed
@@ -756,8 +763,20 @@ uint8_t NextReg::read(uint8_t r) {
 
 // ===== Layer 2 access port (0x123B) =====
 
+extern void ts_fastrd_recalc();   // Video.cpp: the Next inline read gate
+
 void NextReg::writeLayer2Port(uint8_t v) {
-    port123B = v;
+    // zxnext.vhd ~5410: with bit 4 set the write ONLY loads the bank offset
+    // (bits 2:0); with it clear it loads the control latches and leaves the
+    // offset alone. Read-back (port_123b_dat) = segment & 00 & shadow & map_rd
+    // & layer2_en & map_wr, the offset is not readable. layer2_en is one latch
+    // with NR 0x69 bit 7.
+    if (v & 0x10) {
+        l2Offset = v & 0x07;
+    } else {
+        port123B = v & 0xCF;
+        reg[0x69] = (uint8_t)((reg[0x69] & 0x7F) | ((v & 0x02) << 6));
+    }
     updateLayer2Window();
 }
 
@@ -786,22 +805,56 @@ void NextReg::writePortFF(uint8_t v) {
 }
 
 void NextReg::updateLayer2Window() {
-    // The TBBLUE config window owns the write overlay while it is up;
-    // applyNextConfigWindow() calls back here the moment it closes.
-    if (MemESP::nextBootRomActive || MemESP::nextConfigMode) return;
-    if (NextMf::memOn()) { MemESP::wr_overlay_active = false; return; }   // MF wins (zxnext.vhd ~3030)
-    if (port123B & 0x01) { // write enable
-        uint8_t bank = (port123B & 0x08) ? reg[0x13] : reg[0x12];
-        uint8_t off = (port123B >> 6) & 3;
-        uint16_t page = (uint16_t)(bank + off) * 2;
-        if (page + 1 < MemESP::NEXT_PAGES && MemESP::nextRamReady) {
-            MemESP::wrOverlay[0] = MemESP::nextRamPtr[page];
-            MemESP::wrOverlay[1] = MemESP::nextRamPtr[page + 1];
-            MemESP::wr_overlay_active = true;
-            return;
+    // zxnext.vhd ~3030-3110 (layer2_active_bank_offset / sram_layer2_map_en):
+    //   segment 0-2 -> 0x0000-0x3FFF shows bank (NR 0x12, or NR 0x13 with the
+    //                  shadow bit) + segment + offset;
+    //   segment 3   -> 0x0000-0xBFFF, each 16K by A15:14 (the 48K mode).
+    // Writes go there with map_wr (bit 0), reads with map_rd (bit 2); the
+    // divMMC/MF window still wins over both (handled before the overlay in
+    // MemESP). Neither bit set = the MMU sees everything, as before.
+    // The TBBLUE config window owns slots 0/1 while it is up; applyNextConfig-
+    // Window() calls back here the moment it closes.
+    const bool cfg = MemESP::nextBootRomActive || MemESP::nextConfigMode;
+    const uint8_t oldRd = MemESP::l2_rd_mask;
+    uint8_t wr = 0, rd = 0, pass = 0;
+    const bool wrEn = port123B & 0x01, rdEn = port123B & 0x04;
+    if ((wrEn || rdEn) && MemESP::nextRamReady) {
+        const uint8_t seg = port123B >> 6;
+        const uint8_t bank = (port123B & 0x08) ? reg[0x13] : reg[0x12];
+        const uint8_t nSlots = (seg == 3) ? 6 : 2;
+        for (uint8_t s = 0; s < nSlots; s++) {
+            const uint8_t pre = (seg == 3) ? (uint8_t)(s >> 1) : seg;
+            const uint16_t page = (uint16_t)((uint8_t)(bank + pre + l2Offset) & 0x7F) * 2 + (s & 1);
+            uint8_t* lp = (page < MemESP::NEXT_PAGES) ? MemESP::nextRamPtr[page] : nullptr;
+            if (rdEn) {
+                MemESP::l2RdPtr[s] = lp;           // null = open bus (applyMMU)
+                rd |= (uint8_t)(1u << s);
+            }
+            if (wrEn) {
+                if (lp) { MemESP::wrOverlay[s] = lp; wr |= (uint8_t)(1u << s); }
+            } else {
+                // read mapped, write not: ramCurrent now shows Layer 2, so the
+                // write needs the MMU's own RAM page — applyMMU fills it in
+                // (and keeps it current across MMU writes; ROM slots drop it)
+                pass |= (uint8_t)(1u << s);
+            }
         }
     }
-    MemESP::wr_overlay_active = false;
+    if (cfg) { wr &= (uint8_t)~3; rd &= (uint8_t)~3; pass &= (uint8_t)~3; }
+    if (NextMf::memOn()) wr &= (uint8_t)~3;      // MF wins (zxnext.vhd ~3030)
+    MemESP::wr_overlay_mask = (uint8_t)((cfg ? (MemESP::wr_overlay_mask & 3) : 0) | wr);
+    MemESP::l2_rd_mask = rd;
+    MemESP::l2_wr_mmu_mask = pass;
+    // Re-plug every slot whose read mapping moved (or that shows Layer 2 and
+    // may now show another bank of it).
+    const uint8_t touch = (uint8_t)(oldRd | rd);
+    for (uint8_t s = 0; s < 6; s++)
+        if ((touch >> s) & 1) MemESP::applyMMU(s, MemESP::mmu[s]);
+    // The Next fast path writes 0x4000+ straight through ramCurrent; while
+    // Layer 2 covers those slots every write must see the overlay.
+    const bool high = ((wr | rd) & 0x3C) != 0;
+    if (high != l2MapHigh) { l2MapHigh = high; VIDEO::tsFastMemRecalc(); }
+    if (touch) ts_fastrd_recalc();
 }
 
 // ===== Legacy Spectrum paging, Next-style (implemented on top of the MMU) =====

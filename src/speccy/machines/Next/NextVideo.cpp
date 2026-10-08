@@ -102,7 +102,7 @@ struct NextLineState {
     uint8_t p123B, palCtrl, border, flashing, hires, osd;
     uint8_t gigs;            // Gigascreen this frame (s_gigs)
     uint8_t attOvr;          // 1 = attr[] replaces the ULA attribute row (DMA multicolour)
-    uint8_t _pad[2];         // kept word-aligned
+    uint8_t r26, r27;        // ULA scroll X / Y (keeps the struct word-aligned)
     // Border colour changes INSIDE the row (OUT #FE mid-line): segment i ends
     // at fb x 2*brd.t[i] (T-states into the row, cell-aligned) in colour nibble i of brd.c;
     // the rest of the row is `border`. n = 0 for an ordinary row (every byte
@@ -162,7 +162,8 @@ IRAM_ATTR void NEXTVID::captureLine(NextLineState& st) {
     st.osd = VIDEO::OSD;
     st.gigs = s_gigs;
     st.attOvr = 0;
-    st._pad[0] = st._pad[1] = 0;
+    st.r26 = r[0x26];
+    st.r27 = r[0x27];
     uint32_t* w = (uint32_t*)&st.brd;   // no libc memset on this path (flash)
     for (unsigned i = 0; i < sizeof st.brd / 4; i++) w[i] = 0;
     w = (uint32_t*)st.attr;
@@ -1079,6 +1080,15 @@ __attribute__((noinline)) static void nxPaintBorderRuns(uint16_t* u, int xres, c
 // The ULA layer (zxula.vhd): border, then the paper — classic / ULANext /
 // LoRes / Timex hi-res / Gigascreen. NR 0x68 bit 7 (ULA off) is applied by the
 // mixer, not here: blend mode 00 still sees the ULA colour.
+// Rotate the 256-pixel paper left by n (three reversals, no buffer: core1's
+// stack is 2 KB). Only on a scrolled line.
+static IRAM_ATTR void nxRev(uint16_t* a, int i, int j) {
+    for (j--; i < j; i++, j--) { const uint16_t t = a[i]; a[i] = a[j]; a[j] = t; }
+}
+static IRAM_ATTR void nxRotL(uint16_t* a, int n) {
+    nxRev(a, 0, n); nxRev(a, n, 256); nxRev(a, 0, 256);
+}
+
 IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
     const int xres = VIDEO::vga.xres;
     uint16_t* const u = nxU;
@@ -1101,6 +1111,12 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
     const int y = row - paperTopRow;
     if (y < 0 || y >= 192 || VIDEO::paper_off) return;
     uint16_t* p = u + xPaperOff;
+    // ULA scroll (NR 0x26/0x27, zxula.vhd 192-206): the memory row is
+    // (y + scroll Y) mod 192, the columns start scroll X pixels in and wrap
+    // at 256 (rotated below, after the row is drawn). NR 0x68 bit 2 (fine
+    // scroll, one more 14 MHz half-pixel) has no lores equivalent: ignored.
+    // LoRes keeps its own scroll registers (NR 0x32/0x33).
+    const int sy = LS->r27 ? (y + LS->r27) % 192 : y;
 
     if (LS->r15 & 0x80) {          // LoRes 128x96 replaces the paper (not ULA-clipped)
         uint8_t ly = (uint8_t)((y + LS->r33) % 192) >> 1;
@@ -1120,7 +1136,7 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
         // nibble LUT). hiresRow gets the pair slots; the paper carries
         // HIRES_MARK as a ready fb slot so layers drawn over the ULA win.
         const uint16_t* hl = VIDEO::timexHiresLut();
-        const uint8_t* bmp = LS->grmem + VIDEO::offBmp[y];
+        const uint8_t* bmp = LS->grmem + VIDEO::offBmp[sy];
         uint32_t* hr = (uint32_t*)hiresRow;
         for (int col = 0; col < 32; col++) {
             const uint8_t e = bmp[col], o = bmp[col + 0x2000];
@@ -1133,11 +1149,11 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
         // '1' & PIXEL address when mode(1) (hi-colour 8x1 attributes at
         // 0x6000), else mode(0) & attribute address.
         const uint8_t tm = (LS->r69 & 0x40) ? 0 : (LS->r69 & 0x03);
-        const uint16_t pOff = VIDEO::offBmp[y];
+        const uint16_t pOff = VIDEO::offBmp[sy];
         const uint8_t* bmp = LS->grmem + pOff + ((tm & 1) << 13);
-        const uint8_t* att = LS->attOvr ? LS->attr
+        const uint8_t* att = (LS->attOvr && sy == y) ? LS->attr
                            : LS->grmem + ((tm & 2) ? 0x2000 + pOff
-                                                   : VIDEO::offAtt[y] + ((tm & 1) << 13));
+                                                   : VIDEO::offAtt[sy] + ((tm & 1) << 13));
         if (ulaNext) {
             // ink = attr & format; paper = 128 + the bits above the format;
             // a format that is not 2^n-1 (or 0xFF) gives the fallback paper
@@ -1156,7 +1172,7 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
             // the line (the row is still recorded so the next frame has a prev)
             const bool blend = LS->gigs == 1 && !(LS->r15 & 0x01) && !(LS->r6B & 0x80) &&
                                !((LS->p123B & 0x02) || (LS->r69 & 0x80)) && !(LS->r68 & 0x80);
-            uint32_t* gp = (uint32_t*)(gigsPrev + y * 128);
+            uint32_t* gp = (uint32_t*)(gigsPrev + sy * 128);
             for (int col = 0; col < 32; col++) {
                 const uint8_t a = att[col];
                 const uint8_t b = bmp[col] ^ (uint8_t)(-((a & LS->flashing) >> 7));
@@ -1194,6 +1210,7 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
             }
         }
     }
+    if (LS->r26 && !LS->hires) nxRotL(u + xPaperOff, LS->r26);
     // ULA clip window (NR 0x1A, zxula.vhd 562): paper only, never the border
     const uint8_t* cw = LS->clip[2];
     if (y < cw[2] || y > cw[3]) { nxFillTr(u + xPaperOff, 256); return; }
