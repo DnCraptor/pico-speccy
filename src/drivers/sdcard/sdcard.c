@@ -14,6 +14,8 @@
 #include "ff.h"
 #include "diskio.h"
 
+void sd_async_quiesce(void);   /* below, with disk_read */
+
 /* Physical drive 1 = USB mass-storage stick (FatFs volume "USB:"), served by
  * TinyUSB MSC host in src/drivers/usbhost/UsbMsc.cpp. Declared here to keep this file plain C.
  */
@@ -85,9 +87,16 @@ BYTE CardType;			/* Card type flags */
 #define SD_FAIL_LIMIT 3
 static BYTE FailCnt;
 
+/* Time of the last transfer the card completed (either core). sdcard_alive()
+ * skips its probe while the card is proving itself by real I/O: during a game
+ * that streams from the card the probe was pure cost every 2 s — a wait for
+ * core1's read in flight, up to 5 ms of wait_ready and a CMD13, all on core0
+ * inside the frame (TX-1696 on the Next, hw 2026-10-09). */
+static volatile uint32_t s_last_ok_us;
+
 static void io_done(int ok)
 {
-	if (ok) { FailCnt = 0; return; }
+	if (ok) { FailCnt = 0; s_last_ok_us = time_us_32() | 1u; return; }
 	if (Stat & STA_NOINIT) return;
 	if (++FailCnt >= SD_FAIL_LIMIT) {
 		Stat |= STA_NOINIT;	/* next mount does the full CMD0/ACMD41 cycle */
@@ -291,6 +300,7 @@ void init_spi(void)
 void sdcard_reclock(void)
 {
 	if (Stat & STA_NOINIT) return;
+	sd_async_quiesce();
 #ifdef SDCARD_PIO
 	pio_div_fast = pio_fast_div();
 #endif
@@ -476,6 +486,7 @@ DSTATUS disk_initialize (
 
 	if (drv == 1) return usb_disk_initialize();
 	if (drv) return STA_NOINIT;			/* Supports only drive 0 */
+	sd_async_quiesce();
 	init_spi();							/* Initialize SPI */
     sleep_ms(10);
 
@@ -580,6 +591,11 @@ void disk_invalidate (void)
 int sdcard_alive (void)
 {
 	if (Stat & STA_NOINIT) return 0;	/* already known to be gone */
+	{
+		const uint32_t last = s_last_ok_us;
+		if (last && (uint32_t)(time_us_32() - last) < 2000000u) return 1;
+	}
+	sd_async_quiesce();
 
 	/* A card still finishing an internal write holds MISO LOW, which is the one
 	 * thing an empty slot can never do — so "busy" answers the question by
@@ -691,6 +707,45 @@ static inline void sd_led(int on) { (void)on; }
 /* Read sector(s)                                                        */
 /*-----------------------------------------------------------------------*/
 
+/* ---- Background read on core1 (DivMMC's sector read-ahead on the Next) ----
+   The driver is not reentrant: core0 posts ONE request (state 1), core1 runs it
+   from its render loop (2 = on the card, 3 = done OK, 4 = failed), core0 takes
+   the result and sets 0. Every core0 disk_read / disk_write / disk_ioctl on the
+   SD first cancels a request core1 has not started, or waits for the running
+   one (sd_async_quiesce), so the card only ever sees one host at a time. */
+volatile uint8_t g_sd_as_state = 0;
+BYTE*            g_sd_as_buf = 0;
+LBA_t            g_sd_as_sector = 0;
+UINT             g_sd_as_count = 0;
+static DRESULT disk_read_sd0(BYTE *buff, LBA_t sector, UINT count);
+
+volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max;
+
+void sd_async_quiesce(void)
+{
+	if (get_core_num() != 0) return;
+	uint8_t one = 1;
+	if (__atomic_compare_exchange_n(&g_sd_as_state, &one, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+	if (g_sd_as_state != 2) return;
+	const uint32_t t0 = time_us_32();
+	while (g_sd_as_state == 2) tight_loop_contents();
+	const uint32_t d = time_us_32() - t0;
+	g_sd_as_c0wait_us += d;
+	if (d > g_sd_as_c0wait_max) g_sd_as_c0wait_max = d;
+}
+
+void sd_async_pump(void)		/* core1 */
+{
+	uint8_t one = 1;
+	if (!__atomic_compare_exchange_n(&g_sd_as_state, &one, 2, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+	const uint32_t t0 = time_us_32();
+	const DRESULT r = disk_read_sd0(g_sd_as_buf, g_sd_as_sector, g_sd_as_count);
+	const uint32_t d = time_us_32() - t0;
+	g_sd_as_c1_us += d;
+	if (d > g_sd_as_c1_max) g_sd_as_c1_max = d;
+	__atomic_store_n(&g_sd_as_state, r == RES_OK ? 3 : 4, __ATOMIC_RELEASE);
+}
+
 DRESULT disk_read (
 	BYTE drv,		/* Physical drive number (0) */
 	BYTE *buff,		/* Pointer to the data buffer to store read data */
@@ -700,6 +755,12 @@ DRESULT disk_read (
 {
 	if (drv == 1) return usb_disk_read(buff, sector, count);
 	if (drv || !count) return RES_PARERR;		/* Check parameter */
+	sd_async_quiesce();
+	return disk_read_sd0(buff, sector, count);
+}
+
+static DRESULT disk_read_sd0(BYTE *buff, LBA_t sector, UINT count)
+{
 	if (Stat & STA_NOINIT) return RES_NOTRDY;	/* Check if drive is ready */
 
 	if (!(CardType & CT_BLOCK)) sector *= 512;	/* LBA ot BA conversion (byte addressing cards) */
@@ -798,6 +859,7 @@ DRESULT disk_write (
 	g_disk_write_gen++;
 	if (drv == 1) return usb_disk_write(buff, sector, count);
 	if (drv || !count) return RES_PARERR;		/* Check parameter */
+	sd_async_quiesce();
 	if (Stat & STA_NOINIT) return RES_NOTRDY;	/* Check drive status */
 	if (Stat & STA_PROTECT) return RES_WRPRT;	/* Check write protect */
 
@@ -850,6 +912,7 @@ DRESULT disk_ioctl (
 
 	if (drv == 1) return usb_disk_ioctl(cmd, buff);
 	if (drv) return RES_PARERR;					/* Check parameter */
+	sd_async_quiesce();
 	if (Stat & STA_NOINIT) return RES_NOTRDY;	/* Check if drive is ready */
 
 	res = RES_ERROR;

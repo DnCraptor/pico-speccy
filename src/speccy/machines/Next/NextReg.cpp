@@ -25,6 +25,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "speccy/devices/storage/DivMMC.h"
 #include <cstdio>
 #include <cstring>
+extern "C" volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max;
 
 static void applyTimexMode(uint8_t v);   // port FF / NR 0x69 screen-mode bits (below)
 
@@ -43,6 +44,26 @@ uint8_t NextReg::l2Offset = 0;
 uint8_t NextReg::s_ioTrapCause = 0;
 uint16_t NextReg::extKeys = 0;
 bool    NextReg::l2MapHigh = false;
+
+#if NEXT_TRACE
+// NEXT io: line — Next port I/O per port (16-bit address; a 0x?xFD-style port
+// that decodes on the low byte still shows its high byte, which is the point:
+// NR access is 243B/253B whatever the code loads in B).
+struct NxIoStat { uint16_t port; uint8_t out, _p; uint32_t n, us; };
+static NxIoStat s_io[32];
+static uint32_t s_io_n[2], s_io_us[2];
+void __not_in_flash_func(nxIoNote)(uint16_t port, uint32_t us, bool out) {
+    // the 0x?x3B / 0x?xFD families by full address; the rest by low byte (OTIR
+    // to the DMA port #0B walks B through 256 addresses and filled the table)
+    if ((port & 0xFF) != 0x3B && (port & 0xFF) != 0xFD) port &= 0xFF;
+    s_io_n[out] = s_io_n[out] + 1; s_io_us[out] = s_io_us[out] + us;
+    for (int i = 0; i < 32; i++) {
+        NxIoStat& e = s_io[i];
+        if (e.n && (e.port != port || e.out != out)) continue;
+        e.port = port; e.out = out; e.n++; e.us += us; return;
+    }
+}
+#endif
 uint8_t  NextReg::contendBanks = 0;
 uint32_t NextReg::portEn = ~0u;   // all decoded; NextReg::reset / CPU::reset own it
 
@@ -70,7 +91,9 @@ struct NextTraceEnt { char kind; uint8_t reg, val; uint16_t pc; uint16_t rep; };
 static NextTraceEnt s_nt_ring[64];
 static uint32_t s_nt_w = 0;                  // total writes; ring index = w & 63
 static uint32_t s_nt_pal = 0, s_nt_cop = 0, s_nt_spr = 0;   // flood counters
+extern volatile uint32_t g_nx_palw;                           // NEXTVID::nrHot
 volatile int32_t  g_nx_idle_min = 0x7FFFFFFF;   // ESPectrum::loop: worst frame idle per NEXT line
+volatile uint32_t g_nx_worst[7];
 volatile uint32_t g_nx_idle_neg = 0;            // frames with negative idle
 // NMI one-shot trace (2026-10-07, esxDOS NMI on Next): from a divMMC NMI
 // request on, the next events go straight to the UART instead of the ring,
@@ -158,7 +181,7 @@ void next_trace_dump(uint32_t frames) {
         MemESP::nextBootRomActive ? '1' : '0', MemESP::nextConfigMode ? '1' : '0',
         MemESP::nextConfigPage, (unsigned)DivMMC::automap,
         NextReg::port7FFD, NextReg::port1FFD, NextReg::portDFFD, NextReg::portFF,
-        (unsigned)frames, (unsigned)s_nt_pal, (unsigned)s_nt_cop, (unsigned)s_nt_spr,
+        (unsigned)frames, (unsigned)(s_nt_pal + g_nx_palw), (unsigned)s_nt_cop, (unsigned)s_nt_spr,
         (unsigned)(g_sd_stall_us / 1000u), (unsigned)g_sd_ops,
         (unsigned)(g_nextvid_us / 1000u));
     // Frame cost on its own line (the one above is near Debug::log's 256-byte
@@ -182,11 +205,42 @@ void next_trace_dump(uint32_t frames) {
         {
             extern volatile uint32_t g_nx_drain_n, g_nx_drain_us, g_nx_c1_us, g_nx_idle_neg;
             extern volatile int32_t g_nx_idle_min;
-            Debug::log("NEXT perf: idl_min=%d neg=%u/%u c1=%u.%ums/fr drain=%u x %u.%ums/fr",
+            extern volatile uint32_t g_nx_drain_src[4];
+            Debug::log("NEXT perf: idl_min=%d neg=%u/%u c1=%u.%ums/fr drain=%u x %u.%ums/fr (oth %u pal %u lut %u seg %u)",
                 (int)g_nx_idle_min, (unsigned)g_nx_idle_neg, (unsigned)frames,
                 (unsigned)(g_nx_c1_us / f / 1000u), (unsigned)(g_nx_c1_us / f % 1000u / 100u),
                 (unsigned)g_nx_drain_n,
-                (unsigned)(g_nx_drain_us / f / 1000u), (unsigned)(g_nx_drain_us / f % 1000u / 100u));
+                (unsigned)(g_nx_drain_us / f / 1000u), (unsigned)(g_nx_drain_us / f % 1000u / 100u),
+                (unsigned)g_nx_drain_src[0], (unsigned)g_nx_drain_src[1],
+                (unsigned)g_nx_drain_src[2], (unsigned)g_nx_drain_src[3]);
+            for (int i = 0; i < 4; i++) g_nx_drain_src[i] = 0;
+            {
+                // Host PCs of the worst frame (100 us samples on core0), 64-byte
+                // buckets; resolve against the ELF.
+                extern uint32_t* g_nxprof_worst; extern volatile uint32_t g_nxprof_worst_n;
+                const uint32_t n = g_nxprof_worst ? g_nxprof_worst_n : 0;
+                uint32_t pk[24]; uint16_t pc[24]; int np = 0;
+                for (uint32_t i = 0; i < n; i++) {
+                    const uint32_t k = g_nxprof_worst[i] & ~63u;
+                    int j = 0; while (j < np && pk[j] != k) j++;
+                    if (j == np) { if (np == 24) continue; pk[np] = k; pc[np] = 0; np++; }
+                    pc[j]++;
+                }
+                for (int part = 0; part < 2; part++) {
+                    char pb[220]; int po = snprintf(pb, sizeof pb, part ? "NEXT hostpc+" : "NEXT hostpc %u:", (unsigned)n);
+                    for (int t = 0; t < 8; t++) {
+                        int b = -1; for (int j = 0; j < np; j++) if (pc[j] && (b < 0 || pc[j] > pc[b])) b = j;
+                        if (b < 0) break;
+                        po += snprintf(pb + po, sizeof pb - po, " %08X:%u", (unsigned)pk[b], (unsigned)pc[b]);
+                        pc[b] = 0;
+                    }
+                    Debug::log("%s", pb);
+                }
+            }
+            extern volatile uint32_t g_nx_worst[7];
+            Debug::log("NEXT worst frame: before cpu %uus, CPU::loop %uus (sd %u drain %u queue %u sdwait %u), after %uus",
+                (unsigned)g_nx_worst[0], (unsigned)g_nx_worst[1], (unsigned)g_nx_worst[3], (unsigned)g_nx_worst[4],
+                (unsigned)g_nx_worst[5], (unsigned)g_nx_worst[6], (unsigned)g_nx_worst[2]);
             extern volatile uint32_t g_nx_emit_us;
             {
                 extern volatile uint32_t g_nx_rowprobe[2][8];
@@ -196,12 +250,107 @@ void next_trace_dump(uint32_t frames) {
                         (unsigned)g_nx_rowprobe[k][2], (unsigned)g_nx_rowprobe[k][3], (unsigned)g_nx_rowprobe[k][4],
                         (unsigned)g_nx_rowprobe[k][5], (unsigned)g_nx_rowprobe[k][6], (unsigned)g_nx_rowprobe[k][7]);
             }
-            Debug::log("NEXT core0: emit=%u.%ums/fr | L2 12=%02X 13=%02X 16=%02X 17=%02X 70=%02X 71=%02X clip=%u,%u,%u,%u spr=%u,%u,%u,%u 15=%02X 68=%02X 14=%02X 4A=%02X 4B=%02X",
+            {
+                // Where core0's frame goes: fast memory path state, Z80 fetches per
+                // frame (Z80::regR counts every M1) and their average cost.
+                extern uint8_t g_ts_fastmem, g_ts_fastrd;
+                extern volatile uint32_t cpu_frame_us;
+                static uint32_t s_pr = 0, s_pc = 0;
+                const uint32_t rr = Z80::getFetchCounter(), cc = cpu_frame_us;
+                const uint32_t dr = rr - s_pr, dc = cc - s_pc;
+                s_pr = rr; s_pc = cc;
+                volatile uint32_t* xh = (volatile uint32_t*)(XIP_CTRL_BASE + XIP_CTR_HIT_OFFSET);
+                volatile uint32_t* xa = (volatile uint32_t*)(XIP_CTRL_BASE + XIP_CTR_ACC_OFFSET);
+                const uint32_t hit = *xh, acc = *xa;
+                *xh = 0; *xa = 0;                 // write clears
+                extern volatile uint32_t g_nx_rlff_n, g_nx_rlff_t;
+                Debug::log("NEXT rlff: %u/fr skipped %u%% of the frame",
+                    (unsigned)(g_nx_rlff_n / f),
+                    (unsigned)((uint64_t)g_nx_rlff_t * 100u / ((uint64_t)CPU::statesInFrame * f)));
+                g_nx_rlff_n = g_nx_rlff_t = 0;
+                Debug::log("NEXT z80: fm=%u rd=%u m1=%u/fr %uns/m1 act=%u%% T/fr=%u xip=%u/fr miss=%u/fr",
+                    (unsigned)g_ts_fastmem, (unsigned)g_ts_fastrd, (unsigned)(dr / f),
+                    dr ? (unsigned)((uint64_t)dc * 1000u / dr) : 0u,
+                    CPU::tstates_frame ? (unsigned)((uint64_t)CPU::tstates_active * 100u / CPU::tstates_frame) : 0u,
+                    (unsigned)CPU::statesInFrame, (unsigned)(acc / f), (unsigned)((acc - hit) / f));
+            }
+            {
+                // Top ports by time, then the hottest PC blocks / MMU pages.
+                char buf[200]; int o = 0;
+                o += snprintf(buf + o, sizeof buf - o, "NEXT io: in %u/fr %uus/fr out %u/fr %uus/fr |",
+                    (unsigned)(s_io_n[0] / f), (unsigned)(s_io_us[0] / f), (unsigned)(s_io_n[1] / f), (unsigned)(s_io_us[1] / f));
+                for (int k = 0; k < 6; k++) {
+                    int b = -1;
+                    for (int i = 0; i < 32; i++) if (s_io[i].n && (b < 0 || s_io[i].us > s_io[b].us)) b = i;
+                    if (b < 0) break;
+                    o += snprintf(buf + o, sizeof buf - o, " %04X%c%u/%u", s_io[b].port, s_io[b].out ? 'w' : 'r',
+                                  (unsigned)(s_io[b].n / f), (unsigned)(s_io[b].us / f));
+                    s_io[b].us = 0; s_io[b].n = 1;   // taken (cleared below)
+                    if (o > (int)sizeof buf - 24) break;
+                }
+                Debug::log("%s", buf);
+                memset(s_io, 0, sizeof s_io); s_io_n[0] = s_io_n[1] = s_io_us[0] = s_io_us[1] = 0;
+                extern volatile uint16_t* g_nx_pcs;
+                extern volatile uint16_t* g_nx_pcpg;
+                uint32_t tot = 0; if (g_nx_pcs) for (int i = 0; i < 2048; i++) tot += g_nx_pcs[i];
+                o = snprintf(buf, sizeof buf, "NEXT pc: n=%u", (unsigned)tot);
+                for (int k = 0; k < 8 && tot; k++) {
+                    int b = 0;
+                    for (int i = 1; i < 2048; i++) if (g_nx_pcs[i] > g_nx_pcs[b]) b = i;
+                    if (!g_nx_pcs[b]) break;
+                    o += snprintf(buf + o, sizeof buf - o, " %04X:%u%%", b << 5, (unsigned)(g_nx_pcs[b] * 100u / tot));
+                    g_nx_pcs[b] = 0;
+                }
+                o += snprintf(buf + o, sizeof buf - o, " | pg");
+                for (int k = 0; k < 5; k++) {
+                    int b = 0;
+                    for (int i = 1; i < 256; i++) if (g_nx_pcpg[i] > g_nx_pcpg[b]) b = i;
+                    if (!g_nx_pcpg[b] || !tot) break;
+                    o += snprintf(buf + o, sizeof buf - o, " %02X:%u%%", b, (unsigned)(g_nx_pcpg[b] * 100u / tot));
+                    g_nx_pcpg[b] = 0;
+                }
+                Debug::log("%s", buf);
+                if (g_nx_pcs) {
+                    for (int i = 0; i < 2048; i++) g_nx_pcs[i] = 0;
+                    for (int i = 0; i < 256; i++) g_nx_pcpg[i] = 0;
+                }
+            }
+            {
+                extern volatile uint32_t (*g_nx_dmav)[3];
+                char vb[200]; int vo = snprintf(vb, sizeof vb, "NEXT dmav (page:off/256 n bytes):");
+                for (int k = 0; g_nx_dmav && k < 8 && g_nx_dmav[k][0]; k++)
+                    vo += snprintf(vb + vo, sizeof vb - vo, " %02X:%02X %u %u",
+                        (unsigned)((g_nx_dmav[k][0] >> 8) & 0xFF), (unsigned)(g_nx_dmav[k][0] & 0xFF),
+                        (unsigned)(g_nx_dmav[k][1] / f), (unsigned)(g_nx_dmav[k][2] / f));
+                Debug::log("%s | 6E=%02X 6F=%02X 12=%02X", vb, NextReg::reg[0x6E], NextReg::reg[0x6F], NextReg::reg[0x12]);
+                for (int k = 0; g_nx_dmav && k < 8; k++) g_nx_dmav[k][0] = g_nx_dmav[k][1] = g_nx_dmav[k][2] = 0;
+            }
+            {
+                extern volatile uint32_t g_sdk[5], g_sd_ring[12], g_sd_ring_w;
+                extern volatile uint32_t g_nx_qwait_us, g_nx_qwait_max;
+                Debug::log("NEXT sdw: c1 read %ums max %uus | c0 wait sd %ums max %uus | queue wait %ums max %uus",
+                    (unsigned)(g_sd_as_c1_us / 1000u), (unsigned)g_sd_as_c1_max,
+                    (unsigned)(g_sd_as_c0wait_us / 1000u), (unsigned)g_sd_as_c0wait_max,
+                    (unsigned)(g_nx_qwait_us / 1000u), (unsigned)g_nx_qwait_max);
+                g_sd_as_c1_us = g_sd_as_c1_max = g_sd_as_c0wait_us = g_sd_as_c0wait_max = 0;
+                g_nx_qwait_us = g_nx_qwait_max = 0;
+                char sb[220]; int so = snprintf(sb, sizeof sb, "NEXT sd: hit %u async %u burst %u single %u posted %u | last:",
+                    (unsigned)g_sdk[0], (unsigned)g_sdk[1], (unsigned)g_sdk[2], (unsigned)g_sdk[3], (unsigned)g_sdk[4]);
+                const uint32_t w = g_sd_ring_w;
+                for (uint32_t k = (w > 12 ? w - 12 : 0); k < w && so < (int)sizeof sb - 14; k++) {
+                    const uint32_t e = g_sd_ring[k % 12];
+                    so += snprintf(sb + so, sizeof sb - so, " %c%lu", "HABS"[e >> 30], (unsigned long)(e & 0x3FFFFFFF));
+                }
+                Debug::log("%s", sb);
+                for (int k = 0; k < 5; k++) g_sdk[k] = 0;
+            }
+            Debug::log("NEXT core0: emit=%u.%ums/fr | L2 12=%02X 13=%02X 16=%02X 17=%02X 70=%02X 71=%02X clip=%u,%u,%u,%u spr=%u,%u,%u,%u 15=%02X 68=%02X 14=%02X 4A=%02X 4B=%02X 6A=%02X 6B=%02X",
                 (unsigned)(g_nx_emit_us / f / 1000u), (unsigned)(g_nx_emit_us / f % 1000u / 100u),
                 NextReg::reg[0x12], NextReg::reg[0x13], NextReg::reg[0x16], NextReg::reg[0x17], NextReg::reg[0x70], NextReg::reg[0x71],
                 NEXTVID::clip[0][0], NEXTVID::clip[0][1], NEXTVID::clip[0][2], NEXTVID::clip[0][3],
                 NEXTVID::clip[1][0], NEXTVID::clip[1][1], NEXTVID::clip[1][2], NEXTVID::clip[1][3],
-                NextReg::reg[0x15], NextReg::reg[0x68], NextReg::reg[0x14], NextReg::reg[0x4A], NextReg::reg[0x4B]);
+                NextReg::reg[0x15], NextReg::reg[0x68], NextReg::reg[0x14], NextReg::reg[0x4A], NextReg::reg[0x4B],
+                NextReg::reg[0x6A], NextReg::reg[0x6B]);
             g_nx_emit_us = 0;
             g_nx_drain_n = g_nx_drain_us = g_nx_c1_us = g_nx_idle_neg = 0;
             g_nx_idle_min = 0x7FFFFFFF;
@@ -274,6 +423,7 @@ void next_trace_dump(uint32_t frames) {
 #endif
     }
     s_nt_pal = s_nt_cop = s_nt_spr = 0;
+    g_nx_palw = 0;
     g_sd_stall_us = 0;
     g_sd_ops = 0;
     g_nextvid_us = 0;
@@ -459,6 +609,52 @@ uint16_t NextReg::activeLine() {
     // (64 T into the line, the paper's left edge — zxula_timing.vhd 455-472)
     if (ts % VIDEO::tStatesPerLine < 64) line += lines - 1;
     return (uint16_t)((line + lines - paperStart + reg[0x64]) % lines);
+}
+
+// A raster-line wait (Warhawk 906D: IN A,(C) / CP #BF / JP NZ on NR 0x1F, ~8000
+// reads a frame = 82% of guest time; each read is a flash port handler, 6 ms of
+// core0 per frame — hw 2026-10-09). The second read of NR 0x1E/0x1F by the same
+// instruction within 128 T skips guest time to the moment the value next changes
+// (hc 128 of the next line, see activeLine), rendering the lines on the way —
+// the TS-Conf DMAStatus fast-forward. Bounded by the running slice (stFrame:
+// interrupt / DMA events end it) and the frame tail, never in the INT window.
+#if NEXT_TRACE
+volatile uint32_t g_nx_rlff_n = 0, g_nx_rlff_t = 0;
+volatile uint32_t (*g_nx_dmav)[3] = nullptr;   // [8][3], in the NEXTVID profile block
+#endif
+// Kept per register: TX-1696 reads 0x1E then 0x1F from two places in one loop
+// (B14A: CALL 8A48 / CP L / JP NC), which one shared slot never saw repeat.
+void NextReg::rasterPollFF(uint8_t k) {
+    // Only with the frame INT alone. With a line interrupt / CTC / hardware IM2
+    // armed (NextInt::ex) the skip made TX-1696's bottom sprites stick and jump
+    // every few seconds (hw 2026-10-09; gone with the skip off) — its main loop
+    // waits for line 193 right behind the line-192 interrupt, with the sample
+    // CTC and DMA-yields-to-interrupts set. Those polls go through the cheap
+    // port path in Ports::input instead.
+    if (NextInt::ex) return;
+    static uint16_t s_pc[2] = { 0xFFFF, 0xFFFF };
+    static uint32_t s_t[2] = { 0, 0 };
+    const uint32_t now = CPU::tstates;
+    const uint16_t pc = Z80::getRegPC();
+    const uint8_t m = ESPectrum::multiplicator;
+    const bool again = pc == s_pc[k] && (uint32_t)(now - s_t[k]) < (128u << m);
+    s_pc[k] = pc;
+    if (!again || (int32_t)now < CPU::IntEnd) { s_t[k] = now; return; }
+    const uint32_t tpl = VIDEO::tStatesPerLine;
+    const uint32_t cur = now >> m, inl = cur % tpl;
+    const uint32_t change = cur - inl + (inl < 64 ? 64 : tpl + 64);
+    uint32_t tgt = change << m;
+    uint32_t lim = CPU::statesInFrame - (uint32_t)CPU::IntEnd;
+    if (CPU::stFrame < lim) lim = CPU::stFrame;
+    if (tgt > lim) tgt = lim;
+    if (tgt > now) {
+        NEXTVID::haltAdvanceTo(tgt);
+#if NEXT_TRACE
+        g_nx_rlff_n = g_nx_rlff_n + 1;
+        g_nx_rlff_t = g_nx_rlff_t + (CPU::tstates - now);
+#endif
+    }
+    s_t[k] = CPU::tstates;
 }
 
 static void applyRomSelect();
@@ -831,8 +1027,8 @@ uint8_t NextReg::read(uint8_t r) {
                    (uint8_t)(NEXTVID::clipIdx[0] & 3);
         case 0x41: return NEXTVID::palRead8();
         case 0x44: return NEXTVID::palRead9();
-        case 0x1E: return (activeLine() >> 8) & 0x01;
-        case 0x1F: return activeLine() & 0xFF;
+        case 0x1E: rasterPollFF(0); return (activeLine() >> 8) & 0x01;
+        case 0x1F: rasterPollFF(1); return activeLine() & 0xFF;
         case 0x50: case 0x51: case 0x52: case 0x53:
         case 0x54: case 0x55: case 0x56: case 0x57:
             return MemESP::mmu[r - 0x50];

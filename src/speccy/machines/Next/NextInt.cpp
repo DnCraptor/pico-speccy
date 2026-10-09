@@ -168,6 +168,17 @@ void ctcAdvance(int64_t t) {
     }
 }
 
+// Earliest ZC/TO of any channel after the last advance; sync() skips the CTC
+// until then. -kNever = recompute (any change to the CTC state sets it).
+int64_t s_ctcNext = -kNever;
+
+// The counters as of now (ctcRead / ctcWrite), without crossing an event: sync()
+// already advanced through every ZC/TO up to now.
+void ctcCatchUp() {
+    for (auto& c : s_ctc)
+        if (c.st >= C_TRIGGER) { ctcAdvance(s_last28); break; }
+}
+
 // k-th ZC/TO of channel ch from the synced state, kNever if none can come.
 int64_t ctcNextZc(int ch, int64_t k, int depth) {
     if (depth > 4) return kNever;
@@ -187,7 +198,7 @@ int64_t ctcNextZc(int ch, int64_t k, int depth) {
 void sync() {
     const int64_t now = now28();
     if (now <= s_last28) {
-        if (now < s_last28) s_last28 = now;   // CPU::reset moved tstates back
+        if (now < s_last28) { s_last28 = now; s_ctcNext = -kNever; }   // CPU::reset moved tstates back
         return;
     }
     const int64_t relPrev = s_last28 - s_base28, relNow = now - s_base28;
@@ -205,8 +216,25 @@ void sync() {
         }
 #endif
     }
-    for (auto& c : s_ctc)
-        if (c.st >= C_TRIGGER) { ctcAdvance(now); break; }
+    // CTC: only when a ZC/TO can have happened since the last advance. Between
+    // events the counters are bookkeeping that ctcRead / ctcWrite catch up on
+    // (ctcCatchUp); advancing here on every sync cost several 64-bit divisions
+    // per DMA batch / INT check — TX-1696 (CTC running) spent ~10 ms of a frame
+    // in it, hw 2026-10-09.
+    if (now >= s_ctcNext) {
+        bool any = false;
+        for (auto& c : s_ctc) if (c.st >= C_TRIGGER) { any = true; break; }
+        if (any) {
+            ctcAdvance(now);
+            s_ctcNext = kNever;
+            for (int ch = 0; ch < 4; ch++) {
+                const int64_t t = ctcNextZc(ch, 1, 0);
+                if (t > now && t < s_ctcNext) s_ctcNext = t;
+            }
+        } else {
+            s_ctcNext = kNever;
+        }
+    }
     s_last28 = now;
     if (s_unqPulse && now >= s_pulse + pulseLen28()) { s_unqPulse = false; exRecalc(); }
 }
@@ -264,6 +292,7 @@ void reset(bool) {
     s_unqPulse = false;
     s_pulse = -kNever;
     for (auto& c : s_ctc) { c.st = C_RESET; c.cw = 0; c.tc = 256; c.cnt = 256; c.run0 = c.ref = 0; }
+    s_ctcNext = -kNever;
     for (uint8_t r = 0xC0; r <= 0xCE; r++) NextReg::reg[r] = 0;
     NextReg::reg[0xC4] = 0x80;
     s_last28 = now28();
@@ -478,6 +507,7 @@ bool dmaDelay() {
 uint8_t ctcRead(uint8_t ch) {
     if (ch > 3) return 0;   // channels 4..7 are not instantiated (zxnext.vhd 4064)
     sync();
+    ctcCatchUp();
     const Ctc& c = s_ctc[ch];
     return (uint8_t)((c.st == C_RUN || c.st == C_RUN_TC) ? c.cnt : c.tc);
 }
@@ -485,6 +515,8 @@ uint8_t ctcRead(uint8_t ch) {
 void ctcWrite(uint8_t ch, uint8_t v) {
     if (ch > 3) return;
     sync();
+    ctcCatchUp();
+    s_ctcNext = -kNever;
     const int64_t now = s_last28;
     Ctc& c = s_ctc[ch];
     if (c.st == C_RESET_TC || c.st == C_RUN_TC) {          // time constant

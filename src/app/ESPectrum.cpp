@@ -51,6 +51,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "Config.h"
 #include "speccy/machines/TsConf/ZxEvoAvr.h"
 #include "ESPectrum.h"
+#include "NxFrameProf.h"
 #include "LastRun.h"
 #include "fs/FileUtils.h"
 #include "drivers/usbhost/UsbMsc.h"
@@ -3900,7 +3901,20 @@ void ESPectrum::loop() {
         Z80::reset();
       }
     }
+#if NEXT_TRACE
+    extern volatile uint32_t g_sd_stall_us, g_nx_drain_us, g_nx_qwait_us;
+    extern volatile uint32_t g_sd_as_c0wait_us;
+    const uint32_t wf_c0 = time_us_32();
+    const uint32_t wf_sd = g_sd_stall_us, wf_dr = g_nx_drain_us, wf_q = g_nx_qwait_us, wf_w = g_sd_as_c0wait_us;
+    if (Z80Ops::isNext) { NxFrameProf::init(); NxFrameProf::frameBegin(); }
+#endif
     CPU::loop();
+#if NEXT_TRACE
+    const uint32_t wf_c1 = time_us_32();
+    NxFrameProf::frameEnd();
+    const uint32_t wf_sd1 = g_sd_stall_us - wf_sd, wf_dr1 = g_nx_drain_us - wf_dr,
+                   wf_q1 = g_nx_qwait_us - wf_q, wf_w1 = g_sd_as_c0wait_us - wf_w;
+#endif
 
     if (profi_spi_boot) {
       // DS80 turning on (rising edge) schedules the notice; we show it only after
@@ -4520,7 +4534,15 @@ void ESPectrum::loop() {
 #if NEXT_TRACE
     {
       extern volatile int32_t g_nx_idle_min; extern volatile uint32_t g_nx_idle_neg;
-      if ((int32_t)idle < g_nx_idle_min) g_nx_idle_min = (int32_t)idle;
+      if ((int32_t)idle < g_nx_idle_min) {
+          g_nx_idle_min = (int32_t)idle;
+          extern volatile uint32_t g_nx_worst[7];   // pre cpu post | in cpu: sd drain queue sdwait
+          const uint32_t ts0 = (uint32_t)ts_start;
+          g_nx_worst[0] = wf_c0 - ts0; g_nx_worst[1] = wf_c1 - wf_c0;
+          g_nx_worst[2] = (uint32_t)elapsed - (wf_c1 - ts0);
+          g_nx_worst[3] = wf_sd1; g_nx_worst[4] = wf_dr1; g_nx_worst[5] = wf_q1; g_nx_worst[6] = wf_w1;
+          NxFrameProf::keep();
+      }
       if ((int32_t)idle < 0) g_nx_idle_neg = g_nx_idle_neg + 1;
     }
 #endif

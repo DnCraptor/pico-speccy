@@ -1059,7 +1059,10 @@ extern "C" void vga_reinit(void);
 extern "C" void refresh_lcd(void);
 #endif
 
-void __scratch_x("render") render_core() {
+// Main RAM, not SCRATCH_X: that bank holds the HDMI line ISR and core1's stack and
+// was 20 bytes short of the odd-line-count frame fix (2026-10-09). This loop only
+// dispatches; its speed does not depend on the bank.
+void __not_in_flash_func(render_core)() {
     multicore_lockout_victim_init();
     { extern size_t getFreeHeap(void); Debug::log("render: graphics_init begin, freeHeap=%u", (unsigned)getFreeHeap()); }
     graphics_init();

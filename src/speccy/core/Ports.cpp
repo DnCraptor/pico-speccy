@@ -35,6 +35,7 @@ visit https://zxespectrum.speccy.org/contacto
 */
 
 #include "Ports.h"
+#include "hardware/structs/timer.h"
 #if PERF_TRACE
 uint32_t g_brd_first_t = 0, g_brd_min = 0xFFFFFFFF, g_brd_max = 0, g_brd_delta = 0;
 uint32_t g_halt_t = 0; bool g_halt_set = false;
@@ -2048,8 +2049,40 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
 
 __attribute__((noinline)) uint8_t Ports::inputProfi(uint16_t address) { return inputImpl<true>(address); }
 
+#if NEXT_TRACE
+extern void nxIoNote(uint16_t port, uint32_t us, bool out);   // NextReg.cpp
+#endif
+// Spectrum Next register ports 0x243B / 0x253B: ~2500 accesses a frame in
+// TX-1696 (raster polls), each walking the whole decode chain into the flash
+// NextPorts handler (~0.7-1 us). Same timing as that path: 1 T early + the late
+// I/O part (contended on reads, not on writes — NextPorts::output's return).
+static inline __attribute__((always_inline)) bool nxRegPort(uint16_t address) {
+  return Z80Ops::isNext && (address == 0x253B || address == 0x243B);
+}
 IRAM_ATTR uint8_t Ports::input(uint16_t address) {
   if (__builtin_expect(Z80Ops::isProfi, 0)) { return inputProfi(address); }
+  if (nxRegPort(address) && Config::numPortReadBP == 0) {
+    const bool c = MemESP::ramContended[address >> 13];
+    VIDEO::Draw(1, c);
+    p_states = CPU::tstates;
+#if NEXT_TRACE
+    const uint32_t t0 = timer_hw->timerawl;
+#endif
+    ioContentionLate(c);
+    const uint8_t v = address == 0x243B ? NextReg::selected : NextReg::read(NextReg::selected);
+#if NEXT_TRACE
+    nxIoNote(address, timer_hw->timerawl - t0, false);
+#endif
+    return v;
+  }
+#if NEXT_TRACE
+  if (Z80Ops::isNext) {
+    const uint32_t t0 = timer_hw->timerawl;
+    const uint8_t v = inputImpl<false>(address);
+    nxIoNote(address, timer_hw->timerawl - t0, false);
+    return v;
+  }
+#endif
   return inputImpl<false>(address);
 }
 
@@ -4191,6 +4224,28 @@ __attribute__((noinline)) void Ports::outputProfi(uint16_t address, uint8_t data
 
 IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
   if (__builtin_expect(Z80Ops::isProfi, 0)) { outputProfi(address, data); return; }
+  if (nxRegPort(address) && Config::numPortWriteBP == 0) {
+    VIDEO::Draw(1, MemESP::ramContended[address >> 13]);
+    p_states = CPU::tstates;
+#if NEXT_TRACE
+    const uint32_t t0 = timer_hw->timerawl;
+#endif
+    if (address == 0x243B) NextReg::selected = data;
+    else if (!NEXTVID::nrHot(NextReg::selected, data)) NextReg::write(NextReg::selected, data);
+    ioContentionLate(false);
+#if NEXT_TRACE
+    nxIoNote(address, timer_hw->timerawl - t0, true);
+#endif
+    return;
+  }
+#if NEXT_TRACE
+  if (Z80Ops::isNext) {
+    const uint32_t t0 = timer_hw->timerawl;
+    outputImpl<false>(address, data);
+    nxIoNote(address, timer_hw->timerawl - t0, true);
+    return;
+  }
+#endif
   outputImpl<false>(address, data);
 }
 
@@ -4277,7 +4332,7 @@ IRAM_ATTR void Ports::dmaOutput(uint16_t address, uint8_t data) {
         const uint8_t a8 = address & 0xFF;
         if (a8 == 0x5B && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spritePatternWrite(data); return; }
         if (a8 == 0x57 && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spriteAttrWrite(data); return; }
-        if (address == 0x253B) { NextReg::write(NextReg::selected, data); return; }
+        if (address == 0x253B) { if (!NEXTVID::nrHot(NextReg::selected, data)) NextReg::write(NextReg::selected, data); return; }
         if (address == 0x243B) { NextReg::selected = data; return; }
         if (address & 0x0001) { output(address, data); return; }
     }

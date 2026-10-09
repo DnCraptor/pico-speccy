@@ -51,6 +51,7 @@ public:
     // does not execute until the block ends; time still passes.
     static bool     nxPending;
     static bool     nxStall;
+    static bool     nxDrainDue;   // paced block not yet checked against core1's queue
     static uint32_t nxNextT;
     static bool nxService(uint32_t limit);   // transfer what is due, up to limit; false = nothing moved
     static void nxFrameEnd(uint32_t statesInFrame);
@@ -122,6 +123,8 @@ private:
     // executeTransfer() moved to public (for MB-02 deferred DMA)
     static void transferOneByte();
     static void nxOneByte();
+    static bool nxBatch(uint32_t stop, uint8_t ca, uint8_t cb);
+    static void nxByteNoDraw(uint8_t ca, uint8_t cb);   // nxOneByte inside a batch (nxRunSync)
     static void nxRunSync();
     static bool nxBlockDone();
     static void nxReload();

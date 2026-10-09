@@ -435,6 +435,7 @@ static uint hdmi_isl_line[2];                                    //   and the sc
 #else
 static void hdmi_di_load(uint set, uint logical_line);
 #endif
+static void hdmi_odd_wrap(uint playing, uint v_total, uint32_t isr_t0);   // line 0 of an odd-line-count frame
 
 // Diagnostic mode: cycle injection stages ~21 s each. 0 = no injection (pure
 // DVI), 1 = islands on vblank lines only, 2 = + video preamble/guard on active
@@ -1128,8 +1129,19 @@ static void __scratch_x("hdmi_driver") dma_handler_HDMI_body() {
     } else if (line < modep->v_active) {
         if (hdmi_scanlines) {
             if (line & 1) return;            // нечётные = серая, ничего не пишем
-        } else {
-            if (!(line & 1)) return;         // чётные пропускаются (доигрывают пред. буфер)
+        } else if (!(line & 1)) {
+            // An odd line count (lines 0..v_total with v_total EVEN — 640x480 @50 128K
+            // at 540 is 631 lines, 720x576 128K/48K at 504 605, CEA 576p 625, @60 525):
+            // the last line and line 0 are both even, so the buffer rendered on the last
+            // odd line plays THREE times across the frame wrap, its island included —
+            // one audio packet sent twice every frame, the sink over-fed by 4 samples a
+            // frame and muting in "waves" (hw 2026-10-09: 128K and Next at 540 waved,
+            // the 646-line Pentagon twin did not, a 630-line build of the 128K twin
+            // fixed it). Line 0 of such a frame refreshes that island for the third play
+            // (hdmi_odd_wrap: main RAM, this ISR's SCRATCH_X bank is full).
+            if (line == 0 && !(modep->v_total & 1) && hdmi_audio_enabled)
+                hdmi_odd_wrap(inx_buf_dma & 1, modep->v_total, isr_t0);
+            return;                          // чётные пропускаются (доигрывают пред. буфер)
         }
     } else {
         if (!(line & 1)) return;             // в blanking пропускаем чётные (включая v_active)
@@ -3417,6 +3429,27 @@ static void __not_in_flash_func(hdmi_di_load)(uint set, uint logical_line) {
     if (hdmi_x3_on) hdmi_x3_pack_island(set, vsp);
 }
 #endif // !HDMI_EXPANDER
+
+// Line 0 of a frame with an odd line count (lines 0..v_total, v_total even): the
+// buffer rendered on the last odd line plays a third time on the next line, so give
+// it a fresh island (a new packet, not the one already sent twice) and the one line
+// of audio credit the pair accrual does not cover. See the call in the line ISR.
+static void __attribute__((noinline)) __not_in_flash_func(hdmi_odd_wrap)(uint playing, uint v_total, uint32_t isr_t0) {
+    if (!hdmi_vmap_cur) {
+        hdmi_au_pos += (aq_wr - aq_rd) > HDMI_AU_TARGET ? hdmi_au_spl24_hi : hdmi_au_spl24_lo;
+        if (hdmi_au_pos > hdmi_au_cap) hdmi_au_pos = hdmi_au_cap;
+    }
+#if HDMI_EXPANDER
+    const uint32_t past = (uint32_t)dma_lines[playing] + 4u * HDMI_TL_DI_WORDS;
+    while (dma_hw->ch[dma_chan].read_addr < past && time_us_32() - isr_t0 < HDMI_AU_DI_GUARD_US)
+        tight_loop_contents();
+    hdmi_isl_second_play(playing, v_total);
+#else
+    while (time_us_32() - isr_t0 < HDMI_AU_DI_GUARD_US) tight_loop_contents();
+    hdmi_di_load(playing, v_total);
+#endif
+}
+
 
 // ---------- init ----------
 

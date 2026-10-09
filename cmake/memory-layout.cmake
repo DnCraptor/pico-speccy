@@ -213,9 +213,10 @@ endif()
 if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # NextVideo.cpp's .time_critical (the scanline renderer, sprites, tilemap, layer
     # mix, copper). Lowest window: on every other boot it simply extends the base heap.
-    # 19 104 measured (DVp2, 2026-10-09; was 16 608 a few hours earlier — the Next
+    # 21 112 measured (DVp2, 2026-10-09 evening; 19 104 / 16 608 earlier — the Next
     # renderer is still growing) + headroom. On a Next boot the slack is heap lost.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 20480)
+    # +Z80DMA's .nxdma_hot (the batched DMA copy loop, 1412 B) since 2026-10-09.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 23040)
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})
 endif()
@@ -356,6 +357,7 @@ if (NEXT_CODE_OVERLAY)
     .nxovl __nxovl_win_start : {\n\
         __nxovl_start = .;\n\
         *NextVideo.cpp.o*(.time_critical*)\n\
+        *Z80DMA.cpp.o*(.nxdma_hot*)\n\
         . = ALIGN(4);\n\
         __nxovl_end = .;\n\
     } AT > FLASH\n\

@@ -1,6 +1,10 @@
 #include "DivMMC.h"
 #include "speccy/machines/Next/NextMf.h"
 #include "app/Buffer.h"
+#include "app/TryAlloc.h"
+#include "hardware/sync.h"
+#include "speccy/z80/CPU.h"
+#include "ff.h"
 #include "speccy/z80/z80.h"
 #include "pico/time.h"
 
@@ -1095,10 +1099,196 @@ void DivMMC::raInit() {
     s_sq_last = 0xFFFFFFFFu;
 }
 
+#if NEXT_TRACE
+// NEXT sd: line — how loadSector served each sector, and the last card reads
+volatile uint32_t g_sdk[5];            // hit, async take, burst, single, async posted
+volatile uint32_t g_sd_ring[12];       // sector | kind << 30
+volatile uint32_t g_sd_ring_w = 0;
+static inline void sdNote(int k, uint32_t sector) {
+    g_sdk[k] = g_sdk[k] + 1;
+    if (k >= 2) { g_sd_ring[g_sd_ring_w % 12] = sector | ((uint32_t)k << 30); g_sd_ring_w = g_sd_ring_w + 1; }
+}
+#define SDK(k, sec) sdNote(k, sec)
+#else
+#define SDK(k, sec) do {} while (0)
+#endif
+
+// Background read-ahead on core1 (the Next: TX-1696 streams ~480 sectors a
+// second, ~1 ms of core0 per 8-sector burst, frames over budget and the audio
+// broke, hw 2026-10-09). While a stream is sequential, the NEXT burst is posted
+// to core1 (sdcard.c sd_async_pump, from NEXTVID::c1Pump) into a second buffer;
+// a read that reaches it swaps the buffers instead of touching the card. The
+// driver serialises the two cores (sd_async_quiesce). The second 4 KB is taken
+// on the first request (heap, the SD driver DMAs into it), none = synchronous.
+extern "C" {
+    extern volatile uint8_t g_sd_as_state;
+    extern BYTE*            g_sd_as_buf;
+    extern LBA_t            g_sd_as_sector;
+    extern UINT             g_sd_as_count;
+}
+static uint8_t* s_sq2 = nullptr;
+static bool     s_sq2_tried = false;
+static uint32_t s_as_gen = 0;
+static uint8_t  s_as_kind = 0;      // the posted request: 0 prefetch, 1 CMD17 single, 2 CMD17 burst
+
+static bool sq2Ensure() {
+    if (!s_sq2 && !s_sq2_tried) {
+        s_sq2_tried = true;
+        s_sq2 = (uint8_t*)tryMalloc(DIVSD_RA_SECTORS * 512);
+        Debug::log("[divSD] core1 read-ahead %s", s_sq2 ? "on" : "off (no heap)");
+    }
+    return s_sq2 != nullptr;
+}
+
+static void sqAsyncDiscard() {
+    uint8_t st = g_sd_as_state;
+    if (st == 1) { if (__atomic_compare_exchange_n(&g_sd_as_state, &st, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return; }
+    while (g_sd_as_state == 2) tight_loop_contents();
+    if (g_sd_as_state >= 3) g_sd_as_state = 0;
+}
+
+static void sqAsyncRequest(uint32_t next) {
+    if (!Z80Ops::isNext || raw_pdrv() != 0 || g_sd_as_state != 0) return;
+    if (!sq2Ensure()) return;
+    s_as_kind = 0;
+    g_sd_as_buf = s_sq2;
+    g_sd_as_sector = next;
+    g_sd_as_count = DIVSD_RA_SECTORS;
+    s_as_gen = g_disk_write_gen;
+    __dmb();
+    g_sd_as_state = 1;
+    SDK(4, next);
+}
+
+// The background burst, if it starts at `sector`: becomes the read-ahead buffer.
+static bool sqAsyncTake(uint32_t sector) {
+    uint8_t st = g_sd_as_state;
+    if (st == 0) return false;
+    if (g_sd_as_sector != sector || s_as_kind != 0) {   // not what the guest wants now
+        if (st >= 3) g_sd_as_state = 0;
+        return false;
+    }
+    if (st == 1) {                             // not started: read it ourselves
+        if (__atomic_compare_exchange_n(&g_sd_as_state, &st, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return false;
+    }
+    if (g_sd_as_state == 2) {
+        extern volatile uint32_t g_sd_as_c0wait_us, g_sd_as_c0wait_max;
+        const uint32_t t0 = time_us_32();
+        while (g_sd_as_state == 2) tight_loop_contents();
+        const uint32_t d = time_us_32() - t0;
+        g_sd_as_c0wait_us += d;
+        if (d > g_sd_as_c0wait_max) g_sd_as_c0wait_max = d;
+    }
+    __dmb();
+    const bool ok = g_sd_as_state == 3 && s_as_gen == g_disk_write_gen;
+    g_sd_as_state = 0;
+    if (!ok) return false;
+    uint8_t* t = s_sq_buf; s_sq_buf = s_sq2; s_sq2 = t;
+    s_sq_base = sector;
+    s_sq_count = DIVSD_RA_SECTORS;
+    s_sq_gen = s_as_gen;
+    return true;
+}
+
+// ---- CMD17 on the Next: the card's own latency, in guest time ----
+// A sector that is not in the read-ahead is fetched by core1 while the guest
+// polls for the data token, which a real card answers with 0xFF for its access
+// time: the emulation keeps running instead of core0 standing on the card
+// (TX-1696's FAT / file-open bursts: 60 single reads a second, ~1 ms each, hw
+// 2026-10-09). s_c17: 0 none, 1 waiting for the slot, 2 posted.
+extern "C" volatile bool g_next_c1_live;   // NextVideo.cpp: core1 runs the Next queue
+static uint8_t  s_c17 = 0;
+static uint32_t s_c17_sector = 0;
+static uint32_t s_c17_t0 = 0;      // time_us_32 of the command: the fallback clock
+
+static void c17Abandon() { s_c17 = 0; }   // CS edge / new command: a late result is discarded
+
+// Post the request if the slot is free; true once it is.
+static bool c17TryPost() {
+    uint8_t st = g_sd_as_state;
+    if (st == 1) {
+        if (!__atomic_compare_exchange_n(&g_sd_as_state, &st, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return false;
+        st = 0;
+    }
+    if (st == 2) return false;
+    if (st >= 3) { g_sd_as_state = 0; }    // someone's finished result nobody took
+    const bool seq = (s_c17_sector == s_sq_last + 1);
+    s_as_kind = seq ? 2 : 1;
+    g_sd_as_buf = s_sq2;
+    g_sd_as_sector = s_c17_sector;
+    g_sd_as_count = seq ? DIVSD_RA_SECTORS : 1;
+    s_as_gen = g_disk_write_gen;
+    __dmb();
+    g_sd_as_state = 1;
+    s_c17 = 2;
+    return true;
+}
+
+// Command received: true = the sector is (or will be) served by core1, the
+// data token is deferred; false = the caller loads it now (a read-ahead hit).
+static bool c17Begin(uint32_t sector) {
+    // core1 must be pumping (sd_async_pump runs from its Next renderer loop): a
+    // dead queue (nxQueueDead) would leave the request untaken for ever — the
+    // 2 s storage probe used to cancel it as a side effect, and without that
+    // TX-1696 never started (hw 2026-10-09).
+    if (!Z80Ops::isNext || !g_next_c1_live || raw_pdrv() != 0 || !s_sq_buf || !sq2Ensure()) return false;
+    s_c17_t0 = time_us_32();
+    if (sector >= s_sq_base && sector < s_sq_base + s_sq_count && s_sq_gen == g_disk_write_gen)
+        return false;                                         // read-ahead hit
+    const uint8_t st = g_sd_as_state;
+    if (s_as_kind == 0 && g_sd_as_sector == sector) {
+        if (st == 3) return false;                            // prefetched: loadSector takes it
+        if (st == 1 || st == 2) { s_c17_sector = sector; s_c17 = 2; return true; }   // wait for it
+    }
+    s_c17_sector = sector;
+    s_c17 = 1;
+    c17TryPost();
+    return true;
+}
+
+// Data-token poll: 0 not yet, 1 the sector is in mmc_sector_buf, 2 the caller
+// must loadSector() it (failed / stale result).
+static int c17Ready() {
+    // Not taken by core1 within 3 ms (a busy or stalled renderer): read it here.
+    if ((uint32_t)(time_us_32() - s_c17_t0) > 3000u) {
+        uint8_t one = 1;
+        if (s_c17 == 1 || __atomic_compare_exchange_n(&g_sd_as_state, &one, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            s_c17 = 0;
+            return 2;                       // the caller loadSector()s (waits out a read in flight)
+        }
+    }
+    if (s_c17 == 1 && !c17TryPost()) return 0;
+    const uint8_t st = g_sd_as_state;
+    if (st != 3 && st != 4) return 0;
+    __dmb();
+    const uint32_t sector = s_c17_sector;
+    const bool ok = st == 3 && s_as_gen == g_disk_write_gen && g_sd_as_sector == sector;
+    if (ok && (s_as_kind == 0 || s_as_kind == 2)) {           // a burst: becomes the read-ahead
+        uint8_t* t = s_sq_buf; s_sq_buf = s_sq2; s_sq2 = t;
+        s_sq_base = sector; s_sq_count = DIVSD_RA_SECTORS; s_sq_gen = s_as_gen;
+        memcpy(DivMMC::mmc_sector_buf, s_sq_buf, 512);
+        g_sd_as_state = 0;
+        sqAsyncRequest(sector + DIVSD_RA_SECTORS);
+    } else if (ok) {
+        memcpy(DivMMC::mmc_sector_buf, s_sq2, 512);
+        g_sd_as_state = 0;
+    } else {
+        g_sd_as_state = 0;
+        s_c17 = 0;
+        return 2;                                             // failed / stale: the old way
+    }
+    s_sq_last = sector;
+    s_c17 = 0;
+    SDK(1, sector);
+    return 1;
+}
+
 void DivMMC::raInvalidate() {
     s_sq_base = 0xFFFFFFFFu;
     s_sq_count = 0;
+    sqAsyncDiscard();
 }
+
 
 
 void DivMMC::loadSector(uint32_t sector) {
@@ -1113,6 +1303,14 @@ void DivMMC::loadSector(uint32_t sector) {
             s_sq_gen == g_disk_write_gen) {
             memcpy(mmc_sector_buf, s_sq_buf + (size_t)(sector - s_sq_base) * 512, 512);
             s_sq_last = sector;
+            if (sector - s_sq_base >= 2) sqAsyncRequest(s_sq_base + s_sq_count);   // half in: post the next
+            SDK(0, sector);
+            return;
+        }
+        if (s_sq_buf && sqAsyncTake(sector)) {
+            memcpy(mmc_sector_buf, s_sq_buf, 512);
+            s_sq_last = sector;
+            SDK(1, sector);
             return;
         }
         uint64_t t0 = time_us_64();
@@ -1126,6 +1324,8 @@ void DivMMC::loadSector(uint32_t sector) {
                 s_sq_base = sector;
                 s_sq_count = DIVSD_RA_SECTORS;
                 memcpy(mmc_sector_buf, s_sq_buf, 512);
+                SDK(2, sector);
+                sqAsyncRequest(sector + DIVSD_RA_SECTORS);
             } else {
                 // e.g. burst past the end of the card — retry as single
                 raInvalidate();
@@ -1133,6 +1333,7 @@ void DivMMC::loadSector(uint32_t sector) {
             }
         } else {
             r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
+            SDK(3, sector);
         }
         const uint32_t sdUs = (uint32_t)(time_us_64() - t0);
         zc_rd_sectors++; zc_rd_us += sdUs;
@@ -1201,6 +1402,7 @@ void DivMMC::storeSector(uint32_t sector) {
 void DivMMC::mmc_cs(uint8_t value) {
     mmc_cs_active = (value & 0x01) == 0;  // Active low
     raEnd();
+    c17Abandon();
 
     // Reset protocol state on CS change (like ZEsarUX)
     mmc_r1 = 1;
@@ -1324,7 +1526,14 @@ DIVMMC_HOT uint8_t DivMMC::mmc_read() {
             if (mmc_read_index >= 0) {
                 if (mmc_read_index == 0) value = 0xFF;       // NCR
                 if (mmc_read_index == 1) value = 0;           // R1 = OK
-                if (mmc_read_index == 2) value = 0xFE;        // Data token
+                if (mmc_read_index == 2) {                    // Data token
+                    if (s_c17) {
+                        const int r = c17Ready();
+                        if (!r) return 0xFF;                  // the card is still reading (Nac)
+                        if (r == 2) loadSector(s_c17_sector);
+                    }
+                    value = 0xFE;
+                }
                 if (mmc_read_index >= 3 && mmc_read_index <= 514) {
                     if (sdhc_mode)
                         value = mmc_sector_buf[mmc_read_index - 3];
@@ -1357,9 +1566,15 @@ DIVMMC_HOT uint8_t DivMMC::mmc_read() {
                 if (mmc_read_index == 2) {                                   // data token
                     if (mmc_cont_pending) {
                         mmc_cont_pending = false;
-                        if (s_ra_on) loadSectorStream(mmc_read_address);
+                        if (Z80Ops::isNext) { if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address); }
+                        else if (s_ra_on) loadSectorStream(mmc_read_address);
                         else loadSector(mmc_read_address);
                         mmc_sector_buf_addr = mmc_read_address;
+                    }
+                    if (s_c17) {
+                        const int r = c17Ready();
+                        if (!r) return 0xFF;                                 // Nac: still reading
+                        if (r == 2) loadSector(s_c17_sector);
                     }
                     value = 0xFE;
                 }
@@ -1522,6 +1737,7 @@ void DivMMC::mmc_write(uint8_t value) {
         mmc_index_command++;
         mmc_wr_resp = -1;
         raEnd();                                   // the running CMD18 (if any) is over
+        c17Abandon();
 #if ZC_PORT_TRACE
         // Block commands are reported by load/storeSector with their sector;
         // here only the init/status frames, folded so a polled CMD13 cannot
@@ -1618,7 +1834,7 @@ void DivMMC::mmc_write(uint8_t value) {
                     { const uint32_t sector = mmc_read_address; ZS_T0();
                       loadSector(sector); ZS(ZS_C17, 1, "c17"); }
 #else
-                    loadSector(mmc_read_address);
+                    if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address);
 #endif
                     mmc_sector_buf_addr = mmc_read_address;
                 }
@@ -1641,8 +1857,12 @@ void DivMMC::mmc_write(uint8_t value) {
                 if (sdhc_mode) {
                     flushWriteBuffer();
                     raEnd();                       // a new stream starts
-                    s_ra_on = true;
-                    loadSectorStream(mmc_read_address);
+                    if (Z80Ops::isNext) {          // the 8-sector read-ahead + core1, as CMD17
+                        if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address);
+                    } else {
+                        s_ra_on = true;
+                        loadSectorStream(mmc_read_address);
+                    }
                     mmc_sector_buf_addr = mmc_read_address;
                 }
                 mmc_read_index = 0;

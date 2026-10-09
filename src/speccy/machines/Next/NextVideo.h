@@ -73,6 +73,7 @@ public:
     static uint8_t palRead9();
     static void palIndex(uint8_t v);
     static void palValue8(uint8_t v);
+    static bool nrHot(uint8_t r, uint8_t v);   // palette NEXTREGs in SRAM; false = not one of them
     static void palValue9(uint8_t v);
     static void palControl(uint8_t v);
 
@@ -137,7 +138,10 @@ public:
     // a snapshot of the registers it reads, core1 draws it. Anything the
     // renderer reads LIVE (palettes, sprite RAM, the pair tables, the
     // framebuffer itself) may only change after c1Drain().
-    static void c1Drain();
+    // src (NEXT_TRACE): 0 other, 1 palette entry, 2 palette rebuild, 3 copper mid-line segments
+    static void c1Drain(uint8_t src = 0);
+    // wait only for the posted lines that read guest RAM [o0, o1] of 16K bank `bank`
+    static void c1DrainRange(uint8_t bank, uint16_t o0, uint16_t o1);
     static void c1Pump();      // core1 render_core loop
 
 private:
@@ -153,6 +157,7 @@ private:
     static void RenderSpritesLine(int y);
     static void rebuildLut(uint8_t pal);
     static void setLutEntry(uint8_t pal, uint8_t idx, uint16_t rgb333);
+    static void palApply(uint32_t upto);   // renderer: palette log -> rawPal/lut
     static void buildRemap();
     static void defaultPalettes();
 
@@ -178,7 +183,7 @@ private:
     static uint8_t  sprFlags;            // bit0 collision, bit1 overflow
     static uint8_t  sprNrSlot;           // nextreg 0x34 sprite index (separate unless lockstep)
     // Attributes resolved against their anchors (relative / composite /
-    // unified), rebuilt lazily after any attribute write (sprDirty).
+    // unified), re-resolved on the renderer for the sprites the log touched.
     struct SprRes {
         int16_t  x;          // 0..511, wraps at 512; >319 is left of the display
         int16_t  y;          // -256..255
@@ -187,12 +192,26 @@ private:
         uint8_t  pal;        // palette offset (high nibble)
         uint8_t  xs, ys;     // scale shift 0..3
     };
-    enum : uint8_t { SR_XM = 1, SR_YM = 2, SR_ROT = 4, SR_4BPP = 8 };
-    static SprRes*  sprRes;              // [128] (in the Next heap block)
-    static uint8_t* sprVis;              // [128] visible sprite numbers, 0 -> 127
-    static uint8_t  sprVisN;
-    static bool     sprDirty;
-    static void     resolveSprites();
+    enum : uint8_t { SR_XM = 1, SR_YM = 2, SR_ROT = 4, SR_4BPP = 8, SR_VIS = 16 };
+    // Attribute writes never wait for core1 (each port 0x57 byte used to drain
+    // the whole line queue — Warhawk). core0 keeps sprAttr for itself and logs
+    // every byte {sprite, byte, value} into sprLog; each posted line carries the
+    // log position it was captured at, and the renderer applies the log up to
+    // that position to ITS copy (SprRender) and re-resolves only the sprites
+    // that changed (plus the relatives that follow them).
+    struct SprRender {
+        uint8_t attr[128][5];
+        SprRes  res[128];
+        uint8_t vis[128];    // visible sprite numbers, 0 -> 127
+        uint8_t n;
+        uint8_t dirty, lo, hi;   // resolve range [lo, hi] pending
+    };
+    static SprRender* sprR;              // renderer side (own heap block, with sprLog)
+    static uint32_t*  sprLog;            // [SPR_LOG] (sprite << 11) | (byte << 8) | value
+    static void     sprPut(uint8_t s, uint8_t b, uint8_t v);   // core0
+    static void     sprLogPut(uint32_t e);                       // core0: attr or (bit 31) pattern byte
+    static void     sprApply(uint32_t upto);                    // renderer
+    static void     resolveSprites();                           // renderer, the dirty range
 
     // copper state
     // Run the copper over hc_ula [from, to) of the copper line `cvc`

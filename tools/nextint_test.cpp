@@ -9,6 +9,7 @@
 #include <cstdio>
 #include "speccy/machines/Next/NextInt.h"
 #include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextMf.h"
 #include "app/ESPectrum.h"
 #include "speccy/z80/CPU.h"
 #include "speccy/z80/z80.h"
@@ -27,6 +28,7 @@ bool NextReg::portFFIntDisable = false;
 uint16_t NextReg::paperLineV = 63;
 static uint8_t g_timing = 2;   // 128K
 uint8_t NextReg::machineTiming() { return g_timing; }
+bool NextMf::active() { return false; }
 
 static int g_fail = 0, g_n = 0;
 #define CHECK(c, ...) do { g_n++; if (!(c)) { g_fail++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)

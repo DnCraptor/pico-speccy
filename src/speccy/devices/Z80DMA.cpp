@@ -19,6 +19,8 @@
 #include "speccy/z80/z80.h"
 #include "speccy/core/Rzx.h"
 #include "speccy/machines/Next/NextInt.h"
+#include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextVideo.h"
 #include "app/ESPectrum.h"
 #include "app/TryAlloc.h"
 
@@ -49,6 +51,7 @@ uint8_t  Z80DMA::r4_mode = 1;       // dma.vhd reset: "01" continuous
 uint16_t Z80DMA::nx_counter = 0;
 bool     Z80DMA::nxPending = false;
 bool     Z80DMA::nxStall = false;
+bool     Z80DMA::nxDrainDue = false;
 uint32_t Z80DMA::nxNextT = 0;
 
 // Working state
@@ -521,6 +524,7 @@ void Z80DMA::doEnable() {
         // CPU::loop: the first byte is due now.
         if (!prescalar && !auto_restart) { nxRunSync(); return; }
         nxPending = true;
+        nxDrainDue = true;
         nxStall = !(r4_mode == 2 && prescalar);   // burst + prescaler frees the bus
         nxNextT = CPU::tstates;
         NextInt::wake();
@@ -564,6 +568,29 @@ void Z80DMA::nxOneByte() {
 
 bool Z80DMA::nxBlockDone() { return !(nx_counter < block_length); }
 
+// nxOneByte without the Draw calls: the caller guarantees the byte ends before
+// the next line boundary / interrupt event / frame end, where Draw (NEXTVID::Tick)
+// would only add the T-states.
+inline __attribute__((always_inline)) void Z80DMA::nxByteNoDraw(uint8_t ca, uint8_t cb) {
+    uint8_t val;
+    if (transfer_dir) {
+        CPU::tstates += ca;
+        val = port_a_is_io ? Ports::dmaInput(cur_port_a) : MemESP::readbyte(cur_port_a);
+        CPU::tstates += cb;
+        if (port_b_is_io) Ports::dmaOutput(cur_port_b, val);
+        else MemESP::writebyte(cur_port_b, val);
+    } else {
+        CPU::tstates += cb;
+        val = port_b_is_io ? Ports::dmaInput(cur_port_b) : MemESP::readbyte(cur_port_b);
+        CPU::tstates += ca;
+        if (port_a_is_io) Ports::dmaOutput(cur_port_a, val);
+        else MemESP::writebyte(cur_port_a, val);
+    }
+    cur_port_a += port_a_inc;
+    cur_port_b += port_b_inc;
+    nx_counter++;
+}
+
 // FINISH_DMA with auto-restart: the start addresses and the counter reload;
 // status_endofblock_n stays low (only LOAD / CONTINUE / 0x8B raise it).
 void Z80DMA::nxReload() {
@@ -572,8 +599,79 @@ void Z80DMA::nxReload() {
     nx_counter = z80Mode() ? 0xFFFF : 0;
 }
 
+// Does a memory write to this 8K page feed the picture? ULA screen / tilemap /
+// LoRes (16K banks 5 and 7), the displayed Layer 2 (NR 0x12, 3 or 5 banks).
+static bool nxVideoPage(uint8_t pg) {
+    const uint8_t bank = pg >> 1;
+    if (bank == 5 || bank == 7) return true;
+    const uint8_t l2 = NextReg::reg[0x12] & 0x7F;
+    const uint8_t n = (NextReg::reg[0x70] & 0x30) ? 5 : 3;
+    return bank >= l2 && bank < l2 + n;
+}
+
+// A memory block written into guest video RAM: core1 reads that RAM live and
+// lags core0 by some lines, so a block landing faster than the lines already
+// past are drawn shows up in them (the batched DMA below is ~10x faster than
+// the CPU could write it — TX-1696's ground jumped for a frame, hw 2026-10-09).
+// Let core1 catch up first: one wait per such transfer.
+static void nxVideoDrain(uint16_t dest, bool io, int8_t inc, uint16_t len) {
+    if (io) return;
+    if (NextReg::port123B & 0x01) { NEXTVID::c1Drain(0); return; }   // Layer 2 write-over
+    // the 8K slots the block touches (a wrap past 0xFFFF / 0x0000 takes them all)
+    int lo = dest, hi = dest;
+    if (inc > 0) hi = dest + len;
+    else if (inc < 0) lo = dest - len;
+    const int s0 = lo < 0 ? 0 : lo >> 13, s1 = hi > 0xFFFF ? 7 : hi >> 13;
+    for (int sl = (lo < 0 || hi > 0xFFFF) ? 0 : s0; sl <= ((lo < 0 || hi > 0xFFFF) ? 7 : s1); sl++) {
+        const uint8_t pg = MemESP::mmu[sl];
+        if (pg != 0xFF && nxVideoPage(pg)) {
+#if NEXT_TRACE
+            // which video RAM the drained blocks write: 8K page + offset/256 of the start
+            extern volatile uint32_t (*g_nx_dmav)[3];   // [8] {key, count, bytes}
+            if (g_nx_dmav) {
+            const uint32_t key = ((uint32_t)MemESP::mmu[dest >> 13] << 8) | ((dest & 0x1FFF) >> 8) | 0x10000u;
+            int k = 0;
+            for (; k < 8; k++) if (g_nx_dmav[k][0] == key || g_nx_dmav[k][0] == 0) break;
+            if (k < 8) { g_nx_dmav[k][0] = key; g_nx_dmav[k][1]++; g_nx_dmav[k][2] += len + 1; }
+            }
+#endif
+            // the block in this slot, as a 16K-bank offset range
+            const bool wrap = lo < 0 || hi > 0xFFFF;
+            const uint16_t a0 = (uint16_t)(wrap || (sl << 13) > lo ? (sl << 13) : lo);
+            const uint16_t a1 = (uint16_t)(wrap || ((sl << 13) | 0x1FFF) < hi ? ((sl << 13) | 0x1FFF) : hi);
+            const uint16_t base = (uint16_t)((pg & 1) << 13);
+            NEXTVID::c1DrainRange(pg >> 1, (uint16_t)(base | (a0 & 0x1FFF)), (uint16_t)(base | (a1 & 0x1FFF)));
+        }
+    }
+}
+
+// The batch loop of nxRunSync, in SRAM (the Next code overlay window): from
+// flash every copied byte cost ~20 XIP fetches, and TX-1696's big memory DMAs
+// (tile rows, sprite patterns) made single frames 25-60 ms — 3.2 ms per million
+// XIP accesses, hw 2026-10-09.
+__attribute__((section(".nxdma_hot"), noinline)) bool Z80DMA::nxBatch(uint32_t stop, uint8_t ca, uint8_t cb) {
+    const uint32_t cyc = (uint32_t)ca + cb;
+#if NEXT_TRACE
+    uint32_t n = 0;
+#endif
+    bool done = false;
+    while (CPU::tstates + cyc < stop) {
+        nxByteNoDraw(ca, cb);
+#if NEXT_TRACE
+        n++;
+#endif
+        if (!(nx_counter < block_length)) { done = true; break; }
+    }
+#if NEXT_TRACE
+    g_dma_bytes += n;
+#endif
+    return done;
+}
+
 void Z80DMA::nxRunSync() {
     const uint16_t dest_start = transfer_dir ? cur_port_b : cur_port_a;
+    nxVideoDrain(dest_start, transfer_dir ? port_b_is_io : port_a_is_io,
+                 transfer_dir ? port_b_inc : port_a_inc, block_length);
     // A memory DMA into an attribute area: the per-scanline multicolour shadow
     // (NaPICu and the like), taken on the first such transfer of the session.
     if (!dma_attr_shadow && !(transfer_dir ? port_b_is_io : port_a_is_io) &&
@@ -593,6 +691,24 @@ void Z80DMA::nxRunSync() {
             nxNextT = CPU::tstates;
             NextInt::wake();
             return;
+        }
+        // Batch: every byte that ends before the next line boundary, interrupt
+        // event or the frame end. Nothing changes between those — the CPU is
+        // held, so dmaDelay() (a NextInt sync, 64-bit time math) holds too and
+        // Draw would only add T-states. TX-1696 ~2000 bytes a frame into #5B:
+        // ~4.5 ms of core0 at a dmaDelay + two Draws per byte (hw 2026-10-09).
+        {
+            uint32_t stop = VIDEO::ts_line_t;   // = NEXTVID::nextLineTstate
+            if (NextInt::ex) stop = NextInt::nextEventT(stop);
+            if (stop > CPU::statesInFrame) stop = CPU::statesInFrame;
+            const uint8_t ca = port_a_cycles, cb = port_b_cycles;
+            const uint32_t cyc = (uint32_t)ca + cb;
+            bool done = false;
+            dma_in_progress = true;
+            transfer_started = true;
+            if (CPU::tstates + cyc < stop) done = nxBatch(stop, ca, cb);
+            dma_in_progress = false;
+            if (done) break;
         }
         nxOneByte();
 #if NEXT_TRACE
@@ -649,14 +765,43 @@ bool Z80DMA::nxService(uint32_t limit) {
             if (CPU::tstates < nxNextT) return true;   // slice end: still holding the bus
         }
         const uint32_t t0 = CPU::tstates;
-        nxOneByte();
+        // Back to back (no prescaler, i.e. an auto-restart block): the bytes up
+        // to the next line boundary / interrupt event / slice end in one batch,
+        // as nxRunSync does — byte by byte this path paid dmaDelay + two Draws
+        // + a slice turn per byte, ~7 ms of a TX-1696 frame (hw 2026-10-09).
+        bool batched = false;
+        if (!prescalar) {
+            uint32_t stop = VIDEO::ts_line_t;
+            if (NextInt::ex) stop = NextInt::nextEventT(stop);
+            if (stop > limit) stop = limit;
+            if (stop > CPU::statesInFrame) stop = CPU::statesInFrame;
+            const uint8_t ca = port_a_cycles, cb = port_b_cycles;
+            if (CPU::tstates + (uint32_t)ca + cb < stop) {
+                if (nxDrainDue) {   // once per block: core1 must not lag a video-RAM block
+                    nxDrainDue = false;
+                    nxVideoDrain(transfer_dir ? cur_port_b : cur_port_a,
+                                 transfer_dir ? port_b_is_io : port_a_is_io,
+                                 transfer_dir ? port_b_inc : port_a_inc,
+                                 (uint16_t)(block_length - nx_counter));
+                }
+                dma_in_progress = true;
+                transfer_started = true;
+                nxBatch(stop, ca, cb);
+                dma_in_progress = false;
+                batched = true;
+            }
+        }
+        if (!batched) {
+            nxOneByte();
 #if NEXT_TRACE
-        g_dma_bytes++;
+            g_dma_bytes++;
 #endif
+        }
         if (nxBlockDone()) {
             block_end = true;
             if (auto_restart && transfer_active) {
                 nxReload();
+                nxDrainDue = true;
             } else {
                 transfer_active = false;
                 nxPending = false;

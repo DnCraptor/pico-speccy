@@ -86,6 +86,7 @@ public:
     // (the menu's CPU cap hook; also the body of a 0x07 write).
     static void applySpeed();
     static uint8_t read(uint8_t r);
+    static void    rasterPollFF(uint8_t k);   // k: 0 = NR 0x1E, 1 = 0x1F   // NR 0x1E/0x1F busy-wait fast-forward
 
     // Legacy paging on Next (called from Ports.cpp with Next decodes)
     static void write7FFD(uint8_t v);

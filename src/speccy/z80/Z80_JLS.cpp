@@ -47,6 +47,7 @@
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/core/Rzx.h"     // Rzx::mode / onIn: RZX playback substitutes every IN
 #include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextVideo.h"
 #include "speccy/machines/Next/NextInt.h"
 #include "speccy/machines/Next/NextMf.h"
 #include "speccy/z80/next_memory.h"
@@ -3651,7 +3652,7 @@ void Z80::decodeED(void) {
             uint8_t v = Z80Ops::peek8(REG_PC);
             REG_PC++;
             Z80Ops::addressOnBus(getPairIR().word, 6);
-            NextReg::write(r, v);
+            if (!NEXTVID::nrHot(r, v)) NextReg::write(r, v);
             break;
         }
         case 0x92:
@@ -3660,7 +3661,7 @@ void Z80::decodeED(void) {
             uint8_t r = Z80Ops::peek8(REG_PC);
             REG_PC++;
             Z80Ops::addressOnBus(getPairIR().word, 6);
-            NextReg::write(r, regA);
+            if (!NEXTVID::nrHot(r, regA)) NextReg::write(r, regA);
             break;
         }
         case 0x93:
