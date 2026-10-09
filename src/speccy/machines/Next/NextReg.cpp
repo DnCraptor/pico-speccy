@@ -5,6 +5,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 */
 
 #include "NextReg.h"
+#include "speccy/machines/Next/NextIdle.h"
 #include "speccy/core/MemESP.h"
 #include "speccy/core/Ports.h"
 #include "speccy/z80/CPU.h"
@@ -264,10 +265,13 @@ void next_trace_dump(uint32_t frames) {
                 const uint32_t hit = *xh, acc = *xa;
                 *xh = 0; *xa = 0;                 // write clears
                 extern volatile uint32_t g_nx_rlff_n, g_nx_rlff_t;
-                Debug::log("NEXT rlff: %u/fr skipped %u%% of the frame",
+                Debug::log("NEXT rlff: %u/fr skipped %u%% of the frame | idle loop %u/fr skipped %u%%",
                     (unsigned)(g_nx_rlff_n / f),
-                    (unsigned)((uint64_t)g_nx_rlff_t * 100u / ((uint64_t)CPU::statesInFrame * f)));
+                    (unsigned)((uint64_t)g_nx_rlff_t * 100u / ((uint64_t)CPU::statesInFrame * f)),
+                    (unsigned)(NextIdle::g_nx_idle_n / f),
+                    (unsigned)((uint64_t)NextIdle::g_nx_idle_t * 100u / ((uint64_t)CPU::statesInFrame * f)));
                 g_nx_rlff_n = g_nx_rlff_t = 0;
+                NextIdle::g_nx_idle_n = NextIdle::g_nx_idle_t = 0;
                 Debug::log("NEXT z80: fm=%u rd=%u m1=%u/fr %uns/m1 act=%u%% T/fr=%u xip=%u/fr miss=%u/fr",
                     (unsigned)g_ts_fastmem, (unsigned)g_ts_fastrd, (unsigned)(dr / f),
                     dr ? (unsigned)((uint64_t)dc * 1000u / dr) : 0u,

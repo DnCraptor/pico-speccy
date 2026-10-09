@@ -39,6 +39,7 @@ public:
     // HALT flush (CPU::FlushOnHaltTo): advance CPU::tstates to stEnd a line at
     // a time, rendering each line crossed, R stepped as by 4T HALT cycles.
     static void haltAdvanceTo(uint32_t stEnd);
+    static bool idleAdvanceTo(uint32_t stEnd);   // NextIdle: like haltAdvanceTo, R untouched; false = contended (not done)
     // The line-boundary crossing of the fast memory path (VIDEO::tsDrawTick).
     static void lineTick();
 

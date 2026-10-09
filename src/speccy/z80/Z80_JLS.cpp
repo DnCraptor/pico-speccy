@@ -47,6 +47,7 @@
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/core/Rzx.h"     // Rzx::mode / onIn: RZX playback substitutes every IN
 #include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextIdle.h"
 #include "speccy/machines/Next/NextVideo.h"
 #include "speccy/machines/Next/NextInt.h"
 #include "speccy/machines/Next/NextMf.h"
@@ -885,6 +886,11 @@ Z80_COLD uint8_t Z80::scorp_dos_exit_rom() {
                      | (g_scorp_banked ? (Ports::gmxPlane << 2) : 0));
 }
 
+// True only while exec_nocheck() runs: the INT line is sampled at the slice
+// boundary (CPU::stFrame) and nowhere inside it — the one context where the
+// Next idle-loop fast-forward (NextIdle) may move the clock to stFrame.
+static bool z80_in_nocheck = false;
+
 IRAM_ATTR void Z80::check_trdos() {
 
     // TS-Conf owns its window-0 mapping (Page0/MemConfig) — the generic code
@@ -911,6 +917,11 @@ IRAM_ATTR void Z80::check_trdos() {
 #if NEXT_TRACE
         nxJumpNote('J');
 #endif
+        // A target taken twice in a row may be a memory-poll idle loop
+        // (NextIdle.h: Pogie's main loop, 55% of the frame).
+        if (REG_PC == NextIdle::tgt) {
+            if (z80_in_nocheck && REG_PC != NextIdle::rej) NextIdle::jump();
+        } else NextIdle::tgt = REG_PC;
         return;
     }
 
@@ -1453,11 +1464,7 @@ IRAM_ATTR void Z80::execute() {
 
 }
 
-// True only while exec_nocheck() runs: the INT line is sampled at the slice
-// boundary (CPU::stFrame) and nowhere inside it. Kept after the LDIR/LDDR
-// batching that needed it was removed (see the note further down) — a future
-// batcher would need exactly this distinction again.
-static bool z80_in_nocheck = false;
+// z80_in_nocheck: defined near check_trdos (the Next idle-loop hook reads it).
 
 IRAM_ATTR void Z80::exec_nocheck() {
 

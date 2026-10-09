@@ -423,6 +423,22 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   выключают), prev = 4 бита/пиксель paper (24 КБ PSRAM), смесь 16x16 → ближайший индекс
   NEXTVID (`gigsBlend`, без записи слотов палитры), Auto по флипу #7FFD b3 / NR 69 b6.
   Общий Gigascreen (prev-FB + слоты 17..136) на Next подавлен: те слоты — решётка NEXTVID.
+- **Santa / Pogie до 50/60 FPS** (2026-10-10, hw-confirmed: Santa «теперь хорошо» на
+  santa4, Pogie 60 Hz «отлично» на pogie1). Santa (L2 + тайлмап + спрайты, ULA off) был
+  core1-bound (`c1` 24 ms): микшер = один буфер ula_final (`nxUlaMerge` только при ULA И
+  тайлмапе, иначе указатель на слой), `__restrict` + локалы, 12 шаблонов вместо 18
+  (хост-тест 19.2 M пикселей против старой логики = 0); `SprRender` — статик в окне
+  `.nxovl` (`HOT_SRAM` на тонкой куче отдавал его в PSRAM); быстрый путь целого тайла
+  (n==8: слово -> полубайты, X-зеркало = bswap); L2 256x192 по 4 px — без эффекта, строка
+  L2 упирается в PSRAM (банк 8+). Pogie был core0-bound: главный цикл не HALT, а опрос
+  флага ISR `EI / LD A,(nn) / OR A / JP Z` (55% кадра). `NextIdle` (machines/Next, флеш,
+  хук = 2 сравнения в Next-ветке `check_trdos`): после двух равных витков такого цикла
+  время уходит к концу среза (следующее событие INT/DMA) целыми витками,
+  `NEXTVID::idleAdvanceTo` рисует строки, R += выборки. Только в `exec_nocheck`, IFF1=1,
+  не contended, не RZX, PC >= 0x4000; ловит только `JP cc` (не JR). NEXT_TRACE:
+  `NEXT rlff: ... | idle loop N/fr skipped X%`. Trace-сборка сама тормозит core0
+  (`nxJumpNote` на каждом JP/RET) — FPS только по обычной сборке. Окно `.nxovl` почти
+  полное (~240 B), следующий рост — поднимать AUTO.
 - **DS1307 на I2C** (2026-10-07, hw-confirmed: часы в NextZXOS): `machines/Next/
   NextRtc.cpp` (flash) — честный I2C-слейв на #103B/#113B (START/STOP по SDA при
   SCL=1, ACK на каждый байт, автоинкремент 0..63, ACK/NACK мастера), адрес 0x68,
