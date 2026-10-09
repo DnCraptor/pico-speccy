@@ -36,6 +36,7 @@
 extern "C" int   graphics_fast_mode(int mode);
 extern "C" int   graphics_540_mode(int mode);
 extern "C" int   graphics_xga_mode(int x3);
+extern "C" int   graphics_big_mode(int vm, unsigned mhz, int klass);
 #ifdef VGA_HDMI
 extern "C" int   vga_sm_px_bytes(void);   // 1 narrow, 4 with VGA PWM live
 #endif
@@ -174,39 +175,43 @@ static const Option opt_audio_driver[] = {
     { "PCM5122",  5 },              // ZERO2's I2S DAC board (I2C-configured)
 #endif
 };
-static constexpr Option opt_video_mode[] = {   // values are the VM_* enum (constexpr: the
-                                              // static_asserts below read .value)
-    { "640x480 @60", 0 },
-    { "640x480 @50", 1 },
-    { "720x480 @60", 2 },
-    { "720x576 @50", 3 },
-    // 37.8 MHz pixel clock instead of 25.2 (PIO divider 1.0 at sys_clk 378 MHz):
-    // same geometry, x1.5 the refresh. Need CPU 378 MHz and force V-Sync off —
-    // resolveConstraints() settles both, whichever the user edited last.
-    // video_modeOpts() hides these four at any other CPU clock, and it does that
-    // by TRUNCATING the table, so they must stay last and contiguous.
-    { "640x480 @90", 4 },
-    { "640x480 @75", 5 },
-    { "720x480 @90", 6 },
-    { "720x576 @75", 7 },
-    // 1024x768 @59 (54 MHz pixel): HDMI only, CPU 540 only — hidden otherwise.
-    // x4 = the centre 256x192 (no border), x3 = the whole 320x240 as 960x720.
-    { "1024x768 @59 x4", 8 },
-    { "1024x768 @59 x3", 9 },
+// The Video > Mode list, sorted by resolution, then refresh, then scale. The label
+// is built per call (video_modeOpts): "<W>x<H> @<Hz> D<div> Bx<n> <aspect>" on a PIO
+// build, "H/<div>" in place of "D<div>" on an HSTX one (the clk_sys -> clk_hstx
+// divider), "K<k>" for VGA on HSTX. B = output pixels per framebuffer pixel.
+// hz 0 = depends on the clock / output (1024x768: 59 at 540, else 50; the big modes
+// on VGA run VESA 60 Hz).
+struct VmRow { uint8_t vm; uint16_t w, h; uint8_t hz; const char* b; const char* asp; };
+static constexpr VmRow kVmRows[] = {
+    {  1,  640,  480, 50, "2",   "4:3"  },
+    {  0,  640,  480, 60, "2",   "4:3"  },
+    {  5,  640,  480, 75, "2",   "4:3"  },
+    {  4,  640,  480, 90, "2",   "4:3"  },
+    {  2,  720,  480, 60, "2",   "4:3"  },
+    {  6,  720,  480, 90, "2",   "4:3"  },
+    {  3,  720,  576, 50, "2",   "4:3"  },
+    { 12,  720,  576, 50, "1.5", "16:9" },   // HDMI on HSTX (TMDS) only
+    {  7,  720,  576, 75, "2",   "4:3"  },
+    { 11,  800,  600,  0, "2",   "4:3"  },
+    { 10,  800,  600,  0, "3",   "4:3"  },
+    {  9, 1024,  768,  0, "3",   "4:3"  },
+    {  8, 1024,  768,  0, "4",   "4:3"  },
+    { 13, 1280,  720, 50, "3",   "16:9" },
+    { 15, 1280,  720, 60, "3",   "16:9" },   // HSTX @378, V-Sync off
+    { 16, 1440,  480, 60, "3",   "16:9" },   // CEA VIC 15 at 540, V-Sync off
+    { 14, 1440,  576, 50, "3",   "16:9" },   // CEA VIC 30 at 540
 };
-static constexpr uint8_t kVmOptCount  = sizeof(opt_video_mode)/sizeof(opt_video_mode[0]);
-static constexpr uint8_t kVmBaseCount = 4;   // entries before the 90/75 Hz set
-static constexpr uint8_t kVmFastEnd   = 8;   // one past the 90/75 Hz set (1024x768 follows)
-static_assert(!Config::isFastVideoMode((uint8_t)opt_video_mode[kVmBaseCount - 1].value),
-              "opt_video_mode: the standard modes must come first");
-static_assert(Config::isFastVideoMode((uint8_t)opt_video_mode[kVmBaseCount].value),
-              "opt_video_mode: the 90/75 Hz set must follow them");
-static_assert(Config::isFastVideoMode((uint8_t)opt_video_mode[kVmFastEnd - 1].value),
-              "opt_video_mode: the 90/75 Hz set must be contiguous");
-static_assert(Config::isXgaVideoMode((uint8_t)opt_video_mode[kVmFastEnd].value)
-              && Config::isXgaVideoMode((uint8_t)opt_video_mode[kVmFastEnd + 1].value)
-              && kVmOptCount == kVmFastEnd + 2,
-              "opt_video_mode: the two 1024x768 modes are the last entries");
+static constexpr uint8_t kVmOptCount = sizeof(kVmRows) / sizeof(kVmRows[0]);
+static_assert(kVmOptCount == Config::VM_LAST + 1, "kVmRows: one row per VM_* value");
+
+static unsigned vmRowHz(const VmRow& r, unsigned mhz, int vga) {
+    if (r.hz) return r.hz;
+    if (vga) return 60;                                   // VESA timings
+    if (r.vm == Config::VM_1024x768_59 || r.vm == Config::VM_1024x768_59X3)
+        return mhz == Config::CPU_540_MHZ ? 59 : 50;
+    return 50;
+}
+
 // The video-mode list carries the PIO divider each mode would run at, because that
 // divider is the whole point of the "fast" set and of the VGA pixel clocks: an
 // integer one repeats its phase per pixel, a fractional one jitters (1.5 is the
@@ -220,13 +225,17 @@ static_assert(Config::isXgaVideoMode((uint8_t)opt_video_mode[kVmFastEnd].value)
 // representative graphics.c index per VM_* value gives the exact divider without
 // duplicating VIDEO::Reset()'s arch-dependent mapping here.
 static int vmGraphicsIndex(int32_t vm, unsigned mhz, int vga) {
-    // HDMI at 540: the 27 MHz twins, and 1024x768 (HDMI-only, 540-only).
-    if (!vga && Config::isXgaVideoMode((uint8_t)vm))
-        return graphics_xga_mode(Config::isXga3VideoMode((uint8_t)vm) ? 1 : 0);
+    // The big modes are HDMI-only; at a clock that cannot run one, quote its own clock.
+    if (Config::isBigVideoMode((uint8_t)vm)) {
+        if (vga || !Config::bigModeClockOk((uint8_t)vm, (uint16_t)mhz)) mhz = Config::bigModePrefClock((uint8_t)vm);
+        const int big = graphics_big_mode(vm, mhz, 0);
+        return big >= 0 ? big : 0;
+    }
     int idx;
     switch (Config::baseVideoMode((uint8_t)vm)) {
         case Config::VM_640x480_50: idx = 1; break;
-        case Config::VM_720x576_50: idx = 4; break;
+        case Config::VM_720x576_50:
+        case Config::VM_720x576_169: idx = 4; break;
         case Config::VM_720x480_60: idx = 7; break;
         default:                    idx = 0; break;  // VM_640x480_60
     }
@@ -283,27 +292,53 @@ static bool vmFastOffered() {
     // which resolveConstraints already forces.
     return (unsigned)Stage::get(SET_CPU_MHZ) == Config::VM_FAST_CPU_MHZ;
 }
-// 1024x768 x4: HDMI output and a staged CPU clock of 540 (same "keep the staged
-// row" exception as the fast set).
-static bool vmXgaOffered() {
+// The big modes: PIO HDMI (an HSTX build cannot make their clocks) at a staged CPU
+// clock that runs them, or PIO VGA at any clock (its 63 / 42 MHz pixel is an integer
+// divider at 252/378/504). Same "keep the staged row" exception as the fast set.
+static bool vmBigVga() {
 #ifdef VGA_HDMI
-    if (SELECT_VGA) return false;
+    return SELECT_VGA;
+#else
+    return false;
 #endif
-    return (unsigned)Stage::get(SET_CPU_MHZ) == Config::CPU_540_MHZ;
 }
-static bool vmRowVisible(int32_t vm, bool fastOk, bool xgaOk, int32_t staged) {
+static bool vmBigOffered() {
+    if (vmBigVga()) {
+#if defined(VGA_HDMI) && !VGA_HSTX
+        return true;
+#else
+        return false;
+#endif
+    }
+#if HDMI_HSTX
+    return HDMI_HSTX == 2;   // the TMDS expander; bigModeClockOk() narrows it per mode
+#else
+    return true;
+#endif
+}
+static bool vmRowVisible(int32_t vm, bool fastOk, bool bigOk, int32_t staged) {
     if (vm == staged) return true;
-    if (Config::isXgaVideoMode((uint8_t)vm)) return xgaOk;
+    if (vm == Config::VM_720x576_169) {   // HDMI on HSTX (TMDS expander) only
+#if defined(HDMI_HSTX) && HDMI_HSTX == 2
+        return !vmBigVga();
+#else
+        return false;
+#endif
+    }
+    if (Config::isBigVideoMode((uint8_t)vm))
+        return bigOk && (vmBigVga() ? !Config::isHdmiOnlyVideoMode((uint8_t)vm)
+                                    : Config::bigModeClockOk((uint8_t)vm, (uint16_t)Stage::get(SET_CPU_MHZ)));
     return !Config::isFastVideoMode((uint8_t)vm) || fastOk;
 }
 
 static const Option* video_modeOpts(uint8_t& cnt) {
     const int32_t staged = Stage::get(SET_VIDEO_MODE);
-#if defined(VGA_HDMI) || defined(HDMI)
-    const bool fastOk = vmFastOffered();
-    const bool xgaOk  = vmXgaOffered();
     static Option opts[kVmOptCount];
     static char lbl[kVmOptCount][40];
+    static char slbl[kVmOptCount][24];
+#if defined(VGA_HDMI) || defined(HDMI)
+    const bool fastOk = vmFastOffered();
+    const bool xgaOk  = vmBigOffered();
   #ifdef VGA_HDMI
     const int vga = ::SELECT_VGA ? 1 : 0;
   #else
@@ -313,92 +348,87 @@ static const Option* video_modeOpts(uint8_t& cnt) {
     // 378 MHz through resolveConstraints, and a label computed from the live clock
     // would contradict the constraint that just fired.
     const unsigned mhz = (unsigned)Stage::get(SET_CPU_MHZ);
+#else
+    const int vga = 0;
+    const unsigned mhz = (unsigned)Stage::get(SET_CPU_MHZ);
+#endif
     uint8_t n = 0;
     for (uint8_t i = 0; i < kVmOptCount; i++) {
-        const int32_t vm = opt_video_mode[i].value;
+        const VmRow& r = kVmRows[i];
+        const int32_t vm = r.vm;
+#if defined(VGA_HDMI) || defined(HDMI)
         if (!vmRowVisible(vm, fastOk, xgaOk, staged)) continue;
-        const uint8_t o = n++;
-        opts[o] = opt_video_mode[i];
-#if HDMI_HSTX || VGA_HSTX
-        // On an HSTX build the PIO divider the label used to quote DOES NOT EXIST:
-        // the serializer is fed by clk_hstx = clk_sys / 1..4 and nothing here goes
-        // near a state machine.  Quote what the hardware is actually given.
-        //  - HDMI: the clk_sys -> clk_hstx divider, from the driver's own helper.
-        //    It is the quantity that decides whether the mode is reachable at all
-        //    (1..4, exact) and its PARITY is what the 378 MHz fault turns on.
-        //  - VGA: clk_hstx is pinned at 126 MHz, so that divider is the same for
-        //    every row and says nothing; what differs per mode is k, the clk_hstx
-        //    cycles per pixel, which sets the PWM phase weights and level count.
+        // A mode the staged clock cannot run is quoted at the clock it needs:
+        // the 90/75 Hz set at VM_FAST_CPU_MHZ, a big mode at its preferred clock.
+        unsigned lm = mhz;
+        if (Config::isFastVideoMode((uint8_t)vm) && mhz != Config::VM_FAST_CPU_MHZ)
+            lm = Config::VM_FAST_CPU_MHZ;
+        if (!vga && Config::isBigVideoMode((uint8_t)vm) && !Config::bigModeClockOk((uint8_t)vm, (uint16_t)mhz))
+            lm = Config::bigModePrefClock((uint8_t)vm);
+        const int gi = vmGraphicsIndex(vm, lm, vga);
+        char dv[20];
+  #if HDMI_HSTX || VGA_HSTX
+        // On an HSTX build there is no PIO divider: the serializer is fed by
+        // clk_hstx = clk_sys / 1..4. HDMI quotes that divider (its parity is what
+        // decides a clean clock); VGA, whose clk_hstx is pinned at 126 MHz, quotes
+        // k, the clk_hstx cycles per pixel.
+    #if VGA_HSTX
+        if (vga) {
+            const int k = vga_hstx_cycles(graphics_mode_vga_pixel_hz(gi));
+            if (k > 0) snprintf(dv, sizeof(dv), "K%d", k);
+            else       snprintf(dv, sizeof(dv), "K-");
+        } else
+    #endif
         {
-            const unsigned lm = (Config::isFastVideoMode((uint8_t)vm) && mhz != Config::VM_FAST_CPU_MHZ) ? (unsigned)Config::VM_FAST_CPU_MHZ : mhz;
-            const int gi = vmGraphicsIndex(vm, lm, vga);
-            char tail[20];
-  #if VGA_HSTX
-            if (vga) {
-                const int k = vga_hstx_cycles(graphics_mode_vga_pixel_hz(gi));
-                if (k > 0) snprintf(tail, sizeof(tail), "hstx k=%d", k);
-                else       snprintf(tail, sizeof(tail), "hstx n/a");
-            } else
-  #endif
-            {
-                const uint32_t dv = hdmi_hstx_div_at(graphics_mode_tmds_mhz(gi),
-                                                     lm * 1000000u);
-                if (dv >= 1 && dv <= 4) snprintf(tail, sizeof(tail), "hstx /%u", (unsigned)dv);
-                else                    snprintf(tail, sizeof(tail), "hstx n/a");
-            }
-            if (lm != mhz) snprintf(lbl[o], sizeof(lbl[o]), "%s (%s@%u)",
-                                    opt_video_mode[i].label, tail, lm);
-            else           snprintf(lbl[o], sizeof(lbl[o]), "%s (%s)",
-                                    opt_video_mode[i].label, tail);
+            const uint32_t d = hdmi_hstx_div_at(graphics_mode_tmds_mhz(gi), lm * 1000000u);
+            if (d >= 1 && d <= 4) snprintf(dv, sizeof(dv), "H/%u", (unsigned)d);
+            else                  snprintf(dv, sizeof(dv), "H/-");
         }
-#else
-        float d = graphics_clk_div_at(vmGraphicsIndex(vm, mhz, vga), mhz, vga);
-        // With VGA PWM live the SM emits FOUR bytes per pixel, so it runs four
-        // times faster and the divider the PIO is actually given is four times
-        // smaller.  The row exists to say what the hardware gets, so it says that.
+  #else
+        float d = graphics_clk_div_at(gi, lm, vga);
+        // With VGA PWM live the SM emits FOUR bytes per pixel, so the divider the
+        // PIO is actually given is four times smaller. The row says what it gets.
         if (vga && d > 0.0f) d /= (float)vga_sm_px_bytes();
         char ds[16];
-        // A mode the CPU clock cannot reach still says what its divider WOULD be,
-        // and at which clock: "(div 1.0/378)". The 90/75 Hz set is refused by
-        // resolveConstraints at any clock but 378 even where the divider it has
-        // here is legal (VGA: 6.625 at 252 MHz), so the number quoted is the one
-        // at VM_FAST_CPU_MHZ, not the one at `mhz`.
-        const bool needsFast = Config::isFastVideoMode((uint8_t)vm) &&
-                               mhz != Config::VM_FAST_CPU_MHZ;
-        const bool needsXga  = Config::isXgaVideoMode((uint8_t)vm) &&
-                               mhz != Config::CPU_540_MHZ;
-        if (needsFast || needsXga || d <= 0.0f) {
-            const unsigned at = needsXga ? (unsigned)Config::CPU_540_MHZ
-                                         : (unsigned)Config::VM_FAST_CPU_MHZ;
-            divStr(ds, sizeof(ds), graphics_clk_div_at(vmGraphicsIndex(vm, at, vga), at, vga));
-            snprintf(lbl[o], sizeof(lbl[o]), "%s (div %s/%u)", opt_video_mode[i].label,
-                     ds, at);
-        } else {
-            divStr(ds, sizeof(ds), d);
-            snprintf(lbl[o], sizeof(lbl[o]), "%s (div %s)", opt_video_mode[i].label, ds);
+        divStr(ds, sizeof(ds), d);
+        snprintf(dv, sizeof(dv), d > 0.0f ? "D%s" : "D-", ds);
+  #endif
+        if (lm != mhz) {
+            const size_t l = strlen(dv);
+            snprintf(dv + l, sizeof(dv) - l, "@%u", lm);
         }
-#endif  // HDMI_HSTX || VGA_HSTX
-        // The space before the bracket is padding and is the first thing to give
-        // up: VGA's "(div 10.0/378)" is one glyph over the 25 the pane allows,
-        // and losing the space is cheaper than losing the divider to textClip's
-        // "..". Nothing else here can overflow — the widest spaced label is 25.
+        const unsigned hz = vmRowHz(r, lm, vga);
+        snprintf(lbl[i], sizeof(lbl[i]), "%ux%u @%u %s Bx%s %s",
+                 (unsigned)r.w, (unsigned)r.h, hz, dv, r.b, r.asp);
+        // Over the pane width the spaces give way, the least informative first —
+        // textClip() would otherwise cut the label and append "..".
         const int fits = optLabelGlyphs();
-        if (fits > 0 && (int)strlen(lbl[o]) > fits) {
-            char* sp = strstr(lbl[o], " (");
-            if (sp) memmove(sp, sp + 1, strlen(sp));   // drop that one space
+        static const char* const kSqueeze[] = { " @", " Bx", " D", " H/", " K" };
+        for (const char* sq : kSqueeze) {
+            if (fits <= 0 || (int)strlen(lbl[i]) <= fits) break;
+            char* sp = strstr(lbl[i], sq);
+            if (sp) memmove(sp, sp + 1, strlen(sp));
         }
-        opts[o].label  = lbl[o];
-        opts[o].slabel = opt_video_mode[i].label;   // collapsed row stays the bare mode
+#else
+        // SOFTTV/TV/TFT drive their own panel: the four standard modes only (plus
+        // whatever is staged, so the radio keeps a marked row).
+        if (vm != staged && (Config::isFastVideoMode((uint8_t)vm) || Config::isBigVideoMode((uint8_t)vm)
+                             || vm == Config::VM_720x576_169)) continue;
+        const unsigned hz = vmRowHz(r, mhz, vga);
+        snprintf(lbl[i], sizeof(lbl[i]), "%ux%u @%u Bx%s %s",
+                 (unsigned)r.w, (unsigned)r.h, hz, r.b, r.asp);
+#endif
+        // The collapsed Mode row: resolution, refresh and scale (two rows share a
+        // resolution and differ only in B, e.g. 800x600 Bx2 / Bx3).
+        snprintf(slbl[i], sizeof(slbl[i]), "%ux%u @%u Bx%s",
+                 (unsigned)r.w, (unsigned)r.h, hz, r.b);
+        opts[n].label  = lbl[i];
+        opts[n].slabel = slbl[i];
+        opts[n].value  = vm;
+        n++;
     }
     cnt = n;
     return opts;
-#else
-    // SOFTTV/TV/TFT drive their own panel — no PIO divider to show, and
-    // resolveConstraints refuses the 90/75 Hz set there outright. Hiding the tail
-    // needs no table of our own: those four entries are last (static_assert above).
-    cnt = Config::isFastVideoMode((uint8_t)staged) ? kVmFastEnd : kVmBaseCount;
-    return opt_video_mode;
-#endif
 }
 
 static const Option opt_render[] = {
@@ -423,9 +453,9 @@ static const Option opt_cpu_mhz[] = {
     { "252 MHz", 252 },
     { "378 MHz", 378 },
     { "504 MHz", 504 },
-#if defined(VGA_HDMI) && !HDMI_HSTX
-    // HDMI on the PIO only (clk_hstx is pinned to 126 MHz = 252/378/504). Every
-    // video mode switches to a 27 MHz twin (divider 2.0); 1024x768 exists only here.
+#if defined(VGA_HDMI)
+    // HDMI only: every video mode switches to a 27 MHz twin (PIO divider 2.0, or on
+    // HSTX clk_hstx 135 = 540/4). VGA on HSTX cannot take it (resolveConstraints).
     // Needs ~1.80 V — resolveConstraints raises the voltage when 540 is picked.
     { "540 MHz", 540 },
 #endif

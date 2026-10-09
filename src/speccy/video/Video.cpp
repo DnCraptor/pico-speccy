@@ -98,6 +98,11 @@ extern "C" uint32_t graphics_frame_count(void);
 extern "C" int  graphics_fast_mode(int mode);
 extern "C" int  graphics_540_mode(int mode);
 extern "C" int  graphics_xga_mode(int x3);
+extern "C" int  graphics_big_mode(int vm, unsigned mhz, int klass);
+extern "C" void graphics_big_mode_fit(int mode, int klass);
+#ifdef VGA_HDMI
+extern "C" void hdmi_set_wide169(bool on);
+#endif
 extern "C" void graphics_set_hdmi_clock_drive(bool soft);
 extern "C" void hdmi_audio_health_snapshot(uint32_t *und, uint32_t *skip, uint32_t *dup, uint32_t *qmin, uint32_t *qmax);
 extern "C" void hdmi_set_profi_ds80_mode(bool active, const uint32_t *palette16, const uint8_t *pair_lut);
@@ -4705,7 +4710,10 @@ size_t VIDEO::fbBytesForVM(uint8_t vm, size_t* prevBytes) {
     // Explicit, like VIDEO::isFullBorder*(): VM_* is append-only and the 90/75 Hz
     // set took 4..7, so a >= test would call 640x480@90 a 360x288 mode.
     if (vm == Config::VM_720x576_50 || vm == Config::VM_720x576_75)      Mode = 22;  // 360x288 full border
-    else if (vm == Config::VM_720x480_60 || vm == Config::VM_720x480_90) Mode = 23;  // 360x240 half border
+    else if (vm == Config::VM_720x480_60 || vm == Config::VM_720x480_90
+             || vm == Config::VM_1440x480_60)                            Mode = 23;  // 360x240 half border
+    else if (vm == Config::VM_800x600_X2)                                Mode = 22;  // 360x288, x2 in 800x600
+    else if (vm == Config::VM_720x576_169 || vm == Config::VM_1440x576_X3) Mode = 22; // 360x288, 16:9 frame
 #else
     (void)vm;
 #endif
@@ -4920,6 +4928,7 @@ void VIDEO::pickMachineVideoMode() {
             case Config::VM_720x480_60:
                 video_mode = 7;
                 break;
+            case Config::VM_720x576_169:
             case Config::VM_720x576_50:
                 if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 5;
                 else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) video_mode = 6;
@@ -4932,11 +4941,20 @@ void VIDEO::pickMachineVideoMode() {
     }
     if (useFast) video_mode = graphics_fast_mode(video_mode);
     // sys_clk 540: HDMI runs every standard mode at its 27 MHz twin (540/270 = 2.0,
-    // where 25.2 MHz would need 2.143), and 1024x768 x4/x3 (54 MHz) exists only there.
-    // Config::load() already took both away from a build or clock that cannot.
-    if (!SELECT_VGA && Config::cpu_mhz == Config::CPU_540_MHZ) {
-        video_mode = Config::isXgaVideoMode(vmSel) ? graphics_xga_mode(Config::isXga3VideoMode(vmSel) ? 1 : 0)
-                                                   : graphics_540_mode(video_mode);
+    // where 25.2 MHz would need 2.143). Config::load() already took the big modes
+    // away from a build or clock that cannot run them.
+    if (Config::isBigVideoMode(vmSel)) {
+        // The big modes are per machine too (except the 60 Hz entries):
+        // 0 = Pentagon, 1 = 48K/Profi/Scorpion, 2 = 128K — the 720x576 grouping.
+        const int klass = (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) ? 1
+                        : (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) ? 2 : 0;
+        // VGA runs them at its own pixel clocks (63 / 42 MHz, integer at 252/378/504),
+        // so it takes the entry the HDMI mode would use at its own clock.
+        const int big = graphics_big_mode(vmSel, SELECT_VGA ? Config::bigModePrefClock(vmSel)
+                                                            : Config::cpu_mhz, klass);
+        if (big >= 0) { graphics_big_mode_fit(big, klass); video_mode = big; }
+    } else if (!SELECT_VGA && Config::cpu_mhz == Config::CPU_540_MHZ) {
+        video_mode = graphics_540_mode(video_mode);
     }
     // The 50 Hz modes above are per MACHINE — one display frame is tuned to be
     // exactly one emulated frame (v_total 644 Pentagon 48.83 Hz / 629 128K
@@ -4946,6 +4964,7 @@ void VIDEO::pickMachineVideoMode() {
     // reads a snapshot taken in hdmi_init(), and without this a Pentagon -> 128K
     // switch kept running the new machine at the old machine's 48.83 fps until a
     // full reboot (the VGA ISR reads the table live and never had the bug).
+    hdmi_set_wide169(!SELECT_VGA && (vmSel == Config::VM_720x576_169 || Config::isHdmiOnlyVideoMode(vmSel)));
     graphics_update_mode_timing();
 #endif
 }
@@ -6798,14 +6817,18 @@ void VIDEO::blClearCarve(int id) {
     bl->carve[id][3] = bl->carve[id][1];
 }
 
-bool VIDEO::xgaLive() {
+bool VIDEO::bigWindow(int& fbx, int& w, int& oy, int& h) {
 #ifdef VGA_HDMI
-    // x4 only: x3 shows the whole framebuffer, nothing needs to move.
-    return !SELECT_VGA && Config::cpu_mhz == Config::CPU_540_MHZ
-        && Config::hdmi_video_mode == Config::VM_1024x768_59;
-#else
-    return false;
+    const uint8_t vm = activeVideoMode();
+    if (!Config::isBigVideoMode(vm)) return false;
+    if (!SELECT_VGA && !Config::bigModeClockOk(vm, Config::cpu_mhz)) return false;
+    // 1024x768 x4: the centre 256x192 of the 320x240 framebuffer; 800x600 x3: the
+    // centre 264x200. x3 at 1024 and x2 at 800 show the whole framebuffer.
+    if (vm == Config::VM_1024x768_59) { fbx = 32; w = 256; oy = 24; h = 192; return true; }
+    if (vm == Config::VM_800x600_X3)  { fbx = 28; w = 264; oy = 20; h = 200; return true; }
 #endif
+    (void)fbx; (void)w; (void)oy; (void)h;
+    return false;
 }
 
 void VIDEO::blRecalc() {
@@ -6816,7 +6839,7 @@ void VIDEO::blRecalc() {
     const bool want = !Config::render_border && vga.frameBuffer && blGeometryOk()
                       && !foreignPair && !gmx_ext_live && !ts_render_live && !timex_hires_live && !ft_live
                       // 1024x768 x4 already shows the paper only, and it owns the line map
-                      && !Config::isXgaVideoMode(activeVideoMode());
+                      && !Config::isBigVideoMode(activeVideoMode());
     if (want != bl_live) {
         if (want) {
             static bool warned = false;
