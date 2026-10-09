@@ -276,6 +276,11 @@ static void nxQueueDead(const char* why) {
 
 // core0: wait for core1 to finish every posted line. Bounded, like the TS-Conf
 // drain: a wedged core1 must not take core0 with it.
+#if NEXT_TRACE
+// Perf baseline (NEXT perf: line): how often and how long core0 waits for
+// core1's line queue, and how long core1 spends rendering.
+volatile uint32_t g_nx_drain_n = 0, g_nx_drain_us = 0, g_nx_c1_us = 0;
+#endif
 IRAM_ATTR void NEXTVID::c1Drain() {
     if (nx_r == nx_w) return;
     const uint64_t t0 = time_us_64();
@@ -283,6 +288,10 @@ IRAM_ATTR void NEXTVID::c1Drain() {
         if (time_us_64() - t0 > 100000) { nxQueueDead("stuck"); return; }
         tight_loop_contents();
     }
+#if NEXT_TRACE
+    g_nx_drain_n = g_nx_drain_n + 1;
+    g_nx_drain_us = g_nx_drain_us + (uint32_t)(time_us_64() - t0);
+#endif
 }
 
 static void __not_in_flash_func(nxWaitUntil)(uint32_t w1) {
@@ -922,7 +931,8 @@ IRAM_ATTR void NEXTVID::Tick_Opcode(bool contended) {
 volatile uint32_t g_nextvid_us = 0;
 // Per-layer split of the same sampled lines (x16): ULA/LoRes, tilemap,
 // Layer 2, sprites. nx_layer_sample is set by the sampling wrapper.
-volatile uint32_t g_nextvid_layer_us[4] = {0, 0, 0, 0};
+volatile uint32_t g_nextvid_layer_us[6] = {0, 0, 0, 0, 0, 0};   // + mix, out (RenderLine copy)
+volatile uint32_t g_nx_rows = 0;            // rows composed (all, not only sampled)
 static bool nx_layer_sample = false;
 #define NX_LT_BEGIN() uint64_t _lt0 = nx_layer_sample ? time_us_64() : 0
 #define NX_LT_END(i) do { if (nx_layer_sample) { const uint64_t _t = time_us_64(); \
@@ -994,7 +1004,18 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::ScanlineWork() {
 
 // One fb row: posted to core1 with a register snapshot, or drawn here.
 // noinline: ScanlineWork and EndFrame's tail fill both call it.
+#if NEXT_TRACE
+volatile uint32_t g_nx_emit_us = 0;          // core0: emitRow (capture + post) per second
+volatile uint32_t g_nx_rowprobe[2][8];
+#endif
 __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
+#if NEXT_TRACE
+    const uint64_t _em0 = time_us_64();
+    emitRowBody(row);
+    g_nx_emit_us = g_nx_emit_us + (uint32_t)(time_us_64() - _em0);
+}
+__attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
+#endif
     if (g_next_c1_live) {
         // Post the line: capture, and open a new state slot only when
         // something the renderer reads has moved since the last line.
@@ -1044,6 +1065,10 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
 // core1: render up to 8 posted lines per call (render_core interleaves the
 // GS pump and the rest of its loop between batches).
 IRAM_ATTR void NEXTVID::c1Pump() {
+#if NEXT_TRACE
+    if (nx_r == nx_w) return;
+    const uint64_t tb = time_us_64();
+#endif
     for (int n = 0; n < 8 && nx_r != nx_w; n++) {
         __dmb();
         const uint32_t j = nx_ring[nx_r % NEXT_C1_RING];
@@ -1061,6 +1086,9 @@ IRAM_ATTR void NEXTVID::c1Pump() {
         __dmb();                            // the row is written before it is released
         nx_r = nx_r + 1;
     }
+#if NEXT_TRACE
+    g_nx_c1_us = g_nx_c1_us + (uint32_t)(time_us_64() - tb);
+#endif
 }
 extern "C" IRAM_ATTR void next_render_core1_pump(void) { NEXTVID::c1Pump(); }
 
@@ -1121,6 +1149,10 @@ __attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
 IRAM_ATTR void NEXTVID::RenderLine(int row) {
     uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
     if (!s_lineReady) RenderLayers(lineBuf, row);
+#if NEXT_TRACE
+    g_nx_rows = g_nx_rows + 1;
+    const uint64_t _out0 = nx_layer_sample ? time_us_64() : 0;
+#endif
     if (LS->hires) {
         // Packed-pair frame (Timex hi-res): the ULA left HIRES_MARK where its
         // 512-pixel line goes (hiresRow, already pair slots); everything else
@@ -1161,6 +1193,9 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     }
     for (int k = 0; k < k0; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
     for (int k = k1; k < words; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
+#if NEXT_TRACE
+    if (nx_layer_sample) g_nextvid_layer_us[5] += (uint32_t)(time_us_64() - _out0) * 16;
+#endif
 }
 
 // ---- Layer compositor (zxnext.vhd 6940-7350, zxula.vhd 470-565) ----
@@ -1430,7 +1465,7 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
 }
 
 // Mixer state for one line (constant across the row)
-struct NxMix { uint8_t* fb; const uint8_t* remap; uint16_t fb9; bool ulaEn, stencil; uint8_t blend; };
+struct NxMix { uint8_t* fb; const uint8_t* remap; uint16_t fb9; bool ulaEn, stencil, tm; uint8_t blend; };
 
 static inline __attribute__((always_inline)) uint8_t nxOut(const NxMix& m, uint16_t v) {
     return (v & NX_SLOT) ? (uint8_t)v : m.remap[v & 0x1FF];
@@ -1444,26 +1479,57 @@ static inline __attribute__((always_inline)) uint16_t nxUlaFinal(const NxMix& m,
 }
 
 // Layer orders 0..5 (NR 0x15 bits 4:2): S L U / L S U / S U L / L U S / U S L / U L S.
-// One loop for all six (a template per order cost ~3.7 KB of SRAM at -O3).
-IRAM_ATTR __attribute__((noinline, optimize("Os")))
-static void nxMixOrder(const NxMix& m, int xres, int mode) {
+// One loop per (order, tilemap on/off): the order and the ula_final shape are
+// decided once per line, not per pixel (the per-pixel switch at -Os was 15 of
+// Warhawk's 24 ms of core1 per frame, hw 2026-10-08). Without the tilemap the
+// ULA's final colour is the ULA itself (no stencil: it needs the tilemap).
+template <int MODE, bool TM>
+static IRAM_ATTR __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns")))
+void nxMixT(const NxMix& m, int xres) {
+    uint8_t* const fb = m.fb;
+    const uint8_t* const remap = m.remap;
+    const uint16_t fb9 = m.fb9;
+    const bool ulaEn = m.ulaEn;
     for (int x = 0; x < xres; x++) {
-        const uint16_t l = nxL[x], s = nxS[x], t = nxT[x], u = nxU[x];
-        const uint16_t uf = nxUlaFinal(m, u, t);
+        const uint16_t l = nxL[x], s = nxS[x], u = nxU[x];
+        const uint16_t t = TM ? nxT[x] : NX_TR;
+        const uint16_t uf = TM ? nxUlaFinal(m, u, t) : (ulaEn ? u : NX_TR);
         const bool lTr = l & NX_TR, sTr = s & NX_TR, uTr = uf & NX_TR;
-        const bool lPrio = !lTr && (l & NX_PRIO);
-        // orders 3-5: a ULA BORDER pixel gives way to a sprite where the tilemap is transparent
-        const bool uOk = !uTr && !((u & NX_BRD) && (t & NX_TR) && !sTr);
-        uint16_t v = m.fb9;
-        switch (mode) {
-            case 0:  if (lPrio) v = l; else if (!sTr) v = s; else if (!lTr) v = l; else if (!uTr) v = uf; break;
-            case 1:  if (!lTr) v = l; else if (!sTr) v = s; else if (!uTr) v = uf; break;
-            case 2:  if (lPrio) v = l; else if (!sTr) v = s; else if (!uTr) v = uf; else if (!lTr) v = l; break;
-            case 3:  if (!lTr) v = l; else if (uOk) v = uf; else if (!sTr) v = s; break;
-            case 4:  if (lPrio) v = l; else if (uOk) v = uf; else if (!sTr) v = s; else if (!lTr) v = l; break;
-            default: if (lPrio) v = l; else if (uOk) v = uf; else if (!lTr) v = l; else if (!sTr) v = s; break;
+        const bool lPrio = (l & (NX_TR | NX_PRIO)) == NX_PRIO;
+        uint16_t v = fb9;
+        if (MODE == 0)      { if (lPrio) v = l; else if (!sTr) v = s; else if (!lTr) v = l; else if (!uTr) v = uf; }
+        else if (MODE == 1) { if (!lTr) v = l; else if (!sTr) v = s; else if (!uTr) v = uf; }
+        else if (MODE == 2) { if (lPrio) v = l; else if (!sTr) v = s; else if (!uTr) v = uf; else if (!lTr) v = l; }
+        else {
+            // orders 3-5: a ULA BORDER pixel gives way to a sprite where the tilemap is transparent
+            const bool uOk = !uTr && !((u & NX_BRD) && (t & NX_TR) && !sTr);
+            if (MODE == 3)      { if (!lTr) v = l; else if (uOk) v = uf; else if (!sTr) v = s; }
+            else if (MODE == 4) { if (lPrio) v = l; else if (uOk) v = uf; else if (!sTr) v = s; else if (!lTr) v = l; }
+            else                { if (lPrio) v = l; else if (uOk) v = uf; else if (!lTr) v = l; else if (!sTr) v = s; }
         }
-        m.fb[x] = nxOut(m, v);
+        fb[x] = (v & NX_SLOT) ? (uint8_t)v : remap[v & 0x1FF];
+    }
+}
+
+static IRAM_ATTR void nxMixOrder(const NxMix& m, int xres, int mode) {
+    if (m.tm) {
+        switch (mode) {
+            case 0: nxMixT<0, true>(m, xres); break;
+            case 1: nxMixT<1, true>(m, xres); break;
+            case 2: nxMixT<2, true>(m, xres); break;
+            case 3: nxMixT<3, true>(m, xres); break;
+            case 4: nxMixT<4, true>(m, xres); break;
+            default: nxMixT<5, true>(m, xres); break;
+        }
+    } else {
+        switch (mode) {
+            case 0: nxMixT<0, false>(m, xres); break;
+            case 1: nxMixT<1, false>(m, xres); break;
+            case 2: nxMixT<2, false>(m, xres); break;
+            case 3: nxMixT<3, false>(m, xres); break;
+            case 4: nxMixT<4, false>(m, xres); break;
+            default: nxMixT<5, false>(m, xres); break;
+        }
     }
 }
 
@@ -1524,6 +1590,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
             const uint16_t u = nxU[x];
             fb[x] = (u & NX_SLOT) ? (uint8_t)u : remap[((u & NX_TR) ? fb9 : u) & 0x1FF];
         }
+        NX_LT_END(4);
         return;
     }
     nxFillTr(nxT, xres);
@@ -1536,16 +1603,37 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     if (r15 & 0x01) RenderSpritesLine(y);
     NX_LT_END(3);
 
+#if NEXT_TRACE
+    // Warhawk bottom-stripe probe: for paper rows 0 and 191, which layers are
+    // opaque, the Layer 2 source row and a hash of each layer's paper pixels.
+    if (y == 0 || y == 191) {
+        extern volatile uint32_t g_nx_rowprobe[2][8];
+        volatile uint32_t* pr = g_nx_rowprobe[y ? 1 : 0];
+        uint32_t nl = 0, ns = 0, nu = 0, hl = 2166136261u, hs = 2166136261u, hu = 2166136261u;
+        for (int x = xPaperOff; x < xPaperOff + 256 && x < xres; x++) {
+            const uint16_t l = nxL[x], sp = nxS[x], u = nxU[x];
+            if (!(l & NX_TR)) nl++;
+            if (!(sp & NX_TR)) ns++;
+            if (!(u & NX_TR)) nu++;
+            hl = (hl ^ l) * 16777619u; hs = (hs ^ sp) * 16777619u; hu = (hu ^ u) * 16777619u;
+        }
+        uint16_t sy = (uint16_t)(y + LS->r17); if (sy >= 192) sy -= 192;
+        pr[0] = LS->r17; pr[1] = sy; pr[2] = nl; pr[3] = ns; pr[4] = nu;
+        pr[5] = hl; pr[6] = hs; pr[7] = hu;
+    }
+#endif
     NxMix m;
     m.fb = fb;
     m.remap = remap;
     m.fb9 = rgb332_to_333(LS->r4A);
     m.ulaEn = !(LS->r68 & 0x80);
     m.stencil = (LS->r68 & 0x01) && m.ulaEn && tmEn;
+    m.tm = tmEn;
     m.blend = (LS->r68 >> 5) & 3;
     const int order = (r15 >> 2) & 7;
     if (order < 6) nxMixOrder(m, xres, order);
     else nxMixBlend(m, xres, order == 7);
+    NX_LT_END(4);
 }
 
 // Layer 2: 256x192x8bpp (row-major) or 320x256x8bpp (column-major, covers

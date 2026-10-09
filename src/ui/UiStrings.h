@@ -242,7 +242,7 @@
 #define TXT_MACH_MURM_SIZE  "Extra RAM"
 #define TXT_MACH_TSCONF      "ZX Evolution"
 #define TXT_MACH_ATM         "ATM-Turbo"
-#define TXT_MACH_TSCONF_OPTS "TS-Conf options"
+#define TXT_MACH_OPTS        "Options"
 #define TXT_MACH_EVO_OPTS    "BaseConf options"
 #define TXT_MACH_EVO_RASTER  "Raster"
 #define TXT_MACH_TSCONF_CLK  "CPU cap"

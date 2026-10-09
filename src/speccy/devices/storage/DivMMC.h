@@ -301,7 +301,14 @@ __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
             // "ROM3" = the 48K BASIC ROM as zxnext.vhd defines it: depends on
             // the machine type and the Alt-ROM (NextReg applyRomSelect) — ROM3
             // of a +3/Next, ROM1 of a 128K/Pentagon, ROM0 of a 48K.
-            bool rom3 = (MemESP::next_rom_mask & 1) && MemESP::next_rom3;
+            // ...and not while Layer 2 serves this fetch through its read
+            // mapping (port 0x123B bit 2): zxnext.vhd 3138 gates
+            // sram_divmmc_automap_rom3_en with "not sram_layer2_map_en". Without
+            // it an IM1 taken with Layer 2 over the ROM automapped NextZXOS's
+            // 0x0038 entry and left divMMC paged in — MrKWatkins L2Port's whole
+            // bank-offset section then hit divMMC instead of Layer 2 (hw 2026-10-09).
+            bool rom3 = (MemESP::next_rom_mask & 1) && MemESP::next_rom3 &&
+                        !((MemESP::l2_rd_mask >> (pc >> 13)) & 1);
             if (pc <= 0x0038 && (pc & 7) == 0) {
                 uint8_t bit = (uint8_t)(1u << (pc >> 3));
                 if (pc == 0x0000 && !g_next_automap_armed) bit = 0;

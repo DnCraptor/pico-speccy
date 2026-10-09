@@ -4517,6 +4517,13 @@ void ESPectrum::loop() {
 
     elapsed = time_us_64() - ts_start;
     idle = target - elapsed;
+#if NEXT_TRACE
+    {
+      extern volatile int32_t g_nx_idle_min; extern volatile uint32_t g_nx_idle_neg;
+      if ((int32_t)idle < g_nx_idle_min) g_nx_idle_min = (int32_t)idle;
+      if ((int32_t)idle < 0) g_nx_idle_neg = g_nx_idle_neg + 1;
+    }
+#endif
 
 #if GS_PERF_TRACE
     // Track min per-frame IDL across the current pollPerf interval — lets

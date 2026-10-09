@@ -70,6 +70,8 @@ struct NextTraceEnt { char kind; uint8_t reg, val; uint16_t pc; uint16_t rep; };
 static NextTraceEnt s_nt_ring[64];
 static uint32_t s_nt_w = 0;                  // total writes; ring index = w & 63
 static uint32_t s_nt_pal = 0, s_nt_cop = 0, s_nt_spr = 0;   // flood counters
+volatile int32_t  g_nx_idle_min = 0x7FFFFFFF;   // ESPectrum::loop: worst frame idle per NEXT line
+volatile uint32_t g_nx_idle_neg = 0;            // frames with negative idle
 // NMI one-shot trace (2026-10-07, esxDOS NMI on Next): from a divMMC NMI
 // request on, the next events go straight to the UART instead of the ring,
 // which the per-frame IM1 automap floods within a second. h= is a checksum of
@@ -127,7 +129,8 @@ void next_trace_dump(uint32_t frames) {
     extern volatile uint32_t g_sd_stall_us, g_sd_ops;   // DivMMC.cpp
     extern uint32_t g_nextvid_frames;
     extern volatile uint32_t g_nextvid_us;              // NextVideo.cpp
-    extern volatile uint32_t g_nextvid_layer_us[4];     // ula / tilemap / L2 / sprites
+    extern volatile uint32_t g_nextvid_layer_us[6];     // ula / tilemap / L2 / sprites / mix / out
+    extern volatile uint32_t g_nx_rows;
     // Who REALLY owns slot 0 right now — the flags can say "bootrom" while a
     // missed replug hands the CPU something else entirely (2026-08-09: flags
     // said boot=1 while the machine visibly ran a machine ROM).
@@ -176,6 +179,33 @@ void next_trace_dump(uint32_t frames) {
             (unsigned)(ESPectrum::multiplicator == 0 ? 3 : 7u << (ESPectrum::multiplicator - 1)),
             (unsigned)frames, (unsigned)g_nextvid_frames,
             (unsigned)ESPectrum::maxSpeed);
+        {
+            extern volatile uint32_t g_nx_drain_n, g_nx_drain_us, g_nx_c1_us, g_nx_idle_neg;
+            extern volatile int32_t g_nx_idle_min;
+            Debug::log("NEXT perf: idl_min=%d neg=%u/%u c1=%u.%ums/fr drain=%u x %u.%ums/fr",
+                (int)g_nx_idle_min, (unsigned)g_nx_idle_neg, (unsigned)frames,
+                (unsigned)(g_nx_c1_us / f / 1000u), (unsigned)(g_nx_c1_us / f % 1000u / 100u),
+                (unsigned)g_nx_drain_n,
+                (unsigned)(g_nx_drain_us / f / 1000u), (unsigned)(g_nx_drain_us / f % 1000u / 100u));
+            extern volatile uint32_t g_nx_emit_us;
+            {
+                extern volatile uint32_t g_nx_rowprobe[2][8];
+                for (int k = 0; k < 2; k++)
+                    Debug::log("NEXT row%u: r17=%02X sy=%u opaque L2=%u spr=%u ula=%u hash L2=%08X spr=%08X ula=%08X",
+                        k ? 191u : 0u, (unsigned)g_nx_rowprobe[k][0], (unsigned)g_nx_rowprobe[k][1],
+                        (unsigned)g_nx_rowprobe[k][2], (unsigned)g_nx_rowprobe[k][3], (unsigned)g_nx_rowprobe[k][4],
+                        (unsigned)g_nx_rowprobe[k][5], (unsigned)g_nx_rowprobe[k][6], (unsigned)g_nx_rowprobe[k][7]);
+            }
+            Debug::log("NEXT core0: emit=%u.%ums/fr | L2 12=%02X 13=%02X 16=%02X 17=%02X 70=%02X 71=%02X clip=%u,%u,%u,%u spr=%u,%u,%u,%u 15=%02X 68=%02X 14=%02X 4A=%02X 4B=%02X",
+                (unsigned)(g_nx_emit_us / f / 1000u), (unsigned)(g_nx_emit_us / f % 1000u / 100u),
+                NextReg::reg[0x12], NextReg::reg[0x13], NextReg::reg[0x16], NextReg::reg[0x17], NextReg::reg[0x70], NextReg::reg[0x71],
+                NEXTVID::clip[0][0], NEXTVID::clip[0][1], NEXTVID::clip[0][2], NEXTVID::clip[0][3],
+                NEXTVID::clip[1][0], NEXTVID::clip[1][1], NEXTVID::clip[1][2], NEXTVID::clip[1][3],
+                NextReg::reg[0x15], NextReg::reg[0x68], NextReg::reg[0x14], NextReg::reg[0x4A], NextReg::reg[0x4B]);
+            g_nx_emit_us = 0;
+            g_nx_drain_n = g_nx_drain_us = g_nx_c1_us = g_nx_idle_neg = 0;
+            g_nx_idle_min = 0x7FFFFFFF;
+        }
         // Which layer the renderer's time goes to (same sampled lines, the
         // paper rows only — border rows are in vid but not split here).
         {
@@ -206,11 +236,15 @@ void next_trace_dump(uint32_t frames) {
             g_li_raise = g_li_late = g_li_late_by = g_int_ack = 0;
             g_dma_hold_max = g_dma_hold_t0 = g_dma_hold_len = 0;
         }
-        Debug::log("NEXT vid: ula=%u.%u tm=%u.%u l2=%u.%u spr=%u.%u ms/fr",
+        Debug::log("NEXT vid: ula=%u.%u tm=%u.%u l2=%u.%u spr=%u.%u mix=%u.%u out=%u.%u ms/fr rows=%u/fr",
             (unsigned)(g_nextvid_layer_us[0] / f / 1000u), (unsigned)(g_nextvid_layer_us[0] / f % 1000u / 100u),
             (unsigned)(g_nextvid_layer_us[1] / f / 1000u), (unsigned)(g_nextvid_layer_us[1] / f % 1000u / 100u),
             (unsigned)(g_nextvid_layer_us[2] / f / 1000u), (unsigned)(g_nextvid_layer_us[2] / f % 1000u / 100u),
-            (unsigned)(g_nextvid_layer_us[3] / f / 1000u), (unsigned)(g_nextvid_layer_us[3] / f % 1000u / 100u));
+            (unsigned)(g_nextvid_layer_us[3] / f / 1000u), (unsigned)(g_nextvid_layer_us[3] / f % 1000u / 100u),
+            (unsigned)(g_nextvid_layer_us[4] / f / 1000u), (unsigned)(g_nextvid_layer_us[4] / f % 1000u / 100u),
+            (unsigned)(g_nextvid_layer_us[5] / f / 1000u), (unsigned)(g_nextvid_layer_us[5] / f % 1000u / 100u),
+            (unsigned)(g_nx_rows / f));
+        g_nx_rows = 0;
 #if PERF_TRACE && PERF_HIST
         // The TS-Conf opcode histogram (Z80_JLS.cpp, exec_nocheck), printed here
         // because VIDEO::EndFrame's PERF block never runs on the Next. ns/instr is
@@ -244,7 +278,7 @@ void next_trace_dump(uint32_t frames) {
     g_sd_ops = 0;
     g_nextvid_us = 0;
     g_nextvid_frames = 0;
-    for (int i = 0; i < 4; i++) g_nextvid_layer_us[i] = 0;
+    for (int i = 0; i < 6; i++) g_nextvid_layer_us[i] = 0;
     // Ring line: newest LAST, budget spent from the newest end backwards, a
     // leading ".." marks dropped older entries (never drop the newest — the
     // NeoGS ring printed oldest-first once and hid every wedge it saw).
@@ -494,7 +528,8 @@ uint8_t NextReg::divNmiRequest(bool hotkey) {
 
 bool NextReg::osTapeTrapArmed() {
     return (reg[0x0A] & 0x10) && (reg[0x83] & 0x01) && (reg[0xBB] & 0x20) &&
-           (MemESP::next_rom_mask & 1) && MemESP::next_rom3;
+           (MemESP::next_rom_mask & 1) && MemESP::next_rom3 &&
+           !(MemESP::l2_rd_mask & 1);   // zxnext.vhd 3138: not under a Layer 2 read mapping
 }
 static void applyBankC000();
 

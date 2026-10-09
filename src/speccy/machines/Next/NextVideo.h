@@ -144,6 +144,7 @@ private:
     static void captureLine(NextLineState& s);
     static void ScanlineWork();
     static void emitRow(int row);          // post / draw one fb row
+    static void emitRowBody(int row);     // NEXT_TRACE: emitRow's body, timed
     static void renderRowSegments(int row); // core0: a row with mid-line copper palette writes
     static bool computeGeometry();         // firstVisibleLine/paperTopRow (50/60 Hz)
     static void RenderLine(int row);

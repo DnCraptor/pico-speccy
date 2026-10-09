@@ -817,12 +817,12 @@ static const Node kMachine[] = {
     NM_RADIO(TXT_MACH_KARABAS, SET_MACHINE, opt_mach_karabas, p_showProfi),
     NM_RADIO(TXT_MACH_ATM,   SET_MACHINE, opt_mach_atm,   p_showAtm),
     NM_RADIO(TXT_MACH_TSCONF, SET_MACHINE, opt_mach_tsconf, p_showTsconf),
-    NM_SUB  (NM_IND TXT_MACH_TSCONF_OPTS, kTsconf, p_tsconfActive),
+    NM_SUB  (NM_IND TXT_MACH_OPTS, kTsconf, p_tsconfActive),
     NM_SUB  (NM_IND TXT_MACH_EVO_OPTS, kEvoBase, p_evoBaseActive),
     NM_RADIO(TXT_MACH_NEXT,  SET_MACHINE, opt_mach_next,  p_showNext),
+    NM_SUB  (NM_IND TXT_MACH_OPTS, kNext, p_nextActive),
     NM_RADIO(TXT_MACH_ALF,   SET_MACHINE, opt_mach_alf,   nullptr),
     NM_RADIO(TXT_MACH_OTHER, SET_MACHINE, opt_mach_other, p_extRam),
-    NM_SUB  (NM_IND TXT_MACH_TSCONF_OPTS, kNext, p_nextActive),
     // Not a machine, but it lives with them by request: the built-in game — the
     // one "machine" that needs neither ROM nor SD card. Also reachable by
     // holding S during the boot R/M probe window.
