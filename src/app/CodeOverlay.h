@@ -137,7 +137,10 @@ namespace CodeOverlay {
 // window needs no runtime claim: Audio > General Sound is AC_REBOOT, so a guest
 // can never bring the card up on a session that released its window.
 // next = "this boot may come up as the ZX Next" (the Next renderer window).
-void apply(bool tsconf, bool gs, bool dma, bool ngs, bool vdac2, bool next);
+// dma = "something can reach the Z80 DMA register file" (Config::dma_mode, an
+// MB-02+, or the Next's zxnDMA); dmaClassic = "the CLASSIC byte loop can run",
+// which is dma minus the Next — see the two windows in rp2350-memmap.ld.
+void apply(bool tsconf, bool gs, bool dma, bool dmaClassic, bool ngs, bool vdac2, bool next);
 
 // Enabling a feature OUTSIDE that window: load its overlay if the window is
 // still untouched (the heap grows upward and rarely reaches the top tens of KB,
@@ -147,11 +150,14 @@ void apply(bool tsconf, bool gs, bool dma, bool ngs, bool vdac2, bool next);
 // toggle with no reboot of its own.
 bool claimForTsconf();
 bool claimForDma();
+// Only the DMA REGISTER window (.dmarovl): what a Next boot runs. claimForDma()
+// adds the classic byte loop's window on top of it, for the DMA card / MB-02+.
+bool claimDmaRegs();
 bool claimForNext();
 
 // Diagnostics for Hardware/Memory Info: window size, bytes used by the content,
 // and whether the window is currently code (true) or heap (false).
-enum Which { WIN_TS = 0, WIN_DMA, WIN_GS, WIN_NGS, WIN_FT, WIN_NX };
+enum Which { WIN_TS = 0, WIN_DMA, WIN_DMAL, WIN_GS, WIN_NGS, WIN_FT, WIN_NX };
 unsigned windowBytes(Which w);
 unsigned contentBytes(Which w);
 bool     loaded(Which w);

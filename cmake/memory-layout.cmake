@@ -87,7 +87,8 @@ set(GSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the GS/NeoGS code overlay window
 set(NGSOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the NeoGS-only code overlay window, or AUTO (rp2350-memmap.ld)")
 set(FTOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the VDAC2 (FT812) code overlay window, or AUTO (rp2350-memmap.ld)")
 set(NXOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the ZX Next renderer code overlay window, or AUTO (rp2350-memmap.ld)")
-set(DMAOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the Z80 DMA code overlay window, or AUTO (rp2350-memmap.ld)")
+set(DMAOVL_WIN_SIZE "AUTO" CACHE STRING "Size of the classic Z80 DMA byte-loop overlay window, or AUTO (rp2350-memmap.ld)")
+set(DMAROVL_WIN_SIZE "AUTO" CACHE STRING "Size of the Z80 DMA register/service overlay window (.dmarovl), or AUTO (rp2350-memmap.ld)")
 
 if (TSOVL_WIN_SIZE STREQUAL "AUTO")
     # Each term is ONE contributor of the window, measured from the map file
@@ -226,20 +227,48 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # the DMA-before-CPU frame head/tail). Still above .ftovl's base, so the early heap
     # of other machines does not move.
     # SD polling batch and headroom for both trace and normal Next builds.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 35840)
+    # 2026-10-11 (SRAM pass for 576p + NeoGS + MIDI): the four Z80N helpers
+    # (decodeZ80N, nextLdirBatch, nextSdPollBatch, nextInirBatch — 2 176 B, all
+    # called once per INSTRUCTION, not per byte) moved to flash as Z80_COLD, so
+    # the window content fell 35 568 -> 33 392 and the term could follow: down
+    # 2 048 overall, which is another 2 KB of heap on a Next boot.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 33792)
+    # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
+    # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
+    # same rule as the .ngsovl one above.
+    if (NEXT_TRACE)
+        set(NXOVL_WIN_SIZE_EFFECTIVE 34816)
+    endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})
 endif()
 if (NOT NEXT_CODE_OVERLAY)
     set(NXOVL_WIN_SIZE_EFFECTIVE 0)
 endif()
+# Two windows since 2026-10-11. The classic Z80-DMA byte loop (executeTransfer +
+# transferOneByte, 3 272 B) is unreachable on the Next — doEnable() takes
+# nxRunSync() — so it gets its own window, loaded only when the DMA card or an
+# MB-02+ is present. The register file and the service path (handleDMA, the
+# write/read/command decoders, captureAttrAfterTransfer, 2 560 B) are needed by
+# BOTH, so they live in the window a Next boot does load.
+# The two sizes ADD UP to the 6144 the single window used, which leaves every
+# address below them — and therefore __ovl_low_start, i.e. the early heap — where
+# it was. What changes is only what a Next boot LOADS: 2 688 instead of 6 144.
 if (DMAOVL_WIN_SIZE STREQUAL "AUTO")
-    set(DMAOVL_WIN_SIZE_EFFECTIVE 6144)   # 5 656 measured (zxnDMA paths for the Next) + headroom
+    set(DMAOVL_WIN_SIZE_EFFECTIVE 3456)   # classic loop: executeTransfer 1948 + transferOneByte 1324 = 3 272 measured
 else()
     set(DMAOVL_WIN_SIZE_EFFECTIVE ${DMAOVL_WIN_SIZE})
 endif()
 if (NOT DMA_CODE_OVERLAY)
     set(DMAOVL_WIN_SIZE_EFFECTIVE 0)
+endif()
+if (DMAROVL_WIN_SIZE STREQUAL "AUTO")
+    set(DMAROVL_WIN_SIZE_EFFECTIVE 2688)  # register file + service: 2 560 measured + headroom
+else()
+    set(DMAROVL_WIN_SIZE_EFFECTIVE ${DMAROVL_WIN_SIZE})
+endif()
+if (NOT DMA_CODE_OVERLAY)
+    set(DMAROVL_WIN_SIZE_EFFECTIVE 0)
 endif()
 
 # The objects whose .time_critical code moves into a window, and which .data must
@@ -385,9 +414,16 @@ endif()
 if (DMA_CODE_OVERLAY)
     target_compile_definitions(${PROJECT_NAME} PRIVATE DMA_CODE_OVERLAY=1)
     set(DMAOVL_SECTION "\
+    .dmarovl __dmarovl_win_start : {\n\
+        __dmarovl_start = .;\n\
+        *Z80DMA.cpp.o*(.time_critical.z80dma*)\n\
+        . = ALIGN(4);\n\
+        __dmarovl_end = .;\n\
+    } AT > FLASH\n\
+    __dmarovl_source = LOADADDR(.dmarovl);\n\
     .dmaovl __dmaovl_win_start : {\n\
         __dmaovl_start = .;\n\
-        *Z80DMA.cpp.o*(.time_critical*)\n\
+        *Z80DMA.cpp.o*(.time_critical.dmaloop*)\n\
         . = ALIGN(4);\n\
         __dmaovl_end = .;\n\
     } AT > FLASH\n\
@@ -395,6 +431,9 @@ if (DMA_CODE_OVERLAY)
 else()
     target_compile_definitions(${PROJECT_NAME} PRIVATE DMA_CODE_OVERLAY=0)
     set(DMAOVL_SECTION "\
+    PROVIDE(__dmarovl_start  = __dmarovl_win_start);\n\
+    PROVIDE(__dmarovl_end    = __dmarovl_win_start);\n\
+    PROVIDE(__dmarovl_source = __dmarovl_win_start);\n\
     PROVIDE(__dmaovl_start  = __dmaovl_win_start);\n\
     PROVIDE(__dmaovl_end    = __dmaovl_win_start);\n\
     PROVIDE(__dmaovl_source = __dmaovl_win_start);\n")
@@ -439,7 +478,7 @@ else()
     target_compile_definitions(${PROJECT_NAME} PRIVATE AY_STEREO_SLOT=0)
     set(AYOVL_SECTION "")
 endif()
-message(STATUS "Code overlays: .nxovl ${NXOVL_WIN_SIZE_EFFECTIVE} B, .ftovl ${FTOVL_WIN_SIZE_EFFECTIVE} B, .tsovl ${TSOVL_WIN_SIZE_EFFECTIVE} B, .dmaovl ${DMAOVL_WIN_SIZE_EFFECTIVE} B, .ngsovl ${NGSOVL_WIN_SIZE_EFFECTIVE} B, .gsovl ${GSOVL_WIN_SIZE_EFFECTIVE} B")
+message(STATUS "Code overlays: .nxovl ${NXOVL_WIN_SIZE_EFFECTIVE} B, .ftovl ${FTOVL_WIN_SIZE_EFFECTIVE} B, .tsovl ${TSOVL_WIN_SIZE_EFFECTIVE} B, .dmaovl ${DMAOVL_WIN_SIZE_EFFECTIVE} B, .dmarovl ${DMAROVL_WIN_SIZE_EFFECTIVE} B, .ngsovl ${NGSOVL_WIN_SIZE_EFFECTIVE} B, .gsovl ${GSOVL_WIN_SIZE_EFFECTIVE} B")
 
 
 # The GM.DLS bank is everything above the firmware, to the top of flash — a dynamic

@@ -20,6 +20,8 @@ extern char __tsovl_start[], __tsovl_end[], __tsovl_source[];
 extern char __tsovl_bss_start[], __tsovl_bss_end[];
 extern char __dmaovl_win_start[], __dmaovl_win_end[];
 extern char __dmaovl_start[], __dmaovl_end[], __dmaovl_source[];
+extern char __dmarovl_win_start[], __dmarovl_win_end[];
+extern char __dmarovl_start[], __dmarovl_end[], __dmarovl_source[];
 extern char __gsovl_win_start[], __gsovl_win_end[];
 extern char __gsovl_start[], __gsovl_end[], __gsovl_source[];
 extern char __gsovl_bss_start[], __gsovl_bss_end[];
@@ -62,24 +64,26 @@ static HeapRegions s_hr = { { { __end__, __ovl_low_start, __end__ } }, 1, 0, nul
 static bool  s_nx_loaded = false;
 static bool  s_ft_loaded = false;
 static bool  s_ts_loaded = false;
-static bool  s_dma_loaded = false;
+static bool  s_dma_loaded = false;    // .dmarovl: register file + service path
+static bool  s_dmal_loaded = false;   // .dmaovl: the classic byte loop
 static bool  s_gs_loaded = false;
 static bool  s_ngs_loaded = false;
 
 static void regionsRebuild() {
-    HrWindow w[6] = {
+    HrWindow w[7] = {
         { __nxovl_win_start,  __nxovl_win_end,  s_nx_loaded  },
         { __ftovl_win_start,  __ftovl_win_end,  s_ft_loaded  },
         { __tsovl_win_start,  __tsovl_win_end,  s_ts_loaded  },
-        { __dmaovl_win_start, __dmaovl_win_end, s_dma_loaded },
+        { __dmarovl_win_start, __dmarovl_win_end, s_dma_loaded },
+        { __dmaovl_win_start, __dmaovl_win_end, s_dmal_loaded },
         { __ngsovl_win_start, __ngsovl_win_end, s_ngs_loaded },
         { __gsovl_win_start,  __gsovl_win_end,  s_gs_loaded  },
     };
     // Address order for hr_rebuild. .nxovl overlaps .ftovl/.tsovl (never both
     // resident), so where it sorts depends on the window sizes of the build.
-    for (int i = 1; i < 6; i++)
+    for (int i = 1; i < 7; i++)
         for (int j = i; j > 0 && w[j].ws < w[j - 1].ws; j--) { HrWindow t = w[j]; w[j] = w[j - 1]; w[j - 1] = t; }
-    hr_rebuild(&s_hr, __end__, w, 6, __StackLimit);
+    hr_rebuild(&s_hr, __end__, w, 7, __StackLimit);
 }
 
 // Replaces the SDK's __weak _sbrk (pico_clib_interface/newlib_interface.c),
@@ -125,15 +129,16 @@ static void loadWindow(char* dst, const char* src, size_t n) {
     __isb();
 }
 
-void CodeOverlay::apply(bool tsconf, bool gs, bool dma, bool ngs, bool vdac2, bool next) {
+void CodeOverlay::apply(bool tsconf, bool gs, bool dma, bool dmaClassic, bool ngs, bool vdac2, bool next) {
     // .nxovl shares its addresses with .tsovl + .ftovl: one machine at a time.
     if (next) { tsconf = false; vdac2 = false; }
     struct W { const char* name; char* ws; char* we; char* cs; char* ce; char* src; bool want; bool* got; };
-    W w[6] = {
+    W w[7] = {
         { "ZX Next", __nxovl_win_start,  __nxovl_win_end,  __nxovl_start,  __nxovl_end,  __nxovl_source,  next,       &s_nx_loaded },
         { "VDAC2",   __ftovl_win_start,  __ftovl_win_end,  __ftovl_start,  __ftovl_end,  __ftovl_source,  tsconf && vdac2, &s_ft_loaded },
         { "TS-Conf", __tsovl_win_start,  __tsovl_win_end,  __tsovl_start,  __tsovl_end,  __tsovl_source,  tsconf,     &s_ts_loaded  },
-        { "Z80 DMA", __dmaovl_win_start, __dmaovl_win_end, __dmaovl_start, __dmaovl_end, __dmaovl_source, dma,        &s_dma_loaded },
+        { "Z80 DMA regs", __dmarovl_win_start, __dmarovl_win_end, __dmarovl_start, __dmarovl_end, __dmarovl_source, dma, &s_dma_loaded },
+        { "Z80 DMA loop", __dmaovl_win_start,  __dmaovl_win_end,  __dmaovl_start,  __dmaovl_end,  __dmaovl_source,  dmaClassic, &s_dmal_loaded },
         { "NeoGS",   __ngsovl_win_start, __ngsovl_win_end, __ngsovl_start, __ngsovl_end, __ngsovl_source, gs && ngs,  &s_ngs_loaded },
         { "GS",      __gsovl_win_start,  __gsovl_win_end,  __gsovl_start,  __gsovl_end,  __gsovl_source,  gs,         &s_gs_loaded  },
     };
@@ -178,21 +183,42 @@ bool CodeOverlay::claimForTsconf() {
     return true;
 }
 
-// Claim the Z80 DMA window on a live SET_DMA turn-on. Unlike TS-Conf there is no
-// reboot to fall back on, so a refusal simply leaves the feature off.
-bool CodeOverlay::claimForDma() {
+// Claim the Z80 DMA REGISTER window (.dmarovl): the one a Next boot runs, and the
+// one the setup backstop tests. A refusal leaves the feature off or the machine
+// falling back — the caller decides.
+bool CodeOverlay::claimDmaRegs() {
     if (s_dma_loaded) return true;
-    if ((unsigned)(__dmaovl_win_end - __dmaovl_win_start) == 0) return true;   // compiled out
-    if (windowTouched(__dmaovl_win_start)) {
+    if ((unsigned)(__dmarovl_win_end - __dmarovl_win_start) == 0) return true;   // compiled out
+    if (windowTouched(__dmarovl_win_start)) {
         Debug::log("[OVL] cannot claim the Z80 DMA window: heap grew into it (cursor %08lX, window %08lX)",
+                   (unsigned long)(uintptr_t)s_hr.cursor, (unsigned long)(uintptr_t)__dmarovl_win_start);
+        return false;
+    }
+    loadWindow(__dmarovl_start, __dmarovl_source, (size_t)(__dmarovl_end - __dmarovl_start));
+    s_dma_loaded = true;
+    regionsRebuild();
+    Debug::log("[OVL] Z80 DMA window claimed mid-session (%u B resident)",
+               (unsigned)(__dmarovl_end - __dmarovl_start));
+    return true;
+}
+
+// ...and the CLASSIC byte-loop window (.dmaovl) on top of it. SET_DMA has no
+// reboot to fall back on, so both have to be claimable: the register file alone
+// is useless, because a classic transfer jumps straight into the loop's window.
+bool CodeOverlay::claimForDma() {
+    if (!claimDmaRegs()) return false;
+    if (s_dmal_loaded) return true;
+    const unsigned win = (unsigned)(__dmaovl_win_end - __dmaovl_win_start);
+    if (!win) { s_dmal_loaded = true; return true; }   // compiled out
+    if (windowTouched(__dmaovl_win_start)) {
+        Debug::log("[OVL] Z80 DMA loop window NOT claimed: heap grew into it (cursor %08lX, window %08lX) - transfers will not run",
                    (unsigned long)(uintptr_t)s_hr.cursor, (unsigned long)(uintptr_t)__dmaovl_win_start);
         return false;
     }
     loadWindow(__dmaovl_start, __dmaovl_source, (size_t)(__dmaovl_end - __dmaovl_start));
-    s_dma_loaded = true;
+    s_dmal_loaded = true;
     regionsRebuild();
-    Debug::log("[OVL] Z80 DMA window claimed mid-session (%u B resident)",
-               (unsigned)(__dmaovl_end - __dmaovl_start));
+    Debug::log("[OVL] Z80 DMA loop window claimed mid-session (%u B resident)", win);
     return true;
 }
 
@@ -220,7 +246,8 @@ bool CodeOverlay::claimForNext() {
 unsigned CodeOverlay::windowBytes(Which x) {
     switch (x) { case WIN_GS:  return (unsigned)(__gsovl_win_end - __gsovl_win_start);
                  case WIN_NGS: return (unsigned)(__ngsovl_win_end - __ngsovl_win_start);
-                 case WIN_DMA: return (unsigned)(__dmaovl_win_end - __dmaovl_win_start);
+                 case WIN_DMA: return (unsigned)(__dmarovl_win_end - __dmarovl_win_start);
+                 case WIN_DMAL:return (unsigned)(__dmaovl_win_end - __dmaovl_win_start);
                  case WIN_FT:  return (unsigned)(__ftovl_win_end - __ftovl_win_start);
                  case WIN_NX:  return (unsigned)(__nxovl_win_end - __nxovl_win_start);
                  default:      return (unsigned)(__tsovl_win_end - __tsovl_win_start); }
@@ -228,14 +255,16 @@ unsigned CodeOverlay::windowBytes(Which x) {
 unsigned CodeOverlay::contentBytes(Which x) {
     switch (x) { case WIN_GS:  return (unsigned)(__gsovl_end - __gsovl_start);
                  case WIN_NGS: return (unsigned)(__ngsovl_end - __ngsovl_start);
-                 case WIN_DMA: return (unsigned)(__dmaovl_end - __dmaovl_start);
+                 case WIN_DMA: return (unsigned)(__dmarovl_end - __dmarovl_start);
+                 case WIN_DMAL:return (unsigned)(__dmaovl_end - __dmaovl_start);
                  case WIN_FT:  return (unsigned)(__ftovl_end - __ftovl_start);
                  case WIN_NX:  return (unsigned)(__nxovl_end - __nxovl_start);
                  default:      return (unsigned)(__tsovl_end - __tsovl_start); }
 }
 bool CodeOverlay::loaded(Which x) {
     switch (x) { case WIN_GS: return s_gs_loaded; case WIN_NGS: return s_ngs_loaded;
-                 case WIN_DMA: return s_dma_loaded; case WIN_FT: return s_ft_loaded;
+                 case WIN_DMA: return s_dma_loaded; case WIN_DMAL: return s_dmal_loaded;
+                 case WIN_FT: return s_ft_loaded;
                  case WIN_NX: return s_nx_loaded;
                  default: return s_ts_loaded; }
 }
@@ -247,9 +276,10 @@ extern "C" char* heap_ceiling_now() { return __HeapLimit; }
 extern "C" size_t heap_stranded_bytes()   { return 0; }
 extern "C" size_t heap_stranded_largest() { return 0; }
 
-void CodeOverlay::apply(bool, bool, bool, bool, bool, bool) {}
+void CodeOverlay::apply(bool, bool, bool, bool, bool, bool, bool) {}
 bool CodeOverlay::claimForNext()                  { return true; }
 bool CodeOverlay::claimForTsconf()                { return true; }
+bool CodeOverlay::claimDmaRegs()                  { return true; }
 bool CodeOverlay::claimForDma()                   { return true; }
 unsigned CodeOverlay::windowBytes(Which)          { return 0; }
 unsigned CodeOverlay::contentBytes(Which)         { return 0; }

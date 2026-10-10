@@ -439,7 +439,21 @@ public:
     // (buildNextRam), accounted through butter_pages so DivMMC/GS/arena
     // compose on top exactly like Murmuzavr pages would.
     static constexpr int NEXT_PAGES = 224;
-    static uint8_t* nextRamPtr[NEXT_PAGES];
+    // The page mapping is DERIVED, not a 224-entry pointer table (that was 896 B
+    // of .bss on every board, read on the hottest Next paths): banks 0-7 are the
+    // static SRAM ZX pages and everything from page 16 up is ONE linear butter
+    // strip — exactly what buildNextRam() stores. nextRamReady is the "mapping
+    // exists at all" answer the callers used a null table entry for.
+    static uint8_t* nextPg[16];
+    static uint8_t* nextStrip;
+    static inline uint8_t* nextPgPtr(unsigned pg) {
+        if (!nextRamReady || pg >= NEXT_PAGES) return nullptr;
+        return (pg < 16) ? nextPg[pg] : nextStrip + ((size_t)(pg - 16) << 13);
+    }
+    // First byte after the RAM pages: the ROM/Multiface/Alt-ROM region.
+    static inline uint8_t* nextRomRegion() {
+        return nextStrip + ((size_t)(NEXT_PAGES - 16) << 13);
+    }
     static uint8_t  mmu[8];        // current MMU mapping; 0xFF = ROM (slots 0/1)
     static bool     nextRamReady;  // buildNextRam() completed
 

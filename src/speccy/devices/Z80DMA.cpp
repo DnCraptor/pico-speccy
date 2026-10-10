@@ -26,6 +26,15 @@
 
 #undef IRAM_ATTR
 #define IRAM_ATTR __not_in_flash("z80dma")
+// The CLASSIC (non-Next) byte loop: the only part of this file a Next boot never
+// runs — doEnable() takes nxRunSync() there. Its own named section, therefore its
+// own overlay window (.dmaovl), which CodeOverlay loads only when the DMA card or
+// an MB-02+ is present: 3.3 KB of heap a Next boot does not pay for. A SHARED
+// section name would defeat that — --gc-sections drops input sections, not
+// functions, so one name for the whole file keeps all of it once anything is
+// referenced (measured: transferOneByte has no callers at all and still occupied
+// 1 324 B of the window).
+#define DMA_LOOP_ATTR __attribute__((section(".time_critical.dmaloop"), noinline))
 #pragma GCC optimize("O3")
 
 #ifndef Z80DMA_LOG
@@ -916,7 +925,7 @@ volatile uint32_t g_dma_hold_max = 0, g_dma_hold_t0 = 0, g_dma_hold_len = 0;
 volatile uint32_t g_dma_maxlen = 0, g_dma_max_pc = 0, g_dma_max_src = 0, g_dma_max_dst = 0, g_dma_max_fl = 0;
 #endif
 
-IRAM_ATTR void Z80DMA::executeTransfer() {
+DMA_LOOP_ATTR void Z80DMA::executeTransfer() {
     dma_in_progress = true;
 #if NEXT_TRACE
     {
@@ -1023,7 +1032,7 @@ IRAM_ATTR void Z80DMA::executeTransfer() {
     dma_in_progress = false;
 }
 
-IRAM_ATTR void Z80DMA::transferOneByte() {
+DMA_LOOP_ATTR void Z80DMA::transferOneByte() {
     transfer_started = true;
     uint8_t val;
 

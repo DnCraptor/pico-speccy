@@ -3633,8 +3633,10 @@ void Z80::decodeDDFDCB(uint16_t address) {
 
 
 // Z80N extended opcodes (ZX Spectrum Next), dispatched from decodeED under
-// Z80Ops::isNext — in the .nxovl window, not the RAM-resident core (2026-10-10).
-NX_OVL_CODE void Z80::decodeZ80N() {
+// Z80Ops::isNext. In the .nxovl window from 2026-10-10; back in FLASH on
+// 2026-10-11 (SRAM pass for 576p + NeoGS + MIDI — see the block comment above
+// nextLdirBatch for why flash is enough here).
+Z80_COLD void Z80::decodeZ80N() {
     switch (opCode) {
         case 0x23:
         { /* SWAPNIB */
@@ -4315,7 +4317,14 @@ IRAM_ATTR void Z80::copyToRegister(uint8_t value)
 // 28 MHz blits its tiles with 16-byte LDIRs into Layer 2 (hw log 2026-10-10).
 // Removed general blockRepeat (2026-09-09) was a TS-Conf drain problem; the Next
 // renderer has no such queue drain on CPU writes.
-NX_OVL_CODE void Z80::nextLdirBatch(int d) {
+// IN FLASH since 2026-10-11, and that is a deliberate trade: these four Next
+// helpers (this one, nextInirBatch, nextSdPollBatch, decodeZ80N) were in the
+// .nxovl window, and the window is reserved heap on a Next boot. All four are
+// entered ONCE PER INSTRUCTION (the whole point of the batch is to run the block
+// inside one call), so a flash fetch per entry costs nothing measurable — where
+// the window cost 2 176 B of the heap the target config does not have. The
+// per-BYTE loops (Z80::ldx/nxByteNoDraw/Z80DMA::nxBatch) stay in SRAM.
+Z80_COLD void Z80::nextLdirBatch(int d) {
     if (!z80_in_nocheck || Config::numPcBP > 0) return;
     const uint32_t now = CPU::tstates;
     if (now >= CPU::stFrame) return;
@@ -4375,7 +4384,7 @@ NX_OVL_CODE void Z80::nextLdirBatch(int d) {
 // same addresses in enNxtmmc contain unrelated code. Each IN still goes through
 // Ports (including asynchronous SD completion, LEDs and I/O tracing). Do not
 // fast-forward wall time or manufacture FF replies while core1 reads the card.
-NX_OVL_CODE void Z80::nextSdPollBatch() {
+Z80_COLD void Z80::nextSdPollBatch() {
     if (!z80_in_nocheck || !g_next_fastrd || ffIFF1 ||
         Config::numPcBP || Config::numPortReadBP || Config::numMemReadBP || Rzx::mode ||
         MemESP::divmmc_mapped || MemESP::romInUse != 2 ||
@@ -4419,7 +4428,7 @@ NX_OVL_CODE void Z80::nextSdPollBatch() {
 // the late 3 T there), the write 3, the repeat 5 = 18 T, R += 2. Same bounds as
 // nextLdirBatch; the port must answer as Ports::input's early 0xEB branch does
 // (DivMMC SPI on, NR 0x83 SPI enable), no port breakpoints, no RZX playback.
-NX_OVL_CODE void Z80::nextInirBatch() {
+Z80_COLD void Z80::nextInirBatch() {
     if (!z80_in_nocheck || Config::numPcBP > 0 || Config::numPortReadBP > 0 || Rzx::mode) return;
     if (!DivMMC::enabled || DivMMC::divide_mode || !NextReg::portOn(NextReg::PE_SPI)) return;
     const uint32_t now = CPU::tstates;

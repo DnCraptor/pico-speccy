@@ -841,7 +841,13 @@ void ESPectrum::setup() {
   // final covers anything this misses.
   const bool dmaWin = Config::dma_mode != 0 || Config::arch == A_NEXT ||
                       (Config::ram_file == NO_RAM_FILE && Config::pref_arch == A_NEXT);
-  CodeOverlay::apply(Config::arch == A_TSCONF, Config::gs_enabled != 0, dmaWin,
+  // The CLASSIC byte loop (a second window since 2026-10-11) is the one part of
+  // the DMA the Next never runs: doEnable() takes nxRunSync() there. So the Next
+  // alone gets the register file, everything with the card or an MB-02+ gets
+  // both — and the MB-02+ half has to be in this test, because its deferred
+  // transfer calls Z80DMA::executeTransfer() from the FDC port write.
+  const bool dmaClassic = Config::dma_mode != 0 || Config::mb02 != 0;
+  CodeOverlay::apply(Config::arch == A_TSCONF, Config::gs_enabled != 0, dmaWin, dmaClassic,
                      Config::gs_enabled == 2,    // NeoGS-only code/data window
                      Config::tsconf_vdac2        // VDAC2 window (with TS-Conf only); its load
                        && FlashRoms::intact(),   // image is in .psramroms, gone once traded
@@ -1077,7 +1083,9 @@ void ESPectrum::setup() {
   // Backstop for the overlay decision above: the Next cannot run without the
   // zxnDMA code. The heap has barely grown by now, so the claim normally
   // succeeds; if it does not, fall back rather than jump into heap data.
-  if (Config::arch == A_NEXT && (!CodeOverlay::claimForDma() || !CodeOverlay::claimForNext())) {
+  // claimDmaRegs, NOT claimForDma: the classic byte loop's window is the one the
+  // Next never runs, so it must not gate the machine (2026-10-11).
+  if (Config::arch == A_NEXT && (!CodeOverlay::claimDmaRegs() || !CodeOverlay::claimForNext())) {
     Debug::log2SD("setup: Next needs the Z80 DMA / renderer code windows, heap took one - falling back to 128K");
     Config::arch = A_128K;
     Config::romSet = R_128K;

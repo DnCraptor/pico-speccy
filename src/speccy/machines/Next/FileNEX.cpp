@@ -56,8 +56,8 @@ static bool readPage(FIL* f, uint8_t* dst) {
 // Read one 16K bank into Next RAM (two 8K pages)
 static bool readBank(FIL* f, unsigned bank) {
     if (bank >= MemESP::NEXT_PAGES / 2) return false;
-    if (!readPage(f, MemESP::nextRamPtr[bank * 2])) return false;
-    return readPage(f, MemESP::nextRamPtr[bank * 2 + 1]);
+    if (!readPage(f, MemESP::nextPgPtr(bank * 2))) return false;
+    return readPage(f, MemESP::nextPgPtr(bank * 2 + 1));
 }
 
 bool FileNEX::load(const string& nex_fn) {

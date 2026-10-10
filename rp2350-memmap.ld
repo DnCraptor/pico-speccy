@@ -307,6 +307,7 @@ SECTIONS
     __gsovl_win_size   = @GSOVL_WIN_SIZE_EFFECTIVE@;
     __ngsovl_win_size  = @NGSOVL_WIN_SIZE_EFFECTIVE@;
     __dmaovl_win_size  = @DMAOVL_WIN_SIZE_EFFECTIVE@;
+    __dmarovl_win_size = @DMAROVL_WIN_SIZE_EFFECTIVE@;
     __tsovl_win_size   = @TSOVL_WIN_SIZE_EFFECTIVE@;
     __ftovl_win_size   = @FTOVL_WIN_SIZE_EFFECTIVE@;
     __nxovl_win_size   = @NXOVL_WIN_SIZE_EFFECTIVE@;
@@ -318,7 +319,15 @@ SECTIONS
     __ngsovl_win_end   = __ngsovl_win_start + __ngsovl_win_size;
     __dmaovl_win_start = __ngsovl_win_start - __dmaovl_win_size;
     __dmaovl_win_end   = __dmaovl_win_start + __dmaovl_win_size;
-    __tsovl_win_start  = __dmaovl_win_start - __tsovl_win_size;
+    /* Z80 DMA register file + service path (.dmarovl): reachable on every boot
+       that can touch the DMA — the DMA card, an MB-02+, or the Next's zxnDMA —
+       so it is the ONE DMA window a Next boot pays for. It sits below the
+       classic byte loop's window (.dmaovl), which the Next never loads
+       (doEnable() takes nxRunSync()). The two sizes add up to what the single
+       .dmaovl window used to be, so nothing below them moves. */
+    __dmarovl_win_start = __dmaovl_win_start - __dmarovl_win_size;
+    __dmarovl_win_end   = __dmarovl_win_start + __dmarovl_win_size;
+    __tsovl_win_start  = __dmarovl_win_start - __tsovl_win_size;
     __tsovl_win_end    = __tsovl_win_start + __tsovl_win_size;
     /* TS-Conf VDAC2 window, the LOWEST: only ever resident together with .tsovl,
        and a TS-Conf boot without VDAC2 gets it as a longer base heap region. */
@@ -331,8 +340,8 @@ SECTIONS
        the heap is then everything below the LOWEST window, on every machine, and
        the boot framebuffer + Config::load must fit there (2026-10-10: a 6 KB
        larger .nxovl panicked the NEXT_TRACE build at Config::load). Top-aligned
-       with .tsovl, directly under .dmaovl (which a Next boot loads too). */
-    __nxovl_win_start  = __dmaovl_win_start - __nxovl_win_size;
+       with .tsovl, directly under .dmarovl (which a Next boot loads too). */
+    __nxovl_win_start  = __dmarovl_win_start - __nxovl_win_size;
     __nxovl_win_end    = __nxovl_win_start + __nxovl_win_size;
     /* The heap ceiling before any window is applied. */
     __ovl_low_start    = __ftovl_win_start < __nxovl_win_start ? __ftovl_win_start : __nxovl_win_start;
@@ -347,7 +356,9 @@ SECTIONS
     ASSERT(__gsovl_bss_end <= __gsovl_win_end,
         "ERROR: .gsovl overflowed the GS code overlay window. Re-link with -DGSOVL_WIN_SIZE=40960, read the real size from `arm-none-eabi-size -A <elf> | grep .gsovl`, then fix the AUTO arithmetic in CMakeLists.txt")
     ASSERT(__dmaovl_end <= __dmaovl_win_end,
-        "ERROR: .dmaovl overflowed the Z80 DMA overlay window. Re-link with -DDMAOVL_WIN_SIZE=12288, read the real size from `arm-none-eabi-size -A <elf> | grep .dmaovl`, then fix the AUTO arithmetic in CMakeLists.txt")
+        "ERROR: .dmaovl overflowed the Z80 DMA overlay window. Re-link with -DDMAOVL_WIN_SIZE=8192, read the real size from `arm-none-eabi-size -A <elf> | grep .dmaovl`, then fix the AUTO arithmetic in CMakeLists.txt")
+    ASSERT(__dmarovl_end <= __dmarovl_win_end,
+        "ERROR: .dmarovl overflowed the Z80 DMA register/service window. Re-link with -DDMAROVL_WIN_SIZE=4096, read the real size from `arm-none-eabi-size -A <elf> | grep .dmarovl`, then fix the AUTO arithmetic in CMakeLists.txt")
     ASSERT(__tsovl_bss_end <= __tsovl_win_end,
         "ERROR: .tsovl overflowed the TS-Conf code overlay window. Re-link with -DTSOVL_WIN_SIZE=24576, read the real size from `arm-none-eabi-size -A <elf> | grep .tsovl`, then fix the AUTO arithmetic in CMakeLists.txt")
     ASSERT(__ftovl_end <= __ftovl_win_end,

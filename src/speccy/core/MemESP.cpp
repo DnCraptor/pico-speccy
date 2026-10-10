@@ -889,7 +889,8 @@ void MemESP::dbgPoke(uint16_t addr, uint8_t data) {
 #include "app/Buffer.h"
 #include "fs/FileUtils.h"
 
-uint8_t* MemESP::nextRamPtr[MemESP::NEXT_PAGES];
+uint8_t* MemESP::nextPg[16];
+uint8_t* MemESP::nextStrip = nullptr;
 uint8_t  MemESP::mmu[8];
 bool     MemESP::nextRamReady = false;
 uint8_t* MemESP::wrOverlay[8] = {};
@@ -936,17 +937,15 @@ bool MemESP::buildNextRam() {
     size_t used = (size_t)butter_pages * MEM_PG_SZ;
     if (Buffer::pageBudgetButter() < used + needed) return false;
     for (int b = 0; b < 8; b++) {
-        nextRamPtr[b * 2]     = ram[b].direct();
-        nextRamPtr[b * 2 + 1] = ram[b].direct() + 0x2000;
+        nextPg[b * 2]     = ram[b].direct();
+        nextPg[b * 2 + 1] = ram[b].direct() + 0x2000;
     }
-    uint8_t* base = (uint8_t*)PSRAM_DATA + used;
-    for (int pg = 16; pg < NEXT_PAGES; pg++)
-        nextRamPtr[pg] = base + (size_t)(pg - 16) * 0x2000;
+    nextStrip = (uint8_t*)PSRAM_DATA + used;
     // ROM region sits after the RAM pages; pointers stay null until the ROM
     // files actually load. Alt-ROM banks live right after the MMC ROM.
     nextRomBase = nullptr;
     nextDivRomBase = nullptr;
-    altRomBase = base + (size_t)(NEXT_PAGES - 16) * 0x2000 + 9 * 0x2000;
+    altRomBase = nextRomRegion() + 9 * 0x2000;
     altrom_rd = altrom_wr = false;
     altrom_sel = 0;
     mfRomBase = nullptr;                          // set once enNextMf.rom is in
@@ -991,7 +990,7 @@ static bool readFileToButter(const char* path, uint8_t* dst, size_t len) {
 // the card as-is).
 bool MemESP::loadNextRoms() {
     if (!nextRamReady) return false;
-    uint8_t* romRegion = nextRamPtr[NEXT_PAGES - 1] + 0x2000; // after RAM pages
+    uint8_t* romRegion = nextRomRegion(); // after RAM pages
     static const char* zxPaths[]  = { "/roms/next/enNextZX.rom",
                                       "/machines/next/enNextZX.rom" };
     static const char* mmcPaths[] = { "/roms/next/enNxtmmc.rom",
@@ -1041,10 +1040,9 @@ void MemESP::applyMMU(uint8_t slot, uint8_t page) {
         next_rom_mask |= (1 << slot);
     } else {
         next_rom_mask &= ~(1 << slot);
-        if (page < NEXT_PAGES && nextRamPtr[page])
-            p = nextRamPtr[page];
-        else
-            p = (uint8_t*)open_bus_page.b;
+        uint8_t* np = nextPgPtr(page);
+        if (np) p = np;
+        else p = (uint8_t*)open_bus_page.b;
     }
     ramCurrent[slot] = p;
     // Layer 2 read mapping (port 0x123B bit 2) over the MMU page / ROM; below
@@ -1100,7 +1098,7 @@ void MemESP::resetNextMapping() {
 // MMU has mapped and writes drop — same fall-through zx_go implements.
 uint8_t* MemESP::configBackingHalf(uint8_t page, uint8_t half) {
     if (!nextRamReady) return nullptr;
-    uint8_t* romRegion = nextRamPtr[NEXT_PAGES - 1] + 0x2000;
+    uint8_t* romRegion = nextRomRegion();
     if (page <= 0x03)
         return romRegion + (uint32_t)page * 0x4000 + (uint32_t)half * 0x2000;
     if (page == 0x04)
@@ -1117,7 +1115,7 @@ uint8_t* MemESP::configBackingHalf(uint8_t page, uint8_t half) {
     }
     if (page >= 0x10 && page <= 0x7F) {
         int pg = (page - 0x10) * 2 + half;
-        return (pg < NEXT_PAGES) ? nextRamPtr[pg] : nullptr;
+        return nextPgPtr(pg);
     }
     return nullptr;
 }
@@ -1162,7 +1160,7 @@ void MemESP::applyNextConfigWindow() {
         // Firmware writing a ROM image is what makes that image "loaded" —
         // flip the pointers the ROM-select path reads (the direct SD load in
         // loadNextRoms sets the same pointers to the same region).
-        uint8_t* romRegion = nextRamPtr[NEXT_PAGES - 1] + 0x2000;
+        uint8_t* romRegion = nextRomRegion();
         if (nextConfigPage <= 0x03 && !nextRomBase)    nextRomBase = romRegion;
         if (nextConfigPage == 0x04 && !nextDivRomBase) nextDivRomBase = romRegion + 0x10000;
         if (nextConfigPage == 0x05 && !mfRomBase)      mfRomBase = altRomBase + 0x8000;

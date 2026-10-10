@@ -274,6 +274,14 @@ static uint32_t*      nx_st_job = nullptr;   // [NEXT_C1_STATES] nx_w after the 
 static uint32_t       nx_cur = 0;
 static bool           nx_have = false;
 static volatile uint32_t nx_w = 0, nx_r = 0;
+// Occupancy of the line ring, sampled at every publish. This is the number that
+// decides whether NEXT_C1_RING can shrink (it is heap: 320 x 4 B + the state
+// slots): a max well below the size means core1 keeps up line by line, a max
+// pinned at the size means the poster is waiting on a full ring — which
+// haltAdvanceTo always does after a HALT, because it posts a whole frame at
+// once. Printed once a second on the NEXT_TRACE `NEXT cpu:` line.
+volatile uint32_t g_nx_ring_max = 0, g_nx_ring_now = 0;
+volatile uint32_t g_nx_ring_size = NEXT_C1_RING;   // one source of truth for the trace
 static NextLineState  nx_sync;               // the queue-off path
 // Mid-line palette writes by the copper (copper.vhd WAIT H, 8-pixel steps):
 // recorded between the paper's left edge and the line end with the fb x they
@@ -861,18 +869,26 @@ void NEXTVID::Reset() {
         // Two blocks, Next-boot only, never freed (the Next boundary reboots).
         // It used to be ONE 29 KB malloc, which PANICKED at boot once the heap
         // had no hole that size (hw 2026-10-08, pico_malloc panics on NULL).
-        // Both go through Buffer::palloc(HOT_SRAM): SRAM when the heap has it,
-        // butter PSRAM otherwise (slower, but the machine starts).
         // Hot (read per pixel, ~11 KB): rawPal 4K | lut 2K | lineBuf 384 |
         //   pairMap 256 | hiresRow 256 | remap 512 |
-        //   layer lines 4 x 384 x 2.
+        //   layer lines 4 x 384 x 2  -> HOT_SRAM (SRAM when the heap has it).
         // Cold (~19 KB): sprite patterns 16K | copper 2K | sprAttr 640.
+        //   Butter PSRAM since 2026-10-11 (SRAM wave 2): 720x576 + NeoGS did
+        //   not fit, and this is the one block of the Next video state that is
+        //   indexed rather than per-pixel — the sprite row loop below reads 8
+        //   or 16 CONTIGUOUS bytes of one pattern per sprite per rendered line
+        //   (one XIP line fill, not one per pixel), the copper is core0 and
+        //   reads two bytes per instruction, and core0 writing / core1 reading
+        //   through the shared coherent XIP cache is exactly what sprLog and
+        //   palLog have always done. Costs +19 072 B of SRAM heap on a boot
+        //   that claims them; read the [NXV] state: line's addresses (0x11...
+        //   = PSRAM, 0x20... = SRAM) and the PERF `c1=` on a sprite title.
         //   Sprite renderer copy + attribute log: ~2.1 KB + 4 KB, their own block.
         static_assert(sizeof(SprRes) == 10, "SprRender packs 128 x 10");
         const unsigned hotSz  = 8*256*2 + 8*256 + 384 + 512 + 512 + 4 * 768;
         const unsigned coldSz = 16384 + 2048 + 128*5;
         uint8_t* hot  = (uint8_t*)Buffer::palloc(hotSz,  Buffer::NEED_POINTER | Buffer::HOT_SRAM);
-        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         const unsigned sprSz = (sizeof(SprRender) + 3) & ~3u;
         // Two blocks, not one: the renderer state is read per sprite per line
         // (core1), the log only for the bytes written since the last line. As
@@ -1286,6 +1302,9 @@ __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
         __dmb();                    // job + state visible before the index
         nx_w = nx_w + 1;
         nx_st_job[nx_cur] = nx_w;
+        const uint32_t occ = nx_w - nx_r;      // ring occupancy (see g_nx_ring_max)
+        if (occ > g_nx_ring_max) g_nx_ring_max = occ;
+        g_nx_ring_now = occ;
     } else {
         if (s_preCap) nx_sync = *s_preCap;
         else {
@@ -2083,7 +2102,7 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
         if (sy >= 192) sy -= 192;
         uint16_t page = bank + (sy >> 5);
         if (page >= MemESP::NEXT_PAGES - 1u) return;
-        const uint8_t* src = MemESP::nextRamPtr[page] + (sy & 31) * 256;
+        const uint8_t* src = MemESP::nextPgPtr(page) + (sy & 31) * 256;
         uint8_t sx = LS->r16 + LS->clip[0][0];
         uint16_t* q = out + xPaperOff + LS->clip[0][0];
         int count = (int)LS->clip[0][1] - (int)LS->clip[0][0] + 1;
@@ -2143,7 +2162,7 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
             uint32_t off = (uint32_t)sx * 256 + sy;
             uint16_t page = bank + (off >> 13);
             if (page >= MemESP::NEXT_PAGES) continue;
-            const uint8_t b = MemESP::nextRamPtr[page][off & 0x1FFF];
+            const uint8_t b = MemESP::nextPgPtr(page)[off & 0x1FFF];
             uint16_t e, v;
             if (!hires) {
                 e = raw[(uint8_t)(b + palOfs)];

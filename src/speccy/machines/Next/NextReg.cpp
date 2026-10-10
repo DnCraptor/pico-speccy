@@ -201,13 +201,20 @@ void next_trace_dump(uint32_t frames) {
         const uint32_t c = cpu_frame_us, d = c - s_prev_cpu;
         s_prev_cpu = c;
         const uint32_t f = frames ? frames : 1;
-        Debug::log("NEXT cpu: %u.%ums/fr vid=%u.%ums/fr li=%u line=%u clk=%u MHz fps=%u draw=%u max=%u",
+        // Core1 line-ring occupancy since the last dump (NextVideo.cpp): the
+        // worst backlog of the window and the depth right now, against the 320
+        // the ring holds. A max pinned at 320 = the poster waited on a full
+        // ring; a low max is what would let NEXT_C1_RING shrink.
+        extern volatile uint32_t g_nx_ring_max, g_nx_ring_now, g_nx_ring_size;
+        const uint32_t rmax = g_nx_ring_max, rnow = g_nx_ring_now, rsz = g_nx_ring_size;
+        g_nx_ring_max = 0;
+        Debug::log("NEXT cpu: %u.%ums/fr vid=%u.%ums/fr li=%u line=%u clk=%u MHz fps=%u draw=%u max=%u ring=%u/%u(now %u)",
             (unsigned)(d / f / 1000u), (unsigned)(d / f % 1000u / 100u),
             (unsigned)(g_nextvid_us / f / 1000u), (unsigned)(g_nextvid_us / f % 1000u / 100u),
             (unsigned)NextInt::lineEnabled(), (unsigned)NextInt::lineNumber(),
             (unsigned)(ESPectrum::multiplicator == 0 ? 3 : 7u << (ESPectrum::multiplicator - 1)),
             (unsigned)frames, (unsigned)g_nextvid_frames,
-            (unsigned)ESPectrum::maxSpeed);
+            (unsigned)ESPectrum::maxSpeed, (unsigned)rmax, (unsigned)rsz, (unsigned)rnow);
         {   // DACs A..D: writes / steps of 64+ / min..max per frame, writes dropped
             // while NR 08 b3 = 0; then each AY: mixer reg 7, volumes A/B/C, tone A
             extern volatile uint32_t g_nx_dac_n[4], g_nx_dac_jump[4], g_nx_dac_off;
@@ -1207,7 +1214,7 @@ void NextReg::updateLayer2Window() {
         for (uint8_t s = 0; s < nSlots; s++) {
             const uint8_t pre = (seg == 3) ? (uint8_t)(s >> 1) : seg;
             const uint16_t page = (uint16_t)((uint8_t)(bank + pre + l2Offset) & 0x7F) * 2 + (s & 1);
-            uint8_t* lp = (page < MemESP::NEXT_PAGES) ? MemESP::nextRamPtr[page] : nullptr;
+            uint8_t* lp = MemESP::nextPgPtr(page);
             if (rdEn) {
                 MemESP::l2RdPtr[s] = lp;           // null = open bus (applyMMU)
                 rd |= (uint8_t)(1u << s);
@@ -1346,8 +1353,8 @@ void NextReg::write1FFD(uint8_t v) {
         const uint8_t* m = maps[(v >> 1) & 3];
         for (int s = 0; s < 4; s++) {
             uint8_t page = (uint8_t)(m[s] * 2);
-            uint8_t* p0 = (page < MemESP::NEXT_PAGES) ? MemESP::nextRamPtr[page] : nullptr;
-            uint8_t* p1 = (page + 1 < MemESP::NEXT_PAGES) ? MemESP::nextRamPtr[page + 1] : nullptr;
+            uint8_t* p0 = MemESP::nextPgPtr(page);
+            uint8_t* p1 = MemESP::nextPgPtr((unsigned)page + 1);
             if (p0) { MemESP::ramCurrent[s * 2] = p0; MemESP::ramContended[s * 2] = false; }
             if (p1) { MemESP::ramCurrent[s * 2 + 1] = p1; MemESP::ramContended[s * 2 + 1] = false; }
         }
