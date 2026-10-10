@@ -1519,7 +1519,9 @@ __attribute__((noinline)) static uint8_t nxZxNearest(uint16_t v) {
     return best;
 }
 
-IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
+// Returns false when the whole row (border included) is transparent; nxU is
+// then just filled transparent and the mixer may leave the ULA out.
+IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
     const int xres = VIDEO::vga.xres;
     uint16_t* const u = nxU;
     const uint16_t* raw = rawPal[(LS->palCtrl & 0x02) ? 4 : 0];
@@ -1562,11 +1564,39 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
         }
     }
     const uint16_t borderV = hr ? (uint16_t)(hrPap | NX_BRD) : bc[LS->border & 7];
+    const int y = row - paperTopRow;
+
+    // A row that is transparent end to end (NXModPlayer: black screen, black
+    // border, NR 0x14 = 0 under its text tilemap and Layer 2 — 3.3 ms of core1
+    // a frame for nothing, hw 2026-10-11): classic ULA only, the check is the
+    // attribute pass without the 256 stores.
+    bool brdTr = (borderV & NX_TR) != 0;
+    if (LS->brd.n && !hr) for (int c = 0; c < 8; c++) brdTr = brdTr && (bc[c] & NX_TR);
+    if (brdTr && !hr && !ulaNext && !ulap && !(LS->r15 & 0x80) && !(LS->gigs && gigsPrev)) {
+        bool op = false;
+        if (y >= 0 && y < 192 && !VIDEO::paper_off) {
+            const int sy = LS->r27 ? (y + LS->r27) % 192 : y;
+            const uint8_t tm = (LS->r69 & 0x40) ? 0 : (LS->r69 & 0x03);
+            const uint16_t pOff = VIDEO::offBmp[sy];
+            const uint8_t* bmp = LS->grmem + pOff + ((tm & 1) << 13);
+            const uint8_t* att = (LS->attOvr && sy == y) ? LS->attr
+                               : LS->grmem + ((tm & 2) ? 0x2000 + pOff
+                                                       : VIDEO::offAtt[sy] + ((tm & 1) << 13));
+            for (int col = 0; col < 32 && !op; col++) {
+                const uint8_t a = att[col];
+                const uint8_t b = bmp[col] ^ (uint8_t)(-((a & LS->flashing) >> 7));
+                const uint8_t bright = (a & 0x40) >> 3;
+                if (b && !(nxRgb(raw[(a & 7) | bright], tr) & NX_TR)) op = true;
+                else if (b != 0xFF && !(nxRgb(raw[16 + (((a >> 3) & 7) | bright)], tr) & NX_TR)) op = true;
+            }
+        }
+        if (!op) { nxFillTr(u, xres); return false; }
+    }
+
     if (LS->brd.n && !hr) nxPaintBorderRuns(u, xres, bc, borderV);
     else for (int x = 0; x < xres; x++) u[x] = borderV;
 
-    const int y = row - paperTopRow;
-    if (y < 0 || y >= 192 || VIDEO::paper_off) return;
+    if (y < 0 || y >= 192 || VIDEO::paper_off) return true;
     uint16_t* p = u + xPaperOff;
     // ULA scroll (NR 0x26/0x27, zxula.vhd 192-206): the memory row is
     // (y + scroll Y) mod 192, the columns start scroll X pixels in and wrap
@@ -1599,7 +1629,7 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
                 (ry < 48 ? ry * 128 : 0x2000 + (uint16_t)(ry - 48) * 128);
             nxLoResStd(p, base, sxl, ofs, raw, tr);
         }
-        return;
+        return true;
     }
     // Timex screen mode = port FF / NR 0x69 bits 2:0, forced to 000 while the
     // shadow screen (bank 7, NR 0x69 bit 6 = port 7FFD bit 3) is displayed —
@@ -1710,9 +1740,10 @@ IRAM_ATTR void NEXTVID::RenderUlaLine(int row) {
     if (LS->r26 && !LS->hires) nxRotL(u + xPaperOff, LS->r26);
     // ULA clip window (NR 0x1A, zxula.vhd 562): paper only, never the border
     const uint8_t* cw = LS->clip[2];
-    if (y < cw[2] || y > cw[3]) { nxFillTr(u + xPaperOff, 256); return; }
+    if (y < cw[2] || y > cw[3]) { nxFillTr(u + xPaperOff, 256); return true; }
     for (int x = 0; x < cw[0]; x++) u[xPaperOff + x] = NX_TR;
     for (int x = cw[1] + 1; x < 256; x++) u[xPaperOff + x] = NX_TR;
+    return true;
 }
 
 // LoRes standard mode, one paper row: output pixel x shows byte
@@ -1963,8 +1994,9 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     // the ULA layer (ula_final takes the tilemap or transparent), so do not
     // compose it (TX-1696: 3 ms of core1 a frame, hw 2026-10-09). Timex hi-res
     // still needs RenderUlaLine for its pair row.
+    bool ulaRow = false;
     if ((LS->r68 & 0x80) && !LS->hires) nxFillTr(nxU, xres);
-    else RenderUlaLine(row);
+    else ulaRow = RenderUlaLine(row);
     NX_LT_END(0);
     const bool tmEn = LS->r6B & 0x80;
     const bool l2En = (LS->p123B & 0x02) || (LS->r69 & 0x80);
@@ -2016,6 +2048,9 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     m.fb9 = rgb332_to_333(LS->r4A);
     m.ulaEn = !(LS->r68 & 0x80);
     m.stencil = (LS->r68 & 0x01) && m.ulaEn && tmEn;
+    // an all-transparent ULA row mixes exactly like the ULA switched off —
+    // except under the stencil, where it blanks the tilemap
+    if (!ulaRow && !m.stencil) m.ulaEn = false;
     m.tm = tmEn;
     m.l2 = l2En && nxRowL2;             // empty rows drop out of the mix
     m.spr = (r15 & 0x01) && nxRowSpr;
@@ -2059,8 +2094,12 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
             // filled transparent, writing NX_TR again is the same value.
             const uint32_t* w = (const uint32_t*)src;
             bool any = false;
+            // index 0 transparent (NXModPlayer: NR 0x14 = 0, black background):
+            // four zero pixels are skipped — the buffer is already NX_TR
+            const bool z0 = ((raw[palOfs] & 0x1FF) >> 1) == transp;
             for (int k = 0; k < count; k += 4, sx = (uint8_t)(sx + 4)) {
                 uint32_t b = w[sx >> 2];
+                if (z0 && b == 0) { q += 4; continue; }
                 for (int i = 0; i < 4; i++, b >>= 8) {
                     const uint16_t e = raw[(uint8_t)(b + palOfs)];
                     const uint16_t v = e & 0x1FF;

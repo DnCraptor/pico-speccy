@@ -154,7 +154,7 @@ private:
     static bool computeGeometry();         // firstVisibleLine/paperTopRow (50/60 Hz)
     static void RenderLine(int row);
     static void RenderLayers(uint8_t* fb, int row);   // RenderLine's body, linear pixel order
-    static void RenderUlaLine(int row);              // ULA / LoRes layer -> RGB line buffer
+    static bool RenderUlaLine(int row);              // ULA / LoRes layer -> RGB line buffer; false = row all transparent
     static void RenderSpritesLine(int y);
     static void rebuildLut(uint8_t pal);
     static void setLutEntry(uint8_t pal, uint8_t idx, uint16_t rgb333);
