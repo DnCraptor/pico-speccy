@@ -18,6 +18,7 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 #include "speccy/core/MemESP.h"
 #include "NextReg.h"
 #include "app/Debug.h"
+#include "speccy/z80/MemGates.h"
 #include "hardware/sync.h"
 #include "pico/time.h"
 #include "app/TryAlloc.h"
@@ -726,43 +727,7 @@ void NEXTVID::spriteAttrWrite(uint8_t v) {
 // past show patterns uploaded after them — TX-1696's bottom sprites blinked at
 // the level start; a drain per byte instead cost 2-3 ms a frame, the game
 // animates its sprites by re-uploading patterns (hw 2026-10-09).
-#if NEXT_TRACE
-// [NXPAT]: where a pattern upload reads from (every 256th byte: PC, regs, the
-// whole MMU, ROM, 7FFD) and every MMU change while one runs (MemESP::applyMMU).
-volatile uint32_t g_nxpat_lines = 0, g_nxpat_mmu_watch = 0;
-#endif
 void NEXTVID::spritePatternWrite(uint8_t v) {
-#if NEXT_TRACE
-    if ((sprPatWrite & 0x7FF) == 0 && g_nxpat_lines < 400) {
-        g_nxpat_lines++;
-        g_nxpat_mmu_watch = 40;
-        Debug::log("[NXPAT] pat %02X pc=%04X hl=%04X bc=%04X de=%04X sp=%04X mmu=%02X.%02X.%02X.%02X.%02X.%02X.%02X.%02X rom=%d 7FFD=%02X v=%02X t=%u",
-            (unsigned)(sprPatWrite >> 8), Z80::getRegPC(), Z80::getRegHL(), Z80::getRegBC(), Z80::getRegDE(), Z80::getRegSP(),
-            MemESP::mmu[0], MemESP::mmu[1], MemESP::mmu[2], MemESP::mmu[3], MemESP::mmu[4], MemESP::mmu[5], MemESP::mmu[6], MemESP::mmu[7],
-            (int)MemESP::romInUse, NextReg::port7FFD, v, (unsigned)CPU::tstates);
-    }
-    // The byte should be the MMU page's byte at HL (otx reads before HL += d).
-    // Report what the slot really pointed at when it is not.
-    {
-        static uint32_t s_mis = 0;
-        const uint16_t a = Z80::getRegHL();   // OUTI reads (HL) before the increment
-        const uint8_t sl = a >> 13, pg = MemESP::mmu[sl];
-        if (s_mis < 12 && pg != 0xFF && pg < MemESP::NEXT_PAGES && MemESP::nextRamPtr[pg] &&
-            MemESP::nextRamPtr[pg][a & 0x1FFF] != v) {
-            s_mis++;
-            Debug::log("[NXPAT] MISMATCH pat %04X addr %04X v=%02X want=%02X pg=%02X cur=%08X want=%08X romBase=%08X divm=%d p0hi=%08X l2rd=%02X rommask=%02X romInUse=%d pc=%04X iff=%d t=%u",
-                (unsigned)sprPatWrite, a, v, MemESP::nextRamPtr[pg][a & 0x1FFF], pg,
-                (unsigned)(uintptr_t)MemESP::ramCurrent[sl], (unsigned)(uintptr_t)MemESP::nextRamPtr[pg],
-                (unsigned)(uintptr_t)MemESP::nextRomBase, (int)MemESP::divmmc_mapped,
-                (unsigned)(uintptr_t)MemESP::page0_hi, MemESP::l2_rd_mask, MemESP::next_rom_mask,
-                (int)MemESP::romInUse, Z80::getRegPC(), (int)Z80::isIFF1(), (unsigned)CPU::tstates);
-            extern uint8_t g_ts_fastmem, g_ts_fastrd;
-            Debug::log("[NXPAT]   cur-romBase=%d fm=%d rd=%d mmu=%02X.%02X wrov=%02X",
-                (int)(MemESP::ramCurrent[sl] - MemESP::nextRomBase), (int)g_ts_fastmem, (int)g_ts_fastrd,
-                MemESP::mmu[0], MemESP::mmu[1], MemESP::wr_overlay_mask);
-        }
-    }
-#endif
     sprLogPut(0x80000000u | ((uint32_t)(sprPatWrite & 0x3FFF) << 8) | v);
     sprPatWrite = (sprPatWrite + 1) & 0x3FFF;
 }
@@ -1947,22 +1912,32 @@ void nxMixBlendT(uint8_t* __restrict fb, const uint8_t* __restrict remap, uint16
             if (below) { top = uTr ? NX_TR : u; bot = tTr ? NX_TR : t; }
             else       { top = tTr ? NX_TR : t; bot = uTr ? NX_TR : u; }
         }
-        const bool lTr = l & NX_TR, sTr = s & NX_TR, mixTr = mix & NX_TR;
-        const uint16_t lr = lTr ? 0 : l, mr = mixTr ? 0 : mix;
-        int r = ((lr >> 6) & 7) + ((mr >> 6) & 7), g = ((lr >> 3) & 7) + ((mr >> 3) & 7), b = (lr & 7) + (mr & 7);
-        if (!minus5) { if (r > 7) r = 7; if (g > 7) g = 7; if (b > 7) b = 7; }
-        else if (!mixTr) {
-            r = r <= 4 ? 0 : r >= 12 ? 7 : r - 5;
-            g = g <= 4 ? 0 : g >= 12 ? 7 : g - 5;
-            b = b <= 4 ? 0 : b >= 12 ? 7 : b - 5;
+        const bool lTr = l & NX_TR, sTr = s & NX_TR;
+        // The blended colour is needed only where Layer 2 is opaque, and with
+        // the blend source transparent it is Layer 2's own colour (saturate:
+        // l + 0; minus 5 applies only with both opaque). Computed lazily: the
+        // per-pixel channel split + clamp was most of the loop (NextSID: mix
+        // 13 of core1's 23 ms a frame, hw 2026-10-10).
+        uint16_t v;
+        const bool lFirst = !lTr && (l & NX_PRIO);
+        if (lFirst || (!lTr && (top & NX_TR) && sTr && (bot & NX_TR))) {
+            if (mix & NX_TR) {
+                v = (uint16_t)(l & 0x1FF);
+            } else {
+                int r = ((l >> 6) & 7) + ((mix >> 6) & 7), g = ((l >> 3) & 7) + ((mix >> 3) & 7), b = (l & 7) + (mix & 7);
+                if (!minus5) { if (r > 7) r = 7; if (g > 7) g = 7; if (b > 7) b = 7; }
+                else {
+                    r = r <= 4 ? 0 : r >= 12 ? 7 : r - 5;
+                    g = g <= 4 ? 0 : g >= 12 ? 7 : g - 5;
+                    b = b <= 4 ? 0 : b >= 12 ? 7 : b - 5;
+                }
+                v = (uint16_t)((r << 6) | (g << 3) | b);
+            }
         }
-        const uint16_t sum = (uint16_t)(((r & 7) << 6) | ((g & 7) << 3) | (b & 7));
-        uint16_t v = fb9;
-        if (!lTr && (l & NX_PRIO)) v = sum;
         else if (!(top & NX_TR)) v = top;
         else if (!sTr) v = s;
         else if (!(bot & NX_TR)) v = bot;
-        else if (!lTr) v = sum;
+        else v = fb9;
         fb[x] = (v & NX_SLOT) ? (uint8_t)v : remap[v & 0x1FF];
     }
 }

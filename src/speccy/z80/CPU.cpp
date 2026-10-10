@@ -56,6 +56,9 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/machines/TsConf/TsFastMem.h"
 #include "app/CodeOverlay.h" // TS_OVL_CODE (CPU::tsFrameLoop)
 #include "speccy/core/Rzx.h"
+#include "MemGates.h"
+
+alignas(4) MemGates g_memgates = {};   // MemGates.h: the fast-path gates, one word
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Next/NextVideo.h"
 #include "speccy/machines/Next/NextInt.h"
@@ -1227,6 +1230,15 @@ static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_dram(uint16_t address) 
 }
 IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
     TS_PAGE_HIT(address);
+    const uint32_t gates = g_memgates.w;   // MemGates.h: one load for the whole gate set
+    if (__builtin_expect(g_ts_fastrd > tsFastLo8(address) && MEMGATES_READ_PLAIN(gates), 1)) {
+        // No line test here: the line-boundary tick is taken at the next M1
+        // (the fast fetch's tsFastTick), at most one instruction late — a few T
+        // of a 224..1792-T line, the same as a write landing one instruction
+        // earlier (ccr-05d4d17f-wh3s7v).
+        CPU::tstates += 3;
+        return MemESP::ramCurrent[address >> 13][address & 0x1FFF];
+    }
     if (g_ts_fastrd > tsFastLo8(address)) {
         // The DRAM hit test runs FIRST, while nothing but the address is live:
         // placed after the T-state add it needed two more registers and GCC
@@ -1429,6 +1441,12 @@ static IRAM_ATTR __attribute__((noinline)) void poke8_cold(uint16_t address, uin
 }
 IRAM_ATTR void Z80Ops::poke8(uint16_t address, uint8_t value) {
     TS_PAGE_HIT(address);
+    const uint32_t gates = g_memgates.w;
+    if (__builtin_expect(g_ts_fastmem > tsFastLo8(address) && MEMGATES_WRITE_PLAIN(gates), 1)) {
+        CPU::tstates += 3;   // line tick at the next M1 (see peek8)
+        tsPoke8Store(address, value);
+        return;
+    }
     if (g_ts_fastmem > tsFastLo8(address)) {
         // Same register discipline as peek8: the cache invalidate and the two
         // cold gates go first, the T-state add and the line test last.
@@ -1446,6 +1464,18 @@ IRAM_ATTR void Z80Ops::poke8(uint16_t address, uint8_t value) {
     return poke8_generic(address, value);
 }
 static IRAM_ATTR __attribute__((noinline)) void poke8_generic(uint16_t address, uint8_t value) {
+    // Spectrum Next, a write below 0x4000 into the Layer 2 write window (port
+    // 0x123B, segments 0-2): a plain store into the overlay page. Every other
+    // case down here keeps the full writebyte() rules. g_ts_fastmem == 1 means
+    // no contention and no memory breakpoints; divMMC wins over Layer 2
+    // (writebyte's order). Bomb Jack's menu blits its tiles this way with LDIR,
+    // ~16 KB a frame at 28 MHz (hw log 2026-10-10).
+    if (g_ts_fastmem == 1 && !MemESP::divmmc_mapped && !g_ngs_zxdma &&
+        ((MemESP::wr_overlay_mask >> (address >> 13)) & 1)) {
+        CPU::tstates += 3;
+        MemESP::wrOverlay[address >> 13][address & 0x1fff] = value;
+        return;
+    }
     VIDEO::Draw(3, MemESP::ramContended[address >> 13]);
     if (__builtin_expect(g_ts_memcyc != 0, 0)) TsConf::cpuMemWrite(address);   // TS-Conf DRAM model
     gsDmaPoke8(address, value);
@@ -1471,6 +1501,11 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_dram(uint16_t address
 }
 IRAM_ATTR uint16_t Z80Ops::peek16(uint16_t address) {
     TS_PAGE_HIT(address);
+    const uint32_t gates = g_memgates.w;
+    if (__builtin_expect(g_ts_fastrd > tsFastLo16(address) && MEMGATES_READ_PLAIN(gates), 1)) {
+        CPU::tstates += 6;   // line tick at the next M1 (see peek8)
+        return tsPeek16Load(address);
+    }
     if (g_ts_fastrd > tsFastLo16(address)) {
         // An even address reads both halves out of ONE cache word (index a[8:1]),
         // so the second half can only miss when the first did; odd = two words.
@@ -1548,6 +1583,12 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_cold(uint16_t address, Re
 }
 IRAM_ATTR void Z80Ops::poke16(uint16_t address, RegisterPair word) {
     TS_PAGE_HIT(address);
+    const uint32_t gates = g_memgates.w;
+    if (__builtin_expect(g_ts_fastmem > tsFastLo16(address) && MEMGATES_WRITE_PLAIN(gates), 1)) {
+        CPU::tstates += 6;   // line tick at the next M1 (see peek8)
+        tsPoke16Store(address, word);
+        return;
+    }
     if (g_ts_fastmem > tsFastLo16(address)) {
         if (__builtin_expect(g_ts_memcyc != 0, 0)) {
             // a running DMA or a cache hit on either half -> poke16_cold (even: one cache word)
@@ -1696,8 +1737,27 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_generic(uint16_t address,
 
 
 /* Put an address on bus lasting 'tstates' cycles */
+static IRAM_ATTR __attribute__((noinline)) void addressOnBus_generic(uint16_t address, int32_t wstates);
+// The fast path is a leaf (the generic path is a tail call): the generic loop
+// made the whole function push three registers per call.
 IRAM_ATTR void Z80Ops::addressOnBus(uint16_t address, int32_t wstates) {
-    if (g_ts_fastmem) { tsFastTick((uint32_t)wstates); return; }   // TsFastMem.h: no contention on TS-Conf
+    if (g_ts_fastmem) {   // TsFastMem.h: no contention on the fast path; line tick at the next M1
+        CPU::tstates += (uint32_t)wstates;
+        return;
+    }
+    return addressOnBus_generic(address, wstates);
+}
+// IR on the address bus (INC/DEC rr, LD SP,HL, the M1 extension of many
+// instructions): the fast path ignores the address, so the IR pair is only
+// built on the generic path — it was one out-of-line call per such instruction.
+IRAM_ATTR void Z80Ops::addressOnBusIR(int32_t wstates) {
+    if (g_ts_fastmem) {
+        CPU::tstates += (uint32_t)wstates;
+        return;
+    }
+    return addressOnBus_generic((uint16_t)((Z80::getRegI() << 8) | Z80::getRegR()), wstates);
+}
+static IRAM_ATTR __attribute__((noinline)) void addressOnBus_generic(uint16_t address, int32_t wstates) {
     if (MemESP::ramContended[address >> 13]) {
         for (int idx = 0; idx < wstates; idx++)
             VIDEO::Draw(1, true);

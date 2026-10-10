@@ -97,7 +97,6 @@ uint32_t TsConf::sfileGen = 0;
 // while window 0 is write-protected RAM. Tested predicted-not-taken in the CPU
 // write funnel (gsDmaPoke8) — the g_ngs_zxdma pattern; zero for every other
 // machine, so the cost elsewhere is one byte-load-and-test per guest write.
-uint8_t g_tsconf_wr = 0;
 uint8_t g_ts_bank_watch = 0;
 static uint8_t s_bank_phys[4];   // physical page per CPU bank (setBanks)
 
@@ -180,7 +179,6 @@ static bool     s_dma_pending;  // int_dma latch
 #ifndef TS_DRAM_MODEL
 #define TS_DRAM_MODEL 1
 #endif
-uint8_t  g_ts_memcyc = 0;
 // The cache model's state (TsDramCache.h): tags = the truth, rows = the per-PAGE
 // view the hot path reads (pool of 8). ~2.8 KB of RAM, all of it read per guest access on
 // core0 — static on purpose (a palloc that landed in butter would be the

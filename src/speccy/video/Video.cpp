@@ -597,7 +597,6 @@ static uint64_t ts_frame_start_us = 0;
 #define TSPAL_MAPGEN()             ((void)0)
 #define TSPAL_PALGEN()             ((void)0)
 #endif
-uint8_t g_ts_fastmem = 0;
 uint8_t g_ts_fastrd = 0;    // TsFastMem.h: the read twin
 bool g_next_fastrd = false; // Z80_JLS/next_memory.h: inline operand reads
 bool     VIDEO::ts_tsu_live = false;

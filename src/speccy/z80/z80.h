@@ -428,6 +428,7 @@ public:
     // Execute one instruction
     static void execute();
     static void exec_nocheck();
+    static void exec_nocheck_ts();   // TS-Conf / ATM fast memory path inner loop (Z80_JLS.cpp)
 
     // Check INT
     static void checkINT(void);
@@ -531,6 +532,7 @@ private:
 
     // LDI/LDD, CPI/CPD, INI/IND, OUTI/OUTD — one body per pair, d = +1 / -1
     static void ldx(int d);
+    static void nextLdirBatch(int d);   // Spectrum Next: LDIR/LDDR repeats as one copy (.nxovl)
     static void cpx(int d);
     static void inx(int d);
     static void otx(int d);

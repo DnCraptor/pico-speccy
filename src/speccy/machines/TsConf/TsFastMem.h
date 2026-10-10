@@ -15,7 +15,7 @@
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
 
-extern uint8_t g_ts_fastmem;
+#include "speccy/z80/MemGates.h"   // g_ts_fastmem
 // The READ twin (peek8/peek16 — operand bytes included — test this one; pokes,
 // the opcode fetch and addressOnBus test g_ts_fastmem). Same encoding. TS-Conf:
 // always equal to g_ts_fastmem. Next: 2 (every address) when the NextZXOS ROM

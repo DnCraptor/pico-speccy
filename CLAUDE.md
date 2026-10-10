@@ -8071,6 +8071,23 @@ ATM boot. Still in shared RAM: TS/ATM/KAY/P512 dispersed conditions (~0.3-0.4 KB
 each), Timex CPU accessor hooks (deliberate), Profi DS80 in Video.cpp (~1.5 KB),
 check_trdos branches.
 
+## Z80 core speed-up ported from ccr-05d4d17f-wh3s7v (2026-10-10, NOT hw-tested)
+
+Commit d2c05088 of that branch, adapted to 8K slots and the two-level fastmem
+(1 = Next >= 0x4000, 2 = every address). `src/speccy/z80/MemGates.h`: the four
+gates (fastmem / memcyc / tsconf_wr / atm_ro) in ONE word `g_memgates` (CPU.cpp);
+the old names are macros, memdump.gdb reads `g_memgates.b.atm_ro`. peek8/poke8/
+peek16/poke16 test the whole set with one load first (no line tick there: the
+whole-line renderer ticks at the next M1). `Z80::exec_nocheck_ts` (O2, RAM) is
+exec_nocheck's inner loop for `g_ts_fastmem == 2` (TS-Conf / ATM / 16col; not with
+DivMMC or a PC breakpoint), returns when the gate drops mid-slice. `addressOnBusIR`
+builds the IR pair only on the generic path; `addressOnBus` is a leaf.
+TS-Conf `check_trdos` calls the flash trap only on its two edges. Z80_JLS.cpp and
+CPU.cpp build with `-fno-data-sections -fsection-anchors`. The branch's TS-Conf
+"28 MHz (turbo)" CPU cap was deliberately NOT taken (owner: the speed-ups serve
+14 MHz too). `tools/z80bench/` = the branch's QEMU
+instruction-count harness (ZEXDOC passes; -28% ARM insns/T measured there).
+
 ## WD1793 in flash by default (`WD1793_IN_RAM=OFF`, 2026-09-30; hw: owner "все работает", not measured)
 
 Step 2 of the shared-SRAM plan. `_do`, `_end`, `rvmWD1793Step/Read/Write` and

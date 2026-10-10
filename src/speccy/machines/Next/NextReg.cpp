@@ -6,6 +6,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 
 #include "NextReg.h"
 #include "speccy/devices/sound/AySound.h"
+#include "speccy/z80/MemGates.h"
 #include "speccy/machines/Next/NextIdle.h"
 #include "speccy/core/MemESP.h"
 #include "speccy/core/Ports.h"
@@ -296,7 +297,7 @@ void next_trace_dump(uint32_t frames) {
             {
                 // Where core0's frame goes: fast memory path state, Z80 fetches per
                 // frame (Z80::regR counts every M1) and their average cost.
-                extern uint8_t g_ts_fastmem, g_ts_fastrd;
+                extern uint8_t g_ts_fastrd;   // g_ts_fastmem: MemGates.h (TsFastMem.h)
                 extern volatile uint32_t cpu_frame_us;
                 static uint32_t s_pr = 0, s_pc = 0;
                 const uint32_t rr = Z80::getFetchCounter(), cc = cpu_frame_us;
@@ -668,14 +669,36 @@ void NextReg::rasterPollFF(uint8_t k) {
     // waits for line 193 right behind the line-192 interrupt, with the sample
     // CTC and DMA-yields-to-interrupts set. Those polls go through the cheap
     // port path in Ports::input instead.
-    if (NextInt::ex) return;
+    // With them armed it now runs too, but only inside the unchecked slice:
+    // there CPU::stFrame IS the next interrupt / DMA event (CPU::frameRest), so
+    // the skip below can never pass one.
+    //
+    // A skip is safe only when the loop does NOTHING between two reads but read
+    // again: the same PC, the same value read last time, and none of the main
+    // registers moved. The value test alone was the "start takes minutes" bug
+    // (hw 2026-10-10, Bomb Jack): its delay is "wait for line 250, HL times"
+    // (#D961: OUT #243B,#1F / IN / CP #FA / JR NZ / DEC HL / JR NZ), and at line
+    // 250 the loop reads #FA ~34 times within that one line, decrementing HL
+    // each time — a skip to the next line change ate those, so every DEC HL cost
+    // a whole frame.
+    extern bool z80_in_nocheck;
+    if (NextInt::ex && !z80_in_nocheck) return;
     static uint16_t s_pc[2] = { 0xFFFF, 0xFFFF };
     static uint32_t s_t[2] = { 0, 0 };
+    static uint32_t s_r[2][3];
+    static uint16_t s_v[2] = { 0xFFFF, 0xFFFF };
     const uint32_t now = CPU::tstates;
     const uint16_t pc = Z80::getRegPC();
     const uint8_t m = ESPectrum::multiplicator;
-    const bool again = pc == s_pc[k] && (uint32_t)(now - s_t[k]) < (128u << m);
-    s_pc[k] = pc;
+    const uint16_t line = activeLine();
+    const uint16_t v = k ? (line & 0xFF) : ((line >> 8) & 1);
+    const uint32_t r0 = ((uint32_t)Z80::getRegBC() << 16) | Z80::getRegDE();
+    const uint32_t r1 = ((uint32_t)Z80::getRegHL() << 16) | Z80::getRegSP();
+    const uint32_t r2 = ((uint32_t)Z80::getRegIX() << 16) | Z80::getRegIY();
+    const bool again = pc == s_pc[k] && (uint32_t)(now - s_t[k]) < (128u << m) &&
+                       v == s_v[k] && r0 == s_r[k][0] && r1 == s_r[k][1] && r2 == s_r[k][2];
+    s_pc[k] = pc; s_v[k] = v;
+    s_r[k][0] = r0; s_r[k][1] = r1; s_r[k][2] = r2;
     if (!again || (int32_t)now < CPU::IntEnd) { s_t[k] = now; return; }
     const uint32_t tpl = VIDEO::tStatesPerLine;
     const uint32_t cur = now >> m, inl = cur % tpl;
