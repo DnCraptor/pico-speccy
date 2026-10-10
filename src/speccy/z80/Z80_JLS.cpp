@@ -893,6 +893,16 @@ Z80_COLD uint8_t Z80::scorp_dos_exit_rom() {
 // Next idle-loop fast-forward (NextIdle) may move the clock to stFrame.
 bool z80_in_nocheck = false;   // NextReg::rasterPollFF reads it too
 
+// Next: a taken backward JR NZ/Z (decodeOpcode20/28) — the same idle-loop
+// candidate test check_trdos runs for JP/CALL/RET (NextSID's main loop is
+// CP A / CP (HL) / JR Z, 96% of the frame).
+static inline __attribute__((always_inline)) void nextIdleNote() {
+    const uint16_t pc = Z80::getRegPC();
+    if (pc == NextIdle::tgt) {
+        if (z80_in_nocheck && pc != NextIdle::rej) NextIdle::jump();
+    } else NextIdle::tgt = pc;
+}
+
 IRAM_ATTR void Z80::check_trdos() {
 
     // TS-Conf owns its window-0 mapping (Page0/MemConfig) — the generic code
@@ -1901,6 +1911,9 @@ void Z80::decodeOpcode20()
         Z80Ops::addressOnBus(REG_PC, 5);
         REG_PC += offset;
         REG_WZ = REG_PC + 1;
+        REG_PC++;
+        if (Z80Ops::isNext && offset < 0) nextIdleNote();
+        return;
     }
     REG_PC++;
 }
@@ -1947,6 +1960,9 @@ void Z80::decodeOpcode28()
         Z80Ops::addressOnBus(REG_PC, 5);
         REG_PC += offset;
         REG_WZ = REG_PC + 1;
+        REG_PC++;
+        if (Z80Ops::isNext && offset < 0) nextIdleNote();
+        return;
     }
     REG_PC++;
 }

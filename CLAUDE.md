@@ -435,7 +435,10 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   хук = 2 сравнения в Next-ветке `check_trdos`): после двух равных витков такого цикла
   время уходит к концу среза (следующее событие INT/DMA) целыми витками,
   `NEXTVID::idleAdvanceTo` рисует строки, R += выборки. Только в `exec_nocheck`, IFF1=1,
-  не contended, не RZX, PC >= 0x4000; ловит только `JP cc` (не JR). NEXT_TRACE:
+  не contended, не RZX, PC >= 0x4000; тело — только чтения в A и флаги (LD A,(nn)/(HL)/(BC)/(DE), CP r/(HL)/n,
+  OR/AND A/n, BIT), конец — `JP cc` или `JR NZ/Z` назад (хук взятого обратного JR в
+  decodeOpcode20/28, только Next). NextSID (`CP A / CP (HL) / JR Z` на E093, 96%
+  кадра): 42 -> 50 FPS, hw-confirmed 2026-10-10. NEXT_TRACE:
   `NEXT rlff: ... | idle loop N/fr skipped X%`. Trace-сборка сама тормозит core0
   (`nxJumpNote` на каждом JP/RET) — FPS только по обычной сборке.
 - **NXModPlayer (CTC 633 INT/кадр, 4 DAC OUT на каждое) и окно `.nxovl`** (2026-10-10,
