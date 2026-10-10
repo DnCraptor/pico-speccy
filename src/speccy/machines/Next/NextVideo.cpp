@@ -852,9 +852,20 @@ void NEXTVID::softReset() {
 void NEXTVID::Reset() {
     c1Drain();
     if (!nx_ring) {
-        // The core1 line queue (~4.6 KB). No RAM = render on core0 as before.
-        uint8_t* q = (uint8_t*)tryMalloc(4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
-                                         + 4 * NEXT_C1_STATES);
+        // The core1 line queue: 320 x 4 B of jobs + 64 x 120 B of per-line state
+        // + 64 x 4 B of the state-reuse memo = 9 216 B. No RAM = render on
+        // core0 as before.
+        // Butter PSRAM since 2026-10-11 (SRAM wave 2, stage 2): it is a
+        // LINE-granular interface, not per-pixel — core1 reads exactly one
+        // state (120 contiguous bytes, four 32-byte line fills) per rendered
+        // line and never touches it again, and the whole memo beside it
+        // (nx_st_job) is core0-only. The cross-core rule is the one sprLog and
+        // palLog have always relied on: both cores see one coherent XIP cache,
+        // so a state core0 wrote is visible to core1. Costs 9 216 B of SRAM
+        // heap back; watch `c1=` / FPS and the `ring=` field of the NEXT line.
+        uint8_t* q = (uint8_t*)Buffer::palloc(4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
+                                              + 4 * NEXT_C1_STATES,
+                                              Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         if (q) {
             nx_ring = (uint32_t*)q;
             nx_st = (NextLineState*)(q + 4 * NEXT_C1_RING);
