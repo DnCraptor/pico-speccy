@@ -6,7 +6,9 @@
 
 class ZiFi {
 public:
-    static void init();
+    static void init(bool background = false);
+    // Advance a deferred GPIO-UART baud negotiation without waiting on the wire.
+    static bool initReady();
     static void deinit();
 
     // True when the physical ESP UART link is currently up (brought up by the

@@ -269,7 +269,7 @@ ZiFiAT::Status ZiFiAT::syncTime(int tz, string& out_str) {
 
 // ─── Non-blocking background time sync (boot auto-sync, no OSD) ───────────────
 namespace {
-enum AsState { AS_IDLE, AS_CWMODE, AS_CWJAP, AS_SNTPCFG, AS_QUERY, AS_RETRY, AS_DONE, AS_FAIL };
+enum AsState { AS_IDLE, AS_INIT, AS_CWMODE, AS_CWJAP, AS_SNTPCFG, AS_QUERY, AS_RETRY, AS_DONE, AS_FAIL };
 AsState  as_state    = AS_IDLE;
 uint32_t as_deadline = 0;   // per-step timeout (ms since boot)
 uint32_t as_retry_at = 0;   // when to fire the next query in AS_RETRY
@@ -339,11 +339,10 @@ void ZiFiAT::autoSyncBegin(const string& ssid, const string& pass, int tz, bool 
         return;
     }
 #endif
-    ZiFi::init(); // ensure UART backend
+    ZiFi::init(true); // defer GPIO-UART baud settling across background polls
     as_ssid = ssid; as_pass = pass; as_tz = tz; as_sntp = sntp;
     as_attempts = 0; as_got_ip = false; as_linelen = 0;
-    as_send("AT+CWMODE=1");
-    as_state = AS_CWMODE; as_deadline = as_now() + 2000;
+    as_state = AS_INIT;
 }
 
 void ZiFiAT::autoSyncPoll() {
@@ -359,6 +358,13 @@ void ZiFiAT::autoSyncPoll() {
 #endif
     if (!autoSyncBusy()) return;
     uint32_t now = as_now();
+
+    if (as_state == AS_INIT) {
+        if (!ZiFi::initReady()) return;
+        as_send("AT+CWMODE=1");
+        as_state = AS_CWMODE; as_deadline = as_now() + 2000;
+        return;
+    }
 
     if (as_state == AS_RETRY) {
         if (now >= as_retry_at) as_to_query(now);

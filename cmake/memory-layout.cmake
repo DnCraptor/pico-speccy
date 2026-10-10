@@ -225,7 +225,8 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # NEXT_TRACE, 33 016 without; +1 KB the same day (the DAC fast path,
     # the DMA-before-CPU frame head/tail). Still above .ftovl's base, so the early heap
     # of other machines does not move.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 34816)
+    # SD polling batch and headroom for both trace and normal Next builds.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 35840)
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})
 endif()

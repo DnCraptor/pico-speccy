@@ -11,6 +11,13 @@ extern bool g_next_fastrd;
 
 namespace NextMemory {
 
+__attribute__((always_inline)) inline void addressOnBus(uint16_t address, int32_t cycles) {
+    // Match addressOnBus's counter-only fast path: internal cycles defer the
+    // raster tick until the next memory/M1 access, even across a line boundary.
+    if (g_next_fastrd) CPU::tstates += (uint32_t)cycles;
+    else Z80Ops::addressOnBus(address, cycles);
+}
+
 __attribute__((always_inline)) inline uint8_t peek8(uint16_t address) {
     const uint32_t end = CPU::tstates + 3;
     if (g_next_fastrd && end < VIDEO::ts_line_t) {

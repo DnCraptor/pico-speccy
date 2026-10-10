@@ -973,6 +973,23 @@ static __attribute__((noinline)) bool atmPortReadEarly(uint16_t address, uint8_t
 // One source, so the two cannot drift; the per-instance statics are all under
 // *_TRACE flags. Rule for a new machine with woven-in branches: same shape.
 // ---------------------------------------------------------------------------
+// Next's fully decoded keyboard port with no tape inserted. The caller has
+// already applied the early I/O cycle and breakpoint/profiling hooks. No device
+// preceding the ULA decode claims #xxFE on Next (NEMO requires A2:A1 = 00).
+static inline __attribute__((always_inline)) uint8_t nextKeyboardRead(uint16_t address) {
+  VIDEO::Draw(3, g_ula_io_contend);
+  uint8_t data = 0xBF;
+  unsigned rows = (~(address >> 8)) & 0xFF;
+  while (rows) {
+    data &= Ports::port[__builtin_ctz(rows)];
+    rows &= rows - 1;
+  }
+  if ((Ports::feLatch() & 0x10) ||
+      ((NextReg::reg[0x08] & 1) && (Ports::feLatch() & 0x08))) data |= 0x40;
+  if (Tape::tapeEarBit) data ^= 0x40;
+  return data;
+}
+
 template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputImpl(uint16_t address) {
   PERF_PORT_SCOPE(address & 0xFF);
   uint8_t data;
@@ -1056,6 +1073,10 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     LED::touchR(LED::SD);
     return DivMMC::mmc_read();
   }
+
+  if (!PROFI && Z80Ops::isNext && (address & 0xFF) == 0xFE &&
+      Tape::tapeFileType == TAPE_FTYPE_EMPTY && Tape::tapeStatus != TAPE_LOADING)
+    return nextKeyboardRead(address);
 
   if (MEM_PG_CNT > 64 && !Z80Ops::isTsconf && address == 0xAFF7) {
     LED::touchR(LED::RAM);
@@ -3655,10 +3676,12 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
       uint8_t lo = address & 0xFF;
       if (lo == 0xE3 && NextReg::portOn(NextReg::PE_DIVMMC)) {
         LED::touchW(LED::SD);
-        DivMMC::bank = data & (DIVMMC_NUM_BANKS - 1);
-        if (data & 0x40) DivMMC::mapram = true;
-        DivMMC::conmem = (data & 0x80) != 0;
-        DivMMC::applyMapping();
+        if (!(Z80Ops::isNext && NextPorts::divE3Fast(data))) {
+          DivMMC::bank = data & (DIVMMC_NUM_BANKS - 1);
+          if (data & 0x40) DivMMC::mapram = true;
+          DivMMC::conmem = (data & 0x80) != 0;
+          DivMMC::applyMapping();
+        }
 #if NEXT_TRACE
         { extern uint16_t g_nmi_trace_left;
           if (g_nmi_trace_left) next_trace_ev('E', 0xE3, data); }
@@ -4254,6 +4277,20 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
 #if NEXT_TRACE
       nxIoNote(address, timer_hw->timerawl - t0, true);
 #endif
+      return;
+    }
+    // divMMC control 0xE3, bank-only change (NextPorts::divE3Fast): enNxtmmc's
+    // byte-at-a-time bank copy writes it twice per byte (~1600 a frame while
+    // NextZXOS boots). The generic decode reaches the same handler only after
+    // ~40 other machines' tests; nothing ahead of it claims 0xE3 on the Next.
+    // The bank swap has no time-stamped effect, so it may go before the I/O
+    // cycle's T-states.
+    if ((uint8_t)address == 0xE3 && DivMMC::enabled && NextReg::portOn(NextReg::PE_DIVMMC) &&
+        NextPorts::divE3Fast(data)) {
+      VIDEO::Draw(1, MemESP::ramContended[address >> 13]);
+      p_states = CPU::tstates;
+      LED::touchW(LED::SD);
+      ioContentionLate(false);
       return;
     }
   }

@@ -55,6 +55,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "loaders.h"
 #include "speccy/core/Rzx.h"
 #include "speccy/core/Pss.h"
+#include "speccy/machines/Next/NexLaunch.h"
 #include "app/Config.h"
 
 #include <sys/unistd.h>
@@ -109,6 +110,13 @@ bool LoadSnapshot(const string& filename, ArchIdx force_arch, RomsetIdx force_ro
         res = FileZ80::load(filename);
     } else if (FileUtils::hasNEXextension(filename)) {
         res = FileNEX::load(filename);
+    } else if (FileUtils::getLCaseExt(filename) == "snx" || FileUtils::getLCaseExt(filename) == "bas") {
+        const bool bas = FileUtils::getLCaseExt(filename) == "bas";
+        const int native = NexLaunch::start(filename, bas ? NexLaunch::Format::BAS : NexLaunch::Format::SNX);
+        res = native > 0;
+        if (!native) loadFailMsg(bas ? "BAS needs running NextZXOS with raw SD access"
+                                    : "SNX needs running NextZXOS with raw SD access");
+        else if (native < 0) s_load_reported = true;
     } else if (FileUtils::hasPextension(filename)) {
         res = FileP::load(filename);
     } else if (FileUtils::hasSPGextension(filename)) {

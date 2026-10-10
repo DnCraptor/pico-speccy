@@ -15,9 +15,11 @@ banks stored in order 5,2,0,1,3,4,6,7,8...111.
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
 #include "NextReg.h"
+#include "NexLaunch.h"
 #include "ui/OSDMain.h"
 #include "fs/FileUtils.h"
 #include "speccy/z80/z80.h"
+#include "speccy/devices/storage/DivMMC.h"
 #include "app/Debug.h"
 #include "app/TryAlloc.h"
 #include <string.h>
@@ -30,7 +32,8 @@ static bool readExact(FIL* f, void* dst, UINT len) {
 }
 
 static bool skipBytes(FIL* f, FSIZE_t len) {
-    return f_lseek(f, f_tell(f) + len) == FR_OK;
+    return len <= f_size(f) - f_tell(f) &&
+           f_lseek(f, f_tell(f) + len) == FR_OK;
 }
 
 // Read one 8K page. Banks 8+ live in butter PSRAM: the SD driver may DMA
@@ -98,7 +101,16 @@ bool FileNEX::load(const string& nex_fn) {
     uint8_t entryBank = hdr[139];
     (void)numBanks;
 
-    // Full machine reset unless the file asks to keep nextreg state
+    // The OS loader establishes the application's working directory and keeps
+    // its filesystem alive. Host-only bank injection cannot supply those APIs.
+    const int native = NexLaunch::start(nex_fn);
+    if (native) {
+        fclose2(file);
+        return native > 0;
+    }
+
+    // Reset alone leaves the BIOS entry state (ROM0, 3.5 MHz, sprites off).
+    // NEX programs expect the application defaults installed by .nexload.
     if (!preserveRegs) {
         ESPectrum::reset();
     }
@@ -111,6 +123,37 @@ bool FileNEX::load(const string& nex_fn) {
     MemESP::nextConfigMode = false;
     MemESP::applyNextConfigWindow();
 
+    if (!preserveRegs) {
+        // Select 48K BASIC for IM1/RST services, not the NextZXOS boot ROM.
+        // Clear a staged Alt-ROM selection promoted by the soft reset too.
+        NextReg::write(0x8C, 0);
+        NextReg::write(0x08, (NextReg::reg[0x08] & 0x10) | 0xCE);
+        NextReg::write1FFD(0x04);
+        NextReg::write7FFD(0x10);
+        NextReg::write(0x06, (NextReg::reg[0x06] & ~0x10) | 0x08);
+        NextReg::write(0x07, 3); // .nexload starts applications at 28 MHz
+        NextReg::write(0x12, 9);
+        NextReg::write(0x13, 12);
+        NextReg::write(0x15, 1); // sprites enabled
+        NextReg::write(0x42, 15);
+        NextReg::write(0x4A, 0);
+        NextReg::contendRecalc();
+    }
+
+    // Loading via the host does not execute the dot-command's exit trampoline.
+    // Release its divMMC overlay even when preserving the Next registers.
+    DivMMC::automap = DivMMC::conmem = false;
+    DivMMC::applyMapping();
+    // .nexload establishes banks 5/2 independently of PreserveNextRegisters.
+    for (uint8_t s = 2; s < 6; ++s)
+        NextReg::write(0x50 + s, s < 4 ? s + 8 : s);
+
+    auto readFailure = [&]() {
+        fclose2(file);
+        OSD::osdCenteredMsg("Error reading NEX file:\n" + nex_fn, LEVEL_WARN, 2000);
+        return false;
+    };
+
     // Optional palette block (for Layer2/LoRes screens, unless bit7 set)
     bool hasPalette = (screens & 0x05) && !(screens & 0x80);
     if (hasPalette) {
@@ -119,7 +162,7 @@ bool FileNEX::load(const string& nex_fn) {
         NextReg::write(0x40, 0);
         for (int i = 0; i < 256; i++) {
             uint8_t pair[2];
-            if (!readExact(file, pair, 2)) break;
+            if (!readExact(file, pair, 2)) return readFailure();
             NextReg::write(0x44, pair[0]);
             NextReg::write(0x44, pair[1]);
         }
@@ -128,29 +171,28 @@ bool FileNEX::load(const string& nex_fn) {
 
     // Loading screens
     if (screens & 0x01) { // Layer 2 (48K into banks 9,10,11)
-        bool ok = readBank(file, 9) && readBank(file, 10) && readBank(file, 11);
-        if (ok) {
-            NextReg::write(0x12, 9);
-            NextReg::writeLayer2Port(0x02); // visible (rendered from Phase 3 on)
-        }
+        if (!readBank(file, 9) || !readBank(file, 10) || !readBank(file, 11))
+            return readFailure();
+        NextReg::write(0x12, 9);
+        NextReg::writeLayer2Port(0x02);
     }
     if (screens & 0x02) { // ULA (6912 into bank 5)
-        readExact(file, MemESP::ram[5].direct(), 6912);
+        if (!readExact(file, MemESP::ram[5].direct(), 6912)) return readFailure();
     }
-    if (screens & 0x04) skipBytes(file, 12288); // LoRes — not rendered yet
-    if (screens & 0x08) skipBytes(file, 12288); // Timex HiRes — not rendered yet
-    if (screens & 0x10) skipBytes(file, 12288); // Timex HiCol — not rendered yet
+    if ((screens & 0x04) && !skipBytes(file, 12288)) return readFailure(); // LoRes
+    if ((screens & 0x08) && !skipBytes(file, 12288)) return readFailure(); // Timex HiRes
+    if ((screens & 0x10) && !skipBytes(file, 12288)) return readFailure(); // Timex HiCol
 
     // 16K banks in stored order
     static const uint8_t first8[] = { 5, 2, 0, 1, 3, 4, 6, 7 };
     for (int i = 0; i < 8; i++) {
         if (hdr[18 + first8[i]]) {
-            if (!readBank(file, first8[i])) break;
+            if (!readBank(file, first8[i])) return readFailure();
         }
     }
     for (unsigned b = 8; b < 112; b++) {
         if (hdr[18 + b]) {
-            if (!readBank(file, b)) break;
+            if (!readBank(file, b)) return readFailure();
         }
     }
 
@@ -165,6 +207,7 @@ bool FileNEX::load(const string& nex_fn) {
 
     Z80::reset();
     Z80::setRegSP(sp);
+    Z80::setRegBC(0); // no open esxDOS file handle
     Z80::setIM(Z80::IM1);
     Z80::setIFF1(false);
     Z80::setIFF2(false);

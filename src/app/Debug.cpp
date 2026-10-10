@@ -270,6 +270,31 @@ void Debug::uartFlushSync()
     uart_tx_wait_blocking(s_dbg_uart);   // 32 B @ 115200 ≈ 3 ms > the watchdog delay
 }
 
+bool Debug::tryLog(const char* fmt, ...)
+{
+    if (!s_dbg_uart) return true;
+    char buf[256];
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (n < 0) return false;
+    if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
+    unsigned needed = (unsigned)n + 2;
+    for (int i = 0; i < n; ++i) if (buf[i] == '\n') ++needed;
+    const uint32_t save = dbg_lock();
+    const unsigned free = (s_dbg_r - s_dbg_w - 1) & (DBG_TX_RING - 1);
+    if (needed > free) { dbg_unlock(save); return false; }
+    for (int i = 0; i < n; ++i) {
+        if (buf[i] == '\n') dbg_uart_put('\r');
+        dbg_uart_put(buf[i]);
+    }
+    dbg_uart_put('\r'); dbg_uart_put('\n');
+    dbg_unlock(save);
+    dbg_uart_drain_fifo();
+    return true;
+}
+
 void Debug::log(const char* fmt, ...)
 {
     if (!s_dbg_uart) return;   // console off: no sink, so don't even format

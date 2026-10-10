@@ -11,11 +11,19 @@ struct MemESP { static uint8_t* ramCurrent[8]; };
 struct Z80Ops {
     static uint8_t peek8(uint16_t);
     static uint16_t peek16(uint16_t);
+    static void addressOnBus(uint16_t, int32_t);
 };
 uint32_t CPU::tstates;
 uint32_t VIDEO::ts_line_t;
 uint8_t* MemESP::ramCurrent[8];
 bool g_next_fastrd;
+static unsigned bus_calls;
+static uint16_t bus_address;
+void Z80Ops::addressOnBus(uint16_t address, int32_t cycles) {
+    ++bus_calls;
+    bus_address = address;
+    CPU::tstates += cycles;
+}
 
 #include "speccy/z80/next_memory.h"
 
@@ -45,6 +53,16 @@ uint16_t Z80Ops::peek16(uint16_t a) {
 }
 
 int main() {
+    for (bool enabled : {false, true}) {
+        g_next_fastrd = enabled;
+        for (unsigned start = 220; start <= 230; ++start) {
+            CPU::tstates = start; VIDEO::ts_line_t = 228; bus_calls = 0;
+            NextMemory::addressOnBus(0xB981, 5);
+            assert(CPU::tstates == start + 5 && VIDEO::ts_line_t == 228);
+            assert(bus_calls == unsigned(!enabled));
+            if (bus_calls) assert(bus_address == 0xB981);
+        }
+    }
     for (unsigned p = 0; p < 9; ++p)
         for (unsigned i = 0; i < 8192; ++i)
             pages[p][i] = (p * 29 + i * 7 + (i >> 8)) & 255;

@@ -100,6 +100,9 @@ public:
     // ZEsarUX-style automap: call pre before fetch, post after fetch
     static inline void preOpcFetch(uint16_t pc);
     static inline void postOpcFetch();
+    static inline bool opcodeTrapPage(uint16_t pc);
+    static inline uint8_t nextOpcode(uint16_t pc); // direct Next slots, paired M1 only
+    static uint8_t nextOpcodeSlow(uint16_t pc);
 
     // Raw-SD adaptive read-ahead (DivSD/ZC): see DivMMC.cpp
     static void raInit();
@@ -221,32 +224,26 @@ private:
     static uint32_t ide_lba();
 };
 
-// ZEsarUX-style automap: pre-fetch check
-// Called BEFORE opcode is fetched
-// always_inline: -Os declined to inline these and paid a call on every fetch
-// (PC profile 2026-09-25: ~13% of core0 time in NextZXOS's divMMC phases).
+// Keep the page filter shared with the direct Next fetch. Even non-trap
+// addresses on these pages can update the automap enable/arming state.
+__attribute__((always_inline)) inline bool DivMMC::opcodeTrapPage(uint16_t pc) {
+    if (pc >= 0x4000) return false;
+    const uint32_t page = pc >> 8;
+    constexpr uint32_t pages = (1u << 0) | (1u << 4) | (1u << 5) | (1u << 31);
+    return page == 0x3D || (page < 32 && ((pages >> page) & 1));
+}
+
+// Called only at a complete M1 boundary: every previous preOpcFetch has its
+// matching postOpcFetch, so pend_after is zero. Outside the trap pages neither
+// hook has side effects. Keep their large bodies out of the opcode loop.
+__attribute__((always_inline)) inline uint8_t DivMMC::nextOpcode(uint16_t pc) {
+    if (__builtin_expect(opcodeTrapPage(pc), 0)) return nextOpcodeSlow(pc);
+    return MemESP::ramCurrent[pc >> 13][pc & 0x1FFF];
+}
+
+// ZEsarUX-style automap: called BEFORE the opcode is fetched.
 __attribute__((always_inline)) inline void DivMMC::preOpcFetch(uint16_t pc) {
-    // Every entry point (0000/0008/0038/0066/04C6/0562), the 3D00-3DFF instant
-    // map and the 1FF8-1FFF off-points live below 0x4000, so a fetch from RAM
-    // space cannot arm anything: one compare instead of six plus two stores on
-    // every instruction of an esxDOS session (the flags are consumed and
-    // cleared by postOpcFetch, so nothing stale survives an early return).
-    if (__builtin_expect(pc >= 0x4000, 1)) return;
-    // Every automap point lives in one of five 256-byte pages: 0x00 (RST
-    // vectors, 0x0066 NMI, the Next's programmable 0x0000-0x0038 set), 0x04 /
-    // 0x05 (the tape traps 0x04C6/0x04D7/0x0562/0x056A), 0x1F (the 0x1FF8-0x1FFF
-    // off-area) and 0x3D (the instant TR-DOS page). A fetch anywhere else in
-    // ROM space can neither map nor unmap — one shift and test instead of the
-    // whole check chain, per instruction of every ROM routine (PC profile,
-    // Next text viewer: this function was most of exec_nocheck's 56%). The
-    // flags are consumed and cleared by postOpcFetch after every fetch, so an
-    // early return leaves nothing stale.
-    {   // 32-bit mask for pages 0x00-0x1F, one compare for 0x3D (a 64-bit mask
-        // compiled into a ~10-instruction double-word shift)
-        const uint32_t tp = pc >> 8;
-        static constexpr uint32_t kTrapPagesLo = (1u << 0x00) | (1u << 0x04) | (1u << 0x05) | (1u << 0x1F);
-        if (tp != 0x3D && (tp >= 32 || !((kTrapPagesLo >> tp) & 1))) return;
-    }
+    if (!opcodeTrapPage(pc)) return;
     pend_after = 0;
 
     // ZX Spectrum Next: the entry points are PROGRAMMABLE via nextreg

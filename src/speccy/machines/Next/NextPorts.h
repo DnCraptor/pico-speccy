@@ -19,6 +19,10 @@ namespace NextPorts {
     // so no ioTrap, nothing else decodes them first): the DAC mask, 0 = not one
     uint8_t dacFastMask(uint8_t a8);
     void dacOut(uint8_t a8, uint8_t mask, uint8_t v);   // + the Multiface port side effect
+    // divMMC control port 0xE3 when the write only moves the bank of a window
+    // that is already paged in: re-plug slot 1, nothing else. false = take the
+    // full DivMMC::applyMapping() path.
+    bool divE3Fast(uint8_t data);
     void dacNr(uint8_t r, uint8_t v);                   // NR 0x2C-0x2E
     void audioRegWrite(uint8_t r, uint8_t old);         // NR 0x06/0x08/0x09 written
     void audioReset();                                  // machine reset (both types)

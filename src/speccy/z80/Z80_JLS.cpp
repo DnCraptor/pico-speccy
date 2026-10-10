@@ -53,6 +53,7 @@
 #include "speccy/machines/Next/NextInt.h"
 #include "speccy/machines/Next/NextMf.h"
 #include "speccy/z80/next_memory.h"
+#include "speccy/z80/next_opcode.h"
 
 
 // #include "speccy/core/Snapshot.h"
@@ -1513,6 +1514,34 @@ IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_ts() 
     }
 }
 
+// Separate from the multi-machine executor so its register allocation and
+// hot loop do not carry the generic memory gates or inlined automap machinery.
+// PC breakpoints use the original checked-per-PC path below.
+IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_next(bool divmmc) {
+    do {
+        const uint16_t pc = REG_PC;
+        tsFastTick(4);
+        opCode = divmmc ? DivMMC::nextOpcode(pc)
+                       : MemESP::ramCurrent[pc >> 13][pc & 0x1fff];
+        regR++;
+        REG_PC = pc + 1;
+#if PERF_TRACE && PERF_HIST
+        z80_op_hist[opCode]++;
+#endif
+        if (__builtin_expect(prefixOpcode == 0, 1)) {
+            flagQ = pendingEI = false;
+            dcOpcode[opCode]();
+            lastFlagQ = flagQ;
+            continue;
+        }
+        if (prefixOpcode == 0xDD) { prefixOpcode = 0; decodeDDFD(regIX); }
+        else if (prefixOpcode == 0xED) { prefixOpcode = 0; decodeED(); }
+        else if (prefixOpcode == 0xFD) { prefixOpcode = 0; decodeDDFD(regIY); }
+        else continue;
+        if (prefixOpcode == 0) lastFlagQ = flagQ;
+    } while (CPU::tstates < CPU::stFrame && g_next_fastrd);
+}
+
 IRAM_ATTR void Z80::exec_nocheck() {
 
     int nbp = Config::numPcBP;
@@ -1526,38 +1555,8 @@ IRAM_ATTR void Z80::exec_nocheck() {
     while (CPU::tstates < CPU::stFrame) {
 
 #if !NEO8_TRAP
-        // Spectrum Next, every guest read a plain ramCurrent[] load
-        // (g_next_fastrd): a loop of its own, with none of the TS-Conf,
-        // Timex, overlay or beam-video tests the shared one carries. PC profile
-        // 2026-09-26 (text viewer, 14 MHz): the shared fetch sequence was ~47%
-        // of core0 by itself. g_next_fastrd may drop mid-slice (a divMMC
-        // mapping change, a memory breakpoint), so it is re-tested per
-        // instruction and the shared loop takes over from the same state.
-        if (g_next_fastrd) {
-            do {
-                const uint16_t pc = REG_PC;
-                if (nbp > 0 && Config::pcBreakHit(pc)) { z80_in_nocheck = false; return; }
-                tsFastTick(4);
-                if (divmmc) DivMMC::preOpcFetch(pc);
-                opCode = MemESP::ramCurrent[pc >> 13][pc & 0x1fff];
-                if (divmmc) DivMMC::postOpcFetch();
-                regR++;
-                REG_PC = pc + 1;
-#if PERF_TRACE && PERF_HIST
-                z80_op_hist[opCode]++;
-#endif
-                if (__builtin_expect(prefixOpcode == 0, 1)) {
-                    flagQ = pendingEI = false;
-                    dcOpcode[opCode]();
-                    lastFlagQ = flagQ;
-                    continue;
-                }
-                if (prefixOpcode == 0xDD) { prefixOpcode = 0; decodeDDFD(regIX); }
-                else if (prefixOpcode == 0xED) { prefixOpcode = 0; decodeED(); }
-                else if (prefixOpcode == 0xFD) { prefixOpcode = 0; decodeDDFD(regIY); }
-                else continue;
-                if (prefixOpcode == 0) lastFlagQ = flagQ;
-            } while (CPU::tstates < CPU::stFrame && g_next_fastrd);
+        if (g_next_fastrd && nbp <= 0) {
+            exec_nocheck_next(divmmc);
             continue;
         }
         // Whole-address fast path (TS-Conf / ATM / 16col): its own loop. Not with
@@ -2345,7 +2344,7 @@ void Z80::decodeOpcodec9()
 
 void Z80::decodeOpcodecb()
 { /* 0xCB prefix */
-    opCode = Z80Ops::fetchOpcode();
+    opCode = NextOpcode::fetch();
     REG_PC++;
     regR++;
     decodeCB();
@@ -2437,6 +2436,7 @@ void Z80::decodeOpcodedb()
     regA = Ports::input(REG_WZ);
     if (__builtin_expect(Rzx::mode != 0, 0)) regA = Rzx::onIn(regA);
     REG_WZ++;
+    if (Z80Ops::isNext && REG_PC == 0x192A && regA == 0xFF) nextSdPollBatch();
 }
 
 
@@ -2457,7 +2457,7 @@ void Z80::decodeOpcodedd()
     //     VIDEO::Draw_Opcode(false);
     // };
 
-    opCode = Z80Ops::fetchOpcode();
+    opCode = NextOpcode::fetch();
 
     REG_PC++;
     regR++;
@@ -2547,7 +2547,7 @@ void Z80::decodeOpcodeed() /*Subconjunto de instrucciones*/
     //     VIDEO::Draw_Opcode(false);
     // };
 
-    opCode = Z80Ops::fetchOpcode();
+    opCode = NextOpcode::fetch();
 
     REG_PC++;
     regR++;
@@ -2739,7 +2739,7 @@ void Z80::decodeOpcodefd() /* Subconjunto de instrucciones */
     //     VIDEO::Draw_Opcode(false);
     // };
 
-    opCode = Z80Ops::fetchOpcode();
+    opCode = NextOpcode::fetch();
 
     REG_PC++;
     regR++;
@@ -2973,11 +2973,29 @@ static NxJmp s_nx_jmp[NX_JMP_N];
 static uint32_t s_nx_jmp_w = 0;
 static bool s_nx_jmp_done = false;
 static int32_t s_nx_after = -1;   // >0: dump the ring this many transfers later
+static bool s_nx_bas = false;     // NexLaunch BAS: dump when the guest derails
+static const char* s_nx_dump_why = nullptr;
+static uint32_t s_nx_dump_first, s_nx_dump_count, s_nx_dump_pos;
+static uint8_t s_nx_dump_c0, s_nx_dump_c2, s_nx_dump_c3;
+static bool s_nx_dump_retn, s_nx_dump_header;
 // NextMf::retn(): the snapshot launch ends in the Multiface's RETN — what runs
 // after it is the question, so dump the ring 192 transfers later.
 // Every Multiface launch re-arms the ring: n > 0 dumps n transfers later,
 // n == 0 only waits for the next landing / NR 02 reset write.
-Z80_COLD void nxJumpArmAfter(int n) { s_nx_jmp_done = false; s_nx_after = n > 0 ? n : -1; }
+// NexLaunch BAS: re-arm the ring and dump it at the first transfer whose
+// stack is in the attribute file or whose target is the screen bitmap.
+Z80_COLD void nxJumpArmBas() {
+    s_nx_dump_why = nullptr;
+    s_nx_jmp_done = false;
+    s_nx_after = -1;
+    s_nx_bas = true;
+}
+Z80_COLD void nxJumpArmAfter(int n) {
+    // A new snapshot launch supersedes any old dump still queued for output.
+    s_nx_dump_why = nullptr;
+    s_nx_jmp_done = false;
+    s_nx_after = n > 0 ? n : -1;
+}
 static void nxJumpDump(const char* why);
 // A nextreg write into the same ring: to = reg<<8 | value, sp = PC.
 Z80_COLD void nxNrNote(uint8_t r, uint8_t v) {
@@ -3003,21 +3021,58 @@ Z80_COLD void nxJumpNote(char t) {
     j.iff = (uint8_t)(Z80::isIFF1() | (Z80::isIFF2() << 1));
     j.dm = (uint8_t)(MemESP::divmmc_mapped | (DivMMC::automap << 1) | (DivMMC::conmem << 2));
     if (s_nx_after > 0 && --s_nx_after == 0) { nxJumpDump("192 transfers after the Multiface RETN"); return; }
+    if (s_nx_bas && ((j.sp >= 0x5800 && j.sp < 0x5B00) || (j.to >= 0x4000 && j.to < 0x5800))) {
+        s_nx_bas = false;
+        // An error unwinds through ERR_SP: which RST 8 (code byte) came last.
+        {
+            char r8[200]; int p = 0;
+            const uint32_t cnt = s_nx_rst_w < 10 ? s_nx_rst_w : 10;
+            for (uint32_t i = 0; i < cnt && p < (int)sizeof(r8) - 16; i++) {
+                const NxRst8& r = s_nx_rst[(s_nx_rst_w - cnt + i) & 63];
+                p += snprintf(r8 + p, sizeof(r8) - p, "%04X/%u:%02X ", r.pc, r.rom, r.b);
+            }
+            Debug::log("[NXJMP] last RST 8 (pc/rom:code): %s ERR_NR=%02X", r8, MemESP::dbgPeek(0x5C3A));
+        }
+        nxJumpDump("BAS launch: SP in attributes / PC in the screen");
+        return;
+    }
     if (j.to != 0 || j.rom != 2) return;
     nxJumpDump("landed on 0000 in ROM 2");
 }
 static void nxJumpDump(const char* why) {
     s_nx_jmp_done = true;
-    Debug::log("[NXJMP] %s, C0=%02X C2=%02X C3=%02X retnArmed=%d (dm: 1 window 2 automap 4 conmem); last transfers:",
-               why, NextReg::reg[0xC0], NextReg::reg[0xC2], NextReg::reg[0xC3], (int)NextInt::retnArmed);
-    const uint32_t cnt = s_nx_jmp_w < NX_JMP_N ? s_nx_jmp_w : NX_JMP_N;
-    for (uint32_t i = 0; i < cnt; i++) {
-        const NxJmp& r = s_nx_jmp[(s_nx_jmp_w - cnt + i) & (NX_JMP_N - 1)];
-        Debug::log("[NXJMP] %c %04X sp=%04X af=%04X bc=%04X de=%04X hl=%04X rom=%u m=%02X.%02X 7FFD=%02X 1FFD=%02X iff=%u dm=%u",
-                   r.t, r.to, r.sp, r.af, r.bc, r.de, r.hl, r.rom, r.m0, r.m1, r.p7, r.p1, r.iff, r.dm);
-        if ((i & 7) == 7) Debug::uartFlushSync();   // 4 KB ring: the machine is dead anyway
+    s_nx_dump_why = why; // callers pass string literals
+    s_nx_dump_count = s_nx_jmp_w < NX_JMP_N ? s_nx_jmp_w : NX_JMP_N;
+    s_nx_dump_first = s_nx_jmp_w - s_nx_dump_count;
+    s_nx_dump_pos = 0;
+    s_nx_dump_header = true;
+    s_nx_dump_c0 = NextReg::reg[0xC0];
+    s_nx_dump_c2 = NextReg::reg[0xC2];
+    s_nx_dump_c3 = NextReg::reg[0xC3];
+    s_nx_dump_retn = NextInt::retnArmed;
+}
+
+// Once per frame, with the ring frozen by s_nx_jmp_done. Whole-line enqueue
+// avoids truncation under UART backpressure; never wait for bytes to transmit.
+Z80_COLD void nxJumpPump() {
+    if (!s_nx_dump_why) return;
+    if (s_nx_dump_header) {
+        if (!Debug::tryLog("[NXJMP] %s, C0=%02X C2=%02X C3=%02X retnArmed=%d (dm: 1 window 2 automap 4 conmem); last transfers:",
+                          s_nx_dump_why, s_nx_dump_c0, s_nx_dump_c2, s_nx_dump_c3, (int)s_nx_dump_retn)) return;
+        s_nx_dump_header = false;
+    } else if (s_nx_dump_pos < s_nx_dump_count) {
+        const NxJmp& r = s_nx_jmp[(s_nx_dump_first + s_nx_dump_pos) & (NX_JMP_N - 1)];
+        if (!Debug::tryLog("[NXJMP] %c %04X sp=%04X af=%04X bc=%04X de=%04X hl=%04X rom=%u m=%02X.%02X 7FFD=%02X 1FFD=%02X iff=%u dm=%u",
+                          r.t, r.to, r.sp, r.af, r.bc, r.de, r.hl, r.rom, r.m0, r.m1, r.p7, r.p1, r.iff, r.dm)) return;
+        ++s_nx_dump_pos;
     }
-    Debug::uartFlushSync();
+    if (s_nx_dump_pos == s_nx_dump_count) {
+        s_nx_dump_why = nullptr;
+        // Printed: re-arm the ring, whatever froze it (NextZXOS's own boot
+        // soft-reset used to freeze it for the whole session).
+        s_nx_after = -1;
+        s_nx_jmp_done = false;
+    }
 }
 
 Z80_COLD void nxErrPoll() {
@@ -3175,12 +3230,12 @@ void Z80::decodeDDFDLD8(RegisterPair& regIXY) {   /* LD r,r' block under DD/FD, 
     const int s = op & 7, d = (op >> 3) & 7;
     if (s == 6) {                 // LD r,(IX+d): r is the REAL register, H/L included
         REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
-        Z80Ops::addressOnBus(REG_PC, 5);
+        NextMemory::addressOnBus(REG_PC, 5);
         REG_PC++;
         *reg8[d] = NextMemory::peek8(REG_WZ);
     } else if (d == 6) {          // LD (IX+d),r: likewise
         REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
-        Z80Ops::addressOnBus(REG_PC, 5);
+        NextMemory::addressOnBus(REG_PC, 5);
         REG_PC++;
         Z80Ops::poke8(REG_WZ, *reg8[s]);
     } else {
@@ -3194,7 +3249,7 @@ void Z80::decodeDDFDALU8(RegisterPair& regIXY) {  /* ADD..CP A,r / A,(IX+d) unde
     uint8_t v;
     if (s == 6) {
         REG_WZ = regIXY.word + (int8_t) NextMemory::peek8(REG_PC);
-        Z80Ops::addressOnBus(REG_PC, 5);
+        NextMemory::addressOnBus(REG_PC, 5);
         REG_PC++;
         v = NextMemory::peek8(REG_WZ);
     } else {
@@ -4142,6 +4197,7 @@ void Z80::decodeED(void) {
         }
         case 0xB2:
         { /* INIR */
+            if (Z80Ops::isNext && g_ts_fastmem == 1 && REG_C == 0xEB && (REG_B == 0 || REG_B > 2)) nextInirBatch();
             inx(1);
             if (REG_B != 0) {
                 REG_PC = REG_PC - 2;
@@ -4269,8 +4325,21 @@ NX_OVL_CODE void Z80::nextLdirBatch(int d) {
         *mem_desc_t::bank_dirty[ds] = true;
     } else {
         extern volatile uint8_t g_ngs_zxdma;
-        if (MemESP::divmmc_mapped || g_ngs_zxdma || !((MemESP::wr_overlay_mask >> ds) & 1)) return;
-        dp = MemESP::wrOverlay[ds];
+        if (g_ngs_zxdma) return;
+        if (MemESP::divmmc_mapped) {
+            // divMMC RAM at 0x2000-0x3FFF (writebyte's rule for slot 1): enNxtmmc
+            // moves its FAT/file buffers there with LDIR (0x1939 / 0x1943, ~38%
+            // of the PC samples while NextZXOS boots). Slot 0 (ROM / MAPRAM) stays
+            // per-byte.
+            if (ds != 1) return;
+            if (MemESP::page0_hi >= (uint8_t*)0x11000000 && !MemESP::mb02_write_gate) return;
+            dp = MemESP::page0_hi;
+            if (MemESP::divmmc_hi_dirty) *MemESP::divmmc_hi_dirty = true;
+            else if (MemESP::mb02_page_dirty) *MemESP::mb02_page_dirty = true;
+        } else {
+            if (!((MemESP::wr_overlay_mask >> ds) & 1)) return;
+            dp = MemESP::wrOverlay[ds];
+        }
     }
     if (!sp) return;
     uint32_t so = hl & 0x1FFF, dof = de & 0x1FFF;
@@ -4282,6 +4351,84 @@ NX_OVL_CODE void Z80::nextLdirBatch(int d) {
     REG_DE = (uint16_t)(de + (int)n * d);
     REG_BC = (uint16_t)(REG_BC - n);
     CPU::tstates = now + 21 * n;
+    regR += 2 * n;
+}
+
+// ROM 2 waits for CMD17's data token here, before the INIR sector transfer.
+// Fuse only the taken inner loop, checking the actual bytes and mapping: the
+// same addresses in enNxtmmc contain unrelated code. Each IN still goes through
+// Ports (including asynchronous SD completion, LEDs and I/O tracing). Do not
+// fast-forward wall time or manufacture FF replies while core1 reads the card.
+NX_OVL_CODE void Z80::nextSdPollBatch() {
+    if (!z80_in_nocheck || !g_next_fastrd || ffIFF1 ||
+        Config::numPcBP || Config::numPortReadBP || Config::numMemReadBP || Rzx::mode ||
+        MemESP::divmmc_mapped || MemESP::romInUse != 2 ||
+        !DivMMC::enabled || DivMMC::divide_mode || !NextReg::portOn(NextReg::PE_SPI)) return;
+    const uint8_t* p = MemESP::ramCurrent[0] + 0x1928;
+    if (p[0] != 0xDB || p[1] != 0xEB || p[2] != 0xFE || p[3] != 0xFF ||
+        p[4] != 0xC0 || p[5] != 0x10 || p[6] != 0xF9) return;
+    // CP FF (7), RET NZ not taken (5), DJNZ taken (13). Leave B=1's
+    // fall-through, and any non-FF response, to the ordinary interpreter.
+    // At most 32 iterations; never cross a raster line (copper may change the
+    // mapping) or stFrame, which may be the next scheduled DMA/interrupt event.
+    for (unsigned n = 0; n < 32 && regA == 0xFF && REG_B != 1; ++n) {
+        if (CPU::tstates >= CPU::stFrame || CPU::stFrame - CPU::tstates < 25) break;
+        if (CPU::tstates >= VIDEO::ts_line_t || VIDEO::ts_line_t - CPU::tstates <= 25) break;
+        cp(0xFF);
+        REG_B--;
+        REG_PC = REG_WZ = 0x1928;
+        regR += 3;
+        tsFastTick(25);
+        flagQ = false;                    // last instruction was DJNZ, not CP
+        opCode = 0x10;
+        if (n == 31 || CPU::stFrame - CPU::tstates < 8 || VIDEO::ts_line_t - CPU::tstates <= 8) break;
+        // Match today's early #EB port path: M1 4 + immediate 3 + I/O 1.
+        // If Ports gains the missing late 3 T, this bound must become 11.
+        tsFastTick(7);
+        regR++;
+        REG_PC = 0x192A;
+        REG_WZ = 0xFFEB;
+        regA = Ports::input(REG_WZ);
+        REG_WZ++;
+        opCode = 0xDB;
+    }
+}
+
+// Spectrum Next, INIR from the SD SPI data port 0xEB (enNxtmmc / NextZXOS read a
+// sector as INIR x2 into RAM, ~9700 port reads a frame while booting at 28 MHz):
+// every repeat but the last as one loop of DivMMC::mmc_read() straight into the
+// destination page; the normal inx() + repeat code does the final one (flags,
+// WZ, exit timing). Each batched iteration costs what the per-byte path charges
+// now: M1 4 + 4, IR 1, the early-return 0xEB read 1 (Ports::input does not add
+// the late 3 T there), the write 3, the repeat 5 = 18 T, R += 2. Same bounds as
+// nextLdirBatch; the port must answer as Ports::input's early 0xEB branch does
+// (DivMMC SPI on, NR 0x83 SPI enable), no port breakpoints, no RZX playback.
+NX_OVL_CODE void Z80::nextInirBatch() {
+    if (!z80_in_nocheck || Config::numPcBP > 0 || Config::numPortReadBP > 0 || Rzx::mode) return;
+    if (!DivMMC::enabled || DivMMC::divide_mode || !NextReg::portOn(NextReg::PE_SPI)) return;
+    const uint32_t now = CPU::tstates;
+    if (now >= CPU::stFrame) return;
+    constexpr uint32_t T = 18;
+    uint32_t n = (REG_B ? (uint32_t)REG_B : 256u) - 1;   // B = 0: 256 bytes (enNxtmmc: BC = 0x00EB)
+    const uint32_t room = (CPU::stFrame - now) / T;
+    if (n > room) n = room;
+    const uint32_t tpl = VIDEO::tStatesPerLine ? VIDEO::tStatesPerLine : 224;
+    const uint32_t line = (tpl << ESPectrum::multiplicator) / T;
+    if (line > 1 && n > line - 1) n = line - 1;
+    const uint16_t hl = REG_HL;
+    const uint32_t dstLeft = 0x2000u - (hl & 0x1FFF);
+    if (n > dstLeft) n = dstLeft;
+    if (n < 2) return;
+    const uint8_t ds = hl >> 13;
+    if (ds < 2) return;
+    uint8_t* dp = MemESP::ramCurrent[ds];
+    if ((uintptr_t)dp < 0x11000000u) return;          // ROM / accessor
+    *mem_desc_t::bank_dirty[ds] = true;
+    uint32_t o = hl & 0x1FFF;
+    for (uint32_t i = 0; i < n; i++) dp[o++] = DivMMC::mmc_read();
+    REG_HL = (uint16_t)(hl + n);
+    REG_B = (uint8_t)(REG_B - n);
+    CPU::tstates = now + T * n;
     regR += 2 * n;
 }
 

@@ -30,6 +30,9 @@ public:
     static void led_off();
 
     static void log(const char* fmt, ...);
+    // Enqueue a whole line or return false without modifying the TX ring.
+    // No wait for UART space; an inactive console discards the line successfully.
+    static bool tryLog(const char* fmt, ...);
     // Drain the non-blocking debug-UART TX ring into the UART FIFO (no-op
     // while the console is off). Called from the frame-pacing idle in
     // ESPectrum::loop; Debug::log itself never waits on the wire (hw

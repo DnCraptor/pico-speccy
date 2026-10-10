@@ -67,6 +67,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/machines/Atm.h"
 #include "speccy/core/Ports.h"
 #include "speccy/core/Snapshot.h"
+#include "speccy/machines/Next/NexLaunch.h"
 #include "speccy/devices/tape/Tape.h"
 #include "speccy/video/Video.h"
 #if HDMI_LIVE_AUDIO_DIAG && defined(VGA_HDMI)
@@ -1849,6 +1850,7 @@ void ESPectrum::reset() {
 }
 
 void ESPectrum::reset(uint8_t romInUse) {
+  NexLaunch::cancel();
 #if PERF_TRACE
   PerfFdc::reset();
 #endif
@@ -3908,9 +3910,13 @@ void ESPectrum::loop() {
     const uint32_t wf_sd = g_sd_stall_us, wf_dr = g_nx_drain_us, wf_q = g_nx_qwait_us, wf_w = g_sd_as_c0wait_us;
     if (Z80Ops::isNext) { NxFrameProf::init(); NxFrameProf::frameBegin(); }
 #endif
+    NexLaunch::poll();
     CPU::loop();
 #if NEXT_TRACE
     const uint32_t wf_c1 = time_us_32();
+    uint32_t wf_trace_us = 0;
+    uint32_t wf_post[5] = {}; // background, storage, audio, keyboard, tail
+    uint32_t wf_bg[6] = {}; // ZiFi, RTC, overlays, NVRAM, mouse, network/UART
     NxFrameProf::frameEnd();
     const uint32_t wf_sd1 = g_sd_stall_us - wf_sd, wf_dr1 = g_nx_drain_us - wf_dr,
                    wf_q1 = g_nx_qwait_us - wf_q, wf_w1 = g_sd_as_c0wait_us - wf_w;
@@ -3943,14 +3949,40 @@ void ESPectrum::loop() {
       prev_ds80_active = profi_ds80_active;
     }
 
+#if NEXT_TRACE
+    uint32_t wf_bg_at = time_us_32();
+    auto wf_bg_mark = [&](unsigned i) {
+        const uint32_t now = time_us_32();
+        wf_bg[i] = now - wf_bg_at;
+        wf_bg_at = now;
+    };
+#endif
     if (ZiFi::enabled) ZiFi::tick();
+#if NEXT_TRACE
+    wf_bg_mark(0);
+#endif
     RTC::flushNVRAM(); // persist CMOS NVRAM to SD when dirty (debounced)
+#if NEXT_TRACE
+    wf_bg_mark(1);
+#endif
     MemESP::materializeOverlays(); // one pending ROM overlay page per frame into butter PSRAM
+#if NEXT_TRACE
+    wf_bg_mark(2);
+#endif
     Nvram24::flush();  // ...and the SMUC card's own 24LC16, same contract
+#if NEXT_TRACE
+    wf_bg_mark(3);
+#endif
     Ports::serialMouseTick(); // arm the COM-mouse RST20H when movement queued
+#if NEXT_TRACE
+    wf_bg_mark(4);
+#endif
 
     netBackgroundTick();      // radio poll + the boot join/SNTP FSM (also pumped
                               // from the OSD idle loops — see nm::uiIdle)
+#if NEXT_TRACE
+    wf_bg_mark(5);
+#endif
 
     // TS-Conf: F1-F10 silently ceasing to open the menu is exactly the kind of
     // thing a user cannot be asked to guess, so say it once per transition.
@@ -3979,6 +4011,10 @@ void ESPectrum::loop() {
     // usb_announced then keeps the one stick that IS about to become the root
     // volume from being announced twice: the adoption arrives as Online a
     // couple of seconds after the latch this drained.
+#if NEXT_TRACE
+    const uint32_t wf_storage_start = time_us_32();
+    wf_post[0] = wf_storage_start - wf_c1;
+#endif
     static bool usb_announced = false;
     switch (UsbMsc::takeEvent()) {
         case UsbMsc::Event::Mounted:
@@ -4013,6 +4049,9 @@ void ESPectrum::loop() {
         OSD::notify(MSG_CFG_NOT_SAVED, LEVEL_WARN, 2500);
     }
 
+#if NEXT_TRACE
+    wf_post[1] = time_us_32() - wf_storage_start;
+#endif
 #if defined(VGA_HDMI)
     // HDMI-audio health heartbeat (1 Hz, no-op unless the driver is live).
     // Same rationale as the NGS_TRACE counters: dropouts in this pipeline
@@ -4039,9 +4078,15 @@ void ESPectrum::loop() {
         uint64_t now_nt = time_us_64();
         if (now_nt >= next_trace_at) {
             next_trace_at = now_nt + 1000000ull;
+            const uint32_t trace_start = time_us_32();
             next_trace_dump(next_trace_frames);
+            wf_trace_us = time_us_32() - trace_start;
             next_trace_frames = 0;
         }
+        extern void nxJumpPump();
+        const uint32_t jump_start = time_us_32();
+        nxJumpPump();
+        wf_trace_us += time_us_32() - jump_start;
     }
 #endif
 
@@ -4326,11 +4371,18 @@ void ESPectrum::loop() {
       }
     }
     g_mix_us = (uint32_t)(time_us_64() - _mix_t0);
+#if NEXT_TRACE
+    wf_post[2] = g_mix_us;
+#endif
     {
       uint64_t _kbd_t0 = time_us_64();
       processKeyboard();
       g_kbd_us = (uint32_t)(time_us_64() - _kbd_t0);
     }
+#if NEXT_TRACE
+    wf_post[3] = g_kbd_us;
+    const uint32_t wf_tail_start = time_us_32();
+#endif
     GS::pollPerf();
 #if GMX_TRACE
     // ~1 Hz GMX heartbeat: WHERE the machine is, once a second. The paging trace
@@ -4541,6 +4593,13 @@ void ESPectrum::loop() {
           g_nx_worst[0] = wf_c0 - ts0; g_nx_worst[1] = wf_c1 - wf_c0;
           g_nx_worst[2] = (uint32_t)elapsed - (wf_c1 - ts0);
           g_nx_worst[3] = wf_sd1; g_nx_worst[4] = wf_dr1; g_nx_worst[5] = wf_q1; g_nx_worst[6] = wf_w1;
+          extern volatile uint32_t g_nx_worst_trace_us;
+          g_nx_worst_trace_us = wf_trace_us;
+          extern volatile uint32_t g_nx_worst_post[5];
+          wf_post[4] = (uint32_t)ts_start + (uint32_t)elapsed - wf_tail_start;
+          for (unsigned i = 0; i < 5; ++i) g_nx_worst_post[i] = wf_post[i];
+          extern volatile uint32_t g_nx_worst_bg[6];
+          for (unsigned i = 0; i < 6; ++i) g_nx_worst_bg[i] = wf_bg[i];
           NxFrameProf::keep();
       }
       if ((int32_t)idle < 0) g_nx_idle_neg = g_nx_idle_neg + 1;

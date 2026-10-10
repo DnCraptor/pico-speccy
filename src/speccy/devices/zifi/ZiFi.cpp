@@ -108,6 +108,51 @@ static uint32_t nicSafeBaud() {
     return want < cap ? want : cap;
 }
 
+// Boot auto-connect runs inside the emulated frame. Preserve the ESP's 80/20 ms
+// settling delays without sleeping through five frames. RX IRQ stays disabled
+// until transition bytes have been discarded. USB-CDC keeps its existing path.
+static uint8_t g_init_phase = 0;
+static uint32_t g_init_target, g_init_deadline;
+static char g_init_cmd[48];
+static unsigned g_init_pos, g_init_len;
+
+bool ZiFi::initReady() {
+    if (!g_init_phase) return true;
+    switch (g_init_phase) {
+        case 1:
+            while (g_init_pos < g_init_len && uart_is_writable(g_uart))
+                uart_get_hw(g_uart)->dr = (uint8_t)g_init_cmd[g_init_pos++];
+            if (g_init_pos == g_init_len) g_init_phase = 2;
+            return false;
+        case 2:
+            if (uart_get_hw(g_uart)->fr & UART_UARTFR_BUSY_BITS) return false;
+            g_init_deadline = time_us_32() + 80000u;
+            g_init_phase = 3;
+            return false;
+        case 3:
+            if ((int32_t)(time_us_32() - g_init_deadline) < 0) return false;
+            uart_set_baudrate(g_uart, g_init_target);
+            g_cur_baud = g_init_target;
+            g_init_deadline = time_us_32() + 20000u;
+            g_init_phase = 4;
+            return false;
+        default:
+            if ((int32_t)(time_us_32() - g_init_deadline) < 0) return false;
+            // At most one hardware FIFO, even if an unconnected RX pin is noisy.
+            for (unsigned i = 0; i < 32 && uart_is_readable(g_uart); ++i)
+                (void)(uint32_t)uart_get_hw(g_uart)->dr;
+            g_init_phase = 0;
+            irq_set_enabled(g_uart_irq, true);
+            return true;
+    }
+}
+
+// Foreground menu/session operations retain their synchronous contract, even
+// if they take over while the boot background negotiation is in progress.
+static void zifi_finish_init() {
+    while (!ZiFi::initReady()) sleep_ms(1);
+}
+
 // Switch the ESP-01S (and our UART) to `target` baud. Uses the volatile
 // AT+UART_CUR so it never persists in ESP flash — every fresh boot the ESP is
 // back at 115200, which init() relies on. Call only with the RX IRQ disabled so
@@ -180,6 +225,7 @@ static void usbApplyPendingBaud() {
 // zifi_set_baud() poll-drains the transition garbage itself and so must run with
 // the IRQ off; mask it around the switch here. USB-CDC has no IRQ to mask.
 static void zifi_set_baud_live(uint32_t target) {
+    zifi_finish_init();
     if (target == 0 || target == g_cur_baud) return;
 #if CFG_TUH_CDC
     if (g_usb_mode) { zifi_usb_set_baud(target); return; }
@@ -193,6 +239,7 @@ static void zifi_set_baud_live(uint32_t target) {
 // Paused host sessions (FTP/HTTPS/SSH — Z80 stopped) can drive the full configured
 // rate; boost for the session and restore the NIC-safe idle rate afterwards.
 void ZiFi::boostBaud() {
+    zifi_finish_init();
     if (!linkActive()) return;
     uint32_t t = Config::zifi_baud ? Config::zifi_baud : ZIFI_BAUD;
     if (g_usb_mode && t > ZIFI_CDC_MAX_BAUD) {
@@ -207,6 +254,7 @@ void ZiFi::boostBaud() {
     Debug::log("ZiFi: baud boost %u (host session)", (unsigned)g_cur_baud);
 }
 void ZiFi::restoreBaud() {
+    zifi_finish_init();
     if (!linkActive()) return;
     uint32_t t = nicSafeBaud();
     if (t == g_cur_baud) return;
@@ -400,6 +448,7 @@ void ZiFi::reclaimPins() {
 // Best-effort, blocking ~400 ms. Runs with the RX IRQ disabled so the handler
 // doesn't eat the reply or write garbage into the ring during the baud change.
 bool ZiFi::probeBaud(uint32_t baud) {
+    zifi_finish_init();
 #if CFG_TUH_CDC
     if (g_usb_mode) {
         // Real probe like the UART path below: retune only the DONGLE's UART to
@@ -538,8 +587,12 @@ bool __not_in_flash("zifi") ZiFi::rxAvailable() {
 
 // ─── init / deinit ──────────────────────────────────────────────────────────
 
-void ZiFi::init() {
-    if (hw_initialized) { rxRingFit(true); return; }   // e.g. the NIC was just switched on
+void ZiFi::init(bool background) {
+    if (!background) zifi_finish_init();
+    if (hw_initialized) {
+        if (!g_init_phase) rxRingFit(true);
+        return;
+    }   // e.g. the NIC was just switched on
 #if PICOSPECCY_WIFI
     // The on-chip radio is the network transport: there is no ESP-01 to bring up,
     // and claiming the UART pins for one would steal them from the peripheral
@@ -634,8 +687,15 @@ void ZiFi::init() {
     // Optionally raise the link speed for faster transfers. Idle at the NIC-safe
     // rate (paused host sessions boostBaud() past it); negotiate BEFORE arming the
     // RX IRQ so zifi_set_baud can poll-drain the transition bytes.
-    if (nicSafeBaud() != ZIFI_BAUD)
-        zifi_set_baud(nicSafeBaud());
+    if (nicSafeBaud() != ZIFI_BAUD) {
+        if (background) {
+            g_init_target = nicSafeBaud();
+            g_init_len = snprintf(g_init_cmd, sizeof(g_init_cmd),
+                                 "AT+UART_CUR=%u,8,1,0,0\r\n", (unsigned)g_init_target);
+            g_init_pos = 0;
+            g_init_phase = 1;
+        } else zifi_set_baud(nicSafeBaud());
+    }
     irq_set_exclusive_handler(g_uart_irq, uart_rx_irq_handler);
     // High baud (460800/921600) leaves only ~350 us of RX-FIFO headroom (32 bytes);
     // if video/audio IRQs delay this handler the FIFO overflows and bytes are lost,
@@ -643,7 +703,7 @@ void ZiFi::init() {
     // IRQ an elevated priority so it preempts and drains the FIFO promptly.
     irq_set_priority(g_uart_irq, 0x40); // < default 0x80 → higher priority
     uart_set_irq_enables(g_uart, true, false); // RX IRQ only
-    irq_set_enabled(g_uart_irq, true);
+    irq_set_enabled(g_uart_irq, g_init_phase == 0);
     Debug::log("ZiFi: UART%d init TX=%d RX=%d baud=%u", inst, tx, rx, (unsigned)g_cur_baud);
     // Diagnostic: confirm the funcsel mux actually latched the UART onto these pins.
     // fsel should read back 2 (GPIO_FUNC_UART) or 11 (GPIO_FUNC_UART_AUX); if it's
@@ -659,6 +719,7 @@ void ZiFi::init() {
 bool ZiFi::linkUp() { return hw_initialized; }
 
 void ZiFi::deinit() {
+    zifi_finish_init();
     if (!hw_initialized) return;
     if (g_uart) {
         irq_set_enabled(g_uart_irq, false);
@@ -788,6 +849,7 @@ void __not_in_flash("zifi") ZiFi::write(uint8_t hi, uint8_t data) {
 // ─── TX drain (call from emulator main loop) ─────────────────────────────────
 
 void __not_in_flash("zifi") ZiFi::tick() {
+    if (!initReady()) return;
     if (!linkActive()) return;
     rxSpillTick(); // spill backed-up RX to SD swap so the ring can't overflow
     bool tx = false;
@@ -859,6 +921,7 @@ void __not_in_flash("zifi") ZiFi::tick() {
 // ─── Raw UART access for ZiFiAT ──────────────────────────────────────────────
 
 void ZiFi::sendRaw(const uint8_t* buf, size_t len) {
+    zifi_finish_init();
 #if CFG_TUH_CDC
     if (g_usb_mode) {
         if (g_cdc_idx < 0 || !tuh_cdc_mounted(g_cdc_idx)) { (void)buf; (void)len; return; }
@@ -894,6 +957,7 @@ void ZiFi::sendRaw(const uint8_t* buf, size_t len) {
 }
 
 size_t ZiFi::recvRaw(uint8_t* buf, size_t maxlen) {
+    zifi_finish_init();
 #if CFG_TUH_CDC
     // USB-CDC RX is delivered by tuh_cdc_rx_cb, which only fires from tuh_task() (no
     // IRQ like UART). Pump on EVERY call: pump() reads one byte at a time, and if we

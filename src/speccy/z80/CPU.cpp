@@ -1275,6 +1275,15 @@ static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_generic(uint16_t addres
     return v;
 }
 
+// Only the Next direct-read path calls this. Instant mapping precedes the
+// byte read; delayed entry/exit follows it, exactly as in the generic fetch.
+IRAM_ATTR __attribute__((noinline, optimize("O2"))) uint8_t DivMMC::nextOpcodeSlow(uint16_t pc) {
+    preOpcFetch(pc);
+    const uint8_t op = MemESP::ramCurrent[pc >> 13][pc & 0x1FFF];
+    postOpcFetch();
+    return op;
+}
+
 // Fetch opcode from RAM (NON +2A/3 version)
 #if DEBUG
 uint16_t dbg_last_pc = 0;
@@ -1295,12 +1304,7 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
     }
     if (g_ts_fastrd == 2) {   // Next below 0x4000 (see exec_nocheck)
         tsFastTick(4);
-        if (DivMMC::enabled) {
-            DivMMC::preOpcFetch(pc);
-            const uint8_t op = MemESP::ramCurrent[pc >> 13][pc & 0x1fff];
-            DivMMC::postOpcFetch();
-            return op;
-        }
+        if (DivMMC::enabled) return DivMMC::nextOpcode(pc);
         return MemESP::ramCurrent[pg][pc & 0x1fff];
     }
     // Scorpion Yellow-PCB even-M1 (see the g_scorp_even_m1 note in CPU.h): an M1
@@ -1470,10 +1474,16 @@ static IRAM_ATTR __attribute__((noinline)) void poke8_generic(uint16_t address, 
     // no contention and no memory breakpoints; divMMC wins over Layer 2
     // (writebyte's order). Bomb Jack's menu blits its tiles this way with LDIR,
     // ~16 KB a frame at 28 MHz (hw log 2026-10-10).
-    if (g_ts_fastmem == 1 && !MemESP::divmmc_mapped && !g_ngs_zxdma &&
-        ((MemESP::wr_overlay_mask >> (address >> 13)) & 1)) {
-        CPU::tstates += 3;
-        MemESP::wrOverlay[address >> 13][address & 0x1fff] = value;
+    if (g_ts_fastmem == 1) {
+        CPU::tstates += 3;   // no contention here; the line tick runs at the next M1
+        if (!MemESP::divmmc_mapped && !g_ngs_zxdma && ((MemESP::wr_overlay_mask >> (address >> 13)) & 1)) {
+            MemESP::wrOverlay[address >> 13][address & 0x1fff] = value;
+            return;
+        }
+        // divMMC RAM/ROM window, ROM, AltROM write-redirect, NeoGS ZX-DMA: the
+        // full rules, minus the Draw call (esxDOS / NextZXOS boot writes its
+        // divMMC RAM ~thousands of times a frame while loading).
+        gsDmaPoke8(address, value);
         return;
     }
     VIDEO::Draw(3, MemESP::ramContended[address >> 13]);
@@ -1607,7 +1617,10 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_generic(uint16_t address,
     uint16_t page_addr = address & 0x1fff;
 
     if (page_addr < 0x1fff) {    // Check if address is between two different pages
-        if (MemESP::ramContended[page]) {
+        if (g_ts_fastmem == 1) {
+            // Spectrum Next below 0x4000 (see poke8_generic): no contention, no Draw
+            CPU::tstates += 6;
+        } else if (MemESP::ramContended[page]) {
             VIDEO::Draw(3, true);
             VIDEO::Draw(3, true);
         } else

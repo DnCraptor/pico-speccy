@@ -26,6 +26,7 @@
 #include "app/Config.h"
 #include "speccy/z80/z80.h"
 #include "speccy/core/Ports.h"
+#include "speccy/devices/storage/DivMMC.h"
 #include "pico.h"
 
 // NextPorts::output + the DAC write: a CTC-driven sample player writes 4 DAC
@@ -130,6 +131,29 @@ NXP_HOT uint8_t NextPorts::dacFastMask(uint8_t a8) {
         case 0xF3: return NextReg::portOn(NextReg::PE_DAC_SD2) ? 2 : 0;
         default:   return 0;
     }
+}
+
+// enNxtmmc copies between divMMC banks a byte at a time with two OUT (0xE3)
+// per byte (0x077A: OUT bank / LD A,(HL) / OUT back), ~1600 writes a frame
+// while NextZXOS boots at 28 MHz — each a full DivMMC::applyMapping() in
+// flash (hw dump 2026-10-10). Only the bank moves there: CONMEM and MAPRAM
+// unchanged, the window already up, every bank a resident pointer (butter).
+// Then the whole effect of applyMapping is page0_hi + ramCurrent[1]; the fast
+// read level, contention (slots 0/1 never contended while divMMC is up) and
+// the dirty hooks (butter mode has none) do not move.
+NXP_HOT bool NextPorts::divE3Fast(uint8_t data) {
+    if (!MemESP::divmmc_mapped || !DivMMC::use_psram) return false;
+    if (((data & 0x80) != 0) != DivMMC::conmem) return false;
+    if ((data & 0x40) && !DivMMC::mapram) return false;
+    if (!DivMMC::conmem && !DivMMC::automap) return false;
+    if (!MemESP::nextRamReady || MemESP::nextBootRomActive || MemESP::nextConfigMode || NextMf::memOn()) return false;
+    const uint8_t b = data & (DIVMMC_NUM_BANKS - 1);
+    uint8_t* p = DivMMC::bank_ptr[b];
+    if (!p) return false;
+    DivMMC::bank = b;
+    MemESP::page0_hi = p;
+    MemESP::ramCurrent[1] = p;
+    return true;
 }
 
 NXP_HOT void NextPorts::dacOut(uint8_t a8, uint8_t mask, uint8_t v) {

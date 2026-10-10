@@ -97,6 +97,9 @@ static uint32_t s_nt_pal = 0, s_nt_cop = 0, s_nt_spr = 0;   // flood counters
 extern volatile uint32_t g_nx_palw;                           // NEXTVID::nrHot
 volatile int32_t  g_nx_idle_min = 0x7FFFFFFF;   // ESPectrum::loop: worst frame idle per NEXT line
 volatile uint32_t g_nx_worst[7];
+volatile uint32_t g_nx_worst_trace_us;
+volatile uint32_t g_nx_worst_post[5];
+volatile uint32_t g_nx_worst_bg[6];
 volatile uint32_t g_nx_idle_neg = 0;            // frames with negative idle
 // NMI one-shot trace (2026-10-07, esxDOS NMI on Next): from a divMMC NMI
 // request on, the next events go straight to the UART instead of the ring,
@@ -282,9 +285,15 @@ void next_trace_dump(uint32_t frames) {
                 }
             }
             extern volatile uint32_t g_nx_worst[7];
-            Debug::log("NEXT worst frame: before cpu %uus, CPU::loop %uus (sd %u drain %u queue %u sdwait %u), after %uus",
+            Debug::log("NEXT worst frame: before cpu %uus, CPU::loop %uus (sd %u drain %u queue %u sdwait %u), after %uus (trace %uus)",
                 (unsigned)g_nx_worst[0], (unsigned)g_nx_worst[1], (unsigned)g_nx_worst[3], (unsigned)g_nx_worst[4],
-                (unsigned)g_nx_worst[5], (unsigned)g_nx_worst[6], (unsigned)g_nx_worst[2]);
+                (unsigned)g_nx_worst[5], (unsigned)g_nx_worst[6], (unsigned)g_nx_worst[2], (unsigned)g_nx_worst_trace_us);
+            Debug::log("NEXT worst post: background %u storage %u audio %u keyboard %u tail %uus",
+                (unsigned)g_nx_worst_post[0], (unsigned)g_nx_worst_post[1], (unsigned)g_nx_worst_post[2],
+                (unsigned)g_nx_worst_post[3], (unsigned)g_nx_worst_post[4]);
+            Debug::log("NEXT worst bg: zifi %u rtc %u overlays %u nvram %u mouse %u net/uart %uus",
+                (unsigned)g_nx_worst_bg[0], (unsigned)g_nx_worst_bg[1], (unsigned)g_nx_worst_bg[2],
+                (unsigned)g_nx_worst_bg[3], (unsigned)g_nx_worst_bg[4], (unsigned)g_nx_worst_bg[5]);
             extern volatile uint32_t g_nx_emit_us;
             {
                 extern volatile uint32_t g_nx_rowprobe[2][8];
