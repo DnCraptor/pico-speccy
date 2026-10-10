@@ -216,7 +216,16 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # 21 112 measured (DVp2, 2026-10-09 evening; 19 104 / 16 608 earlier — the Next
     # renderer is still growing) + headroom. On a Next boot the slack is heap lost.
     # +Z80DMA's .nxdma_hot (the batched DMA copy loop, 1412 B) since 2026-10-09.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 23040)
+    # +5.7 KB on 2026-10-10 (NXModPlayer): the per-interrupt NextInt path (CTC,
+    # sync, nextEventT, ack/reti; .time_critical.nxint) and NextPorts::output +
+    # the DAC write, both from flash before, and the fused ula_final mixer. Paid
+    # for by moving the sprite / palette logs (6 KB) to PSRAM. Measured 28 704 B
+    # with NEXT_TRACE, 28 176 without. +2 KB on 2026-10-10 (NextSID): the blend
+    # mixer (layer orders 6/7, nxMixBlendT) from flash — 33 672 B with
+    # NEXT_TRACE, 33 016 without; +1 KB the same day (the DAC fast path,
+    # the DMA-before-CPU frame head/tail). Still above .ftovl's base, so the early heap
+    # of other machines does not move.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 34816)
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})
 endif()
@@ -242,7 +251,7 @@ if (DMA_CODE_OVERLAY)
     set(OVL_EXCLUDE_OBJECTS "${OVL_EXCLUDE_OBJECTS} *Z80DMA.cpp.o*")
 endif()
 if (NEXT_CODE_OVERLAY)
-    set(OVL_EXCLUDE_OBJECTS "${OVL_EXCLUDE_OBJECTS} *NextVideo.cpp.o*")
+    set(OVL_EXCLUDE_OBJECTS "${OVL_EXCLUDE_OBJECTS} *NextVideo.cpp.o* *NextInt.cpp.o* *NextPorts.cpp.o*")
 endif()
 string(STRIP "${OVL_EXCLUDE_OBJECTS}" OVL_EXCLUDE_OBJECTS)
 
@@ -357,6 +366,9 @@ if (NEXT_CODE_OVERLAY)
     .nxovl __nxovl_win_start : {\n\
         __nxovl_start = .;\n\
         *NextVideo.cpp.o*(.time_critical*)\n\
+        *NextInt.cpp.o*(.time_critical*)\n\
+        *NextPorts.cpp.o*(.time_critical*)\n\
+        *(.nxovl_code .nxovl_code.*)\n\
         *Z80DMA.cpp.o*(.nxdma_hot*)\n\
         . = ALIGN(4);\n\
         __nxovl_end = .;\n\

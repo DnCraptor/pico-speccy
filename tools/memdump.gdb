@@ -67,6 +67,10 @@ if $nslots == 8
   dump binary memory /tmp/picospec_page0B.bin MemESP::nextRamPtr[0x0B] (MemESP::nextRamPtr[0x0B] + 8192)
   dump binary memory /tmp/picospec_page10.bin MemESP::nextRamPtr[0x10] (MemESP::nextRamPtr[0x10] + 8192)
   dump binary memory /tmp/picospec_page11.bin MemESP::nextRamPtr[0x11] (MemESP::nextRamPtr[0x11] + 8192)
+  dump binary memory /tmp/picospec_page20.bin MemESP::nextRamPtr[0x20] (MemESP::nextRamPtr[0x20] + 8192)
+  dump binary memory /tmp/picospec_page21.bin MemESP::nextRamPtr[0x21] (MemESP::nextRamPtr[0x21] + 8192)
+  dump binary memory /tmp/picospec_page30.bin MemESP::nextRamPtr[0x30] (MemESP::nextRamPtr[0x30] + 8192)
+  dump binary memory /tmp/picospec_page31.bin MemESP::nextRamPtr[0x31] (MemESP::nextRamPtr[0x31] + 8192)
   printf "slots: %08X %08X %08X %08X %08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[1], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[3], (unsigned)MemESP::ramCurrent[4], (unsigned)MemESP::ramCurrent[5], (unsigned)MemESP::ramCurrent[6], (unsigned)MemESP::ramCurrent[7]
   printf "nextRomBase=%08X nextDivRomBase=%08X\n", (unsigned)MemESP::nextRomBase, (unsigned)MemESP::nextDivRomBase
   printf "palCtrl=%02X palIdx=%02X border=%d\n", NEXTVID::palCtrl, NEXTVID::palIdx, VIDEO::borderColor
@@ -75,6 +79,22 @@ if $nslots == 8
   printf "lut0 ink0-7: %02X %02X %02X %02X %02X %02X %02X %02X\n", NEXTVID::lut[0][0], NEXTVID::lut[0][1], NEXTVID::lut[0][2], NEXTVID::lut[0][3], NEXTVID::lut[0][4], NEXTVID::lut[0][5], NEXTVID::lut[0][6], NEXTVID::lut[0][7]
   printf "lut0 pap16-23: %02X %02X %02X %02X %02X %02X %02X %02X\n", NEXTVID::lut[0][16], NEXTVID::lut[0][17], NEXTVID::lut[0][18], NEXTVID::lut[0][19], NEXTVID::lut[0][20], NEXTVID::lut[0][21], NEXTVID::lut[0][22], NEXTVID::lut[0][23]
   printf "lut4 pap16-23: %02X %02X %02X %02X %02X %02X %02X %02X\n", NEXTVID::lut[4][16], NEXTVID::lut[4][17], NEXTVID::lut[4][18], NEXTVID::lut[4][19], NEXTVID::lut[4][20], NEXTVID::lut[4][21], NEXTVID::lut[4][22], NEXTVID::lut[4][23]
+  # Sprites: the renderer's patterns (16 KB), core0's attributes [128][5], the
+  # renderer's attribute copy (SprRender.attr, first 640 bytes of sprR), the
+  # sprite palettes (rawPal[2], [3]) and the log positions.
+  if NEXTVID::sprPatterns != 0
+    dump binary memory /tmp/picospec_sprpat.bin NEXTVID::sprPatterns (NEXTVID::sprPatterns + 16384)
+  end
+  if NEXTVID::sprAttr != 0
+    dump binary memory /tmp/picospec_sprattr.bin (char*)NEXTVID::sprAttr ((char*)NEXTVID::sprAttr + 640)
+  end
+  if NEXTVID::sprR != 0
+    dump binary memory /tmp/picospec_sprattr_r.bin (char*)NEXTVID::sprR ((char*)NEXTVID::sprR + 640)
+  end
+  if NEXTVID::rawPal != 0
+    dump binary memory /tmp/picospec_rawpal.bin (char*)NEXTVID::rawPal ((char*)NEXTVID::rawPal + 4096)
+  end
+  printf "spr: patWrite=%04X attrSlot=%02X nrSlot=%02X reg09=%02X reg43=%02X reg4B=%02X reg75..79: %02X %02X %02X %02X %02X\n", NEXTVID::sprPatWrite, NEXTVID::sprAttrSlot, NEXTVID::sprNrSlot, NextReg::reg[0x09], NextReg::reg[0x43], NextReg::reg[0x4B], NextReg::reg[0x75], NextReg::reg[0x76], NextReg::reg[0x77], NextReg::reg[0x78], NextReg::reg[0x79]
   set logging enabled off
 else
   dump binary memory /tmp/picospec_mem0.bin MemESP::ramCurrent[0] (MemESP::ramCurrent[0] + 16384)

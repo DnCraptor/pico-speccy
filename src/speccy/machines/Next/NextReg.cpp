@@ -5,6 +5,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 */
 
 #include "NextReg.h"
+#include "speccy/devices/sound/AySound.h"
 #include "speccy/machines/Next/NextIdle.h"
 #include "speccy/core/MemESP.h"
 #include "speccy/core/Ports.h"
@@ -153,7 +154,7 @@ void next_trace_dump(uint32_t frames) {
     extern volatile uint32_t g_sd_stall_us, g_sd_ops;   // DivMMC.cpp
     extern uint32_t g_nextvid_frames;
     extern volatile uint32_t g_nextvid_us;              // NextVideo.cpp
-    extern volatile uint32_t g_nextvid_layer_us[6];     // ula / tilemap / L2 / sprites / mix / out
+    extern volatile uint32_t g_nextvid_layer_us[7];     // ula / tilemap / L2 / sprites / mix / out
     extern volatile uint32_t g_nx_rows;
     // Who REALLY owns slot 0 right now — the flags can say "bootrom" while a
     // missed replug hands the CPU something else entirely (2026-08-09: flags
@@ -203,6 +204,29 @@ void next_trace_dump(uint32_t frames) {
             (unsigned)(ESPectrum::multiplicator == 0 ? 3 : 7u << (ESPectrum::multiplicator - 1)),
             (unsigned)frames, (unsigned)g_nextvid_frames,
             (unsigned)ESPectrum::maxSpeed);
+        {   // DACs A..D: writes / steps of 64+ / min..max per frame, writes dropped
+            // while NR 08 b3 = 0; then each AY: mixer reg 7, volumes A/B/C, tone A
+            extern volatile uint32_t g_nx_dac_n[4], g_nx_dac_jump[4], g_nx_dac_off;
+            extern volatile uint8_t g_nx_dac_min[4], g_nx_dac_max[4];
+            char ay[96]; int ao = 0;
+            for (int i = 0; i < 3; i++) {
+                if (!chips[i]) { ao += snprintf(ay + ao, sizeof ay - ao, " -"); continue; }
+                const AySound* c = chips[i];
+                ao += snprintf(ay + ao, sizeof ay - ao, " %02X/%X%X%X/%03X", c->reg(7),
+                               c->reg(8) & 0x1F, c->reg(9) & 0x1F, c->reg(10) & 0x1F,
+                               (c->reg(1) & 15) << 8 | c->reg(0));
+                if (ao >= (int)sizeof ay) ao = sizeof ay - 1;
+            }
+            const unsigned fr = f ? f : 1;
+            Debug::log("NEXT dac: A %u/%u %02X..%02X B %u/%u %02X..%02X C %u/%u %02X..%02X D %u/%u %02X..%02X off %u | nr08=%02X ay%s",
+                (unsigned)(g_nx_dac_n[0] / fr), (unsigned)(g_nx_dac_jump[0] / fr), g_nx_dac_min[0], g_nx_dac_max[0],
+                (unsigned)(g_nx_dac_n[1] / fr), (unsigned)(g_nx_dac_jump[1] / fr), g_nx_dac_min[1], g_nx_dac_max[1],
+                (unsigned)(g_nx_dac_n[2] / fr), (unsigned)(g_nx_dac_jump[2] / fr), g_nx_dac_min[2], g_nx_dac_max[2],
+                (unsigned)(g_nx_dac_n[3] / fr), (unsigned)(g_nx_dac_jump[3] / fr), g_nx_dac_min[3], g_nx_dac_max[3],
+                (unsigned)(g_nx_dac_off / fr), NextReg::reg[0x08], ay);
+            for (int i = 0; i < 4; i++) { g_nx_dac_n[i] = g_nx_dac_jump[i] = 0; g_nx_dac_min[i] = 255; g_nx_dac_max[i] = 0; }
+            g_nx_dac_off = 0;
+        }
         {
             extern volatile uint32_t g_nx_drain_n, g_nx_drain_us, g_nx_c1_us, g_nx_idle_neg;
             extern volatile int32_t g_nx_idle_min;
@@ -215,6 +239,24 @@ void next_trace_dump(uint32_t frames) {
                 (unsigned)g_nx_drain_src[0], (unsigned)g_nx_drain_src[1],
                 (unsigned)g_nx_drain_src[2], (unsigned)g_nx_drain_src[3]);
             for (int i = 0; i < 4; i++) g_nx_drain_src[i] = 0;
+            // Printed here, right after perf: the later lines are the ones a
+            // saturated UART drops (NXModPlayer, hw 2026-10-10: no vid line at all).
+            {
+                extern volatile uint32_t g_nx_logapply_spr, g_nx_logapply_pal;
+                Debug::log("NEXT vidpre: logapply=%u.%u ms/fr sprlog=%u/fr pallog=%u/fr",
+                    (unsigned)(g_nextvid_layer_us[6] / f / 1000u), (unsigned)(g_nextvid_layer_us[6] / f % 1000u / 100u),
+                    (unsigned)(g_nx_logapply_spr / f), (unsigned)(g_nx_logapply_pal / f));
+                g_nx_logapply_spr = g_nx_logapply_pal = 0;
+            }
+            Debug::log("NEXT vid: ula=%u.%u tm=%u.%u l2=%u.%u spr=%u.%u mix=%u.%u out=%u.%u ms/fr rows=%u/fr",
+                (unsigned)(g_nextvid_layer_us[0] / f / 1000u), (unsigned)(g_nextvid_layer_us[0] / f % 1000u / 100u),
+                (unsigned)(g_nextvid_layer_us[1] / f / 1000u), (unsigned)(g_nextvid_layer_us[1] / f % 1000u / 100u),
+                (unsigned)(g_nextvid_layer_us[2] / f / 1000u), (unsigned)(g_nextvid_layer_us[2] / f % 1000u / 100u),
+                (unsigned)(g_nextvid_layer_us[3] / f / 1000u), (unsigned)(g_nextvid_layer_us[3] / f % 1000u / 100u),
+                (unsigned)(g_nextvid_layer_us[4] / f / 1000u), (unsigned)(g_nextvid_layer_us[4] / f % 1000u / 100u),
+                (unsigned)(g_nextvid_layer_us[5] / f / 1000u), (unsigned)(g_nextvid_layer_us[5] / f % 1000u / 100u),
+                (unsigned)(g_nx_rows / f));
+            g_nx_rows = 0;
             {
                 // Host PCs of the worst frame (100 us samples on core0), 64-byte
                 // buckets; resolve against the ELF.
@@ -389,15 +431,6 @@ void next_trace_dump(uint32_t frames) {
             g_li_raise = g_li_late = g_li_late_by = g_int_ack = 0;
             g_dma_hold_max = g_dma_hold_t0 = g_dma_hold_len = 0;
         }
-        Debug::log("NEXT vid: ula=%u.%u tm=%u.%u l2=%u.%u spr=%u.%u mix=%u.%u out=%u.%u ms/fr rows=%u/fr",
-            (unsigned)(g_nextvid_layer_us[0] / f / 1000u), (unsigned)(g_nextvid_layer_us[0] / f % 1000u / 100u),
-            (unsigned)(g_nextvid_layer_us[1] / f / 1000u), (unsigned)(g_nextvid_layer_us[1] / f % 1000u / 100u),
-            (unsigned)(g_nextvid_layer_us[2] / f / 1000u), (unsigned)(g_nextvid_layer_us[2] / f % 1000u / 100u),
-            (unsigned)(g_nextvid_layer_us[3] / f / 1000u), (unsigned)(g_nextvid_layer_us[3] / f % 1000u / 100u),
-            (unsigned)(g_nextvid_layer_us[4] / f / 1000u), (unsigned)(g_nextvid_layer_us[4] / f % 1000u / 100u),
-            (unsigned)(g_nextvid_layer_us[5] / f / 1000u), (unsigned)(g_nextvid_layer_us[5] / f % 1000u / 100u),
-            (unsigned)(g_nx_rows / f));
-        g_nx_rows = 0;
 #if PERF_TRACE && PERF_HIST
         // The TS-Conf opcode histogram (Z80_JLS.cpp, exec_nocheck), printed here
         // because VIDEO::EndFrame's PERF block never runs on the Next. ns/instr is
@@ -432,7 +465,7 @@ void next_trace_dump(uint32_t frames) {
     g_sd_ops = 0;
     g_nextvid_us = 0;
     g_nextvid_frames = 0;
-    for (int i = 0; i < 6; i++) g_nextvid_layer_us[i] = 0;
+    for (int i = 0; i < 7; i++) g_nextvid_layer_us[i] = 0;
     // Ring line: newest LAST, budget spent from the newest end backwards, a
     // leading ".." marks dropped older entries (never drop the newest — the
     // NeoGS ring printed oldest-first once and hid every wedge it saw).

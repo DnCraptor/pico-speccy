@@ -38,7 +38,11 @@
 #define HDMI720_LINE 416
 _Static_assert(360 + HDMI720_HS + HDMI720_BP + HDMI720_FP == HDMI720_LINE, "720 line layout");
 
-static struct video_mode_t video_mode[] = {
+// const: in FLASH. Was 4.4 KB of .data — the VGA ISR read it per line, so it had
+// to be RAM. The two fields that change at run time live in RAM arrays in
+// graphics.c (s_div / s_vtot), and the ISR reads a RAM copy of the ACTIVE entry
+// (graphics_live_video_mode). 2026-10-10.
+static const struct video_mode_t video_mode[] = {
     { // [0] 640x480 60Hz
         .v_total = 524,
         .v_active = 480,

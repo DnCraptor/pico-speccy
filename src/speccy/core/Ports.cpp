@@ -4238,6 +4238,25 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
 #endif
     return;
   }
+  // Next DAC ports with no other decode ahead of them (NextPorts::dacFastMask):
+  // a CTC sample player writes four of them per interrupt (NXModPlayer: 2546
+  // OUTs a frame, ~3 ms of core0 through the generic decode, hw 2026-10-10).
+  if (Z80Ops::isNext && (address & 3) == 3 && Config::numPortWriteBP == 0) {
+    const uint8_t m = NextPorts::dacFastMask((uint8_t)address);
+    if (m) {
+      VIDEO::Draw(1, MemESP::ramContended[address >> 13]);
+      p_states = CPU::tstates;
+#if NEXT_TRACE
+      const uint32_t t0 = timer_hw->timerawl;
+#endif
+      NextPorts::dacOut((uint8_t)address, m, data);
+      ioContentionLate(false);
+#if NEXT_TRACE
+      nxIoNote(address, timer_hw->timerawl - t0, true);
+#endif
+      return;
+    }
+  }
 #if NEXT_TRACE
   if (Z80Ops::isNext) {
     const uint32_t t0 = timer_hw->timerawl;

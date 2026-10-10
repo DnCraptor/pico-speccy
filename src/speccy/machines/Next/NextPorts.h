@@ -15,6 +15,10 @@ namespace NextPorts {
     // Sound (TurboSound + DACs), NextPorts.cpp
     bool ayWrite(uint16_t address, uint8_t data);       // A15=1, A1:0=01 family
     void dacWrite(uint8_t mask, uint8_t v);             // bit 0 = A .. bit 3 = D
+    // The DAC ports Ports::output takes straight here (0F 1F 3F 4F 5F F3: A1:0 = 11,
+    // so no ioTrap, nothing else decodes them first): the DAC mask, 0 = not one
+    uint8_t dacFastMask(uint8_t a8);
+    void dacOut(uint8_t a8, uint8_t mask, uint8_t v);   // + the Multiface port side effect
     void dacNr(uint8_t r, uint8_t v);                   // NR 0x2C-0x2E
     void audioRegWrite(uint8_t r, uint8_t old);         // NR 0x06/0x08/0x09 written
     void audioReset();                                  // machine reset (both types)

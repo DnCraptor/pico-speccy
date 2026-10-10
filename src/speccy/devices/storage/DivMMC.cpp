@@ -608,6 +608,18 @@ void DivMMC::reset() {
 }
 
 void DivMMC::applyMapping() {
+#if NEXT_TRACE
+    if (Config::arch == A_NEXT) {
+        extern volatile uint32_t g_nxpat_mmu_watch;
+        const bool on = conmem || automap;
+        if (g_nxpat_mmu_watch && on != MemESP::divmmc_mapped) {
+            g_nxpat_mmu_watch--;
+            Debug::log("[NXPAT] divmmc %s pc=%04X conmem=%d automap=%d mapram=%d bank=%d mmu=%02X.%02X t=%u",
+                       on ? "ON" : "off", Z80::getRegPC(), (int)conmem, (int)automap, (int)mapram, (int)bank,
+                       MemESP::mmu[0], MemESP::mmu[1], (unsigned)CPU::tstates);
+        }
+    }
+#endif
     if (conmem || automap) {
         uint8_t b = bank & (DIVMMC_NUM_BANKS - 1);
         if (mapram) {

@@ -36,6 +36,8 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/machines/Next/NextReg.h"
 #include "MemESP.h"
 #include "app/Debug.h"
+#include "speccy/z80/z80.h"
+#include "speccy/z80/CPU.h"
 #include "app/Buffer.h"
 #include "app/TryAlloc.h"
 #include "speccy/machines/Plus3/Plus3Paging.h"
@@ -1024,6 +1026,16 @@ void MemESP::nextContendRefresh() {
 
 void MemESP::applyMMU(uint8_t slot, uint8_t page) {
     slot &= 7;
+#if NEXT_TRACE
+    {
+        extern volatile uint32_t g_nxpat_mmu_watch;
+        if (g_nxpat_mmu_watch && mmu[slot] != page) {
+            g_nxpat_mmu_watch--;
+            Debug::log("[NXPAT] mmu%u %02X->%02X pc=%04X sp=%04X iff=%d t=%u", slot, mmu[slot], page,
+                       Z80::getRegPC(), Z80::getRegSP(), (int)Z80::isIFF1(), (unsigned)CPU::tstates);
+        }
+    }
+#endif
     mmu[slot] = page;
     // While the TBBLUE bootrom / config-mode window owns slots 0/1 only the
     // latch updates; applyNextConfigWindow() re-applies mmu[] on window exit.

@@ -1506,13 +1506,13 @@ void ESPectrum::setup() {
 
   // AY Sound — chip0 is always-on (required by 128K/Pentagon).
   // chip1 (TurboSound second AY) is allocated on demand by TurboSubsys.
-  Debug::log("setup: AY init begin");
+  Debug::log("setup: AY init begin, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: AY init begin");
   chip0.init();
   chip0.set_sound_format(Audio_freq, 1, 8);
   chip0.set_stereo(AYEMU_MONO, NULL);
   chip0.reset();
-  Debug::log("setup: AY init done");
+  Debug::log("setup: AY init done, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: AY init done");
 
   // Optional audio subsystems: alloc memory only if their Config flag is set.
@@ -1547,18 +1547,18 @@ void ESPectrum::setup() {
   Debug::log2SD("setup: Subsystems::applyPending done, freeHeap=%u", (unsigned)getFreeHeap());
 
   // Init tape
-  Debug::log("setup: Tape init begin");
+  Debug::log("setup: Tape init begin, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: Tape init begin");
   Tape::Init();
   Tape::tapeFileName = "none";
   Tape::tapeStatus = TAPE_STOPPED;
   Tape::SaveStatus = SAVE_STOPPED;
   Tape::romLoading = false;
-  Debug::log("setup: Tape init done");
+  Debug::log("setup: Tape init done, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: Tape init done");
 
   // Init CPU
-  Debug::log("setup: Z80 create begin");
+  Debug::log("setup: Z80 create begin, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: Z80 create begin");
   Z80::create();
 
@@ -1571,7 +1571,7 @@ void ESPectrum::setup() {
     Ports::port[0x7f] = 0xff; // Fuller
 
   // Init disk controller
-  Debug::log("setup: WD1793 reset begin");
+  Debug::log("setup: WD1793 reset begin, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: WD1793 reset begin");
   // Primary Betadisk drive always needs its track buffer. The MB-02 drive's
   // buffer is allocated/freed on demand via Mb02Subsys (saves ~12.5 KB SRAM
@@ -1583,11 +1583,11 @@ void ESPectrum::setup() {
   // The +3's uPD765. Allocates nothing until a .dsk is mounted, so a session on any
   // other machine pays only the controller struct.
   Plus3Fdc::init();
-  Debug::log("setup: WD1793 reset done");
+  Debug::log("setup: WD1793 reset done, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: WD1793 reset done");
 
   // Reset cpu
-  Debug::log("setup: CPU reset begin");
+  Debug::log("setup: CPU reset begin, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: CPU reset begin");
   CPU::reset();
   VIDEO::Reset(); // Re-run after CPU::reset() so Z80Ops flags are correct
@@ -1598,14 +1598,14 @@ void ESPectrum::setup() {
     memset(Ports::pitChannels, 0, sizeof(Ports::pitChannels));
   }
 
-  Debug::log("setup: CPU reset done");
+  Debug::log("setup: CPU reset done, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: CPU reset done");
-  Debug::log("setup: Config::loadDiskMounts begin");
+  Debug::log("setup: Config::loadDiskMounts begin, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: Config::loadDiskMounts begin, freeHeap=%u", (unsigned)getFreeHeap());
   if (FileUtils::fsMount) {
     Config::loadDiskMounts();
   }
-  Debug::log("setup: Config::loadDiskMounts done");
+  Debug::log("setup: Config::loadDiskMounts done, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: Config::loadDiskMounts done, freeHeap=%u", (unsigned)getFreeHeap());
 
   // A Web-catalog .dsk launch that had to reboot to reach the +3 (MachineSwitch::commit

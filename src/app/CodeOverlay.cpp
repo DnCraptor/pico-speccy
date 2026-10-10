@@ -26,6 +26,7 @@ extern char __gsovl_bss_start[], __gsovl_bss_end[];
 extern char __ngsovl_win_start[], __ngsovl_win_end[];
 extern char __ngsovl_start[], __ngsovl_end[], __ngsovl_source[];
 extern char __ngsovl_bss_start[], __ngsovl_bss_end[];
+extern char __ovl_low_start[];  // the lowest window (Next and TS-Conf+VDAC2 share addresses)
 extern char __StackLimit[];
 extern char __end__[];          // heap start (the linker also aliases it as `end`,
                                 // which cannot be used here: <string> drags in
@@ -57,7 +58,7 @@ extern char __end__[];          // heap start (the linker also aliases it as `en
 //    can only be entered by a request whose rounded size fits it, and its last
 //    <4 KB are never handed out. That is the same loss the single ceiling always
 //    had at its own top; it is why the heap probes round a stranded region down.
-static HeapRegions s_hr = { { { __end__, __nxovl_win_start, __end__ } }, 1, 0, nullptr, __nxovl_win_start };
+static HeapRegions s_hr = { { { __end__, __ovl_low_start, __end__ } }, 1, 0, nullptr, __ovl_low_start };
 static bool  s_nx_loaded = false;
 static bool  s_ft_loaded = false;
 static bool  s_ts_loaded = false;
@@ -66,7 +67,7 @@ static bool  s_gs_loaded = false;
 static bool  s_ngs_loaded = false;
 
 static void regionsRebuild() {
-    const HrWindow w[6] = {
+    HrWindow w[6] = {
         { __nxovl_win_start,  __nxovl_win_end,  s_nx_loaded  },
         { __ftovl_win_start,  __ftovl_win_end,  s_ft_loaded  },
         { __tsovl_win_start,  __tsovl_win_end,  s_ts_loaded  },
@@ -74,6 +75,10 @@ static void regionsRebuild() {
         { __ngsovl_win_start, __ngsovl_win_end, s_ngs_loaded },
         { __gsovl_win_start,  __gsovl_win_end,  s_gs_loaded  },
     };
+    // Address order for hr_rebuild. .nxovl overlaps .ftovl/.tsovl (never both
+    // resident), so where it sorts depends on the window sizes of the build.
+    for (int i = 1; i < 6; i++)
+        for (int j = i; j > 0 && w[j].ws < w[j - 1].ws; j--) { HrWindow t = w[j]; w[j] = w[j - 1]; w[j - 1] = t; }
     hr_rebuild(&s_hr, __end__, w, 6, __StackLimit);
 }
 
@@ -121,6 +126,8 @@ static void loadWindow(char* dst, const char* src, size_t n) {
 }
 
 void CodeOverlay::apply(bool tsconf, bool gs, bool dma, bool ngs, bool vdac2, bool next) {
+    // .nxovl shares its addresses with .tsovl + .ftovl: one machine at a time.
+    if (next) { tsconf = false; vdac2 = false; }
     struct W { const char* name; char* ws; char* we; char* cs; char* ce; char* src; bool want; bool* got; };
     W w[6] = {
         { "ZX Next", __nxovl_win_start,  __nxovl_win_end,  __nxovl_start,  __nxovl_end,  __nxovl_source,  next,       &s_nx_loaded },
@@ -144,12 +151,16 @@ void CodeOverlay::apply(bool tsconf, bool gs, bool dma, bool ngs, bool vdac2, bo
     regionsRebuild();
     Debug::log("[OVL] heap ceiling %08lX (+%u B over all windows reserved, +%u B stranded above a resident window)",
                (unsigned long)(uintptr_t)s_hr.ceiling,
-               (unsigned)(s_hr.ceiling - __nxovl_win_start), (unsigned)heap_stranded_bytes());
+               (unsigned)(s_hr.ceiling - __ovl_low_start), (unsigned)heap_stranded_bytes());
     logRegions();
 }
 
 bool CodeOverlay::claimForTsconf() {
     if (s_ts_loaded) return true;
+    if (s_nx_loaded) {   // same addresses as .nxovl (rp2350-memmap.ld)
+        Debug::log("[OVL] cannot claim the TS-Conf window: the ZX Next window is resident there - reboot needed");
+        return false;
+    }
     if ((unsigned)(__tsovl_win_end - __tsovl_win_start) == 0) return true;   // overlay compiled out
     // Anything the heap handed out lives strictly below its region's high-water
     // mark, so the window is untouched exactly while that mark has not entered it.
@@ -189,6 +200,10 @@ bool CodeOverlay::claimForDma() {
 // without its renderer code, so a window the heap already took means falling back.
 bool CodeOverlay::claimForNext() {
     if (s_nx_loaded) return true;
+    if (s_ts_loaded || s_ft_loaded) {   // same addresses as .tsovl / .ftovl
+        Debug::log("[OVL] cannot claim the ZX Next window: the TS-Conf windows are resident there");
+        return false;
+    }
     if ((unsigned)(__nxovl_win_end - __nxovl_win_start) == 0) return true;   // compiled out
     if (windowTouched(__nxovl_win_start)) {
         Debug::log("[OVL] cannot claim the ZX Next window: heap grew into it (cursor %08lX, window %08lX)",

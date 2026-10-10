@@ -737,11 +737,28 @@ IRAM_ATTR void CPU::loop() {
     // mid-slice ends the slice through tsWakeLoop (frameIntRecalc), exactly
     // like an INTMask/DMACtrl write.
     if (Z80Ops::isTsconf) { tsFrameLoop(_loop_t0, pbbp, nbp, zifi_pump_due); return; }
+    // Next: the rest of the frame in the .nxovl window (CPU::nextFrameLoop), every
+    // other machine the same body with the Next branches compiled out — frameRest
+    // is instantiated twice (the Profi "compile twice" shape), so the RAM-resident
+    // loop carries none of the Next code (2026-10-10).
+    if (Z80Ops::isNext) { nextFrameLoop(_loop_t0, pbbp, nbp, zifi_pump_due); return; }
+    frameRest<false>(_loop_t0, pbbp, nbp, zifi_pump_due);
+}
+
+// The rest of the frame after the INT window head; NEXT selects the Next shape.
+template <bool NEXT>
+__attribute__((always_inline)) inline void CPU::frameRest(uint64_t _loop_t0, bool pbbp, int nbp, uint32_t zifi_pump_due) {
 
     while (tstates < IntEnd) {
+        // Next: a zxnDMA block that holds the bus (nxStall) runs before the CPU
+        // executes anything. A block crossing the frame end resumes here, and
+        // the next guest instruction must not run first: Jumping Jack's 16K
+        // sprite upload from MMU 0/1 had its tail read from ROM, because the
+        // instruction after the OUT put the ROM back (hw 2026-10-10).
+        if (NEXT && Z80DMA::nxPending && Z80DMA::nxStall && Z80DMA::nxService(IntEnd)) { BREAKPOINTS continue; }
         Z80::execute();
-        if (Config::dma_mode || Z80Ops::isNext) Z80DMA::handleDMA();
-        if (__builtin_expect(Z80Ops::isNext && Z80::isNMI(), 0) && Z80::atInstrBoundary()) Z80::doNMI();
+        if (Config::dma_mode || NEXT) Z80DMA::handleDMA();
+        if (__builtin_expect(NEXT && Z80::isNMI(), 0) && Z80::atInstrBoundary()) Z80::doNMI();
         if (ZiFi::cdcNicActive && tstates >= zifi_pump_due) {
             zifi_pump_due = tstates + 3500;
             ZiFi::cdcPump();
@@ -750,7 +767,7 @@ IRAM_ATTR void CPU::loop() {
     }
     BREAKPOINTS
     bool halted = Z80::isHalted();
-    if (Z80Ops::isNext) {
+    if (NEXT) {
         // Next: the middle of the frame (up to the tail window) as slices to the
         // next interrupt event. With nothing beyond the classic frame INT armed
         // (NextInt::ex = 0) that is one unchecked run, exactly the shape every
@@ -837,9 +854,10 @@ IRAM_ATTR void CPU::loop() {
     }
     BREAKPOINTS
     while (tstates < statesInFrame) {
+        if (NEXT && Z80DMA::nxPending && Z80DMA::nxStall && Z80DMA::nxService(statesInFrame)) { BREAKPOINTS continue; }
         Z80::execute();
-        if (Config::dma_mode || Z80Ops::isNext) Z80DMA::handleDMA();
-        if (__builtin_expect(Z80Ops::isNext && Z80::isNMI(), 0) && Z80::atInstrBoundary()) Z80::doNMI();
+        if (Config::dma_mode || NEXT) Z80DMA::handleDMA();
+        if (__builtin_expect(NEXT && Z80::isNMI(), 0) && Z80::atInstrBoundary()) Z80::doNMI();
         if (ZiFi::cdcNicActive && tstates >= zifi_pump_due) {
             zifi_pump_due = tstates + 3500;
             ZiFi::cdcPump();
@@ -876,13 +894,17 @@ IRAM_ATTR void CPU::loop() {
     global_tstates += statesInFrame; // increase global Tstates
     tstates_frame = tstates;
     if (!halted) tstates_active = tstates_frame; // no HALT this frame: full load
-    if (Z80Ops::isNext) {
+    if (NEXT) {
         NextInt::frameEnd();                     // before the wrap, see NextInt.h
         Z80DMA::nxFrameEnd(statesInFrame);       // paced DMA's next byte, frame-relative
     }
     tstates -= statesInFrame;
 
     CPU::prev_tstates = tstates;
+}
+
+NX_OVL_CODE void CPU::nextFrameLoop(uint64_t _loop_t0, bool pbbp, int nbp, uint32_t zifi_pump_due) {
+    frameRest<true>(_loop_t0, pbbp, nbp, zifi_pump_due);
 }
 
 IRAM_ATTR void CPU::FlushOnHalt() {

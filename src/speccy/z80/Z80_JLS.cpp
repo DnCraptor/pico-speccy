@@ -47,6 +47,7 @@
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/core/Rzx.h"     // Rzx::mode / onIn: RZX playback substitutes every IN
 #include "speccy/machines/Next/NextReg.h"
+#include "app/CodeOverlay.h"   // NX_OVL_CODE
 #include "speccy/machines/Next/NextIdle.h"
 #include "speccy/machines/Next/NextVideo.h"
 #include "speccy/machines/Next/NextInt.h"
@@ -2915,7 +2916,8 @@ static Z80_COLD void nxRst8Note() {
 // RETI), every NMI and every RETN lands in a 256-entry ring; the first time a
 // transfer lands on 0x0000 with ROM 2 paged the ring is printed once.
 struct NxJmp { uint16_t to, sp, af, bc, de, hl; uint8_t t, rom, m0, m1, p7, p1, iff, dm; };
-static NxJmp s_nx_jmp[256];
+static constexpr uint32_t NX_JMP_N = 256;
+static NxJmp s_nx_jmp[NX_JMP_N];
 static uint32_t s_nx_jmp_w = 0;
 static bool s_nx_jmp_done = false;
 static int32_t s_nx_after = -1;   // >0: dump the ring this many transfers later
@@ -2928,7 +2930,7 @@ static void nxJumpDump(const char* why);
 // A nextreg write into the same ring: to = reg<<8 | value, sp = PC.
 Z80_COLD void nxNrNote(uint8_t r, uint8_t v) {
     if (s_nx_jmp_done) return;
-    NxJmp& j = s_nx_jmp[s_nx_jmp_w++ & 255];
+    NxJmp& j = s_nx_jmp[s_nx_jmp_w++ & (NX_JMP_N - 1)];
     j.t = 'n'; j.to = (uint16_t)(r << 8 | v); j.sp = Z80::getRegPC();
     j.af = Z80::getRegAF(); j.bc = Z80::getRegBC(); j.de = Z80::getRegDE(); j.hl = Z80::getRegHL();
     j.rom = (uint8_t)MemESP::romInUse; j.m0 = MemESP::mmu[0]; j.m1 = MemESP::mmu[1];
@@ -2941,7 +2943,7 @@ Z80_COLD void nxNrNote(uint8_t r, uint8_t v) {
 }
 Z80_COLD void nxJumpNote(char t) {
     if (s_nx_jmp_done) return;
-    NxJmp& j = s_nx_jmp[s_nx_jmp_w++ & 255];
+    NxJmp& j = s_nx_jmp[s_nx_jmp_w++ & (NX_JMP_N - 1)];
     j.t = (uint8_t)t; j.to = Z80::getRegPC(); j.sp = Z80::getRegSP();
     j.af = Z80::getRegAF(); j.bc = Z80::getRegBC(); j.de = Z80::getRegDE(); j.hl = Z80::getRegHL();
     j.rom = (uint8_t)MemESP::romInUse; j.m0 = MemESP::mmu[0]; j.m1 = MemESP::mmu[1];
@@ -2956,9 +2958,9 @@ static void nxJumpDump(const char* why) {
     s_nx_jmp_done = true;
     Debug::log("[NXJMP] %s, C0=%02X C2=%02X C3=%02X retnArmed=%d (dm: 1 window 2 automap 4 conmem); last transfers:",
                why, NextReg::reg[0xC0], NextReg::reg[0xC2], NextReg::reg[0xC3], (int)NextInt::retnArmed);
-    const uint32_t cnt = s_nx_jmp_w < 256 ? s_nx_jmp_w : 256;
+    const uint32_t cnt = s_nx_jmp_w < NX_JMP_N ? s_nx_jmp_w : NX_JMP_N;
     for (uint32_t i = 0; i < cnt; i++) {
-        const NxJmp& r = s_nx_jmp[(s_nx_jmp_w - cnt + i) & 255];
+        const NxJmp& r = s_nx_jmp[(s_nx_jmp_w - cnt + i) & (NX_JMP_N - 1)];
         Debug::log("[NXJMP] %c %04X sp=%04X af=%04X bc=%04X de=%04X hl=%04X rom=%u m=%02X.%02X 7FFD=%02X 1FFD=%02X iff=%u dm=%u",
                    r.t, r.to, r.sp, r.af, r.bc, r.de, r.hl, r.rom, r.m0, r.m1, r.p7, r.p1, r.iff, r.dm);
         if ((i & 7) == 7) Debug::uartFlushSync();   // 4 KB ring: the machine is dead anyway
@@ -3506,21 +3508,18 @@ void Z80::decodeDDFDCB(uint16_t address) {
     copyToRegister(work8);
 }
 
-//Subconjunto de instrucciones 0xED
 
-void Z80::decodeED(void) {
+// Z80N extended opcodes (ZX Spectrum Next), dispatched from decodeED under
+// Z80Ops::isNext — in the .nxovl window, not the RAM-resident core (2026-10-10).
+NX_OVL_CODE void Z80::decodeZ80N() {
     switch (opCode) {
-        // ===== Z80N (ZX Spectrum Next) extended opcodes =====
-        // On non-Next machines these remain 8T NOPs (as unhandled ED opcodes).
         case 0x23:
         { /* SWAPNIB */
-            if (!Z80Ops::isNext) break;
             regA = (regA << 4) | (regA >> 4);
             break;
         }
         case 0x24:
         { /* MIRROR A */
-            if (!Z80Ops::isNext) break;
             uint8_t v = regA;
             v = ((v & 0xF0) >> 4) | ((v & 0x0F) << 4);
             v = ((v & 0xCC) >> 2) | ((v & 0x33) << 2);
@@ -3530,7 +3529,6 @@ void Z80::decodeED(void) {
         }
         case 0x27:
         { /* TEST n */
-            if (!Z80Ops::isNext) break;
             uint8_t value = Z80Ops::peek8(REG_PC);
             REG_PC++;
             carryFlag = false;
@@ -3540,14 +3538,12 @@ void Z80::decodeED(void) {
         }
         case 0x28:
         { /* BSLA DE,B */
-            if (!Z80Ops::isNext) break;
             uint8_t sh = REG_B & 0x1F;
             REG_DE = (sh > 15) ? 0 : (uint16_t)(REG_DE << sh);
             break;
         }
         case 0x29:
         { /* BSRA DE,B */
-            if (!Z80Ops::isNext) break;
             uint8_t sh = REG_B & 0x1F;
             if (sh > 15) sh = 15;
             REG_DE = (uint16_t)(((int16_t)REG_DE) >> sh);
@@ -3555,52 +3551,44 @@ void Z80::decodeED(void) {
         }
         case 0x2A:
         { /* BSRL DE,B */
-            if (!Z80Ops::isNext) break;
             uint8_t sh = REG_B & 0x1F;
             REG_DE = (sh > 15) ? 0 : (uint16_t)(REG_DE >> sh);
             break;
         }
         case 0x2B:
         { /* BSRF DE,B */
-            if (!Z80Ops::isNext) break;
             uint8_t sh = REG_B & 0x1F;
             REG_DE = (sh > 15) ? 0xFFFF : (uint16_t)~((uint16_t)(~REG_DE) >> sh);
             break;
         }
         case 0x2C:
         { /* BRLC DE,B */
-            if (!Z80Ops::isNext) break;
             uint8_t sh = REG_B & 0x0F;
             REG_DE = (uint16_t)((REG_DE << sh) | (REG_DE >> (16 - sh)));
             break;
         }
         case 0x30:
         { /* MUL D,E */
-            if (!Z80Ops::isNext) break;
             REG_DE = (uint16_t)(REG_D * REG_E);
             break;
         }
         case 0x31:
         { /* ADD HL,A */
-            if (!Z80Ops::isNext) break;
             REG_HL += regA;
             break;
         }
         case 0x32:
         { /* ADD DE,A */
-            if (!Z80Ops::isNext) break;
             REG_DE += regA;
             break;
         }
         case 0x33:
         { /* ADD BC,A */
-            if (!Z80Ops::isNext) break;
             REG_BC += regA;
             break;
         }
         case 0x34:
         { /* ADD HL,nn */
-            if (!Z80Ops::isNext) break;
             uint16_t nn = Z80Ops::peek8(REG_PC);
             REG_PC++;
             nn |= Z80Ops::peek8(REG_PC) << 8;
@@ -3611,7 +3599,6 @@ void Z80::decodeED(void) {
         }
         case 0x35:
         { /* ADD DE,nn */
-            if (!Z80Ops::isNext) break;
             uint16_t nn = Z80Ops::peek8(REG_PC);
             REG_PC++;
             nn |= Z80Ops::peek8(REG_PC) << 8;
@@ -3622,7 +3609,6 @@ void Z80::decodeED(void) {
         }
         case 0x36:
         { /* ADD BC,nn */
-            if (!Z80Ops::isNext) break;
             uint16_t nn = Z80Ops::peek8(REG_PC);
             REG_PC++;
             nn |= Z80Ops::peek8(REG_PC) << 8;
@@ -3633,7 +3619,6 @@ void Z80::decodeED(void) {
         }
         case 0x8A:
         { /* PUSH nn — immediate is big-endian (high byte first) */
-            if (!Z80Ops::isNext) break;
             uint16_t nn = Z80Ops::peek8(REG_PC) << 8;
             REG_PC++;
             nn |= Z80Ops::peek8(REG_PC);
@@ -3644,7 +3629,6 @@ void Z80::decodeED(void) {
         }
         case 0x90:
         { /* OUTINB — like OUTI but B unchanged, no flags */
-            if (!Z80Ops::isNext) break;
             Z80Ops::addressOnBus(getPairIR().word, 1);
             uint8_t work8 = Z80Ops::peek8(REG_HL);
             Ports::output(REG_BC, work8);
@@ -3653,7 +3637,6 @@ void Z80::decodeED(void) {
         }
         case 0x91:
         { /* NEXTREG reg,val */
-            if (!Z80Ops::isNext) break;
             uint8_t r = Z80Ops::peek8(REG_PC);
             REG_PC++;
             uint8_t v = Z80Ops::peek8(REG_PC);
@@ -3664,7 +3647,6 @@ void Z80::decodeED(void) {
         }
         case 0x92:
         { /* NEXTREG reg,A */
-            if (!Z80Ops::isNext) break;
             uint8_t r = Z80Ops::peek8(REG_PC);
             REG_PC++;
             Z80Ops::addressOnBus(getPairIR().word, 6);
@@ -3673,7 +3655,6 @@ void Z80::decodeED(void) {
         }
         case 0x93:
         { /* PIXELDN — advance HL one line down in ULA screen layout */
-            if (!Z80Ops::isNext) break;
             if ((REG_HL & 0x0700) != 0x0700)
                 REG_HL += 0x0100;
             else if ((REG_HL & 0x00E0) != 0x00E0)
@@ -3684,20 +3665,17 @@ void Z80::decodeED(void) {
         }
         case 0x94:
         { /* PIXELAD — HL = ULA address of pixel (D=y, E=x) */
-            if (!Z80Ops::isNext) break;
             REG_HL = 0x4000 | ((REG_D & 0xC0) << 5) | ((REG_D & 0x07) << 8)
                             | ((REG_D & 0x38) << 2) | (REG_E >> 3);
             break;
         }
         case 0x95:
         { /* SETAE — A = pixel mask for x-coordinate in E */
-            if (!Z80Ops::isNext) break;
             regA = 0x80 >> (REG_E & 0x07);
             break;
         }
         case 0x98:
         { /* JP (C) — jump within current 16K bank via port read */
-            if (!Z80Ops::isNext) break;
             uint8_t in8 = Ports::input(REG_BC);
             Z80Ops::addressOnBus(getPairIR().word, 1);
             REG_PC = (REG_PC & 0xC000) | ((uint16_t)in8 << 6);
@@ -3705,25 +3683,21 @@ void Z80::decodeED(void) {
         }
         case 0xA4:
         { /* LDIX */
-            if (!Z80Ops::isNext) break;
             ldix();
             break;
         }
         case 0xA5:
         { /* LDWS */
-            if (!Z80Ops::isNext) break;
             ldws();
             break;
         }
         case 0xAC:
         { /* LDDX */
-            if (!Z80Ops::isNext) break;
             lddx();
             break;
         }
         case 0xB4:
         { /* LDIRX */
-            if (!Z80Ops::isNext) break;
             ldix();
             if (REG_BC != 0) {
                 REG_PC = REG_PC - 2;
@@ -3733,7 +3707,6 @@ void Z80::decodeED(void) {
         }
         case 0xB7:
         { /* LDPIRX */
-            if (!Z80Ops::isNext) break;
             ldpirx();
             if (REG_BC != 0) {
                 REG_PC = REG_PC - 2;
@@ -3743,7 +3716,6 @@ void Z80::decodeED(void) {
         }
         case 0xBC:
         { /* LDDRX */
-            if (!Z80Ops::isNext) break;
             lddx();
             if (REG_BC != 0) {
                 REG_PC = REG_PC - 2;
@@ -3751,6 +3723,19 @@ void Z80::decodeED(void) {
             }
             break;
         }
+        default: break;
+    }
+}
+
+//Subconjunto de instrucciones 0xED
+
+void Z80::decodeED(void) {
+    switch (opCode) {
+        // ===== Z80N (ZX Spectrum Next) extended opcodes =====
+        // On non-Next machines these remain 8T NOPs (as unhandled ED opcodes).
+        case 0x23: case 0x24: case 0x27: case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x8A: case 0x90: case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x98: case 0xA4: case 0xA5: case 0xAC: case 0xB4: case 0xB7: case 0xBC:
+            if (Z80Ops::isNext) decodeZ80N();   // .nxovl window; an 8T NOP elsewhere
+            break;
         // IN r,(C) / OUT (C),r — one body per direction for the eight registers
         // (2026-09-22; was 16 cases). r = 6 is the undocumented IN (C) (flags only,
         // nothing stored) and OUT (C),0 (an NMOS Z80 puts 0x00 on the bus).

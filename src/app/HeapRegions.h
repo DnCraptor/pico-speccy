@@ -37,7 +37,7 @@ typedef struct {
 // other, the last one ending at `top`) and the stack limit `top`. Keeps the
 // high-water marks of the old regions (a claim needs them: see hr_window_touched).
 static inline void hr_rebuild(HeapRegions* h, char* base, const HrWindow* w, unsigned nw, char* top) {
-    HrRegion old[4]; unsigned nold = h->n;
+    HrRegion old[6]; unsigned nold = h->n;   // = reg[] size
     for (unsigned i = 0; i < nold; i++) old[i] = h->reg[i];
     if (h->cursor == 0) h->cursor = base;
     unsigned n = 0;

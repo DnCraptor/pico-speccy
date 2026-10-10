@@ -8,6 +8,16 @@
 #include "speccy/z80/z80.h"
 #include "speccy/video/Video.h"
 #include <cstdint>
+#include "pico.h"
+
+// The per-interrupt path (a CTC sample timer raises ~600 interrupts a frame:
+// NXModPlayer, hw 2026-10-10 — this code from flash was ~5 ms of core0) lives in
+// the Next code overlay window (.nxovl, SRAM on a Next boot only).
+#if NEXT_CODE_OVERLAY
+#define NXI_HOT __not_in_flash("nxint")
+#else
+#define NXI_HOT
+#endif
 
 #if NEXT_TRACE
 // NEXT cpu: trace (NextReg.cpp): line pulses raised / already over when seen /
@@ -67,14 +77,14 @@ inline int64_t pulseLen28() {
 inline int64_t fdiv(int64_t a, int64_t b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
 
 // The classic frame-INT window, exactly as Z80Ops::isActiveINT tests it.
-bool classicUla() {
+NXI_HOT bool classicUla() {
     if (NextReg::portFFIntDisable) return false;
     int32_t tmp = (int32_t)CPU::tstates + CPU::latetiming;
     if (tmp >= (int32_t)CPU::statesInFrame) tmp -= CPU::statesInFrame;
     return tmp >= CPU::IntStart && tmp < CPU::IntEnd;
 }
 
-void exRecalc() {
+NXI_HOT void exRecalc() {
     bool ctcInt = false;
     for (auto& c : s_ctc) ctcInt |= (c.cw & 0x80) != 0;
     const uint8_t was = NextInt::ex;
@@ -84,7 +94,7 @@ void exRecalc() {
 
 // A source fired at absolute time t. `pulse` false = the ULA frame event, whose
 // pulse is the classic window.
-void raise(int d, int64_t t, bool pulse) {
+NXI_HOT void raise(int d, int64_t t, bool pulse) {
     s_status |= (uint16_t)(1u << d);
     if (im2Hw()) {
         s_req |= (uint16_t)(1u << d);
@@ -101,9 +111,21 @@ void raise(int d, int64_t t, bool pulse) {
 inline bool running(const Ctc& c) { return c.st == C_RUN || c.st == C_RUN_TC; }
 inline bool timer(const Ctc& c) { return !(c.cw & 0x40); }
 inline int64_t presc(const Ctc& c) { return (c.cw & 0x20) ? 256 : 16; }
-inline int64_t ticksTo(const Ctc& c, int64_t t) { return fdiv(t - c.run0 + 1, presc(c)); }
+// The prescaler is 16 or 256: a floor division by it is an arithmetic shift.
+// fdiv() here was a libgcc __aeabi_ldivmod in flash, twice per channel per
+// nextEventT — with a CTC sample timer that is every slice (NXModPlayer:
+// ~4 ms of core0 a frame, hw 2026-10-10).
+inline int presShift(const Ctc& c) { return (c.cw & 0x20) ? 8 : 4; }
+inline int64_t ticksTo(const Ctc& c, int64_t t) { return (t - c.run0 + 1) >> presShift(c); }
+// n / d and n % d for 0 <= n, 1 <= d <= 256 — a 32-bit hardware divide when n fits.
+inline int64_t udiv64s(int64_t n, uint32_t d) {
+    return ((uint64_t)n >> 32) ? n / d : (int64_t)((uint32_t)n / d);
+}
+inline uint32_t umod64s(int64_t n, uint32_t d) {
+    return ((uint64_t)n >> 32) ? (uint32_t)(n % d) : (uint32_t)n % d;
+}
 
-void advanceTimer(Ctc& c, int64_t t, Stream& s) {
+NXI_HOT void advanceTimer(Ctc& c, int64_t t, Stream& s) {
     s.n = 0;
     if (t <= c.ref) return;
     const int64_t P = presc(c);
@@ -112,24 +134,24 @@ void advanceTimer(Ctc& c, int64_t t, Stream& s) {
     if (n < c.cnt) { c.cnt = (uint16_t)(c.cnt - n); c.ref = t; return; }
     s.first = c.run0 + (k0 + c.cnt) * P - 1;
     const int64_t rem = n - c.cnt;
-    s.n = 1 + rem / c.tc;
+    s.n = 1 + udiv64s(rem, c.tc);
     s.period = (int64_t)c.tc * P;
-    c.cnt = (uint16_t)(c.tc - rem % c.tc);
+    c.cnt = (uint16_t)(c.tc - umod64s(rem, c.tc));
     c.ref = t;
 }
 
-void counterFrom(Ctc& c, const Stream& src, Stream& s) {
+NXI_HOT void counterFrom(Ctc& c, const Stream& src, Stream& s) {
     s.n = 0;
     if (src.n <= 0) return;
     if (src.n < c.cnt) { c.cnt = (uint16_t)(c.cnt - src.n); return; }
     s.first = src.first + (int64_t)(c.cnt - 1) * src.period;
     const int64_t rem = src.n - c.cnt;
-    s.n = 1 + rem / c.tc;
+    s.n = 1 + udiv64s(rem, c.tc);
     s.period = (int64_t)c.tc * src.period;
-    c.cnt = (uint16_t)(c.tc - rem % c.tc);
+    c.cnt = (uint16_t)(c.tc - umod64s(rem, c.tc));
 }
 
-void emit(int ch, const Stream& s) {
+NXI_HOT void emit(int ch, const Stream& s) {
     if (s.n <= 0) return;
     const int d = D_CTC0 + ch;
     s_status |= (uint16_t)(1u << d);
@@ -137,7 +159,7 @@ void emit(int ch, const Stream& s) {
     raise(d, s.first + (s.n - 1) * s.period, true);
 }
 
-void propagate(int i, Stream s, bool* done, int64_t t) {
+NXI_HOT void propagate(int i, Stream s, bool* done, int64_t t) {
     int j = (i + 1) & 3;
     for (int k = 0; k < 3 && s.n > 0; k++, j = (j + 1) & 3) {
         if (done[j]) break;
@@ -155,7 +177,7 @@ void propagate(int i, Stream s, bool* done, int64_t t) {
     }
 }
 
-void ctcAdvance(int64_t t) {
+NXI_HOT void ctcAdvance(int64_t t) {
     bool done[4] = {false, false, false, false};
     for (int i = 0; i < 4; i++) {
         Ctc& c = s_ctc[i];
@@ -180,7 +202,7 @@ void ctcCatchUp() {
 }
 
 // k-th ZC/TO of channel ch from the synced state, kNever if none can come.
-int64_t ctcNextZc(int ch, int64_t k, int depth) {
+NXI_HOT int64_t ctcNextZc(int ch, int64_t k, int depth) {
     if (depth > 4) return kNever;
     const Ctc& c = s_ctc[ch];
     if (running(c) && timer(c))
@@ -195,7 +217,7 @@ int64_t ctcNextZc(int ch, int64_t k, int depth) {
     return kNever;
 }
 
-void sync() {
+NXI_HOT void sync() {
     const int64_t now = now28();
     if (now <= s_last28) {
         if (now < s_last28) { s_last28 = now; s_ctcNext = -kNever; }   // CPU::reset moved tstates back
@@ -239,12 +261,12 @@ void sync() {
     if (s_unqPulse && now >= s_pulse + pulseLen28()) { s_unqPulse = false; exRecalc(); }
 }
 
-bool pulseUp() { return now28() - s_pulse < pulseLen28() && now28() >= s_pulse; }
+NXI_HOT bool pulseUp() { return now28() - s_pulse < pulseLen28() && now28() >= s_pulse; }
 
 // The source currently pulling /INT in hardware IM2 mode, -1 none. Daisy chain:
 // a source in service (ACK/ISR) blocks every lower one; one requesting blocks
 // them too (im2_device: ieo = iei and reti_decode in S_REQ).
-int presented() {
+NXI_HOT int presented() {
     for (int d = 0; d < D_NUM; d++) {
         if (s_st[d] == S_0 && ((s_req >> d) & 1)) s_st[d] = S_REQ;   // im2_device S_0 -> S_REQ on i_int_req
         if (s_st[d] == S_REQ) return d;
@@ -324,17 +346,17 @@ bool lineEnabled() { return s_lineEn; }
 int32_t linePosT() { return s_linePos28 < 0 ? -1 : (int32_t)(s_linePos28 / 8); }
 uint16_t lineNumber() { return s_lineNum; }
 
-void wake() {
+NXI_HOT void wake() {
     if (CPU::stFrame > CPU::tstates + 1) CPU::stFrame = CPU::tstates + 1;
 }
 
-bool intLine() {
+NXI_HOT bool intLine() {
     sync();
     if (im2Hw()) return cpuIm2() ? presented() >= 0 : classicUla();
     return classicUla() || pulseUp();
 }
 
-uint32_t nextEventT(uint32_t limit) {
+NXI_HOT uint32_t nextEventT(uint32_t limit) {
     sync();
     const int64_t now = s_last28;
     int64_t best = kNever;
@@ -346,14 +368,14 @@ uint32_t nextEventT(uint32_t limit) {
     }
     const uint32_t lo = CPU::tstates + 1;
     if (best >= kNever) return limit > lo ? limit : lo;
-    const uint32_t f = f28();
+    const uint32_t f = f28();                       // 8 >> multiplicator: a shift
     const int64_t rel = best - s_base28;
-    const int64_t T = (rel + f - 1) / f;
+    const int64_t T = (rel + f - 1) >> (3 - ESPectrum::multiplicator);
     if (T >= (int64_t)limit) return limit > lo ? limit : lo;
     return (uint32_t)T > lo ? (uint32_t)T : lo;
 }
 
-uint8_t ack() {
+NXI_HOT uint8_t ack() {
     sync();
 #if NEXT_TRACE
     g_int_ack++;
@@ -365,7 +387,7 @@ uint8_t ack() {
     return (uint8_t)((s_c0 & 0xE0) | (d << 1));
 }
 
-void reti() {
+NXI_HOT void reti() {
     if (!im2Hw() || !cpuIm2()) return;
     sync();
     for (int d = 0; d < D_NUM; d++) {
@@ -488,7 +510,7 @@ bool nrRead(uint8_t r, uint8_t& out) {
     }
 }
 
-bool dmaDelay() {
+NXI_HOT bool dmaDelay() {
     const uint8_t cc = NextReg::reg[0xCC], cd = NextReg::reg[0xCD], ce = NextReg::reg[0xCE];
     if ((cc & 0x80) && (NextMf::active() || DivMMC::next_nmi_hold || DivMMC::next_nmi_btn)) return true;
     if (!im2Hw()) return false;

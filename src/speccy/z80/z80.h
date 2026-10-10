@@ -582,6 +582,7 @@ private:
     //Subconjunto de instrucciones 0xED
     // Decode EDXX opcodes
     static void decodeED(void);
+    static void decodeZ80N(void);   // Next only, .nxovl window
 
     static void (*dcOpcode[256])();
 

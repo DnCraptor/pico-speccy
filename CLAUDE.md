@@ -437,8 +437,36 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   `NEXTVID::idleAdvanceTo` рисует строки, R += выборки. Только в `exec_nocheck`, IFF1=1,
   не contended, не RZX, PC >= 0x4000; ловит только `JP cc` (не JR). NEXT_TRACE:
   `NEXT rlff: ... | idle loop N/fr skipped X%`. Trace-сборка сама тормозит core0
-  (`nxJumpNote` на каждом JP/RET) — FPS только по обычной сборке. Окно `.nxovl` почти
-  полное (~240 B), следующий рост — поднимать AUTO.
+  (`nxJumpNote` на каждом JP/RET) — FPS только по обычной сборке.
+- **NXModPlayer (CTC 633 INT/кадр, 4 DAC OUT на каждое) и окно `.nxovl`** (2026-10-10,
+  NOT hw-tested кроме FPS 36 -> 41 на nxmod4). Путь прерывания `NextInt` (sync, CTC,
+  nextEventT, intLine, ack/reti, dmaDelay; `NXI_HOT` = `.time_critical.nxint`) и
+  `NextPorts::output` + `dacWrite` (`NXP_HOT`) — в окне `.nxovl` (объекты
+  `NextInt.cpp.o`/`NextPorts.cpp.o` в правиле окна и в OVL_EXCLUDE). CTC без 64-бит
+  делений (предделитель/f28 = сдвиги). Микшер с ula_final внутри (`nxMixT<MODE,true,
+  true>` при ULA+тайлмап+L2 без stencil). Журналы спрайтов/палитры — PSRAM (общий XIP-кэш
+  = когерентно). Окно 29 184 B. **`.nxovl` ДЕЛИТ адреса с `.tsovl` + `.ftovl`**
+  (rp2350-memmap.ld, верх под `.dmaovl`): до `CodeOverlay::apply` куча = всё ниже
+  САМОГО НИЖНЕГО окна (`__ovl_low_start`) на ЛЮБОЙ машине, и туда должны влезть
+  кадровый буфер + `Config::load`; рост `.nxovl` на 6 KB уронил trace-сборку паникой
+  malloc в Config::load. Перекрытие вернуло ~29 KB ранней кучи (DVp2 обычная 102 -> 131
+  KB). Правило: Next и TS-Conf/VDAC2 никогда не резидентны вместе — `apply` гасит
+  tsconf/vdac2 при next, `claimForTsconf`/`claimForNext` отказывают при резидентном
+  соседе, `regionsRebuild` сортирует окна по адресу. Растить любое окно = отнимать
+  раннюю кучу у всех машин: считать `__ovl_low_start - __end__` против кадрового буфера.
+- **SRAM-проход 2026-10-10 (NOT hw-tested): `.data` DVp2 102 260 -> 93 020 B.** Таблица
+  видеорежимов `video_mode` — `static const` во флеше (была 4.4 KB .data): изменяемые поля
+  в RAM-массивах `s_div` (pio_clk_div) / `s_vtot` (v_total) в graphics.c, ISR VGA читает
+  RAM-копию активной записи `graphics_live_video_mode()` (пересборка только при смене
+  индекса; писатели правят поле копии 32-бит записью). `_arm_addsubdf3` (libgcc double
+  add/sub/f2d) — во флеш в rp2350-memmap.ld. `process_kbd_report` — флеш (зовётся только
+  из главного цикла). Next из общего RAM-кода: хвост кадра `CPU::frameRest<bool NEXT>`
+  (общий loop = `<false>`, `CPU::nextFrameLoop` = `<true>` в окне, `NX_OVL_CODE` =
+  секция `.nxovl_code`, собирается правилом окна) и Z80N-опкоды `Z80::decodeZ80N()` в
+  окне (в `decodeED` остался один case-список). `.nxovl` AUTO 31 744 (31 312 trace).
+  Не сделано и почему: `flash_qe_fix` (656 B, должен жить в RAM при выключенном XIP),
+  Next-ветки `Ports` (~600 B, горячий путь, разбросаны), Gigascreen (~3.5 KB, включается
+  на лету — нужен захват окна посреди сеанса), SAA/MIDI/FM генераторы (3.6 KB, per-sample).
 - **DS1307 на I2C** (2026-10-07, hw-confirmed: часы в NextZXOS): `machines/Next/
   NextRtc.cpp` (flash) — честный I2C-слейв на #103B/#113B (START/STOP по SDA при
   SCL=1, ACK на каждый байт, автоинкремент 0..63, ACK/NACK мастера), адрес 0x68,

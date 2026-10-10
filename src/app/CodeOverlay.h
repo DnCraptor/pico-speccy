@@ -52,6 +52,14 @@
 // g_ts_c1_live, g_tsconf_wr, or the a8 == 0xAF port decode — and that is the
 // thing to re-verify before adding a function, not just that it "looks TS-only".
 
+// ZX Next code outside NextVideo/NextInt/NextPorts (CPU::nextFrameLoop): the
+// .nxovl window collects this named section too (cmake/memory-layout.cmake).
+#if defined(NEXT_CODE_OVERLAY) && NEXT_CODE_OVERLAY
+#define NX_OVL_CODE __attribute__((noinline, section(".nxovl_code")))
+#else
+#define NX_OVL_CODE __attribute__((noinline)) __not_in_flash("next")
+#endif
+
 #if !defined(TSCONF_CODE_OVERLAY)
 #define TSCONF_CODE_OVERLAY 0
 #endif

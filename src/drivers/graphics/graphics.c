@@ -46,9 +46,37 @@ void draw_window(const char title[TEXTMODE_COLS + 1], uint32_t x, uint32_t y, ui
     draw_text(line, x + (width - strlen(line)) / 2, y, 14, 3);
 }
 
-struct video_mode_t __not_in_flash_func(graphics_get_video_mode)(int mode)
+#define VM_N ((int)(sizeof(video_mode)/sizeof(video_mode[0])))
+// The run-time fields of the flash table: pio_clk_div (graphics_set_sys_clk_mhz,
+// 0 = the table's) and v_total (graphics_big_mode_fit, 0 = the table's).
+static float    s_div[VM_N];
+static uint16_t s_vtot[VM_N];
+// The VGA ISR's copy of the active entry (graphics_live_video_mode).
+static struct video_mode_t s_live;
+static volatile int s_live_idx = -1;
+
+static void vm_fill(struct video_mode_t* d, int mode) {
+    *d = video_mode[mode];
+    if (s_div[mode] != 0.0f) d->pio_clk_div = s_div[mode];
+    if (s_vtot[mode]) d->v_total = s_vtot[mode];
+}
+
+struct video_mode_t graphics_get_video_mode(int mode)
 {
-    return video_mode[mode];
+    struct video_mode_t m;
+    vm_fill(&m, mode);
+    return m;
+}
+
+const struct video_mode_t* __not_in_flash_func(graphics_live_video_mode)(int mode)
+{
+    // A new index is rebuilt from flash once (a mode / machine switch); every
+    // other line is this one compare.
+    if (__builtin_expect(mode != s_live_idx, 0)) {
+        vm_fill(&s_live, mode);
+        s_live_idx = mode;
+    }
+    return &s_live;
 }
 
 int graphics_fast_mode(int mode)
@@ -155,7 +183,8 @@ void graphics_big_mode_fit(int mode, int klass)
     // A machine whose frame is shorter than the picture can hold
     // gets the fewest lines that still carry vertical blanking: slightly slow, not broken.
     if (lines < video_mode[mode].vsync_end + 6) lines = video_mode[mode].vsync_end + 6;
-    video_mode[mode].v_total = lines - 1;
+    s_vtot[mode] = (uint16_t)(lines - 1);
+    if (mode == s_live_idx) s_live.v_total = lines - 1;
 }
 
 float graphics_clk_div_at(int mode, unsigned sys_mhz, int vga)
@@ -200,7 +229,7 @@ uint32_t graphics_mode_vga_pixel_hz(int mode)
 void graphics_set_sys_clk_mhz(unsigned mhz)
 {
     if (!mhz) return;
-    for (int i = 0; i < sizeof(video_mode)/sizeof(video_mode[0]); i++) {
+    for (int i = 0; i < VM_N; i++) {
         const int tmds = video_mode[i].tmds_mhz ? video_mode[i].tmds_mhz : TMDS_STD_MHZ;
         float div = (float)mhz / (float)tmds;
         // A PIO divider below 1 does not exist; a mode asking for more TMDS than
@@ -208,7 +237,8 @@ void graphics_set_sys_clk_mhz(unsigned mhz)
         // the menu (Config::isFastVideoMode).  Clamp so a stale pick cannot hand
         // pio_sm_init() an illegal divider.
         if (div < 1.0f) div = 1.0f;
-        video_mode[i].pio_clk_div = div;
+        s_div[i] = div;
+        if (i == s_live_idx) s_live.pio_clk_div = div;
     }
 }
 

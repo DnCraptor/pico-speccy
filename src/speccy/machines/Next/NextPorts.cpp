@@ -26,6 +26,16 @@
 #include "app/Config.h"
 #include "speccy/z80/z80.h"
 #include "speccy/core/Ports.h"
+#include "pico.h"
+
+// NextPorts::output + the DAC write: a CTC-driven sample player writes 4 DAC
+// ports per interrupt (NXModPlayer: 2544 OUTs a frame, hw 2026-10-10) — in the
+// Next code overlay window, not flash.
+#if NEXT_CODE_OVERLAY
+#define NXP_HOT __not_in_flash("nxports")
+#else
+#define NXP_HOT
+#endif
 
 // The ULA floating bus on port #FF (zxnext.vhd 2813 / 4513, zxula.vhd 573):
 // only in 48K and 128K machine timing — +3 and Pentagon read 0xFF there —
@@ -79,11 +89,52 @@ static void dacPublish() {
     }
 }
 
-void NextPorts::dacWrite(uint8_t mask, uint8_t v) {
-    if (!(NextReg::reg[0x08] & 0x08)) return;   // soundrive held in reset (NR 0x08 bit 3 = 0)
+#if NEXT_TRACE
+// NEXT dac: trace (NextReg.cpp): per DAC A..D writes, steps of 64+, min, max.
+volatile uint32_t g_nx_dac_n[4], g_nx_dac_jump[4], g_nx_dac_off;
+volatile uint8_t  g_nx_dac_min[4] = { 255, 255, 255, 255 }, g_nx_dac_max[4];
+#endif
+
+NXP_HOT void NextPorts::dacWrite(uint8_t mask, uint8_t v) {
+    if (!(NextReg::reg[0x08] & 0x08)) {          // soundrive held in reset (NR 0x08 bit 3 = 0)
+#if NEXT_TRACE
+        g_nx_dac_off++;
+#endif
+        return;
+    }
+#if NEXT_TRACE
+    for (int i = 0; i < 4; i++) if (mask & (1 << i)) {
+        g_nx_dac_n[i]++;
+        const int d = (int)v - (int)s_dac[i];
+        if (d >= 64 || d <= -64) g_nx_dac_jump[i]++;
+        if (v < g_nx_dac_min[i]) g_nx_dac_min[i] = v;
+        if (v > g_nx_dac_max[i]) g_nx_dac_max[i] = v;
+    }
+#endif
     for (int i = 0; i < 4; i++) if (mask & (1 << i)) s_dac[i] = v;
     s_dacLive = true;
     dacPublish();
+}
+
+// Same decode as NextPorts::output's DAC switch, for the ports with A1:0 = 11
+// that nothing in output() decodes before it (the Multiface write on 1F/3F is
+// done by dacOut). F1/F9 (A1:0 = 01, ioTrap) and FB/DF/B3 (GS, Covox, the
+// generic decoders ahead of NextPorts) keep the full path.
+NXP_HOT uint8_t NextPorts::dacFastMask(uint8_t a8) {
+    switch (a8) {
+        case 0x0F: return NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_COVOX) ? 2 : 0;
+        case 0x1F: return NextReg::portOn(NextReg::PE_DAC_SD1) ? 1 : 0;
+        case 0x3F: return NextReg::portOn(NextReg::PE_DAC_PROFI) ? 1 : 0;
+        case 0x4F: return NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_COVOX) ? 4 : 0;
+        case 0x5F: return NextReg::portOn(NextReg::PE_DAC_SD1 | NextReg::PE_DAC_PROFI) ? 8 : 0;
+        case 0xF3: return NextReg::portOn(NextReg::PE_DAC_SD2) ? 2 : 0;
+        default:   return 0;
+    }
+}
+
+NXP_HOT void NextPorts::dacOut(uint8_t a8, uint8_t mask, uint8_t v) {
+    if (a8 == 0x1F || a8 == 0x3F) NextMf::portWrite(a8);
+    dacWrite(mask, v);
 }
 
 // The DACs are held in reset while NR 0x08 bit 3 is clear (reset_i = reset or
@@ -370,7 +421,7 @@ int NextPorts::input(uint16_t address) {
     return -1;
 }
 
-bool NextPorts::output(uint16_t address, uint8_t data) {
+NXP_HOT bool NextPorts::output(uint16_t address, uint8_t data) {
     const uint8_t a8 = address & 0xFF;
     if (address == 0x243B) { NextReg::selected = data; return true; }
     if (address == 0x253B) { NextReg::write(NextReg::selected, data); return true; }

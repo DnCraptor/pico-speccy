@@ -35,6 +35,10 @@ SECTIONS
         *libgcc.a:unwind-arm.o(.text* .rodata*)
         *libgcc.a:pr-support.o(.text* .rodata*)
         *libgcc.a:libunwind.o(.text* .rodata*)
+        /* Soft double add/sub (+ f2d/i2d/ui2d in the same object): no RAM-resident
+         * caller needs it per pixel or per instruction — VIDEO::EndFrame's one
+         * float->double per frame is the only RAM caller (2026-10-10, -888 B). */
+        *libgcc.a:_arm_addsubdf3.o(.text* .rodata*)
         /* The Z80 core's cold half (create/reset/NMI entry — Z80_COLD in
          * Z80_JLS.cpp) stays in flash whether or not Z80_CORE_IN_RAM puts the
          * rest of the object in SRAM: it is a named section, so the object-wide
@@ -320,10 +324,18 @@ SECTIONS
        and a TS-Conf boot without VDAC2 gets it as a longer base heap region. */
     __ftovl_win_start  = __tsovl_win_start - __ftovl_win_size;
     __ftovl_win_end    = __ftovl_win_start + __ftovl_win_size;
-    /* ZX Next renderer window, now the LOWEST: resident only on a Next boot (never
-       together with .tsovl/.ftovl); on every other boot it extends the base heap. */
-    __nxovl_win_start  = __ftovl_win_start - __nxovl_win_size;
+    /* ZX Next renderer window: SHARES its addresses with .tsovl + .ftovl. The Next
+       and TS-Conf are never resident together (crossing either boundary reboots,
+       and CodeOverlay refuses the pair), so the machine windows cost max(Next,
+       TS-Conf + VDAC2) instead of the sum. That matters before CodeOverlay::apply:
+       the heap is then everything below the LOWEST window, on every machine, and
+       the boot framebuffer + Config::load must fit there (2026-10-10: a 6 KB
+       larger .nxovl panicked the NEXT_TRACE build at Config::load). Top-aligned
+       with .tsovl, directly under .dmaovl (which a Next boot loads too). */
+    __nxovl_win_start  = __dmaovl_win_start - __nxovl_win_size;
     __nxovl_win_end    = __nxovl_win_start + __nxovl_win_size;
+    /* The heap ceiling before any window is applied. */
+    __ovl_low_start    = __ftovl_win_start < __nxovl_win_start ? __ftovl_win_start : __nxovl_win_start;
 
 @GSOVL_SECTION@
 @NGSOVL_SECTION@
@@ -342,7 +354,7 @@ SECTIONS
         "ERROR: .ftovl overflowed the VDAC2 overlay window. Re-link with -DFTOVL_WIN_SIZE=32768, read the real size from `arm-none-eabi-size -A <elf> | grep ftovl`, then fix the AUTO arithmetic in cmake/memory-layout.cmake")
     ASSERT(__nxovl_end <= __nxovl_win_end,
         "ERROR: .nxovl overflowed the ZX Next renderer overlay window. Re-link with -DNXOVL_WIN_SIZE=32768, read the real size from `arm-none-eabi-size -A <elf> | grep nxovl`, then fix the AUTO arithmetic in cmake/memory-layout.cmake")
-    ASSERT(__end__ <= __nxovl_win_start,
+    ASSERT(__end__ <= __ovl_low_start,
         "ERROR: .bss/heap start reaches into the code overlay windows")
     .flash_end : {
         KEEP(*(.embedded_end_block*))
