@@ -8,6 +8,9 @@
 # Python). 8-slot builds write picospec_s{0-7}.bin (8K each) + the Next
 # MMU/nextreg state to /tmp/picospec_next.txt; memdump.py picks whichever
 # set is present.
+# The extension resumes the target and converts only once this marker exists:
+# the evaluate reply of `source` can come back before the script has finished.
+shell rm -f /tmp/picospec_gdb_done
 shell rm -f /tmp/picospec_s0.bin /tmp/picospec_s1.bin /tmp/picospec_s2.bin /tmp/picospec_s3.bin /tmp/picospec_s4.bin /tmp/picospec_s5.bin /tmp/picospec_s6.bin /tmp/picospec_s7.bin /tmp/picospec_mem0.bin /tmp/picospec_mem1.bin /tmp/picospec_mem2.bin /tmp/picospec_mem3.bin /tmp/picospec_next.txt
 set $nslots = sizeof(MemESP::ramCurrent)/sizeof(MemESP::ramCurrent[0])
 if $nslots == 8
@@ -64,13 +67,13 @@ if $nslots == 8
     dump binary memory /tmp/picospec_altrom.bin MemESP::altRomBase (MemESP::altRomBase + 32768)
   end
   printf "reg8C=%02X altrom_rd=%d altrom_wr=%d altrom_sel=%d\n", NextReg::reg[0x8C], MemESP::altrom_rd, MemESP::altrom_wr, MemESP::altrom_sel
-  dump binary memory /tmp/picospec_page0B.bin MemESP::nextRamPtr[0x0B] (MemESP::nextRamPtr[0x0B] + 8192)
-  dump binary memory /tmp/picospec_page10.bin MemESP::nextRamPtr[0x10] (MemESP::nextRamPtr[0x10] + 8192)
-  dump binary memory /tmp/picospec_page11.bin MemESP::nextRamPtr[0x11] (MemESP::nextRamPtr[0x11] + 8192)
-  dump binary memory /tmp/picospec_page20.bin MemESP::nextRamPtr[0x20] (MemESP::nextRamPtr[0x20] + 8192)
-  dump binary memory /tmp/picospec_page21.bin MemESP::nextRamPtr[0x21] (MemESP::nextRamPtr[0x21] + 8192)
-  dump binary memory /tmp/picospec_page30.bin MemESP::nextRamPtr[0x30] (MemESP::nextRamPtr[0x30] + 8192)
-  dump binary memory /tmp/picospec_page31.bin MemESP::nextRamPtr[0x31] (MemESP::nextRamPtr[0x31] + 8192)
+  dump binary memory /tmp/picospec_page0B.bin MemESP::nextPg[0x0B] (MemESP::nextPg[0x0B] + 8192)
+  dump binary memory /tmp/picospec_page10.bin (MemESP::nextStrip + 0x0) ((MemESP::nextStrip + 0x0) + 8192)
+  dump binary memory /tmp/picospec_page11.bin (MemESP::nextStrip + 0x2000) ((MemESP::nextStrip + 0x2000) + 8192)
+  dump binary memory /tmp/picospec_page20.bin (MemESP::nextStrip + 0x20000) ((MemESP::nextStrip + 0x20000) + 8192)
+  dump binary memory /tmp/picospec_page21.bin (MemESP::nextStrip + 0x22000) ((MemESP::nextStrip + 0x22000) + 8192)
+  dump binary memory /tmp/picospec_page30.bin (MemESP::nextStrip + 0x40000) ((MemESP::nextStrip + 0x40000) + 8192)
+  dump binary memory /tmp/picospec_page31.bin (MemESP::nextStrip + 0x42000) ((MemESP::nextStrip + 0x42000) + 8192)
   printf "slots: %08X %08X %08X %08X %08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[1], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[3], (unsigned)MemESP::ramCurrent[4], (unsigned)MemESP::ramCurrent[5], (unsigned)MemESP::ramCurrent[6], (unsigned)MemESP::ramCurrent[7]
   printf "nextRomBase=%08X nextDivRomBase=%08X\n", (unsigned)MemESP::nextRomBase, (unsigned)MemESP::nextDivRomBase
   printf "palCtrl=%02X palIdx=%02X border=%d\n", NEXTVID::palCtrl, NEXTVID::palIdx, VIDEO::borderColor
@@ -389,3 +392,6 @@ if Config::arch == 11
   set logging enabled off
   set logging redirect off
 end
+
+# Last line: tell the VS Code extension the dump is complete.
+shell touch /tmp/picospec_gdb_done

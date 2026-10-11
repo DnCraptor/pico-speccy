@@ -134,6 +134,7 @@ const char* profiles_vlabel();
 // the file browser in between is not missed.
 void profilesSessionBegin();
 void profilesSessionEnd();
+void videoModeOptsFree();     // UiTree.cpp: the Video > Mode rows' storage
 bool p_mosPresent();
 
 // Hardware info

@@ -106,6 +106,12 @@ public:
     // EndFrame, when the packed-pair driver comes on).
     static void rebuildPairMap();
 
+    // 640-wide frames (80-column tilemap): one fb byte = (left, right) pixel of
+    // the 640 grid through the pair driver, 16 colours picked per frame.
+    static bool p80Live;
+    static void pairPoll();          // core0, VIDEO::EndFrame: mode switch + palette
+    static void pairForceOff();      // VIDEO::Reset (the driver tables are rebuilt)
+
     // CLUT slots the Next's colours map into: 17..151, 168..183, 200..215 —
     // the TS-Conf ts256 pool minus 0..16. Excluded: 0..15 the ZX colours, 16
     // the hi-res marker, 152..167 the nm:: UI block (the menu and the F8 stats
@@ -175,6 +181,12 @@ private:
     // nearest palette index to the average of the two ULA colours.
     static uint8_t* gigsPrev;
     static uint8_t  gigsBlend[256];
+    // 640-wide frames (80-column tilemap): one fb byte = (left, right) pixel of
+    // the 640 grid through the pair driver. Its own lazily allocated block
+    // (P80Blk, NextVideo.cpp), only on a session that shows such a frame.
+    // Layer 2 320x256 / 640x256 are column-major: rows are read 8 at a time
+    // into an SRAM band (one XIP line fill per column, not one per pixel).
+    static uint8_t* l2Band;              // [320 * 8], lazily allocated, SRAM only
     static uint8_t* pairMap;             // [256] Timex hi-res: palette index -> solid pair slot
     static uint8_t* hiresRow;            // [256] Timex hi-res: this row's ULA as pair slots, linear
     static uint8_t  (*sprAttr)[5];       // [128][5]

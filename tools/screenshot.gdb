@@ -1,3 +1,6 @@
+# The extension resumes the target and converts only once this marker exists:
+# the evaluate reply of `source` can come back before the script has finished.
+shell rm -f /tmp/picospec_gdb_done
 set pagination off
 set $w = VIDEO::vga.xres
 set $h = VIDEO::vga.yres
@@ -10,12 +13,18 @@ printf "screenshot: %dx%d fb=%p\n", $w, $h, $fb0
 # table instead -- every driver reads rows through it, so this is the picture.
 # `dump` creates the file, `append` extends it; each row is exactly $w bytes, so
 # the result is the same contiguous w*h image fb2png.py has always expected.
-dump binary memory /tmp/picospec_fb.bin $fb0 ($fb0 + $w)
-set $y = 1
-while $y < $h
-  set $row = VIDEO::vga.frameBuffer[$y]
-  append binary memory /tmp/picospec_fb.bin $row ($row + $w)
-  set $y = $y + 1
+# One read when the rows are one block (the usual case); a chunked framebuffer
+# (2..8 blocks) row by row — 240 round trips through OpenOCD take seconds.
+if VIDEO::vga.frameBuffer[$h - 1] == $fb0 + ($h - 1) * $w
+  dump binary memory /tmp/picospec_fb.bin $fb0 ($fb0 + $w * $h)
+else
+  dump binary memory /tmp/picospec_fb.bin $fb0 ($fb0 + $w)
+  set $y = 1
+  while $y < $h
+    set $row = VIDEO::vga.frameBuffer[$y]
+    append binary memory /tmp/picospec_fb.bin $row ($row + $w)
+    set $y = $y + 1
+  end
 end
 set logging file /tmp/picospec_dim.txt
 set logging overwrite on
@@ -83,3 +92,6 @@ set logging enabled off
 set logging redirect off
 dump binary memory /tmp/picospec_profi_lut.bin &VIDEO::profi_pair_lookup ((char*)(&VIDEO::profi_pair_lookup) + 256)
 dump binary memory /tmp/picospec_profi_pal.bin &VIDEO::profi_palette_live ((char*)(&VIDEO::profi_palette_live) + 64)
+
+# Last line: tell the VS Code extension the dump is complete.
+shell touch /tmp/picospec_gdb_done

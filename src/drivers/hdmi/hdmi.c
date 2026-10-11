@@ -2605,7 +2605,12 @@ void hdmi_set_profi_ds80_mode(bool active,
             // driver) on 576p + TS-Conf + NeoGS took the firmware down with
             // "*** PANIC *** Out of memory" out of tsVideoApplyPending (hw 2026-09-14).
             extern void* tryMalloc(size_t n);
-            if (!conv_color_std_snapshot)
+            extern size_t getLargestAllocatable(void);
+            // ...and on a THIN heap it is not even attempted: it is a speed-up of the
+            // exit path, and 5 KB taken while a Next 640 pair frame is on was what
+            // left F5 no room at 720x576 (hw 2026-10-11, PANIC Out of memory).
+            if (!conv_color_std_snapshot
+                && getLargestAllocatable() >= HDMI_SNAP_WORDS * sizeof(uint32_t) + 16384)
                 conv_color_std_snapshot = (uint32_t *) tryMalloc(HDMI_SNAP_WORDS * sizeof(uint32_t));
             // No snapshot is no longer a refusal: the exit path re-derives page A
             // from palette[] exactly as it already does page B. Refusing instead

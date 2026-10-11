@@ -23,6 +23,7 @@
 #include "app/FlashRoms.h"      // romsUsable()/extendable() for the GMX, TS-Conf and bank rows
 #include "drivers/psram/psram_spi.h"       // psram_size()
 #include "app/Buffer.h"          // Buffer::gsPsramAvailable() for the General Sound gate
+#include "app/TryAlloc.h"        // the Video > Mode rows (heap per menu session)
 #include "player/PicoPlayer.h" // pp::available() for the Pico-Zx-Player row
 #include "drivers/board/BoardPins.h"       // the ESP-link predicate of the Network rows
 #include "app/messages.h"        // _PIN_XSTR for the Real sound input row label
@@ -331,11 +332,24 @@ static bool vmRowVisible(int32_t vm, bool fastOk, bool bigOk, int32_t staged) {
     return !Config::isFastVideoMode((uint8_t)vm) || fastOk;
 }
 
+// The rows' storage is heap for the menu session (videoModeOptsFree() from
+// runInternal's exit, beside profilesSessionEnd): as statics they were 1.3 KB of
+// .bss on every machine for a list that only exists while the menu is open.
+struct VmOptRows {
+    Option opts[kVmOptCount];
+    char   lbl[kVmOptCount][40];
+    char   slbl[kVmOptCount][24];
+};
+static VmOptRows* s_vmRows = nullptr;
+void videoModeOptsFree() { free(s_vmRows); s_vmRows = nullptr; }
+
 static const Option* video_modeOpts(uint8_t& cnt) {
     const int32_t staged = Stage::get(SET_VIDEO_MODE);
-    static Option opts[kVmOptCount];
-    static char lbl[kVmOptCount][40];
-    static char slbl[kVmOptCount][24];
+    if (!s_vmRows) s_vmRows = (VmOptRows*)tryMalloc(sizeof(VmOptRows));
+    if (!s_vmRows) { cnt = 0; return nullptr; }   // no heap: the radio shows no rows
+    Option* const opts = s_vmRows->opts;
+    char (*const lbl)[40]  = s_vmRows->lbl;
+    char (*const slbl)[24] = s_vmRows->slbl;
 #if defined(VGA_HDMI) || defined(HDMI)
     const bool fastOk = vmFastOffered();
     const bool xgaOk  = vmBigOffered();

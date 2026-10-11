@@ -641,6 +641,13 @@ public:
   static void timexHiresForceOff();            // machine reset / mode gone
   static void timexHiresColour();              // port #FF bits 3-5 changed (cheap)
   static void timexHiresRefresh();             // ... or the ZX palette was rebuilt
+  // ZX Spectrum Next 640-wide frames (80-column tilemap): the same pair driver,
+  // its 16 colours chosen per frame by NEXTVID and kept in profi_palette_live
+  // (so the menu's palette swap, BMP capture and applyPalette's re-push treat it
+  // exactly like Profi DS80). Callers drain the core1 line queue first.
+  static bool nextPairOn(const uint32_t pal16[16]);   // false: no pair driver here
+  static void nextPairOff();
+  static void nextPairPalette(const uint32_t pal16[16]);
   static uint8_t timexHiresInk();              // 4-bit pair index, always BRIGHT
   static uint8_t timexHiresPaper();            // ... = ink ^ 7, also the border
   static const uint16_t* timexHiresLut();      // nibble -> 2 pair bytes (NEXTVID reuses it)

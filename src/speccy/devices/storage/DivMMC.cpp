@@ -124,7 +124,9 @@ int8_t DivMMC::active_bank[DIVMMC_CACHE_SLOTS] = {};
 bool DivMMC::slot_dirty[DIVMMC_CACHE_SLOTS] = {};
 uint8_t DivMMC::slot_lru[DIVMMC_CACHE_SLOTS] = {};
 uint8_t DivMMC::lru_clock = 0;
-FIL DivMMC::swap_file;
+// Heap, on the first open: only the SD-swap tier (no butter PSRAM) ever opens it,
+// and a static FIL was 608 B of .bss on every machine.
+FIL* DivMMC::swap_file = nullptr;
 bool DivMMC::swap_open = false;
 
 // IDE/ATA state (DivIDE)
@@ -291,7 +293,8 @@ void DivMMC::init() {
         }
         if (!swap_open) {
             f_unlink("/tmp/divmmc-pico-speccy.swap");
-            FRESULT fr = f_open(&swap_file, "/tmp/divmmc-pico-speccy.swap", FA_READ | FA_WRITE | FA_CREATE_ALWAYS);
+            if (!swap_file) swap_file = (FIL*)Buffer::palloc(sizeof(FIL), Buffer::NEED_POINTER);
+            FRESULT fr = swap_file ? f_open(swap_file, "/tmp/divmmc-pico-speccy.swap", FA_READ | FA_WRITE | FA_CREATE_ALWAYS) : FR_NOT_ENOUGH_CORE;
             if (fr != FR_OK) {
                 for (int i = 0; i < DIVMMC_CACHE_SLOTS; i++) {
                     free(active_buf[i]); active_buf[i] = nullptr;
@@ -527,8 +530,8 @@ void DivMMC::reopenFiles() {
     }
     // Reopen swap file
     if (swap_open) {
-        f_close(&swap_file);
-        if (f_open(&swap_file, "/tmp/divmmc-pico-speccy.swap", FA_READ | FA_WRITE) != FR_OK) {
+        f_close(swap_file);
+        if (f_open(swap_file, "/tmp/divmmc-pico-speccy.swap", FA_READ | FA_WRITE) != FR_OK) {
             swap_open = false;
         }
     }
@@ -738,10 +741,10 @@ void DivMMC::clearAllBanks() {
         if (swap_open) {
             uint8_t zeros[256];
             memset(zeros, 0, sizeof(zeros));
-            f_lseek(&swap_file, 0);
+            f_lseek(swap_file, 0);
             UINT bw;
             for (size_t i = 0; i < DIVMMC_NUM_BANKS * DIVMMC_BANK_SIZE; i += sizeof(zeros))
-                f_write(&swap_file, zeros, sizeof(zeros), &bw);
+                f_write(swap_file, zeros, sizeof(zeros), &bw);
         }
     }
 }
@@ -775,8 +778,8 @@ void DivMMC::evict(int slot) {
     // Only write back if dirty
     if (slot_dirty[slot]) {
         UINT bw;
-        f_lseek(&swap_file, (FSIZE_t)active_bank[slot] * DIVMMC_BANK_SIZE);
-        f_write(&swap_file, active_buf[slot], DIVMMC_BANK_SIZE, &bw);
+        f_lseek(swap_file, (FSIZE_t)active_bank[slot] * DIVMMC_BANK_SIZE);
+        f_write(swap_file, active_buf[slot], DIVMMC_BANK_SIZE, &bw);
         slot_dirty[slot] = false;
     }
     bank_ptr[active_bank[slot]] = nullptr;
@@ -821,8 +824,8 @@ void DivMMC::materialize(uint8_t bank_idx) {
 
     // Load from swap
     UINT br;
-    f_lseek(&swap_file, (FSIZE_t)bank_idx * DIVMMC_BANK_SIZE);
-    f_read(&swap_file, active_buf[slot], DIVMMC_BANK_SIZE, &br);
+    f_lseek(swap_file, (FSIZE_t)bank_idx * DIVMMC_BANK_SIZE);
+    f_read(swap_file, active_buf[slot], DIVMMC_BANK_SIZE, &br);
     bank_ptr[bank_idx] = active_buf[slot];
     active_bank[slot] = bank_idx;
     slot_dirty[slot] = false;
@@ -1062,8 +1065,13 @@ volatile uint32_t g_sd_ops = 0;
 // Coherency: invalidated on any write and on reset; FatFs writing the card
 // behind our back is out of scope (same assumption as the rest of raw-SD).
 #define DIVSD_RA_SECTORS 8
-// The 4 KB burst buffer must be plain SRAM the SD driver can DMA into (butter
-// is out: DMA bypasses the XIP cache — the readFileToButter lesson). It lived
+// The two 4 KB burst buffers (this one and s_sq2) live in butter PSRAM since
+// 2026-10-11 (+8 KB of SRAM heap for a Next session at 720x576). The old rule
+// "plain SRAM the SD driver can DMA into" was never true: both SD paths store
+// with the CPU (spi_read_blocking / the pio_spi FIFO loop, sdcard.c) and so does
+// USB MSC (TinyUSB copies out of the USB DPRAM) — nothing in either driver
+// claims a DMA channel. CPU stores through the cached alias are coherent for
+// both cores like every other PSRAM write. History of the SRAM placement: it lived
 // in SCRATCH_Y on the Next branch, where that bank was empty; it is not empty
 // here — hdmi.c's 4 KB conv_color_b owns all of it (see the alignas note in
 // rp2350-memmap.ld / CLAUDE.md), and keeping both overflowed the bank 2:1.
@@ -1083,17 +1091,28 @@ static uint32_t s_sq_count = 0;
 static uint32_t s_sq_last = 0xFFFFFFFFu;       // previous request (sequen. detect)
 static uint32_t s_sq_gen = 0;                  // g_disk_write_gen when filled (host writes)
 
-void DivMMC::raInit() {
-    if (!s_sq_buf) {
-        if (s_sqBuf.alloc(DIVSD_RA_SECTORS * 512, Buffer::NEED_POINTER | Buffer::HOT_SRAM) &&
-            s_sqBuf.data() && s_sqBuf.tier() == Buffer::TIER_HEAP) {
-            s_sq_buf = (uint8_t*)s_sqBuf.data();
-        } else {
-            s_sqBuf.free();   // butter/arena is not DMA-able here
-            Debug::log("[divSD] read-ahead off: no SRAM for the %u KB burst buffer",
-                       (unsigned)(DIVSD_RA_SECTORS * 512 / 1024));
-        }
+// Taken on the first read, not in raInit(): DivMMC::init runs BEFORE
+// Buffer::initPools, where PREFER_PSRAM has no butter pool yet and quietly lands
+// on the heap — the 4 KB stayed in SRAM (hw log 2026-10-11, mem3). On a board
+// with butter PSRAM the attempt waits for the pool; without it, heap at once.
+static bool s_sq_tried = false;
+static inline bool sq1Ensure() {
+    if (s_sq_buf || s_sq_tried) return s_sq_buf != nullptr;
+    if (butter_psram_size() && !Buffer::butterPoolReady()) return false;
+    s_sq_tried = true;
+    if (s_sqBuf.alloc(DIVSD_RA_SECTORS * 512, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM) &&
+        s_sqBuf.data()) {
+        s_sq_buf = (uint8_t*)s_sqBuf.data();
+    } else {
+        s_sqBuf.free();
+        Debug::log("[divSD] read-ahead off: no memory for the %u KB burst buffer",
+                   (unsigned)(DIVSD_RA_SECTORS * 512 / 1024));
     }
+    Debug::log("[divSD] read-ahead buffer @%08X", (unsigned)(uintptr_t)s_sq_buf);
+    return s_sq_buf != nullptr;
+}
+
+void DivMMC::raInit() {
     s_sq_base = 0xFFFFFFFFu;
     s_sq_count = 0;
     s_sq_last = 0xFFFFFFFFu;
@@ -1134,8 +1153,10 @@ static uint8_t  s_as_kind = 0;      // the posted request: 0 prefetch, 1 CMD17 s
 static bool sq2Ensure() {
     if (!s_sq2 && !s_sq2_tried) {
         s_sq2_tried = true;
-        s_sq2 = (uint8_t*)tryMalloc(DIVSD_RA_SECTORS * 512);
-        Debug::log("[divSD] core1 read-ahead %s", s_sq2 ? "on" : "off (no heap)");
+        // Butter PSRAM, like s_sq_buf (see the note at DIVSD_RA_SECTORS).
+        s_sq2 = (uint8_t*)Buffer::palloc(DIVSD_RA_SECTORS * 512, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        Debug::log("[divSD] core1 read-ahead %s @%08X", s_sq2 ? "on" : "off (no memory)",
+                   (unsigned)(uintptr_t)s_sq2);
     }
     return s_sq2 != nullptr;
 }
@@ -1298,6 +1319,7 @@ void DivMMC::loadSector(uint32_t sector) {
           next_trace_ev('S', (uint8_t)(sector >> 8), (uint8_t)sector); }
 #endif
     if (divsd_mode) {
+        sq1Ensure();
         // Read-ahead hit: no card access at all
         if (s_sq_buf && sector >= s_sq_base && sector < s_sq_base + s_sq_count &&
             s_sq_gen == g_disk_write_gen) {

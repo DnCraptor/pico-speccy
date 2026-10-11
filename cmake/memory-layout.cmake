@@ -130,7 +130,9 @@ if (TSOVL_WIN_SIZE STREQUAL "AUTO")
     # line buffers, s_pairmap, ts_band_slot) + .tsovl_data 560 B (the DRAM-cache
     # rows' 0xFF fill and the row->page maps, loaded so a claim re-initialises
     # them from flash) = 10 620 B.
-    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 9216")
+    # + 1 KB (2026-10-11): TsConf::cram / sfile moved into the tail too (they were
+    # .bss on every machine; a Next session at 720x576 wanted the 1 KB).
+    math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 10240")
     # The HSTX command-expander build (HDMI_HSTX=2: TMDS, or AUTO on the GPIO 12-19
     # boards) has a 240-slot ts256 pool instead of 184, and the per-slot tables
     # (ts256_slot_col/ref, ts256_pool, the dirty words) are TS_OVL_BSS: measured
@@ -238,13 +240,18 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # handler BODIES pasted in with the NextMemory accessors (tools/
     # gen_next_dispatch.py): content 47 408 B, trace 47 688. +440 B the same day,
     # the CTC independent-timers fast path (NextInt ctcRefresh): content 47 848 B,
-    # trace 48 120.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 48128)
+    # trace 48 120. +1.4 KB 2026-10-11 (NextBench): the 640-wide pair frame (two
+    # tilemap phases, the second mixer pass, the pair encode) and the Layer 2
+    # column band: content 49 248 B. +0.9 KB the same day: the generalised
+    # NextIdle note (noteNew), the row-major band loop, the span-limited second
+    # mix: content 50 152 B, trace 50 072. Ceiling while .dmaovl must stay
+    # inside .ftovl: .tsovl + .ftovl - .dmaovl = 51 328 B.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 50688)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
     if (NEXT_TRACE)
-        set(NXOVL_WIN_SIZE_EFFECTIVE 48640)
+        set(NXOVL_WIN_SIZE_EFFECTIVE 50688)
     endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})

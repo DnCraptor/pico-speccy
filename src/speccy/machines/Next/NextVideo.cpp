@@ -66,6 +66,56 @@ static uint8_t s_gigs = 0;
 static bool    s_gigsSeed = true;
 uint8_t* NEXTVID::pairMap = nullptr;
 uint8_t* NEXTVID::hiresRow = nullptr;
+
+// ── 640-wide frames (80-column tilemap) through the pair driver ──────────────
+// The tilemap is rendered twice, once per phase of the 640-pixel grid (even
+// source pixels into nxT, odd into nxT2); a row whose two phases differ is
+// mixed twice (lineBuf = left pixels, p80Line2 = right pixels) and every fb
+// byte becomes the pair (left, right) of 16 colours. The 16 are picked per
+// frame from what the frame actually shows (p80Hist, counted by the renderer)
+// and kept in VIDEO::profi_palette_live. Everything else of the frame (Layer 2
+// 320, ULA, sprites, border) is 320-wide and comes out as solid pairs.
+// One block, allocated when the mode first comes on, SRAM only (read per pixel):
+//   p80Line2 384 | p80Map16 256 | p80Solid 256 | nxT2 384x2 | nxUs 384x2 | p80Hist 256x4
+bool     NEXTVID::p80Live = false;
+uint8_t* NEXTVID::l2Band = nullptr;
+static uint8_t*  p80Blk   = nullptr;
+static uint8_t*  p80Line2 = nullptr;
+static uint8_t*  p80Map16 = nullptr;   // palette index -> pair colour 0..15
+static uint8_t*  p80Solid = nullptr;   // palette index -> pair slot (c, c)
+static uint16_t* nxT2     = nullptr;
+static uint16_t* nxUs     = nullptr;   // nxU before the first mix (nxUlaMerge works in place)
+static uint32_t* p80Hist  = nullptr;   // palette index -> pixels this frame (core1 writes, core0 reads)
+static bool      s_rowDiff = false;    // this row's two phases differ (p80Line2 is valid in [s_dx0, s_dx1))
+static int       s_dx0 = 0, s_dx1 = 0;
+static uint8_t   p80Cur[16];           // palette index shown in each pair colour (0xFF = unused)
+static constexpr unsigned P80_BLK = 384 + 256 + 256 + 384 * 2 * 2 + 256 * 4;
+
+static inline bool nxIsSram(const void* p) {
+    const uintptr_t a = (uintptr_t)p;
+    return a >= 0x20000000u && a < 0x20082000u;
+}
+
+// A per-pixel table: SRAM or nothing (HOT_SRAM falls back to butter PSRAM, where
+// the per-pixel reads would cost what the band / the pair mode exists to save).
+static uint8_t* nxSramBlock(unsigned bytes) {
+    uint8_t* p = (uint8_t*)Buffer::palloc(bytes, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+    if (p && !nxIsSram(p)) { Buffer::pfree(p); p = nullptr; }
+    return p;
+}
+
+static bool p80Alloc() {
+    if (p80Blk) return true;
+    p80Blk = nxSramBlock(P80_BLK);
+    if (!p80Blk) return false;
+    p80Line2 = p80Blk;
+    p80Map16 = p80Line2 + 384;
+    p80Solid = p80Map16 + 256;
+    nxT2     = (uint16_t*)(p80Solid + 256);
+    nxUs     = nxT2 + 384;
+    p80Hist  = (uint32_t*)(nxUs + 384);
+    return true;
+}
 uint8_t* NEXTVID::sprPatterns = nullptr;
 uint8_t  (*NEXTVID::sprAttr)[5] = nullptr;
 uint16_t NEXTVID::sprPatWrite = 0;
@@ -178,7 +228,7 @@ IRAM_ATTR void NEXTVID::captureLine(NextLineState& st) {
     st.palCtrl = palCtrl;
     st.border = VIDEO::borderColor;
     st.flashing = VIDEO::flashing;
-    st.hires = VIDEO::timex_hires_live ? 1 : 0;
+    st.hires = VIDEO::timex_hires_live ? 1 : (p80Live ? 2 : 0);
     st.osd = VIDEO::OSD;
     st.gigs = s_gigs;
     st.attOvr = 0;
@@ -387,7 +437,7 @@ static bool nxLineReads(const NextLineState& st, int row, int paperTop, uint8_t 
             return nxRangeHit(ub, a, a + 127, bank, o0, o1);
         }
         if (nxRangeHit(ub, 0, 0x1AFF, bank, o0, o1)) return true;
-        if ((st.r69 & 0x03) || st.hires) return nxRangeHit(ub, 0x2000, 0x3AFF, bank, o0, o1);
+        if ((st.r69 & 0x03) || st.hires == 1) return nxRangeHit(ub, 0x2000, 0x3AFF, bank, o0, o1);
     }
     return false;
 }
@@ -498,6 +548,190 @@ void NEXTVID::rebuildPairMap() {
         }
         pairMap[i] = VIDEO::profi_pair_lookup[best][best];
     }
+}
+
+// ── 640-wide pair frames: core0 side (flash) ─────────────────────────────────
+// RGB of a palette index as the renderer emits it: 0..15 the ZX colours, the
+// rest the colour lattice.
+static uint32_t nxIdxRgb(int i) {
+    if (i < 16) {
+        const int l = (i & 8) ? 255 : 205;
+        return ((i & 2) ? (uint32_t)l << 16 : 0) | ((i & 4) ? (uint32_t)l << 8 : 0) | ((i & 1) ? (uint32_t)l : 0);
+    }
+    return NEXTVID::isSlot(i) ? NEXTVID::slotRgb(i) : 0;
+}
+
+static uint32_t nxRgbDist(uint32_t a, uint32_t b) {
+    const int dr = (int)((a >> 16) & 0xFF) - (int)((b >> 16) & 0xFF);
+    const int dg = (int)((a >> 8) & 0xFF) - (int)((b >> 8) & 0xFF);
+    const int db = (int)(a & 0xFF) - (int)(b & 0xFF);
+    return (uint32_t)(dr * dr * 3 + dg * dg * 6 + db * db);
+}
+
+// p80Cur -> the 16 RGB colours, map16 (every palette index -> its nearest pair
+// colour) and solid (-> the pair slot (c, c)). Callers drain core1 first.
+static void p80BuildTables(uint32_t pal[16]) {
+    for (int k = 0; k < 16; k++) pal[k] = p80Cur[k] == 0xFF ? 0 : nxIdxRgb(p80Cur[k]);
+    for (int i = 0; i < 256; i++) {
+        int best = 0;
+        uint32_t bestd = 0xFFFFFFFFu;
+        const uint32_t c = nxIdxRgb(i);
+        for (int k = 0; k < 16; k++) {
+            if (p80Cur[k] == 0xFF) continue;
+            if (p80Cur[k] == i) { best = k; break; }
+            const uint32_t d = nxRgbDist(c, pal[k]);
+            if (d < bestd) { bestd = d; best = k; }
+        }
+        p80Map16[i] = (uint8_t)best;
+        p80Solid[i] = VIDEO::profi_pair_lookup[best][best];
+    }
+}
+
+// The frame's 16 colours: the most shown palette indices, counted over
+// P80_WINDOW frames (core1 renders behind core0, so one frame's count is a
+// different slice of the picture every time — hw 2026-10-11: the 16 changed
+// almost every frame and the whole screen flickered).
+// The pair table folds (ink 0..5, paper 8) into (ink, 0) and, with HDMI audio
+// on, (bright ink, other bright paper) into paper - 8 (init_profi_pair_lookup's
+// slot budget). So the first pick goes out as 8 families of the two closest
+// colours, family f in pair colours f and f + 8, the more shown one at f: a
+// folded pair then shows a near colour instead of an arbitrary one.
+// Afterwards a colour stays in its slot for as long as it is picked (a current
+// colour counts double), and a newcomer takes the slot of an evicted one whose
+// family partner is nearest to it — the rest of the screen does not change.
+static constexpr int P80_WINDOW = 8;
+static bool s_p80Full = true;          // next pick lays the families out afresh
+static int  s_p80Frames = 0;
+
+static bool p80Choose() {
+    const bool full = s_p80Full;
+    if (++s_p80Frames < (full ? 2 : P80_WINDOW)) return false;
+    s_p80Frames = 0;
+    // read in place (core1 keeps counting meanwhile — harmless), zeroed below
+    const uint32_t* const cnt = p80Hist;
+    uint32_t total = 0;
+    for (int i = 0; i < 256; i++) total += cnt[i];
+    if (!total) return false;
+    bool cur[256] = {};
+    if (!full) for (int k = 0; k < 16; k++) if (p80Cur[k] != 0xFF) cur[p80Cur[k]] = true;
+    uint8_t pick[16]; int n = 0;
+    bool taken[256] = {};
+    for (; n < 16; n++) {
+        int best = -1; uint32_t bs = 0;
+        for (int i = 0; i < 256; i++) {
+            if (taken[i] || !cnt[i] || !(i < 16 || NEXTVID::isSlot(i))) continue;
+            const uint32_t sc = cur[i] ? cnt[i] * 2 : cnt[i];
+            if (sc > bs) { bs = sc; best = i; }
+        }
+        if (best < 0) break;
+        taken[best] = true; pick[n] = (uint8_t)best;
+    }
+    int distinct = 0; for (int i = 0; i < 256; i++) distinct += cnt[i] != 0;
+    for (int i = 0; i < 256; i++) p80Hist[i] = 0;
+    if (!n) return false;
+    if (!full) {
+        // newcomers into the slots of evicted colours; slots of colours no
+        // longer shown at all stay as they are (nothing maps to them)
+        bool keep[16] = {};
+        for (int k = 0; k < 16; k++) keep[k] = p80Cur[k] != 0xFF && taken[p80Cur[k]];
+        bool changed = false;
+        for (int j = 0; j < n; j++) {
+            if (cur[pick[j]]) continue;
+            const uint32_t c = nxIdxRgb(pick[j]);
+            int best = -1; uint32_t bd = 0xFFFFFFFFu;
+            for (int k = 0; k < 16; k++) {
+                if (keep[k]) continue;
+                const uint8_t pt = p80Cur[k ^ 8];
+                const uint32_t d = pt == 0xFF ? 0x7FFFFFFFu : nxRgbDist(c, nxIdxRgb(pt));
+                if (best < 0 || d < bd) { bd = d; best = k; }
+            }
+            if (best < 0) break;
+            p80Cur[best] = pick[j];
+            keep[best] = true;
+            changed = true;
+        }
+        return changed;
+    }
+    // families: greedily the closest pair left; pick[] is in count order, so a
+    // family's first member is the more shown one. An odd one out shares
+    // nothing (its partner slot repeats it).
+    bool used[16] = {};
+    uint8_t out[16]; for (int k = 0; k < 16; k++) out[k] = 0xFF;
+    for (int f = 0; f < 8; f++) {
+        int a = -1;
+        for (int k = 0; k < n; k++) if (!used[k]) { a = k; break; }
+        if (a < 0) break;
+        used[a] = true;
+        int b = -1; uint32_t bd = 0xFFFFFFFFu;
+        const uint32_t ca = nxIdxRgb(pick[a]);
+        for (int k = 0; k < n; k++) {
+            if (used[k]) continue;
+            const uint32_t d = nxRgbDist(ca, nxIdxRgb(pick[k]));
+            if (d < bd) { bd = d; b = k; }
+        }
+        out[f] = pick[a];
+        if (b >= 0) { used[b] = true; out[f + 8] = pick[b]; } else out[f + 8] = pick[a];
+    }
+    for (int k = 0; k < 16; k++) p80Cur[k] = out[k];
+    s_p80Full = false;
+    Debug::log("[NXV] 640: %d colours on screen, 16 picked", distinct);
+    return true;
+}
+
+void NEXTVID::pairForceOff() {
+    if (!p80Live) return;
+    c1Drain();
+    p80Live = false;
+    VIDEO::nextPairOff();
+    computeGeometry();
+}
+
+void NEXTVID::pairPoll() {
+    const uint8_t* r = NextReg::reg;
+    // Layer 2 320x256 / 640x256 on: the column band (SRAM, ~2.5 KB, once)
+    static bool s_bandTried = false;
+    if (!l2Band && !s_bandTried && (r[0x70] & 0x30) && ((NextReg::port123B & 0x02) || (r[0x69] & 0x80))) {
+        s_bandTried = true;
+        uint8_t* b = nxSramBlock(320 * 8);
+        c1Drain();
+        l2Band = b;
+        Debug::log("[NXV] Layer 2 column band %s", b ? "in SRAM" : "not allocated (no SRAM heap)");
+    }
+    const bool want = (r[0x6B] & 0xC0) == 0xC0 && !VIDEO::timex_hires_live && !VIDEO::timex_hires_pending_on;
+    static uint8_t s_on = 0, s_off = 0;
+    static bool s_refused = false;
+    if (!p80Live) {
+        if (!want) { s_on = 0; s_refused = false; return; }
+        if (s_refused || ++s_on < 2) return;
+        if (!p80Alloc()) {
+            s_refused = true;
+            Debug::log("[NXV] 640: no SRAM for the pair tables (%u B), staying at 320", P80_BLK);
+            return;
+        }
+        c1Drain();
+        for (int k = 0; k < 16; k++) p80Cur[k] = (uint8_t)k;    // the ZX 16 until a frame is counted
+        for (int i = 0; i < 256; i++) p80Hist[i] = 0;
+        s_p80Full = true; s_p80Frames = 0;
+        uint32_t pal[16];
+        p80BuildTables(pal);                // needs the pair lookup: built by nextPairOn first
+        if (!VIDEO::nextPairOn(pal)) { s_refused = true; return; }
+        p80BuildTables(pal);                // ... now with this session's pair slots
+        p80Live = true;
+        computeGeometry();                  // the window moves up (see computeGeometry)
+        s_off = 0;
+        return;
+    }
+    if (!want) {
+        // Timex hi-res wants the driver: hand it over now, not 25 frames late
+        if (VIDEO::timex_hires_pending_on || ++s_off >= 25) { pairForceOff(); s_on = 0; }
+        return;
+    }
+    s_off = 0;
+    if (!p80Choose()) return;
+    c1Drain();
+    uint32_t pal[16];
+    p80BuildTables(pal);
+    VIDEO::nextPairPalette(pal);
 }
 
 // Renderer (or core0 with the queue drained): apply the palette log up to `upto`.
@@ -851,8 +1085,11 @@ void NEXTVID::softReset() {
     cop16Second = false;
 }
 
+size_t getFreeHeap(void);
 void NEXTVID::Reset() {
     c1Drain();
+    const bool firstReset = !sprPatterns;
+    const size_t heap0 = firstReset ? getFreeHeap() : 0;
     if (!sprPatterns) {
         // Two blocks, Next-boot only, never freed (the Next boundary reboots).
         // It used to be ONE 29 KB malloc, which PANICKED at boot once the heap
@@ -877,7 +1114,18 @@ void NEXTVID::Reset() {
         const unsigned hotSz  = 8*256*2 + 8*256 + 384 + 512 + 512 + 4 * 768;
         const unsigned coldSz = 16384 + 2048 + 128*5;
         uint8_t* hot  = (uint8_t*)Buffer::palloc(hotSz,  Buffer::NEED_POINTER | Buffer::HOT_SRAM);
-        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+        // The 640-wide pair tables and the Layer 2 column band (~6 KB, read per
+        // pixel, SRAM or nothing) BEFORE the cold block: that one is read per
+        // sprite row and tolerates PSRAM, these do not. Allocated lazily they
+        // found 4 KB of heap left on the NEXT_TRACE build (hw 2026-10-11).
+        p80Alloc();
+        if (!l2Band) l2Band = nxSramBlock(320 * 8);
+        Debug::log("[NXV] 640 tables %s, Layer 2 band %s", p80Blk ? "in SRAM" : "none",
+                   l2Band ? "in SRAM" : "none");
+        // PREFER_PSRAM again (2026-10-11 evening): read per sprite row, 8-16
+        // contiguous bytes = one XIP line fill; 19 KB of SRAM heap was what kept
+        // F5 and 720x576 out of reach of a Next session.
+        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         const unsigned sprSz = (sizeof(SprRender) + 3) & ~3u;
         // Two blocks, not one: the renderer state is read per sprite per line
         // (core1), the log only for the bytes written since the last line. As
@@ -939,17 +1187,20 @@ void NEXTVID::Reset() {
         // heap back; watch `c1=` / FPS and the `ring=` field of the NEXT line.
         uint8_t* q = (uint8_t*)Buffer::palloc(4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
                                               + 4 * NEXT_C1_STATES,
-                                              Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+                                              Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         if (q) {
             nx_ring = (uint32_t*)q;
             nx_st = (NextLineState*)(q + 4 * NEXT_C1_RING);
             nx_st_job = (uint32_t*)(q + 4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES);
             memset(nx_st_job, 0, 4 * NEXT_C1_STATES);
         }
-        Debug::log("[NXC1] core1 line renderer %s", q ? "ON" : "unavailable (no RAM)");
+        Debug::log("[NXC1] core1 line renderer %s @%08X", q ? "ON" : "unavailable (no RAM)", (unsigned)(uintptr_t)q);
     }
     nx_have = false;
     g_next_c1_live = nx_ring != nullptr;
+    if (firstReset)
+        Debug::log("[NXV] video state took %u B of heap (%u -> %u)",
+                   (unsigned)(heap0 - getFreeHeap()), (unsigned)heap0, (unsigned)getFreeHeap());
 #if NEXT_TRACE
     extern volatile uint16_t* g_nx_pcs;
     extern volatile uint16_t* g_nx_pcpg;
@@ -1017,6 +1268,14 @@ bool NEXTVID::computeGeometry() {
     int fv = (VIDEO::tStatesBorder + tpl / 2) / tpl - shift;
     if (fv < 0) fv = 0;
     const int paper = (VIDEO::tStatesScreen + tpl / 2) / tpl - shift;
+    // 640-wide pair frames (NextBench and other 320x256 desktops): show the
+    // 256-line tilemap / Layer 2 window from its first line — a 240-row fb
+    // otherwise cuts 8 lines at the top, where such programs keep their menu
+    // bar — and give up 16 at the bottom instead. A 288-row fb shows it all.
+    if (p80Live) {
+        const int d = 32 - (paper - fv);
+        if (d > 0) { fv -= d; if (fv < 0) fv = 0; }
+    }
     const bool moved = fv != firstVisibleLine || paper - fv != paperTopRow;
     firstVisibleLine = fv;
     paperTopRow = paper - fv;
@@ -1431,6 +1690,7 @@ __attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
         lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].neu & 0x1FF];
     }
     for (int x = 0; x < xres; x++) lineBuf[x] = acc[x];
+    s_rowDiff = false;            // the right pixels were not kept per segment: solid pairs
     s_lineReady = true;
     RenderLine(row);
     s_lineReady = false;
@@ -1443,7 +1703,7 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     g_nx_rows = g_nx_rows + 1;
     const uint64_t _out0 = nx_layer_sample ? time_us_64() : 0;
 #endif
-    if (LS->hires) {
+    if (LS->hires == 1) {
         // Packed-pair frame (Timex hi-res): the ULA left HIRES_MARK where its
         // 512-pixel line goes (hiresRow, already pair slots); everything else
         // is a palette index and becomes a solid pair.
@@ -1465,6 +1725,29 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
                 const uint8_t v = b[i];
                 b[i] = (v == HIRES_MARK && (unsigned)(x + i - x0) < 256u) ? hiresRow[x + i - x0] : pairMap[v];
             }
+        }
+    } else if (LS->hires == 2) {
+        // 640-wide pair frame: lineBuf = left pixels, p80Line2 = right pixels
+        // (only on rows whose 80-column tilemap phases differ); count what is
+        // shown for the frame's 16 colours (pairPoll), every other row.
+        const int xres = (int)VIDEO::vga.xres;
+        uint32_t* const hist = p80Hist;
+        if (!(row & 1)) {
+            for (int x = 0; x < xres; x++) hist[lineBuf[x]]++;
+            if (s_rowDiff) for (int x = s_dx0; x < s_dx1; x++) hist[p80Line2[x]]++;
+        }
+        const uint8_t* __restrict m16 = p80Map16;
+        const uint8_t* __restrict so = p80Solid;
+        uint8_t* __restrict l = lineBuf;
+        if (s_rowDiff) {
+            const uint8_t* __restrict pr = &VIDEO::profi_pair_lookup[0][0];
+            const uint8_t* __restrict r = p80Line2;
+            const int x0 = s_dx0, x1 = s_dx1;
+            for (int x = 0; x < x0; x++) l[x] = so[l[x]];
+            for (int x = x0; x < x1; x++) l[x] = pr[(m16[l[x]] << 4) | m16[r[x]]];
+            for (int x = x1; x < xres; x++) l[x] = so[l[x]];
+        } else {
+            for (int x = 0; x < xres; x++) l[x] = so[l[x]];
         }
     }
     const uint32_t* src = (const uint32_t*)lineBuf;
@@ -1582,7 +1865,7 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
     // the ink in port FF 5:3 — and the border takes that paper colour too.
     // Ink / paper go through whatever palette the ULA uses (classic, ULANext,
     // ULA+) like any attribute.
-    const bool hr = LS->hires && !(LS->r69 & 0x40);
+    const bool hr = LS->hires == 1 && !(LS->r69 & 0x40);
     uint16_t hrInk = 0, hrPap = 0;
     if (hr) {
         const uint8_t ink = (LS->r69 >> 3) & 7;
@@ -1775,7 +2058,7 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
             }
         }
     }
-    if (LS->r26 && !LS->hires) nxRotL(u + xPaperOff, LS->r26);
+    if (LS->r26 && LS->hires != 1) nxRotL(u + xPaperOff, LS->r26);
     // ULA clip window (NR 0x1A, zxula.vhd 562): paper only, never the border
     const uint8_t* cw = LS->clip[2];
     if (y < cw[2] || y > cw[3]) { nxFillTr(u + xPaperOff, 256); return true; }
@@ -2024,6 +2307,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     const int xres = VIDEO::vga.xres;
     const int y = row - paperTopRow;
     const uint8_t r15 = LS->r15;
+    s_rowDiff = false;
     NX_LT_BEGIN();
     sprApply(LS->sprSeq);               // keep the attribute log moving on every line
     palApply(LS->palSeq);
@@ -2033,7 +2317,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     // compose it (TX-1696: 3 ms of core1 a frame, hw 2026-10-09). Timex hi-res
     // still needs RenderUlaLine for its pair row.
     bool ulaRow = false;
-    if ((LS->r68 & 0x80) && !LS->hires) nxFillTr(nxU, xres);
+    if ((LS->r68 & 0x80) && LS->hires != 1) nxFillTr(nxU, xres);
     else ulaRow = RenderUlaLine(row);
     NX_LT_END(0);
     const bool tmEn = LS->r6B & 0x80;
@@ -2050,7 +2334,23 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         return;
     }
     nxFillTr(nxT, xres);
+    // 640-wide pair frame, 80-column row: the odd phase into nxT2 as well
+    const bool tmPair = tmEn && LS->hires == 2 && (LS->r6B & 0x40);
+    if (tmPair) nxFillTr(nxT2, xres);
     if (tmEn) RenderTilemapLine(row);
+    bool p2 = false;
+    int dx0 = 0, dx1 = 0;                  // [dx0, dx1): where the two phases differ (even, word-aligned)
+    if (tmPair) {
+        const uint32_t* a = (const uint32_t*)nxT; const uint32_t* b = (const uint32_t*)nxT2;
+        const int n = (xres + 1) >> 1;
+        int k0 = 0, k1 = n;
+        while (k0 < n && a[k0] == b[k0]) k0++;
+        if (k0 < n) {
+            while (k1 > k0 && a[k1 - 1] == b[k1 - 1]) k1--;
+            p2 = true; dx0 = k0 * 2; dx1 = k1 * 2;
+            if (dx1 > xres) dx1 = xres;
+        }
+    }
     NX_LT_END(1);
     nxFillTr(nxL, xres);
     nxRowL2 = false;
@@ -2094,9 +2394,68 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     m.spr = (r15 & 0x01) && nxRowSpr;
     m.blend = (LS->r68 >> 5) & 3;
     const int order = (r15 >> 2) & 7;
+    // nxUlaMerge rewrites nxU in place: keep the ULA span for the second pass
+    if (p2 && m.ulaEn && m.tm) {
+        const uint32_t* a = (const uint32_t*)nxU; uint32_t* b = (uint32_t*)nxUs;
+        for (int k = dx0 >> 1; k < (dx1 + 1) >> 1; k++) b[k] = a[k];
+    }
     if (order < 6) nxMixOrder(m, xres, order);
     else nxMixBlend(m, xres, order == 7);
+    if (p2) {
+        // the right pixels: same layers, the tilemap's odd phase, only over
+        // [dx0, dx1) — the mixers take their buffers from these pointers
+        if (m.ulaEn && m.tm) {
+            const uint32_t* a = (const uint32_t*)nxUs; uint32_t* b = (uint32_t*)nxU;
+            for (int k = dx0 >> 1; k < (dx1 + 1) >> 1; k++) b[k] = a[k];
+        }
+        uint16_t* const su = nxU; uint16_t* const st = nxT; uint16_t* const sl = nxL; uint16_t* const ss = nxS;
+        nxU = su + dx0; nxT = nxT2 + dx0; nxL = sl + dx0; nxS = ss + dx0;
+        m.fb = p80Line2 + dx0;
+        if (order < 6) nxMixOrder(m, dx1 - dx0, order);
+        else nxMixBlend(m, dx1 - dx0, order == 7);
+        nxU = su; nxT = st; nxL = sl; nxS = ss;
+        s_rowDiff = true;
+        s_dx0 = dx0; s_dx1 = dx1;
+    }
     NX_LT_END(4);
+}
+
+// Layer 2 320/640 the slow way (flash): 640x256x4bpp, or no band (no SRAM) —
+// one pixel at a time. o = the line buffer at tilemap/L2 x 0, brow = this
+// row of the band or nullptr.
+__attribute__((noinline)) static bool nxL2SlowRow(uint16_t* o, const uint8_t* brow, const uint16_t* raw,
+                                                  int t0, int t1, int scrollX, uint8_t sy, uint16_t bank,
+                                                  uint8_t palOfs, uint8_t transp, bool hires) {
+    bool any = false;
+    uint16_t curPage = 0xFFFF;
+    const uint8_t* pgp = nullptr;
+    for (int tx = t0; tx <= t1; tx++) {
+        int sx = tx + scrollX;
+        if (sx >= 320) sx -= 320;
+        uint8_t b;
+        if (brow) b = brow[sx];
+        else {
+            const uint32_t off = (uint32_t)sx * 256 + sy;
+            const uint16_t page = bank + (off >> 13);
+            if (page != curPage) { curPage = page; pgp = MemESP::nextPgPtr(page); }
+            if (!pgp) continue;               // >= NEXT_PAGES, or no Next RAM
+            b = pgp[off & 0x1FFF];
+        }
+        uint16_t e, v;
+        if (!hires) {
+            e = raw[(uint8_t)(b + palOfs)];
+            v = e & 0x1FF;
+        } else {
+            e = raw[(uint8_t)(palOfs | (b >> 4))];
+            v = e & 0x1FF;
+            if ((v >> 1) == transp) {
+                e = raw[(uint8_t)(palOfs | (b & 0x0F))];
+                v = e & 0x1FF;
+            }
+        }
+        if ((v >> 1) != transp) { o[tx] = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0)); any = true; }
+    }
+    return any;
 }
 
 // Layer 2: 256x192x8bpp (row-major) or 320x256x8bpp (column-major, covers
@@ -2172,35 +2531,69 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
         int xOrig = xPaperOff - 32;
         int xres = VIDEO::vga.xres;
         int cx1 = LS->clip[0][0] * 2, cx2 = LS->clip[0][1] * 2 + 1;
-        // The page changes every 32 columns: resolve it once per page, not per
-        // pixel (nextPgPtr tests nextRamReady and the strip bounds each call).
-        uint16_t curPage = 0xFFFF;
-        const uint8_t* pgp = nullptr;
-        for (int tx = 0; tx < 320; tx++) {
-            if (tx < cx1 || tx > cx2) continue;
-            int fx = xOrig + tx;
-            if (fx < 0 || fx >= xres) continue;
-            uint16_t sx = tx + scrollX;
-            if (sx >= 320) sx -= 320;
-            uint32_t off = (uint32_t)sx * 256 + sy;
-            uint16_t page = bank + (off >> 13);
-            if (page != curPage) { curPage = page; pgp = MemESP::nextPgPtr(page); }
-            if (!pgp) continue;                   // >= NEXT_PAGES, or no Next RAM
-            const uint8_t b = pgp[off & 0x1FFF];
-            uint16_t e, v;
-            if (!hires) {
-                e = raw[(uint8_t)(b + palOfs)];
-                v = e & 0x1FF;
-            } else {
-                e = raw[(uint8_t)(palOfs | (b >> 4))];
-                v = e & 0x1FF;
-                if ((v >> 1) == transp) {
-                    e = raw[(uint8_t)(palOfs | (b & 0x0F))];
-                    v = e & 0x1FF;
+        // Column-major: each pixel of a row is in another 256-byte column, and
+        // the 2-way XIP cache maps every 32nd column to one set, so reading the
+        // row straight from butter PSRAM missed on every pixel (NextBench: Layer
+        // 2 22 ms of core1 a frame, 80k misses). Eight rows of every column are
+        // ONE 8-byte line fill: fill the band once per 8 source rows, read the
+        // rest from SRAM. Rows render in order and the next frame starts above
+        // the last band, so (row - fill row) < 8 with the same key is a hit.
+        // Guest writes to the rows of a live band show a few lines late — the
+        // same race the beam has.
+        // Stored transposed — band[r * 320 + column] — so a row is read in order.
+        uint8_t* const band = l2Band;
+        static uint32_t s_bandKey = 0xFFFFFFFFu;
+        static int s_bandRow = -1000, s_lastRow = 0;
+        const uint32_t key = ((uint32_t)bank << 8) | (sy & 0xF8);
+        if (row < s_lastRow) s_bandKey = 0xFFFFFFFFu;     // a new frame: nothing carries over
+        s_lastRow = row;
+        if (band && (key != s_bandKey || (unsigned)(row - s_bandRow) >= 8u)) {
+            const uint8_t blk = sy & 0xF8;
+            for (int c0 = 0; c0 < 320; c0 += 32) {         // one 8K page = 32 columns
+                const uint32_t off0 = (uint32_t)c0 * 256 + blk;
+                const uint8_t* pg = MemESP::nextPgPtr(bank + (off0 >> 13));
+                for (int c = c0; c < c0 + 32; c++) {
+                    uint32_t lo = 0, hi = 0;
+                    if (pg) {
+                        const uint32_t* q = (const uint32_t*)(pg + (((uint32_t)c * 256 + blk) & 0x1FFF));
+                        lo = q[0]; hi = q[1];
+                    }
+                    uint8_t* d = band + c;
+                    d[0]    = (uint8_t)lo; d[320]  = (uint8_t)(lo >> 8);
+                    d[640]  = (uint8_t)(lo >> 16); d[960] = (uint8_t)(lo >> 24);
+                    d[1280] = (uint8_t)hi; d[1600] = (uint8_t)(hi >> 8);
+                    d[1920] = (uint8_t)(hi >> 16); d[2240] = (uint8_t)(hi >> 24);
                 }
             }
-            if ((v >> 1) != transp) { out[fx] = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0)); nxRowL2 = true; }
+            s_bandKey = key;
+            s_bandRow = row - (sy & 7);
         }
+        // The visible columns: the clip window and the framebuffer, decided once.
+        int t0 = cx1 > -xOrig ? cx1 : -xOrig;
+        int t1 = cx2 < xres - 1 - xOrig ? cx2 : xres - 1 - xOrig;
+        if (t0 < 0) t0 = 0;
+        if (t1 > 319) t1 = 319;
+        bool any = false;
+        if (band && !hires) {
+            const uint8_t* __restrict src = band + (sy & 7) * 320;
+            uint16_t* __restrict o = out + xOrig;
+            const uint16_t* __restrict pr = raw;
+            int sx = t0 + scrollX; if (sx >= 320) sx -= 320;
+            for (int tx = t0; tx <= t1; ) {
+                int n = t1 - tx + 1;
+                if (n > 320 - sx) n = 320 - sx;            // up to the scroll wrap
+                for (int k = 0; k < n; k++) {
+                    const uint16_t e = pr[(uint8_t)(src[sx + k] + palOfs)];
+                    const uint16_t v = e & 0x1FF;
+                    if ((v >> 1) != transp) { o[tx + k] = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0)); any = true; }
+                }
+                tx += n; sx = 0;
+            }
+        } else {
+            any = nxL2SlowRow(out + xOrig, band ? band + (sy & 7) * 320 : nullptr, raw, t0, t1, scrollX,
+                              sy, bank, palOfs, transp, hires);
+        }
+        if (any) nxRowL2 = true;
     }
 }
 
@@ -2264,15 +2657,18 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
     if (t0 < -xOrig) t0 = -xOrig;
     if (t1 > 319) t1 = 319;
     if (t1 > xres - 1 - xOrig) t1 = xres - 1 - xOrig;
-    uint16_t* const out = nxT + xOrig;
 
     // Tile by tile: one map entry, one attribute decode and the tile's 8
     // source pixels per tile instead of per output pixel. 80-column mode
     // renders 640 source pixels halved: every other source pixel.
     const int step = cols80 ? 2 : 1;
     const int wrap = cols80 ? 640 : 320;
+    // 640-wide pair frame: the odd source pixels go to nxT2 (a second pass).
+    const bool pair = cols80 && LS->hires == 2;
+    for (int ph = 0; ph <= (pair ? 1 : 0); ph++) {
+    uint16_t* const out = (ph ? nxT2 : nxT) + xOrig;
     int tx = t0;
-    int sx = (tx * step + scrollX) % wrap;     // advanced per tile below, no per-tile %
+    int sx = (tx * step + ph + scrollX) % wrap; // advanced per tile below, no per-tile %
     while (tx <= t1) {
         const int u0 = sx & 7;
         int n = (8 - u0 + step - 1) / step;        // output pixels left in this tile
@@ -2301,7 +2697,16 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
                 tx += 8; sx += 8; if (sx >= wrap) sx -= wrap;
                 continue;
             }
-            tmTextSpan(out + tx, n, b, u0, step, (uint8_t)(attr & 0xFE), rawTM, LS->r14, below);
+            if (pair) {
+                // one source pixel per output pixel of this phase: no ORed pair
+                const uint8_t ph2 = (uint8_t)(attr & 0xFE), r14 = LS->r14;
+                const uint16_t v0 = rawTM[ph2] & 0x1FF, v1 = rawTM[(uint8_t)(ph2 | 1)] & 0x1FF;
+                const uint16_t c0 = ((v0 >> 1) != r14) ? (uint16_t)(v0 | below) : NX_TR;
+                const uint16_t c1 = ((v1 >> 1) != r14) ? (uint16_t)(v1 | below) : NX_TR;
+                uint16_t* __restrict o = out + tx;
+                for (int k = 0; k < n; k++) o[k] = ((b << (u0 + 2 * k)) & 0x80) ? c1 : c0;
+            } else
+                tmTextSpan(out + tx, n, b, u0, step, (uint8_t)(attr & 0xFE), rawTM, LS->r14, below);
         } else {
             const bool xm = attr & 0x08, ym = attr & 0x04, rot = attr & 0x02;
             const uint16_t defBase = (uint16_t)(defsOff + tnum * 32);
@@ -2355,6 +2760,7 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
         tx += n;
         sx += n * step;
         if (sx >= wrap) sx -= wrap;
+    }
     }
 }
 

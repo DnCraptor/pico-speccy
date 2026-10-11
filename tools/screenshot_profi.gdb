@@ -1,3 +1,6 @@
+# The extension resumes the target and converts only once this marker exists:
+# the evaluate reply of `source` can come back before the script has finished.
+shell rm -f /tmp/picospec_gdb_done
 set pagination off
 # Dump Profi DS80 framebuffer and decoding tables.
 # Requires profi_ds80_active == 1 for meaningful content,
@@ -15,14 +18,19 @@ printf "screenshot profi: %dx%d fb=%p\n", $w, $h, $fb0
 # since 2026-09-10 may be 2..8 whole-row chunks scattered over the heap, so a
 # single dump of fb0..fb0+w*h reads garbage past the first chunk (hw 2026-09-14:
 # a 720x576 capture came out as the top rows + noise). Dump one row at a time.
-set $y = 0
-while $y < $h
-  if $y == 0
-    dump binary memory /tmp/picospec_profi_fb.bin VIDEO::vga.frameBuffer[0] (VIDEO::vga.frameBuffer[0] + $w)
-  else
-    append binary memory /tmp/picospec_profi_fb.bin VIDEO::vga.frameBuffer[$y] (VIDEO::vga.frameBuffer[$y] + $w)
+# One read when the rows are one block (the usual case), else row by row.
+if VIDEO::vga.frameBuffer[$h - 1] == $fb0 + ($h - 1) * $w
+  dump binary memory /tmp/picospec_profi_fb.bin $fb0 ($fb0 + $w * $h)
+else
+  set $y = 0
+  while $y < $h
+    if $y == 0
+      dump binary memory /tmp/picospec_profi_fb.bin VIDEO::vga.frameBuffer[0] (VIDEO::vga.frameBuffer[0] + $w)
+    else
+      append binary memory /tmp/picospec_profi_fb.bin VIDEO::vga.frameBuffer[$y] (VIDEO::vga.frameBuffer[$y] + $w)
+    end
+    set $y = $y + 1
   end
-  set $y = $y + 1
 end
 
 # Pair lookup table: uint8_t[16][16], row-major [ink][paper] → DS80 slot index
@@ -68,3 +76,6 @@ if $has_hdmipal
 else
   dump binary memory /tmp/picospec_pal.bin VIDEO::vga.frameBuffer[0] (VIDEO::vga.frameBuffer[0] + 1024)
 end
+
+# Last line: tell the VS Code extension the dump is complete.
+shell touch /tmp/picospec_gdb_done

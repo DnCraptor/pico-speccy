@@ -52,6 +52,9 @@
 
 using std::string;
 
+size_t getFreeHeap(void);
+extern "C" size_t getLargestAllocatable(void);
+
 namespace nm {
 
 // ── state ──────────────────────────────────────────────────────────────────────
@@ -1698,8 +1701,9 @@ string browseFile(string& fdir, const string& title, uint8_t ftype, const char* 
     if (!s_root.empty() && s_dir.compare(0, s_root.size(), s_root) != 0) s_dir = s_root;
     s_title = title;
     s_ftype = ftype;
-    Debug::log("UiBrowser: open dir='%s' ftype=%u root='%s' root_parent=%d\n",
-               s_dir.c_str(), (unsigned)ftype, s_root.c_str(), (int)OSD::fd_root_parent);
+    Debug::log("UiBrowser: open dir='%s' ftype=%u root='%s' root_parent=%d heap=%u largest=%u\n",
+               s_dir.c_str(), (unsigned)ftype, s_root.c_str(), (int)OSD::fd_root_parent,
+               (unsigned)getFreeHeap(), (unsigned)getLargestAllocatable());
 
     // Split the type's extension list once ("(.tap,.tzx,...)" style comma list).
     s_exts.clear();

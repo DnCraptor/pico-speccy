@@ -2305,6 +2305,50 @@ void VIDEO::timexHiresApplyPending() {
 // Machine reset / the mode is gone while the deferred path cannot see the edge
 // (VIDEO::Reset rebuilds the standard driver tables under us — same reason
 // gmxForceOff and tsVideoForceOff exist).
+// ── ZX Spectrum Next 640-wide frames — see Video.h ───────────────────────────
+static void nextPairClearFb() {
+    if (!VIDEO::vga.frameBuffer) return;
+    for (int y = 0; y < (int)VIDEO::vga.yres; y++)
+        if (VIDEO::vga.frameBuffer[y]) memset(VIDEO::vga.frameBuffer[y], 0, VIDEO::vga.xres);
+}
+
+bool VIDEO::nextPairOn(const uint32_t pal16[16]) {
+    if (profi_ds80_active) return false;          // another pair mode owns the driver
+    init_profi_pair_lookup();
+    setGuestPalette16(pal16);
+    profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
+    profi_palette_dirty = false;
+    if (!profi_ds80_active) {
+        Debug::log("[NXV] 640: no packed-pair mode here, staying at 320");
+        return false;
+    }
+    rebuildDS80ColorLut();
+    Graphics8BitPalette::ds80_active = true;
+    nextPairClearFb();
+    brdChange = brdnextframe = true;
+    Debug::log("[NXV] 640-wide pair frame on");
+    return true;
+}
+
+void VIDEO::nextPairOff() {
+    if (!profi_ds80_active) return;
+    profi_ds80_driver_set(false, nullptr, nullptr);
+    Graphics8BitPalette::ds80_active = false;
+    nextPairClearFb();
+    brdChange = brdnextframe = true;
+    Debug::log("[NXV] 640-wide pair frame off");
+}
+
+void VIDEO::nextPairPalette(const uint32_t pal16[16]) {
+    setGuestPalette16(pal16);
+    // While a full-screen menu owns the pair palette the guest's colours wait in
+    // profi_palette_ui_saved; restoreUiDS80Palette pushes them on the way out.
+    if (profi_palette_ui_saved_valid || !profi_ds80_active) return;
+    profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
+    profi_palette_dirty = false;
+    rebuildDS80ColorLut();
+}
+
 void VIDEO::timexHiresForceOff() {
     timex_hires_pending_on = timex_hires_pending_off = false;
     if (!timex_hires_live) return;
@@ -5315,6 +5359,7 @@ void VIDEO::Reset() {
     // palette below, so a live packed-pair mode has to go first.  timex_mode was
     // zeroed at the top of Reset, so there is nothing to re-request.
     timexHiresForceOff();
+    if (NEXTVID::p80Live) NEXTVID::pairForceOff();   // Next 640-wide frames: re-armed by pairPoll
     blPairForceOff();   // borderless pair scaler: same rule, re-armed at EndFrame
 
     if (Config::arch == A_PROFI || g_scorp_gmx || Config::arch == A_TSCONF || Config::arch == A_ATM) {
@@ -8485,6 +8530,9 @@ IRAM_ATTR void VIDEO::EndFrame() {
         // Timex hi-res (port FF %110 / NR 0x69): the same vblank-deferred
         // packed-pair switch as on a TC2048; NEXTVID then renders the ULA at
         // 512 px and maps its other layers onto the 16 pair colours.
+        // 640-wide frames (80-column tilemap) and the frame's 16 pair colours.
+        // Before the Timex switch: a pending Timex hi-res takes the driver over.
+        NEXTVID::pairPoll();
         {
             const bool was = timex_hires_live;
             // The pair driver and the LUTs change under the core1 line queue.

@@ -902,10 +902,7 @@ bool z80_in_nocheck = false;   // NextReg::rasterPollFF reads it too
 // candidate test check_trdos runs for JP/CALL/RET (NextSID's main loop is
 // CP A / CP (HL) / JR Z, 96% of the frame).
 static inline __attribute__((always_inline)) void nextIdleNote() {
-    const uint16_t pc = Z80::getRegPC();
-    if (pc == NextIdle::tgt) {
-        if (z80_in_nocheck && pc != NextIdle::rej) NextIdle::jump();
-    } else NextIdle::tgt = pc;
+    NextIdle::note(Z80::getRegPC());
 }
 
 // noinline: called from ~30 handlers, which Z80::exec_nocheck_next inlines.
@@ -942,9 +939,7 @@ IRAM_ATTR __attribute__((noinline)) void Z80::check_trdos() {
 #endif
         // A target taken twice in a row may be a memory-poll idle loop
         // (NextIdle.h: Pogie's main loop, 55% of the frame).
-        if (REG_PC == NextIdle::tgt) {
-            if (z80_in_nocheck && REG_PC != NextIdle::rej) NextIdle::jump();
-        } else NextIdle::tgt = REG_PC;
+        NextIdle::note(REG_PC);
         return;
     }
 
@@ -1592,9 +1587,8 @@ IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_ts() 
 #if NEXT_TRACE
 #define nxCheckTrdos() check_trdos()
 #else
-#define nxCheckTrdos() do { if (__builtin_expect(Z80Ops::isNext, 1)) { \
-        if (REG_PC == NextIdle::tgt) { if (z80_in_nocheck && REG_PC != NextIdle::rej) NextIdle::jump(); } \
-        else NextIdle::tgt = REG_PC; } else check_trdos(); } while (0)
+#define nxCheckTrdos() do { if (__builtin_expect(Z80Ops::isNext, 1)) NextIdle::note(REG_PC); \
+        else check_trdos(); } while (0)
 #endif
 // push() with the Next-inline write (next_dispatch.inc pastes handler bodies).
 #define nxPush(w) do { const uint16_t nx_w_ = (uint16_t)(w); \

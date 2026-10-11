@@ -185,7 +185,7 @@ private:
     static bool slot_dirty[DIVMMC_CACHE_SLOTS];
     static uint8_t slot_lru[DIVMMC_CACHE_SLOTS]; // LRU counter (higher = more recently used)
     static uint8_t lru_clock;
-    static FIL swap_file;
+    static FIL* swap_file;   // nullptr until the SD-swap tier opens it
     static bool swap_open;
     static void materialize(uint8_t bank_idx);
     static void evict(int slot);

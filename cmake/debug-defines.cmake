@@ -1,6 +1,16 @@
 # Compile definitions for the trace / debug toggles declared in cmake/options.cmake,
 # plus the RAM-placement and HDMI signal-integrity switches.
 
+# Out-of-memory diagnostic: pico_malloc PANICS on a NULL return, which names neither
+# the size nor the caller ("*** PANIC *** Out of memory", PC = _exit). With this the
+# wrapper prints "malloc N failed to allocate memory" and returns NULL, so the caller
+# takes a SIGBUS at its own PC/LR. Never ship it: every unchecked malloc becomes a
+# NULL dereference.
+if (MALLOC_FAIL_TRACE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE PICO_MALLOC_PANIC=0 PICO_DEBUG_MALLOC=1
+                               PICO_DEBUG_MALLOC_LOW_WATER=0x20082000)
+endif ()
+
 # Scorpion port #FF trace (see Ports.cpp `#if SCORP_FF_TRACE`): logs every IN/OUT
 # on low byte #FF with pc/trdos/sysen/border — for the "ТЕСТ SCORPION" port-FF
 # diagnostic. Capped, default OFF.

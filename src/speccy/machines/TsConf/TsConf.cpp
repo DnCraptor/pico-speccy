@@ -89,8 +89,10 @@ uint8_t TsConf::vmSeen = 0;
 #endif
 
 TsConf::Regs TsConf::r;
-uint16_t TsConf::cram[256];
-uint16_t TsConf::sfile[256];
+// In the TS-Conf window's NOLOAD tail (zeroed at every claim): read only on a
+// TS-Conf session (renderer, Pss, memdump.gdb behind Z80Ops::isTsconf).
+uint16_t TS_OVL_BSS TsConf::cram[256];
+uint16_t TS_OVL_BSS TsConf::sfile[256];
 uint32_t TsConf::sfileGen = 0;
 
 // Write-side gate (see TsConf.h): 0x10|window while FMAddr is enabled, 0x20
