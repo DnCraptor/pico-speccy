@@ -4388,7 +4388,7 @@ IRAM_ATTR void Ports::dmaOutput(uint16_t address, uint8_t data) {
         const uint8_t a8 = address & 0xFF;
         if (a8 == 0x5B && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spritePatternWrite(data); return; }
         if (a8 == 0x57 && NextReg::portOn(NextReg::PE_SPRITE)) { NEXTVID::spriteAttrWrite(data); return; }
-        if (address == 0x253B) { if (!NEXTVID::nrHot(NextReg::selected, data)) NextReg::write(NextReg::selected, data); return; }
+        if (address == 0x253B) { NextReg::writeHot(NextReg::selected, data); return; }
         if (address == 0x243B) { NextReg::selected = data; return; }
         if (address & 0x0001) { output(address, data); return; }
     }

@@ -40,6 +40,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/z80/CPU.h"
 #include "app/Buffer.h"
 #include "app/TryAlloc.h"
+#include "app/CodeOverlay.h"   // NX_OVL_CODE (applyMMU)
 #include "speccy/machines/Plus3/Plus3Paging.h"
 #include "speccy/machines/Timex.h"   // g_timex_mmu + Timex::rd/read8: the SCLD window the debugger must see
 #include <stddef.h>
@@ -1023,7 +1024,9 @@ void MemESP::nextContendRefresh() {
     }
 }
 
-void MemESP::applyMMU(uint8_t slot, uint8_t page) {
+// In the .nxovl window (2026-10-11): every caller is Next-only, and NR 0x5x
+// paging runs per guest interrupt on titles such as NXModPlayer.
+NX_OVL_CODE void MemESP::applyMMU(uint8_t slot, uint8_t page) {
     slot &= 7;
     mmu[slot] = page;
     // While the TBBLUE bootrom / config-mode window owns slots 0/1 only the

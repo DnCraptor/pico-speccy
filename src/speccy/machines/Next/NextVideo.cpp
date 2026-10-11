@@ -853,31 +853,6 @@ void NEXTVID::softReset() {
 
 void NEXTVID::Reset() {
     c1Drain();
-    if (!nx_ring) {
-        // The core1 line queue: 320 x 4 B of jobs + 64 x 120 B of per-line state
-        // + 64 x 4 B of the state-reuse memo = 9 216 B. No RAM = render on
-        // core0 as before.
-        // Butter PSRAM since 2026-10-11 (SRAM wave 2, stage 2): it is a
-        // LINE-granular interface, not per-pixel — core1 reads exactly one
-        // state (120 contiguous bytes, four 32-byte line fills) per rendered
-        // line and never touches it again, and the whole memo beside it
-        // (nx_st_job) is core0-only. The cross-core rule is the one sprLog and
-        // palLog have always relied on: both cores see one coherent XIP cache,
-        // so a state core0 wrote is visible to core1. Costs 9 216 B of SRAM
-        // heap back; watch `c1=` / FPS and the `ring=` field of the NEXT line.
-        uint8_t* q = (uint8_t*)Buffer::palloc(4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
-                                              + 4 * NEXT_C1_STATES,
-                                              Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
-        if (q) {
-            nx_ring = (uint32_t*)q;
-            nx_st = (NextLineState*)(q + 4 * NEXT_C1_RING);
-            nx_st_job = (uint32_t*)(q + 4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES);
-            memset(nx_st_job, 0, 4 * NEXT_C1_STATES);
-        }
-        Debug::log("[NXC1] core1 line renderer %s", q ? "ON" : "unavailable (no RAM)");
-    }
-    nx_have = false;
-    g_next_c1_live = nx_ring != nullptr;
     if (!sprPatterns) {
         // Two blocks, Next-boot only, never freed (the Next boundary reboots).
         // It used to be ONE 29 KB malloc, which PANICKED at boot once the heap
@@ -886,7 +861,8 @@ void NEXTVID::Reset() {
         //   pairMap 256 | hiresRow 256 | remap 512 |
         //   layer lines 4 x 384 x 2  -> HOT_SRAM (SRAM when the heap has it).
         // Cold (~19 KB): sprite patterns 16K | copper 2K | sprAttr 640.
-        //   Butter PSRAM since 2026-10-11 (SRAM wave 2): 720x576 + NeoGS did
+        //   HOT_SRAM again (2026-10-11, NXModPlayer): SRAM when the heap has it,
+        //   PSRAM on a thin heap. The PREFER_PSRAM reasoning, for the record: 720x576 + NeoGS did
         //   not fit, and this is the one block of the Next video state that is
         //   indexed rather than per-pixel — the sprite row loop below reads 8
         //   or 16 CONTIGUOUS bytes of one pattern per sprite per rendered line
@@ -901,7 +877,7 @@ void NEXTVID::Reset() {
         const unsigned hotSz  = 8*256*2 + 8*256 + 384 + 512 + 512 + 4 * 768;
         const unsigned coldSz = 16384 + 2048 + 128*5;
         uint8_t* hot  = (uint8_t*)Buffer::palloc(hotSz,  Buffer::NEED_POINTER | Buffer::HOT_SRAM);
-        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
         const unsigned sprSz = (sizeof(SprRender) + 3) & ~3u;
         // Two blocks, not one: the renderer state is read per sprite per line
         // (core1), the log only for the bytes written since the last line. As
@@ -946,6 +922,34 @@ void NEXTVID::Reset() {
         nxU = (uint16_t*)(remap + 512);
         nxT = nxU + 384; nxL = nxT + 384; nxS = nxL + 384;
     }
+    // After the video state: that block is read per pixel, this one per line, so
+    // on a thin heap it is the queue that goes to PSRAM (HOT_SRAM rule), not it.
+    if (!nx_ring) {
+        // The core1 line queue: 320 x 4 B of jobs + 64 x 120 B of per-line state
+        // + 64 x 4 B of the state-reuse memo = 9 216 B. No RAM = render on
+        // core0 as before.
+        // HOT_SRAM (2026-10-11, NXModPlayer): SRAM when the heap has it, butter
+        // PSRAM otherwise. Was PREFER_PSRAM for a few hours (SRAM wave 2): it is a
+        // LINE-granular interface, not per-pixel — core1 reads exactly one
+        // state (120 contiguous bytes, four 32-byte line fills) per rendered
+        // line and never touches it again, and the whole memo beside it
+        // (nx_st_job) is core0-only. The cross-core rule is the one sprLog and
+        // palLog have always relied on: both cores see one coherent XIP cache,
+        // so a state core0 wrote is visible to core1. Costs 9 216 B of SRAM
+        // heap back; watch `c1=` / FPS and the `ring=` field of the NEXT line.
+        uint8_t* q = (uint8_t*)Buffer::palloc(4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
+                                              + 4 * NEXT_C1_STATES,
+                                              Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+        if (q) {
+            nx_ring = (uint32_t*)q;
+            nx_st = (NextLineState*)(q + 4 * NEXT_C1_RING);
+            nx_st_job = (uint32_t*)(q + 4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES);
+            memset(nx_st_job, 0, 4 * NEXT_C1_STATES);
+        }
+        Debug::log("[NXC1] core1 line renderer %s", q ? "ON" : "unavailable (no RAM)");
+    }
+    nx_have = false;
+    g_next_c1_live = nx_ring != nullptr;
 #if NEXT_TRACE
     extern volatile uint16_t* g_nx_pcs;
     extern volatile uint16_t* g_nx_pcpg;

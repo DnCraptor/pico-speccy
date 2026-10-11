@@ -446,12 +446,12 @@ public:
     // exists at all" answer the callers used a null table entry for.
     static uint8_t* nextPg[16];
     static uint8_t* nextStrip;
-    static inline uint8_t* nextPgPtr(unsigned pg) {
+    __attribute__((always_inline)) static inline uint8_t* nextPgPtr(unsigned pg) {
         if (!nextRamReady || pg >= NEXT_PAGES) return nullptr;
         return (pg < 16) ? nextPg[pg] : nextStrip + ((size_t)(pg - 16) << 13);
     }
     // First byte after the RAM pages: the ROM/Multiface/Alt-ROM region.
-    static inline uint8_t* nextRomRegion() {
+    __attribute__((always_inline)) static inline uint8_t* nextRomRegion() {
         return nextStrip + ((size_t)(NEXT_PAGES - 16) << 13);
     }
     static uint8_t  mmu[8];        // current MMU mapping; 0xFF = ROM (slots 0/1)

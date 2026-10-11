@@ -60,7 +60,7 @@ public:
     // timing bank 5, 128K odd banks, +3 banks 4-7, banks 8+ never; 0 while
     // contention is off (Pentagon timing, CPU above 3.5 MHz, NR 0x08 bit 6).
     static uint8_t contendBanks;
-    static inline bool pageContended(uint8_t page8k) {
+    __attribute__((always_inline)) static inline bool pageContended(uint8_t page8k) {
         return page8k < 16 && ((contendBanks >> (page8k >> 1)) & 1);
     }
     // Re-derive contendBanks, NEXTVID's contention window and every slot's
@@ -82,6 +82,11 @@ public:
     // it at the next frame boundary (0 = none, 1 = soft, 2 = hard)
     static uint8_t resetPending;
     static void write(uint8_t r, uint8_t v);
+    // NEXTREG from the guest's hot paths (ED 91/92, port 0x253B): the palette
+    // registers (NEXTVID::nrHot) and the MMU 0x50-0x57 in the .nxovl window,
+    // everything else through write(). NXModPlayer pages its sample banks with
+    // NR 0x5x inside a CTC interrupt taken ~630 times a frame (2026-10-11).
+    static void writeHot(uint8_t r, uint8_t v);
     // Re-derive the live clock from nextreg 0x07 under Config::next_clk_cap
     // (the menu's CPU cap hook; also the body of a 0x07 write).
     static void applySpeed();

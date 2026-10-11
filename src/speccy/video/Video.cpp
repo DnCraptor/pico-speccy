@@ -599,6 +599,13 @@ static uint64_t ts_frame_start_us = 0;
 #endif
 uint8_t g_ts_fastrd = 0;    // TsFastMem.h: the read twin
 bool g_next_fastrd = false; // Z80_JLS/next_memory.h: inline operand reads
+// Z80::exec_nocheck_next() no longer tests g_next_fastrd per instruction: a
+// writer that turns it OFF mid-slice (port 0x123B L2 mapping, NR 08 contention,
+// a NeoGS ZX-DMA window) ends the slice instead, within the current instruction.
+static inline void nextFastrdSet(bool on) {
+    if (g_next_fastrd && !on && CPU::stFrame > CPU::tstates + 1) CPU::stFrame = CPU::tstates + 1;
+    g_next_fastrd = on;
+}
 bool     VIDEO::ts_tsu_live = false;
 bool     VIDEO::ts_pal256_live = false;
 bool     VIDEO::tsPalScanWanted = false;
@@ -5356,7 +5363,7 @@ void VIDEO::Reset() {
         Draw_Opcode = &Blank_Opcode;
     }
     ts_fast_armed = false; ts_line_t = 0xFFFFFFFFu; g_ts_fastmem = 0; g_ts_fastrd = 0; // TsFastMem.h: re-armed by EndFrame
-    g_next_fastrd = false;
+    nextFastrdSet(false);
     col16_fast = false;
 
     // Restart border drawing + main screen draw state
@@ -6469,7 +6476,7 @@ static inline uint8_t tsFastRdFor(uint8_t mem) {
 }
 void ts_fastrd_recalc() {
     g_ts_fastrd = tsFastRdFor(g_ts_fastmem);
-    g_next_fastrd = g_ts_fastmem == 1 && g_ts_fastrd == 2;
+    nextFastrdSet(g_ts_fastmem == 1 && g_ts_fastrd == 2);
 }
 void VIDEO::tsFastMemRecalc() {
     extern volatile uint8_t g_ngs_zxdma;
@@ -6500,7 +6507,7 @@ void VIDEO::tsFastMemRecalc() {
                                            && Config::numMemReadBP == 0 && Config::numMemWriteBP == 0
                                            && !g_ngs_zxdma && !MemESP::divmmc_mapped) ? 2 : 0;
     g_ts_fastrd = tsFastRdFor(v);
-    g_next_fastrd = v == 1 && g_ts_fastrd == 2;
+    nextFastrdSet(v == 1 && g_ts_fastrd == 2);
     if (v != g_ts_fastmem) {
         g_ts_fastmem = v;
         Debug::log("[TSF] fast memory path %s%s (render=%u armed=%u ft=%u bp=%d/%d zxdma=%u divmmc=%u)", v ? "ON" : "off", v == 1 ? " (Next, >= 0x4000)" : "",

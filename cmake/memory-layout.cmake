@@ -230,12 +230,14 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # 2026-10-11: nextInirBatch / nextSdPollBatch (rare) moved to flash;
     # decodeZ80N and nextLdirBatch stay here — both run per guest instruction
     # (and the LDIR batch per iteration when it declines), see Z80_JLS.cpp.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 34816)
+    # +1 KB 2026-10-11 (NXModPlayer, ~630 CTC interrupts a frame): MemESP::applyMMU,
+    # NextReg::writeHot, NextMf::portWrite and the DAC publish left flash.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 35840)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
     if (NEXT_TRACE)
-        set(NXOVL_WIN_SIZE_EFFECTIVE 35840)
+        set(NXOVL_WIN_SIZE_EFFECTIVE 36864)
     endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})

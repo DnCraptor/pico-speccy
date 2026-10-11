@@ -1549,7 +1549,7 @@ IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_next(
         else if (prefixOpcode == 0xFD) { prefixOpcode = 0; decodeDDFD(regIY); }
         else continue;
         if (prefixOpcode == 0) lastFlagQ = flagQ;
-    } while (CPU::tstates < CPU::stFrame && g_next_fastrd);
+    } while (CPU::tstates < CPU::stFrame);   // a g_next_fastrd drop ends the slice (Video.cpp nextFastrdSet)
 }
 
 IRAM_ATTR void Z80::exec_nocheck() {
@@ -3768,7 +3768,7 @@ NX_OVL_CODE void Z80::decodeZ80N() {
             uint8_t v = Z80Ops::peek8(REG_PC);
             REG_PC++;
             Z80Ops::addressOnBusIR(6);
-            if (!NEXTVID::nrHot(r, v)) NextReg::write(r, v);
+            NextReg::writeHot(r, v);
             break;
         }
         case 0x92:
@@ -3776,7 +3776,7 @@ NX_OVL_CODE void Z80::decodeZ80N() {
             uint8_t r = Z80Ops::peek8(REG_PC);
             REG_PC++;
             Z80Ops::addressOnBusIR(6);
-            if (!NEXTVID::nrHot(r, regA)) NextReg::write(r, regA);
+            NextReg::writeHot(r, regA);
             break;
         }
         case 0x93:

@@ -9,6 +9,7 @@
 #include "speccy/z80/z80.h"
 #include "speccy/devices/storage/DivMMC.h"
 #include "app/Debug.h"
+#include "app/CodeOverlay.h"   // NX_OVL_CODE
 
 void ts_fastrd_recalc();   // Video.cpp: the Next fast read level follows slots 0/1
 #if NEXT_TRACE
@@ -27,9 +28,9 @@ bool s_pending   = false;   // MF NMI requested, not yet taken at 0x0066
 bool s_nr02      = false;   // NR 0x02 bit 3 read-back (nr_02_generate_mf_nmi)
 uint8_t s_logLeft = 16;     // first few transitions go to the log
 
-inline uint8_t mode() { return (uint8_t)(NextReg::reg[0x0A] >> 6); }   // 00 +3, 01 128, 1x 48
-inline bool modeP3()  { return mode() == 0; }
-inline bool mode48()  { return mode() >= 2; }
+__attribute__((always_inline)) inline uint8_t mode() { return (uint8_t)(NextReg::reg[0x0A] >> 6); }   // 00 +3, 01 128, 1x 48
+__attribute__((always_inline)) inline bool modeP3()  { return mode() == 0; }
+__attribute__((always_inline)) inline bool mode48()  { return mode() >= 2; }
 
 void note(const char* what) {
     if (!s_logLeft) return;
@@ -60,8 +61,8 @@ void setMem(bool on) {
 }
 
 // The enable port by mf_type; the disable port is the other one of the pair.
-inline uint8_t enablePort()  { return mode48() ? 0x9F : (mode() == 1 ? 0xBF : 0x3F); }
-inline uint8_t disablePort() { return mode48() ? 0x1F : (mode() == 1 ? 0x3F : 0xBF); }
+__attribute__((always_inline)) inline uint8_t enablePort()  { return mode48() ? 0x9F : (mode() == 1 ? 0xBF : 0x3F); }
+__attribute__((always_inline)) inline uint8_t disablePort() { return mode48() ? 0x1F : (mode() == 1 ? 0x3F : 0xBF); }
 
 // zxnext.vhd 4307-4321: what an enable read drives onto the bus.
 uint8_t portData(uint16_t address) {
@@ -179,7 +180,8 @@ int NextMf::portRead(uint16_t address) {
     return -1;
 }
 
-void NextMf::portWrite(uint16_t address) {
+// .nxovl: reached from the DAC ports 0x1F / 0x3F on every write (NextPorts).
+NX_OVL_CODE void NextMf::portWrite(uint16_t address) {
     if (!NextReg::portOn(NextReg::PE_MF)) return;
     const uint8_t lo = (uint8_t)address;
     const bool en = lo == enablePort(), dis = lo == disablePort();

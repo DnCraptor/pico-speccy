@@ -38,6 +38,7 @@ enum : uint8_t { C_RESET, C_RESET_TC, C_TRIGGER, C_RUN, C_RUN_TC };   // ctc_cha
 constexpr int64_t kNever = INT64_MAX / 4;
 
 uint8_t  s_st[D_NUM];      // im2_device state per source
+uint16_t s_active;         // bit d = s_st[d] != S_0 (presented()'s early exit)
 uint16_t s_req;            // im2_int_req (hardware IM2 pending, cleared at RETI)
 uint16_t s_status;         // int_status (NR 0x20 / 0xC8-0xCA), cleared by writes
 uint8_t  s_c0;             // NR 0xC0: 7:5 vector, 3 stackless NMI, 0 hw IM2
@@ -62,14 +63,14 @@ Ctc s_ctc[4];
 
 struct Stream { int64_t first, period; int64_t n; };   // n ZC/TO pulses, first, first+period, ...
 
-inline uint32_t f28() { return 8u >> ESPectrum::multiplicator; }
-inline int64_t now28() { return s_base28 + (int64_t)CPU::tstates * f28(); }
+__attribute__((always_inline)) inline uint32_t f28() { return 8u >> ESPectrum::multiplicator; }
+__attribute__((always_inline)) inline int64_t now28() { return s_base28 + (int64_t)CPU::tstates * f28(); }
 inline bool im2Hw() { return s_c0 & 1; }
 inline bool cpuIm2() { return Z80::getIM() == Z80::IM2; }
 
 // zxnext.vhd 2030: pulse_count_end = count(5) and (48K or +3 or count(2)) —
 // 32 CPU cycles in 48K/+3 timing, 36 in 128K/Pentagon.
-inline int64_t pulseLen28() {
+__attribute__((always_inline)) inline int64_t pulseLen28() {
     const uint8_t t = NextReg::machineTiming();   // 1 48K, 2 128K, 3 +3, 4 Pentagon
     return (int64_t)((t == 1 || t == 3) ? 32 : 36) * f28();
 }
@@ -98,7 +99,7 @@ NXI_HOT void raise(int d, int64_t t, bool pulse) {
     s_status |= (uint16_t)(1u << d);
     if (im2Hw()) {
         s_req |= (uint16_t)(1u << d);
-        if (s_st[d] == S_0) s_st[d] = S_REQ;
+        if (s_st[d] == S_0) { s_st[d] = S_REQ; s_active |= (uint16_t)(1u << d); }
     } else if (pulse && t > s_pulse) {
         s_pulse = t;
     }
@@ -193,6 +194,11 @@ NXI_HOT void ctcAdvance(int64_t t) {
 // Earliest ZC/TO of any channel after the last advance; sync() skips the CTC
 // until then. -kNever = recompute (any change to the CTC state sets it).
 int64_t s_ctcNext = -kNever;
+// The soonest ZC/TO among channels with their interrupt ON (control word bit 7),
+// computed by sync() in the same pass as s_ctcNext and valid exactly as long as
+// it: nextEventT() used to re-derive it per channel on every slice, and a CTC
+// sample timer (NXModPlayer: ~630 interrupts a frame) makes that every slice.
+int64_t s_ctcNextInt = kNever;
 
 // The counters as of now (ctcRead / ctcWrite), without crossing an event: sync()
 // already advanced through every ZC/TO up to now.
@@ -217,10 +223,28 @@ NXI_HOT int64_t ctcNextZc(int ch, int64_t k, int depth) {
     return kNever;
 }
 
+// Advance the CTC to `now` and re-derive the next ZC/TO overall (s_ctcNext) and
+// among interrupt-enabled channels (s_ctcNextInt).
+NXI_HOT void ctcRefresh(int64_t now) {
+    bool any = false;
+    for (auto& c : s_ctc) if (c.st >= C_TRIGGER) { any = true; break; }
+    s_ctcNext = s_ctcNextInt = kNever;
+    if (!any) return;
+    ctcAdvance(now);
+    for (int ch = 0; ch < 4; ch++) {
+        const int64_t t = ctcNextZc(ch, 1, 0);
+        if (t > now && t < s_ctcNext) s_ctcNext = t;
+        if ((s_ctc[ch].cw & 0x80) && t > now && t < s_ctcNextInt) s_ctcNextInt = t;
+    }
+}
+
 NXI_HOT void sync() {
     const int64_t now = now28();
     if (now <= s_last28) {
-        if (now < s_last28) { s_last28 = now; s_ctcNext = -kNever; }   // CPU::reset moved tstates back
+        if (now < s_last28) { s_last28 = now; s_ctcNext = -kNever; s_ctcNextInt = kNever; }   // CPU::reset moved tstates back
+        // No time passed, but a CTC write may have invalidated the cached next
+        // events (s_ctcNext = -kNever): re-derive them before nextEventT reads.
+        else if (s_ctcNext == -kNever) ctcRefresh(now);
         return;
     }
     const int64_t relPrev = s_last28 - s_base28, relNow = now - s_base28;
@@ -243,20 +267,7 @@ NXI_HOT void sync() {
     // (ctcCatchUp); advancing here on every sync cost several 64-bit divisions
     // per DMA batch / INT check — TX-1696 (CTC running) spent ~10 ms of a frame
     // in it, hw 2026-10-09.
-    if (now >= s_ctcNext) {
-        bool any = false;
-        for (auto& c : s_ctc) if (c.st >= C_TRIGGER) { any = true; break; }
-        if (any) {
-            ctcAdvance(now);
-            s_ctcNext = kNever;
-            for (int ch = 0; ch < 4; ch++) {
-                const int64_t t = ctcNextZc(ch, 1, 0);
-                if (t > now && t < s_ctcNext) s_ctcNext = t;
-            }
-        } else {
-            s_ctcNext = kNever;
-        }
-    }
+    if (now >= s_ctcNext) ctcRefresh(now);
     s_last28 = now;
     if (s_unqPulse && now >= s_pulse + pulseLen28()) { s_unqPulse = false; exRecalc(); }
 }
@@ -267,8 +278,13 @@ NXI_HOT bool pulseUp() { return now28() - s_pulse < pulseLen28() && now28() >= s
 // a source in service (ACK/ISR) blocks every lower one; one requesting blocks
 // them too (im2_device: ieo = iei and reti_decode in S_REQ).
 NXI_HOT int presented() {
-    for (int d = 0; d < D_NUM; d++) {
-        if (s_st[d] == S_0 && ((s_req >> d) & 1)) s_st[d] = S_REQ;   // im2_device S_0 -> S_REQ on i_int_req
+    // Every source below the lowest one that is requesting or not idle is S_0
+    // with no request: the loop would only step over it. With nothing pending
+    // (between interrupts — most slices) that is the whole answer.
+    const uint32_t any = (uint32_t)s_req | s_active;
+    if (!any) return -1;
+    for (int d = __builtin_ctz(any); d < D_NUM; d++) {
+        if (s_st[d] == S_0 && ((s_req >> d) & 1)) { s_st[d] = S_REQ; s_active |= (uint16_t)(1u << d); }   // im2_device S_0 -> S_REQ on i_int_req
         if (s_st[d] == S_REQ) return d;
         if (s_st[d] != S_0) return -1;
     }
@@ -307,6 +323,7 @@ void reset(bool) {
     // reset alike (zxnext_top_issue5.vhd:880 reset <= hard or soft;
     // zxnext.vhd 5092-5105 for the NR 0xC0-0xCE defaults).
     for (auto& s : s_st) s = S_0;
+    s_active = 0;
     s_req = s_status = 0;
     s_c0 = 0; s_c4hi = 0x80;
     s_lineEn = false; s_lineNum = 0;
@@ -361,11 +378,7 @@ NXI_HOT uint32_t nextEventT(uint32_t limit) {
     const int64_t now = s_last28;
     int64_t best = kNever;
     if (s_lineEn && s_linePos28 >= 0 && s_base28 + s_linePos28 > now) best = s_base28 + s_linePos28;
-    for (int ch = 0; ch < 4; ch++) {
-        if (!(s_ctc[ch].cw & 0x80)) continue;
-        const int64_t t = ctcNextZc(ch, 1, 0);
-        if (t > now && t < best) best = t;
-    }
+    if (s_ctcNextInt > now && s_ctcNextInt < best) best = s_ctcNextInt;   // sync() keeps it
     const uint32_t lo = CPU::tstates + 1;
     if (best >= kNever) return limit > lo ? limit : lo;
     const uint32_t f = f28();                       // 8 >> multiplicator: a shift
@@ -393,6 +406,7 @@ NXI_HOT void reti() {
     for (int d = 0; d < D_NUM; d++) {
         if (s_st[d] == S_ACK || s_st[d] == S_ISR) {
             s_st[d] = S_0;
+            s_active &= (uint16_t)~(1u << d);
             s_req &= (uint16_t)~(1u << d);
             break;
         }
@@ -438,7 +452,7 @@ void nrWrite(uint8_t r, uint8_t v) {
             break;
         case 0xC0:
             s_c0 = v & 0xE9;
-            if (!(v & 0x01)) { for (auto& s : s_st) s = S_0; s_req = 0; }   // im2_reset_n
+            if (!(v & 0x01)) { for (auto& s : s_st) s = S_0; s_active = 0; s_req = 0; }   // im2_reset_n
             if (!(v & 0x08)) retnArmed = false;
             break;
         case 0xC4:   // bit 7 expansion bus, bit 1 line (= NR 0x22 bit 1), bit 0 ULA (= NOT #FF bit 6)
@@ -450,6 +464,7 @@ void nrWrite(uint8_t r, uint8_t v) {
         case 0xC5:   // CTC channel interrupt enables = control word bit 7
             for (int ch = 0; ch < 4; ch++)
                 s_ctc[ch].cw = (uint8_t)((s_ctc[ch].cw & 0x7F) | ((v >> ch) & 1 ? 0x80 : 0));
+            s_ctcNext = -kNever;   // the next sync() re-derives s_ctcNextInt
             break;
         case 0xC8:
             if (v & 0x02) s_status &= (uint16_t)~(1u << D_LINE);

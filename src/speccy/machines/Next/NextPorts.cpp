@@ -80,7 +80,7 @@ static uint8_t s_dac[4] = { 0x80, 0x80, 0x80, 0x80 };   // A B C D (soundrive.vh
 static bool s_dacLive = false;
 
 // Catch the Covox buffer up with the OLD level first, then publish the new one.
-static void dacPublish() {
+static NXP_HOT void dacPublish() {   // per DAC write (NXModPlayer: ~2500 a frame)
     ESPectrum::CovoxGetSample();
     if (s_dacLive) {
         ESPectrum::lastCovoxVal  = (uint8_t)((s_dac[0] + s_dac[1]) >> 1);
@@ -448,7 +448,7 @@ int NextPorts::input(uint16_t address) {
 NXP_HOT bool NextPorts::output(uint16_t address, uint8_t data) {
     const uint8_t a8 = address & 0xFF;
     if (address == 0x243B) { NextReg::selected = data; return true; }
-    if (address == 0x253B) { NextReg::write(NextReg::selected, data); return true; }
+    if (address == 0x253B) { NextReg::writeHot(NextReg::selected, data); return true; }
     if (a8 == 0x3F || a8 == 0xBF || a8 == 0x1F || a8 == 0x9F) NextMf::portWrite(address);
     if (address == 0x123B && NextReg::portOn(NextReg::PE_LAYER2)) {
         NextReg::writeLayer2Port(data);

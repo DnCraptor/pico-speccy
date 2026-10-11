@@ -14,6 +14,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "app/ESPectrum.h"
 #include "speccy/video/Video.h"
 #include "app/Debug.h"
+#include "app/CodeOverlay.h"   // NX_OVL_CODE
 #include "app/Config.h"
 #include "hardware/regs/xip.h"
 #include "hardware/regs/addressmap.h"
@@ -215,6 +216,35 @@ void next_trace_dump(uint32_t frames) {
             (unsigned)(ESPectrum::multiplicator == 0 ? 3 : 7u << (ESPectrum::multiplicator - 1)),
             (unsigned)frames, (unsigned)g_nextvid_frames,
             (unsigned)ESPectrum::maxSpeed, (unsigned)rmax, (unsigned)rsz, (unsigned)rnow);
+        // Printed right after `NEXT cpu:`: the 1 Hz burst overflows the UART ring
+        // and the lines at its END are the ones lost (2026-10-11, NXModPlayer).
+        {
+            // Where core0's frame goes: fast memory path state, Z80 fetches per
+            // frame (Z80::regR counts every M1) and their average cost.
+            extern uint8_t g_ts_fastrd;   // g_ts_fastmem: MemGates.h (TsFastMem.h)
+            extern volatile uint32_t cpu_frame_us;
+            static uint32_t s_pr = 0, s_pc = 0;
+            const uint32_t rr = Z80::getFetchCounter(), cc = cpu_frame_us;
+            const uint32_t dr = rr - s_pr, dc = cc - s_pc;
+            s_pr = rr; s_pc = cc;
+            volatile uint32_t* xh = (volatile uint32_t*)(XIP_CTRL_BASE + XIP_CTR_HIT_OFFSET);
+            volatile uint32_t* xa = (volatile uint32_t*)(XIP_CTRL_BASE + XIP_CTR_ACC_OFFSET);
+            const uint32_t hit = *xh, acc = *xa;
+            *xh = 0; *xa = 0;                 // write clears
+            extern volatile uint32_t g_nx_rlff_n, g_nx_rlff_t;
+            Debug::log("NEXT rlff: %u/fr skipped %u%% of the frame | idle loop %u/fr skipped %u%%",
+                (unsigned)(g_nx_rlff_n / f),
+                (unsigned)((uint64_t)g_nx_rlff_t * 100u / ((uint64_t)CPU::statesInFrame * f)),
+                (unsigned)(NextIdle::g_nx_idle_n / f),
+                (unsigned)((uint64_t)NextIdle::g_nx_idle_t * 100u / ((uint64_t)CPU::statesInFrame * f)));
+            g_nx_rlff_n = g_nx_rlff_t = 0;
+            NextIdle::g_nx_idle_n = NextIdle::g_nx_idle_t = 0;
+            Debug::log("NEXT z80: fm=%u rd=%u m1=%u/fr %uns/m1 act=%u%% T/fr=%u xip=%u/fr miss=%u/fr",
+                (unsigned)g_ts_fastmem, (unsigned)g_ts_fastrd, (unsigned)(dr / f),
+                dr ? (unsigned)((uint64_t)dc * 1000u / dr) : 0u,
+                CPU::tstates_frame ? (unsigned)((uint64_t)CPU::tstates_active * 100u / CPU::tstates_frame) : 0u,
+                (unsigned)CPU::statesInFrame, (unsigned)(acc / f), (unsigned)((acc - hit) / f));
+        }
         {   // DACs A..D: writes / steps of 64+ / min..max per frame, writes dropped
             // while NR 08 b3 = 0; then each AY: mixer reg 7, volumes A/B/C, tone A
             extern volatile uint32_t g_nx_dac_n[4], g_nx_dac_jump[4], g_nx_dac_off;
@@ -309,33 +339,6 @@ void next_trace_dump(uint32_t frames) {
                         k ? 191u : 0u, (unsigned)g_nx_rowprobe[k][0], (unsigned)g_nx_rowprobe[k][1],
                         (unsigned)g_nx_rowprobe[k][2], (unsigned)g_nx_rowprobe[k][3], (unsigned)g_nx_rowprobe[k][4],
                         (unsigned)g_nx_rowprobe[k][5], (unsigned)g_nx_rowprobe[k][6], (unsigned)g_nx_rowprobe[k][7]);
-            }
-            {
-                // Where core0's frame goes: fast memory path state, Z80 fetches per
-                // frame (Z80::regR counts every M1) and their average cost.
-                extern uint8_t g_ts_fastrd;   // g_ts_fastmem: MemGates.h (TsFastMem.h)
-                extern volatile uint32_t cpu_frame_us;
-                static uint32_t s_pr = 0, s_pc = 0;
-                const uint32_t rr = Z80::getFetchCounter(), cc = cpu_frame_us;
-                const uint32_t dr = rr - s_pr, dc = cc - s_pc;
-                s_pr = rr; s_pc = cc;
-                volatile uint32_t* xh = (volatile uint32_t*)(XIP_CTRL_BASE + XIP_CTR_HIT_OFFSET);
-                volatile uint32_t* xa = (volatile uint32_t*)(XIP_CTRL_BASE + XIP_CTR_ACC_OFFSET);
-                const uint32_t hit = *xh, acc = *xa;
-                *xh = 0; *xa = 0;                 // write clears
-                extern volatile uint32_t g_nx_rlff_n, g_nx_rlff_t;
-                Debug::log("NEXT rlff: %u/fr skipped %u%% of the frame | idle loop %u/fr skipped %u%%",
-                    (unsigned)(g_nx_rlff_n / f),
-                    (unsigned)((uint64_t)g_nx_rlff_t * 100u / ((uint64_t)CPU::statesInFrame * f)),
-                    (unsigned)(NextIdle::g_nx_idle_n / f),
-                    (unsigned)((uint64_t)NextIdle::g_nx_idle_t * 100u / ((uint64_t)CPU::statesInFrame * f)));
-                g_nx_rlff_n = g_nx_rlff_t = 0;
-                NextIdle::g_nx_idle_n = NextIdle::g_nx_idle_t = 0;
-                Debug::log("NEXT z80: fm=%u rd=%u m1=%u/fr %uns/m1 act=%u%% T/fr=%u xip=%u/fr miss=%u/fr",
-                    (unsigned)g_ts_fastmem, (unsigned)g_ts_fastrd, (unsigned)(dr / f),
-                    dr ? (unsigned)((uint64_t)dc * 1000u / dr) : 0u,
-                    CPU::tstates_frame ? (unsigned)((uint64_t)CPU::tstates_active * 100u / CPU::tstates_frame) : 0u,
-                    (unsigned)CPU::statesInFrame, (unsigned)(acc / f), (unsigned)((acc - hit) / f));
             }
             {
                 // Top ports by time, then the hottest PC blocks / MMU pages.
@@ -735,7 +738,8 @@ void NextReg::rasterPollFF(uint8_t k) {
 
 static void applyRomSelect();
 uint8_t NextReg::machineType() { return s_machineType; }
-uint8_t NextReg::machineTiming() { return s_machineTiming; }
+// SRAM (a few bytes): NextInt sync()/pulseUp() read it on every interrupt check.
+__not_in_flash("next") uint8_t NextReg::machineTiming() { return s_machineTiming; }
 uint16_t NextReg::paperLineV = 63;
 
 uint8_t NextReg::rasterKey() {
@@ -853,6 +857,18 @@ void NextReg::contendRecalc() {
     MemESP::nextContendRefresh();
     VIDEO::tsFastMemRecalc();
     Ports::ulaIoContendRecalc();
+}
+
+NX_OVL_CODE void NextReg::writeHot(uint8_t r, uint8_t v) {
+    if (NEXTVID::nrHot(r, v)) return;
+#if !NEXT_TRACE   // a trace build keeps every NR write in its event ring
+    if ((uint8_t)(r - 0x50) < 8) {   // write()'s MMU case: latch + applyMMU, no tail work
+        reg[r] = v;
+        MemESP::applyMMU(r - 0x50, v);
+        return;
+    }
+#endif
+    write(r, v);
 }
 
 void NextReg::write(uint8_t r, uint8_t v) {
