@@ -309,6 +309,7 @@ HSTX exists **only on GPIO 12-19**. Per board:
 | MURM2 (m2p2) | 12 -> 12..19 | yes |
 | MURM2_W (m2p2w) | 12 (inherits the MURM2 arm) | yes |
 | MURM1, PICO_DV | 6 | no |
+| PICO_DV_W (DVp2w) | 6 (inherits the PICO_DV arm) | no |
 | ZERO2 | 32 | no |
 
 So the real criterion is `HDMI_BASE_PIN == 12`, and the pin/lane map is a per-board
@@ -366,7 +367,7 @@ NVS string (`auto`/`vga`/`hdmi`); the jumper decides in practice.
 
 **HDMI** (`src/drivers/hdmi/hdmi.c`): 2 PIO SMs + 18 instructions on pio2.
 
-```
+```raw
 ISR (core1) writes a line of 400 palette-index BYTES (= 800 output pixels),
    sync 240..243, Data-Island/audio 184..199 + 216..239, scanline, DS80 pairs,
    dither and the CRT grille all being ordinary indices
@@ -460,7 +461,7 @@ one 32-bit word per output pixel, looked up from a 256-entry x 2-word palette, d
 by a stream of index bytes. Both are 800 output pixels per line = 400 indices, 2 output
 pixels per index. So the existing HDMI plumbing serves both:
 
-```
+```raw
 line of 400 index BYTES -> dma_chan -> PIO conv (unchanged, 8 instr on pio2)
    -> dma_chan_pal_conv_ctrl -> dma_chan_pal_conv (2 words) -> HSTX FIFO
 ```
@@ -534,7 +535,7 @@ one has to BE a palette entry. See the palette section below for the full ledger
 To get non-pixel words into the stream without spending indices, the line has to be a
 buffer of WORDS with a command list, which is exactly what the expander is for:
 
-```
+```raw
 [HSTX_CMD_RAW_REPEAT | front_porch] [sync word]
 [HSTX_CMD_RAW_REPEAT | hsync]       [sync word]
 [HSTX_CMD_RAW_REPEAT | back_porch]  [sync word]        (+ island block when audio)
@@ -714,7 +715,6 @@ separate releases.
    (under the same guard) `vga_bayer4`, the solid/dither fork and `vgaGridSnap` — with
    PWM they have nothing left to do.
 4. **Build** — five lines, no matrix change:
-   ```cmake
    option(HDMI_HSTX "..." OFF)            # engineering A/B only, not in the matrix
    IF(PICO_PC)                            # ... and IF(MURM2), once m2p2 is confirmed
        if(NOT TFT AND NOT TV AND NOT SOFTTV)
@@ -726,7 +726,7 @@ separate releases.
        SET(BUILD_NAME "${BUILD_NAME}-HSTX")
        SET(DISPLAY_TAG "${DISPLAY_TAG}HSTX")
    endif()
-   ```
+```raw
    The lane table is written for every 12-19 board from the start, but the
    auto-enable lands on **PCp2 alone** — m2p2/m2p2w keep the PIO path until someone
    runs the same image on one, and flipping them on afterwards is that one `IF()`.
@@ -848,3 +848,5 @@ separate releases.
   the caller so the island's baked sync matches its buffer's control words.
   `debug/PCp2-hstx-tmds11-1.0.6.elf`; meter 12000 pkt/s, q 64..66, und/skip/dup 0,
   ISR 22/33 us (the second pack costs ~3 us of the 31.8 us line).
+
+```
