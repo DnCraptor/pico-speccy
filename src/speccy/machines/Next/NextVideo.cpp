@@ -20,6 +20,7 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 #include "app/Debug.h"
 #include "speccy/z80/MemGates.h"
 #include "hardware/sync.h"
+#include "hardware/regs/addressmap.h"
 #include "pico/time.h"
 #include "app/TryAlloc.h"
 #include "app/Buffer.h"
@@ -80,15 +81,17 @@ uint8_t* NEXTVID::hiresRow = nullptr;
 bool     NEXTVID::p80Live = false;
 uint8_t* NEXTVID::l2Band = nullptr;
 static uint8_t*  p80Blk   = nullptr;
-static uint8_t*  p80Line2 = nullptr;
+// The renderer's per-row scratch (p80Line2 / nxT2 / nxUs and the layer lines)
+// belongs to the core that renders the row: see NxCtx below. These are the
+// shared buffers core1 always uses and core0 uses while it does not help.
+static uint8_t*  p80Line2b = nullptr;
 static uint8_t*  p80Map16 = nullptr;   // palette index -> pair colour 0..15
 static uint8_t*  p80Solid = nullptr;   // palette index -> pair slot (c, c)
-static uint16_t* nxT2     = nullptr;
-static uint16_t* nxUs     = nullptr;   // nxU before the first mix (nxUlaMerge works in place)
-static uint32_t* p80Hist  = nullptr;   // palette index -> pixels this frame (core1 writes, core0 reads)
-static bool      s_rowDiff = false;    // this row's two phases differ (p80Line2 is valid in [s_dx0, s_dx1))
-static int       s_dx0 = 0, s_dx1 = 0;
+static uint16_t* nxT2b    = nullptr;
+static uint16_t* nxUsb    = nullptr;   // nxU before the first mix (nxUlaMerge works in place)
+static uint32_t* p80Hist  = nullptr;   // palette index -> pixels this frame (renderers write, core0 reads)
 static uint8_t   p80Cur[16];           // palette index shown in each pair colour (0xFF = unused)
+static void nxCtxRefresh();
 static constexpr unsigned P80_BLK = 384 + 256 + 256 + 384 * 2 * 2 + 256 * 4;
 
 static inline bool nxIsSram(const void* p) {
@@ -108,12 +111,13 @@ static bool p80Alloc() {
     if (p80Blk) return true;
     p80Blk = nxSramBlock(P80_BLK);
     if (!p80Blk) return false;
-    p80Line2 = p80Blk;
-    p80Map16 = p80Line2 + 384;
+    p80Line2b = p80Blk;
+    p80Map16 = p80Line2b + 384;
     p80Solid = p80Map16 + 256;
-    nxT2     = (uint16_t*)(p80Solid + 256);
-    nxUs     = nxT2 + 384;
-    p80Hist  = (uint32_t*)(nxUs + 384);
+    nxT2b    = (uint16_t*)(p80Solid + 256);
+    nxUsb    = nxT2b + 384;
+    p80Hist  = (uint32_t*)(nxUsb + 384);
+    nxCtxRefresh();
     return true;
 }
 uint8_t* NEXTVID::sprPatterns = nullptr;
@@ -181,14 +185,66 @@ struct NextLineState {
     // holds its LAST row (NaPICu: 8x8 blocks instead of 8x1 art, hw 2026-10-08).
     uint8_t attr[32];
 };
-static const NextLineState* LS = nullptr;
-// Per-layer RGB line buffers of the compositor (RenderLayers), [384] each, in the Next heap block.
-static uint16_t *nxU, *nxT, *nxL, *nxS;
-// The line's Layer 2 / sprite renderers wrote at least one opaque pixel into
-// nxL / nxS. A layer that is enabled but empty on this row is dropped from the
-// mix (NXModPlayer: L2 on, all transparent, no sprites — mix 8.8 of 24 ms of
-// core1 a frame, hw 2026-10-10).
-static bool nxRowL2, nxRowSpr;
+// ── Who renders a row: the renderer's per-row state, one copy per core ──────
+// Rows are rendered by core1 from the queue and, while it waits for core1 (a
+// full queue, a drain), by core0 too (nxHelp): two rows at once. Everything a
+// row writes while it is composed lives in the core's NxCtx. core1 always uses
+// the shared buffers (the Next heap block, P80Blk, l2Band); core0 uses them too
+// (it only ever renders with the queue drained) unless it has its own set
+// (s_c0Blk, taken while a 640-wide pair frame is live — the mode the split is
+// for). The band cache state belongs to the band buffer, not to the core: core0
+// rendering a copper row on the shared band must see what core1 left in it.
+struct NxBand { uint8_t* buf; uint32_t key; int row, lastRow; };   // buf nullptr = l2Band
+struct NxCtx {
+    const NextLineState* ls;   // the line being rendered
+    // Per-layer RGB line buffers of the compositor (RenderLayers), [384] each.
+    uint16_t *u, *t, *l, *s;
+    uint16_t *t2, *us;         // 640 pair frame: the tilemap's odd phase, nxU before the first mix
+    uint8_t  *line, *line2;    // lineBuf (left pixels), p80Line2 (right pixels)
+    NxBand*  band;
+    int      dx0, dx1;         // this row's two phases differ in [dx0, dx1) (line2 valid there)
+    bool     rowDiff;
+    // The line's Layer 2 / sprite renderers wrote at least one opaque pixel into
+    // nxL / nxS. A layer that is enabled but empty on this row is dropped from the
+    // mix (NXModPlayer: L2 on, all transparent, no sprites — mix 8.8 of 24 ms of
+    // core1 a frame, hw 2026-10-10).
+    bool     rowL2, rowSpr;
+    bool     sample;           // NEXT_TRACE: this row is timed
+};
+static NxBand s_band[2] = { { nullptr, 0xFFFFFFFFu, -1000, 0 }, { nullptr, 0xFFFFFFFFu, -1000, 0 } };
+static NxCtx  s_nxc[2];
+static uint16_t* nxUb = nullptr;       // the shared layer lines (Next heap block)
+// The renderer's context: SIO CPUID is 0 / 1. const: one load per function, the
+// compiler keeps the pointer (a core never changes under a running function).
+static inline __attribute__((always_inline, const)) NxCtx* nxCtx() {
+    return &s_nxc[*(const uint32_t*)SIO_BASE & 1];
+}
+#define LS        (nxCtx()->ls)
+#define nxU       (nxCtx()->u)
+#define nxT       (nxCtx()->t)
+#define nxL       (nxCtx()->l)
+#define nxS       (nxCtx()->s)
+#define nxT2      (nxCtx()->t2)
+#define nxUs      (nxCtx()->us)
+#define p80Line2  (nxCtx()->line2)
+#define s_rowDiff (nxCtx()->rowDiff)
+#define s_dx0     (nxCtx()->dx0)
+#define s_dx1     (nxCtx()->dx1)
+#define nxRowL2   (nxCtx()->rowL2)
+#define nxRowSpr  (nxCtx()->rowSpr)
+#if NEXT_TRACE
+#define nx_layer_sample (nxCtx()->sample)
+#endif
+static void nxCtxShared(NxCtx& c) {
+    c.u = nxUb; c.t = nxUb ? nxUb + 384 : nullptr; c.l = nxUb ? nxUb + 768 : nullptr; c.s = nxUb ? nxUb + 1152 : nullptr;
+    c.t2 = nxT2b; c.us = nxUsb; c.line = NEXTVID::lineBufShared(); c.line2 = p80Line2b;
+    c.band = &s_band[0];
+}
+static uint8_t* s_c0Blk = nullptr;     // core0's own row scratch (nxHelp), or nullptr
+static void nxCtxRefresh() {
+    nxCtxShared(s_nxc[1]);
+    if (!s_c0Blk) nxCtxShared(s_nxc[0]);
+}
 static_assert(sizeof(NextLineState) % 4 == 0, "compared a word at a time");
 // memcmp is libc in FLASH; 12 words compared inline instead, once per line.
 static inline __attribute__((always_inline)) bool nxSameState(const NextLineState& a, const NextLineState& b) {
@@ -350,11 +406,144 @@ static bool     s_lineReady = false;   // RenderLine: lineBuf already composed
 // Tested by core1's render_core loop on every machine: one byte in .data.
 extern "C" volatile bool g_next_c1_live = false;
 
+// Two renderers on one queue. nx_c = the next job to claim; a claimed job is
+// rendered by the core that claimed it and nx_r (the release point every waiter
+// tests) only moves past it once it is done: nx_r = the oldest job still being
+// rendered, or nx_c when neither core renders. Rows are composed with the logs
+// (sprite attributes, palette) applied up to the row's capture position, and
+// the logs only move forward — so a row may be claimed while the other core
+// renders only if it needs nothing applied (the common case: a whole frame of
+// rows on one log position); otherwise it waits for the other core. The claim
+// applies the logs itself, under the lock, before anyone can read them.
+// The lock is taken without masking IRQs: core1's HDMI line ISR must never wait
+// for it, and no ISR touches the queue.
+static volatile uint32_t nx_c = 0;
+static volatile uint8_t  nx_busy[2] = { 0, 0 };
+static volatile uint32_t nx_jobAt[2] = { 0, 0 };   // the job index each core renders
+static spin_lock_t*      nx_lock = nullptr;
+#if NEXT_TRACE
+extern volatile uint32_t g_nextvid_us;
+volatile uint32_t g_nx_c0_us = 0, g_nx_c0_rows = 0, g_nx_c1_rows = 0, g_nx_claim_blk = 0;
+#endif
+
 static void nxQueueDead(const char* why) {
-    Debug::log("[NXC1] core1 render queue %s (r=%u w=%u) - rendering on core0", why,
-               (unsigned)nx_r, (unsigned)nx_w);
+    Debug::log("[NXC1] core1 render queue %s (r=%u c=%u w=%u) - rendering on core0", why,
+               (unsigned)nx_r, (unsigned)nx_c, (unsigned)nx_w);
     g_next_c1_live = false;
+    nx_c = nx_w;
     nx_r = nx_w;
+}
+
+__attribute__((noinline)) IRAM_ATTR bool NEXTVID::rowClaim(unsigned core, uint32_t& job) {
+    if (nx_c == nx_w) return false;
+    spin_lock_unsafe_blocking(nx_lock);
+    const uint32_t c = nx_c;
+    bool ok = false;
+    if (c != nx_w && g_next_c1_live) {
+        __dmb();
+        const uint32_t j = nx_ring[c % NEXT_C1_RING];
+        const NextLineState& st = nx_st[j >> 16];
+        if (core == 0 && st.hires == 1) {
+            ok = false;                       // Timex hi-res: one shared row scratch (hiresRow)
+        } else if (!nx_busy[core ^ 1]) {
+            sprApply(st.sprSeq);              // nobody renders: move the logs on
+            palApply(st.palSeq);
+            if (sprR->dirty) resolveSprites();
+            ok = true;
+        } else {
+            ok = (int32_t)(st.sprSeq - spr_app) <= 0 && (int32_t)(st.palSeq - pal_app) <= 0 && !sprR->dirty;
+        }
+        if (ok) {
+            job = j;
+            nx_jobAt[core] = c;
+            nx_busy[core] = 1;
+            nx_c = c + 1;
+        }
+#if NEXT_TRACE
+        else g_nx_claim_blk = g_nx_claim_blk + 1;
+#endif
+    }
+    spin_unlock_unsafe(nx_lock);
+    return ok;
+}
+
+__attribute__((noinline)) IRAM_ATTR void NEXTVID::rowRelease(unsigned core) {
+    __dmb();                                  // the row is written before it is released
+    spin_lock_unsafe_blocking(nx_lock);
+    nx_busy[core] = 0;
+    const uint32_t r = nx_busy[core ^ 1] ? nx_jobAt[core ^ 1] : nx_c;
+    if ((int32_t)(r - nx_r) > 0) nx_r = r;
+    spin_unlock_unsafe(nx_lock);
+}
+
+__attribute__((noinline)) IRAM_ATTR void NEXTVID::renderJob(uint32_t j) {
+    LS = &nx_st[j >> 16];
+#if NEXT_TRACE
+    if ((j & 15) == 0) {
+        const uint64_t t0 = time_us_64();
+        nx_layer_sample = true;
+        RenderLine((int)(j & 0xFFFF));
+        nx_layer_sample = false;
+        g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
+    } else
+#endif
+    RenderLine((int)(j & 0xFFFF));
+}
+
+// core0, waiting for core1: render the oldest queued row here. Only with its
+// own row scratch (s_c0Blk) — the shared one is core1's while the queue runs.
+// Flash: once per row at most, and not a frame of the .nxovl window on core0's
+// wait paths (a shared-VMA frame there has crashed GDB's unwinder).
+__attribute__((noinline)) bool NEXTVID::c0Help() {
+    if (!s_c0Blk || !g_next_c1_live) return false;
+    uint32_t j;
+    if (!rowClaim(0, j)) return false;
+#if NEXT_TRACE
+    const uint64_t t0 = time_us_64();
+#endif
+    renderJob(j);
+    rowRelease(0);
+#if NEXT_TRACE
+    g_nx_c0_us = g_nx_c0_us + (uint32_t)(time_us_64() - t0);
+    g_nx_c0_rows = g_nx_c0_rows + 1;
+#endif
+    return true;
+}
+
+// core0's own row scratch: lineBuf 384 | 4 layer lines 4 x 768 | nxT2 768 |
+// nxUs 768 | p80Line2 384 | band 2560. SRAM or nothing (read per pixel).
+static constexpr unsigned NX_C0_BLK = 384 + 4 * 768 + 768 + 768 + 384 + 320 * 8;
+static uint32_t s_c0Retry = 0;   // frames until the next allocation attempt
+static void nxHelperAlloc() {
+    if (s_c0Blk || !g_next_c1_live) return;
+    if (s_c0Retry) { s_c0Retry--; return; }
+    uint8_t* b = (uint8_t*)Buffer::palloc(NX_C0_BLK, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+    if (b && !nxIsSram(b)) { Buffer::pfree(b); b = nullptr; }
+    if (!b) { s_c0Retry = 250; Debug::log("[NXC1] core0 row helper: no SRAM (%u B)", NX_C0_BLK); return; }
+    NxCtx& c = s_nxc[0];
+    c.line  = b;
+    c.u     = (uint16_t*)(b + 384);
+    c.t = c.u + 384; c.l = c.t + 384; c.s = c.l + 384;
+    c.t2    = c.s + 384;
+    c.us    = c.t2 + 384;
+    c.line2 = (uint8_t*)(c.us + 384);
+    s_band[1].buf = c.line2 + 384;
+    s_band[1].key = 0xFFFFFFFFu; s_band[1].row = -1000; s_band[1].lastRow = 0;
+    c.band = &s_band[1];
+    s_c0Blk = b;                     // last: c0Help tests it
+    Debug::log("[NXC1] core0 row helper on, %u B @%08X", NX_C0_BLK, (unsigned)(uintptr_t)b);
+}
+
+void NEXTVID::helperFree() {
+    if (!s_c0Blk) return;
+    c1Drain();                       // core0 renders nothing outside c0Help: free to swap
+    uint8_t* b = s_c0Blk;
+    s_c0Blk = nullptr;
+    nxCtxShared(s_nxc[0]);
+    s_band[1].buf = nullptr;
+    Buffer::pfree(b);
+    s_c0Retry = 0;
+    Debug::log("[NXC1] core0 row helper off");
 }
 
 // core0: wait for core1 to finish every posted line. Bounded, like the TS-Conf
@@ -369,8 +558,10 @@ IRAM_ATTR void NEXTVID::c1Drain(uint8_t src) {
     (void)src;
     if (nx_r == nx_w) return;
     const uint64_t t0 = time_us_64();
+    uint64_t tw = t0;
     while (nx_r != nx_w) {
-        if (time_us_64() - t0 > 100000) { nxQueueDead("stuck"); return; }
+        if (c0Help()) { tw = time_us_64(); continue; }   // a row done here is a row core1 does not owe
+        if (time_us_64() - tw > 100000) { nxQueueDead("stuck"); return; }
         tight_loop_contents();
     }
 #if NEXT_TRACE
@@ -384,8 +575,10 @@ volatile uint32_t g_nx_qwait_us = 0, g_nx_qwait_max = 0;   // core0 waiting for 
 static void __not_in_flash_func(nxWaitUntil)(uint32_t w1) {
     if ((int32_t)(nx_r - w1) >= 0) return;
     const uint64_t t0 = time_us_64();
+    uint64_t tw = t0;
     while ((int32_t)(nx_r - w1) < 0) {
-        if (time_us_64() - t0 > 100000) { nxQueueDead("stuck"); return; }
+        if (NEXTVID::c0Help()) { tw = time_us_64(); continue; }
+        if (time_us_64() - tw > 100000) { nxQueueDead("stuck"); return; }
         tight_loop_contents();
     }
     const uint32_t d = (uint32_t)(time_us_64() - t0);
@@ -601,6 +794,7 @@ static void p80BuildTables(uint32_t pal[16]) {
 // family partner is nearest to it — the rest of the screen does not change.
 static constexpr int P80_WINDOW = 8;
 static bool s_p80Full = true;          // next pick lays the families out afresh
+static bool s_tall = false;            // the frame shows a 320x256 window (computeGeometry)
 static int  s_p80Frames = 0;
 
 static bool p80Choose() {
@@ -678,9 +872,47 @@ static bool p80Choose() {
     return true;
 }
 
+// The framebuffer through a byte table, in place. Mode / palette switches of
+// the pair frame re-encode what is already on screen instead of leaving it to
+// the next frame's rows: until a row is re-rendered the beam shows it through
+// the NEW driver tables, and old bytes there are another picture — a frame of
+// wrong colours (the whole desktop red after the first 16-colour pick) or of
+// garbage at every 320 <-> 640 switch (hw 2026-10-11, NextBench). core0, with
+// the queue drained. ~0.3 ms for a 320x240 fb; only on a change. Flash.
+__attribute__((noinline)) static void p80RemapFb(const uint8_t* tab) {
+    if (!VIDEO::vga.frameBuffer) return;
+    const int xres = (int)VIDEO::vga.xres;
+    for (int y = 0; y < (int)VIDEO::vga.yres; y++) {
+        uint8_t* r = VIDEO::vga.frameBuffer[y];
+        if (!r) continue;
+        for (int x = 0; x < xres; x++) r[x] = tab[r[x]];
+    }
+}
+
+// Pair slots of the old 16 colours -> pair slots of the new ones (p80Map16 is
+// already rebuilt): each half to the new colour nearest to what it showed.
+static void p80RemapPal(const uint8_t old[16]) {
+    uint8_t rev[256], tab[256];
+    VIDEO::getPairSlotReverse(rev);
+    for (int s = 0; s < 256; s++) {
+        const uint8_t ia = old[rev[s] >> 4], ib = old[rev[s] & 15];
+        const uint8_t na = ia == 0xFF ? 0 : p80Map16[ia], nb = ib == 0xFF ? 0 : p80Map16[ib];
+        tab[s] = VIDEO::profi_pair_lookup[na][nb];
+    }
+    p80RemapFb(tab);
+}
+
 void NEXTVID::pairForceOff() {
     if (!p80Live) return;
+    helperFree();
     c1Drain();
+    {
+        // back to palette indices: each byte shows its left pixel's colour
+        uint8_t rev[256], tab[256];
+        VIDEO::getPairSlotReverse(rev);
+        for (int s = 0; s < 256; s++) { const uint8_t i = p80Cur[rev[s] >> 4]; tab[s] = i == 0xFF ? 0 : i; }
+        p80RemapFb(tab);
+    }
     p80Live = false;
     VIDEO::nextPairOff();
     computeGeometry();
@@ -688,6 +920,17 @@ void NEXTVID::pairForceOff() {
 
 void NEXTVID::pairPoll() {
     const uint8_t* r = NextReg::reg;
+    {
+        // the frame shows a 256-line window: move the fb window with the
+        // program's own screen change, at the frame boundary
+        const bool l2 = (NextReg::port123B & 0x02) || (r[0x69] & 0x80);
+        const bool tall = (r[0x6B] & 0x80) || (l2 && (r[0x70] & 0x30));
+        if (tall != s_tall) {
+            c1Drain();
+            s_tall = tall;
+            computeGeometry();
+        }
+    }
     // Layer 2 320x256 / 640x256 on: the column band (SRAM, ~2.5 KB, once)
     static bool s_bandTried = false;
     if (!l2Band && !s_bandTried && (r[0x70] & 0x30) && ((NextReg::port123B & 0x02) || (r[0x69] & 0x80))) {
@@ -716,6 +959,7 @@ void NEXTVID::pairPoll() {
         p80BuildTables(pal);                // needs the pair lookup: built by nextPairOn first
         if (!VIDEO::nextPairOn(pal)) { s_refused = true; return; }
         p80BuildTables(pal);                // ... now with this session's pair slots
+        p80RemapFb(p80Solid);               // the 320 picture on screen as solid pairs
         p80Live = true;
         computeGeometry();                  // the window moves up (see computeGeometry)
         s_off = 0;
@@ -727,10 +971,14 @@ void NEXTVID::pairPoll() {
         return;
     }
     s_off = 0;
+    nxHelperAlloc();                        // core0 renders rows too while it waits (c0Help)
+    uint8_t old[16];
+    for (int k = 0; k < 16; k++) old[k] = p80Cur[k];
     if (!p80Choose()) return;
     c1Drain();
     uint32_t pal[16];
     p80BuildTables(pal);
+    p80RemapPal(old);                       // what is on screen, in the new 16 colours
     VIDEO::nextPairPalette(pal);
 }
 
@@ -1167,12 +1415,17 @@ void NEXTVID::Reset() {
         pairMap     = lineBuf + 384;
         hiresRow    = pairMap + 256;
         remap       = hiresRow + 256;
-        nxU = (uint16_t*)(remap + 512);
-        nxT = nxU + 384; nxL = nxT + 384; nxS = nxL + 384;
+        nxUb = (uint16_t*)(remap + 512);
+        nxCtxRefresh();
     }
     // After the video state: that block is read per pixel, this one per line, so
     // on a thin heap it is the queue that goes to PSRAM (HOT_SRAM rule), not it.
-    if (!nx_ring) {
+    if (!nx_lock) {
+        const int sl = spin_lock_claim_unused(false);
+        if (sl >= 0) nx_lock = spin_lock_init((uint)sl);
+        else Debug::log("[NXC1] no free hardware spinlock - rendering on core0");
+    }
+    if (!nx_ring && nx_lock) {
         // The core1 line queue: 320 x 4 B of jobs + 64 x 120 B of per-line state
         // + 64 x 4 B of the state-reuse memo = 9 216 B. No RAM = render on
         // core0 as before.
@@ -1197,6 +1450,8 @@ void NEXTVID::Reset() {
         Debug::log("[NXC1] core1 line renderer %s @%08X", q ? "ON" : "unavailable (no RAM)", (unsigned)(uintptr_t)q);
     }
     nx_have = false;
+    nx_c = nx_r = nx_w;               // drained above; a dead queue may have left a core "busy"
+    nx_busy[0] = nx_busy[1] = 0;
     g_next_c1_live = nx_ring != nullptr;
     if (firstReset)
         Debug::log("[NXV] video state took %u B of heap (%u -> %u)",
@@ -1268,11 +1523,14 @@ bool NEXTVID::computeGeometry() {
     int fv = (VIDEO::tStatesBorder + tpl / 2) / tpl - shift;
     if (fv < 0) fv = 0;
     const int paper = (VIDEO::tStatesScreen + tpl / 2) / tpl - shift;
-    // 640-wide pair frames (NextBench and other 320x256 desktops): show the
-    // 256-line tilemap / Layer 2 window from its first line — a 240-row fb
+    // 320x256 frames (the tilemap, Layer 2 320/640 — NextBench and other such
+    // desktops): show the 256-line window from its first line — a 240-row fb
     // otherwise cuts 8 lines at the top, where such programs keep their menu
     // bar — and give up 16 at the bottom instead. A 288-row fb shows it all.
-    if (p80Live) {
+    // Keyed on what the frame SHOWS (s_tall, pairPoll), not on the 640 pair
+    // mode: that one switches off 25 frames after the program left 640, and
+    // the picture jumped 8 rows in the middle of the next screen (hw 2026-10-11).
+    if (s_tall) {
         const int d = 32 - (paper - fv);
         if (d > 0) { fv -= d; if (fv < 0) fv = 0; }
     }
@@ -1457,7 +1715,6 @@ volatile uint32_t g_nextvid_us = 0;
 volatile uint32_t g_nextvid_layer_us[7] = {0, 0, 0, 0, 0, 0, 0};   // [6] = log apply (spr/pal) before the layers
 volatile uint32_t g_nx_logapply_spr = 0, g_nx_logapply_pal = 0;     // entries applied (all rows)   // + mix, out (RenderLine copy)
 volatile uint32_t g_nx_rows = 0;            // rows composed (all, not only sampled)
-static bool nx_layer_sample = false;
 #define NX_LT_BEGIN() uint64_t _lt0 = nx_layer_sample ? time_us_64() : 0
 #define NX_LT_END(i) do { if (nx_layer_sample) { const uint64_t _t = time_us_64(); \
     g_nextvid_layer_us[i] += (uint32_t)(_t - _lt0) * 16; _lt0 = _t; } } while (0)
@@ -1614,25 +1871,17 @@ IRAM_ATTR void NEXTVID::c1Pump() {
     // here so core0 keeps emulating meanwhile
     if (__builtin_expect(g_sd_as_state == 1, 0)) sd_async_pump();
 #if NEXT_TRACE
-    if (nx_r == nx_w) return;
+    if (nx_c == nx_w) return;
     const uint64_t tb = time_us_64();
 #endif
-    for (int n = 0; n < 8 && nx_r != nx_w; n++) {
-        __dmb();
-        const uint32_t j = nx_ring[nx_r % NEXT_C1_RING];
-        LS = &nx_st[j >> 16];
+    for (int n = 0; n < 8; n++) {
+        uint32_t j;
+        if (!rowClaim(1, j)) break;         // nothing queued, or core0 renders a row on other logs
+        renderJob(j);
+        rowRelease(1);
 #if NEXT_TRACE
-        if ((j & 15) == 0) {
-            const uint64_t t0 = time_us_64();
-            nx_layer_sample = true;
-            RenderLine((int)(j & 0xFFFF));
-            nx_layer_sample = false;
-            g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
-        } else
+        g_nx_c1_rows = g_nx_c1_rows + 1;
 #endif
-        RenderLine((int)(j & 0xFFFF));
-        __dmb();                            // the row is written before it is released
-        nx_r = nx_r + 1;
     }
 #if NEXT_TRACE
     g_nx_c1_us = g_nx_c1_us + (uint32_t)(time_us_64() - tb);
@@ -1666,6 +1915,7 @@ __attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
     c1Drain(3);
     palApply(pal_w);              // line-end values, as the deltas below expect
     LS = &nx_sync;
+    uint8_t* const lineBuf = nxCtx()->line;
     uint8_t acc[400];
     const int xres = VIDEO::vga.xres;
     for (int i = s_pdn - 1; i >= 0; i--) {
@@ -1698,6 +1948,7 @@ __attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
 
 IRAM_ATTR void NEXTVID::RenderLine(int row) {
     uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
+    uint8_t* const lineBuf = nxCtx()->line;
     if (!s_lineReady) RenderLayers(lineBuf, row);
 #if NEXT_TRACE
     g_nx_rows = g_nx_rows + 1;
@@ -2541,9 +2792,11 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
         // Guest writes to the rows of a live band show a few lines late — the
         // same race the beam has.
         // Stored transposed — band[r * 320 + column] — so a row is read in order.
-        uint8_t* const band = l2Band;
-        static uint32_t s_bandKey = 0xFFFFFFFFu;
-        static int s_bandRow = -1000, s_lastRow = 0;
+        NxBand& bd = *nxCtx()->band;
+        uint8_t* const band = bd.buf ? bd.buf : l2Band;
+        uint32_t& s_bandKey = bd.key;
+        int& s_bandRow = bd.row;
+        int& s_lastRow = bd.lastRow;
         const uint32_t key = ((uint32_t)bank << 8) | (sy & 0xF8);
         if (row < s_lastRow) s_bandKey = 0xFFFFFFFFu;     // a new frame: nothing carries over
         s_lastRow = row;

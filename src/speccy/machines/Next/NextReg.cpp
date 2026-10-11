@@ -280,6 +280,15 @@ void next_trace_dump(uint32_t frames) {
                 (unsigned)g_nx_drain_src[0], (unsigned)g_nx_drain_src[1],
                 (unsigned)g_nx_drain_src[2], (unsigned)g_nx_drain_src[3]);
             for (int i = 0; i < 4; i++) g_nx_drain_src[i] = 0;
+            {
+                // the row queue's two renderers: core0 helps while it waits for core1
+                extern volatile uint32_t g_nx_c0_us, g_nx_c0_rows, g_nx_c1_rows, g_nx_claim_blk;
+                Debug::log("NEXT rows: core0 %u/fr %u.%ums/fr, core1 %u/fr, claim blocked %u/fr",
+                    (unsigned)(g_nx_c0_rows / f), (unsigned)(g_nx_c0_us / f / 1000u),
+                    (unsigned)(g_nx_c0_us / f % 1000u / 100u), (unsigned)(g_nx_c1_rows / f),
+                    (unsigned)(g_nx_claim_blk / f));
+                g_nx_c0_us = g_nx_c0_rows = g_nx_c1_rows = g_nx_claim_blk = 0;
+            }
             // Printed here, right after perf: the later lines are the ones a
             // saturated UART drops (NXModPlayer, hw 2026-10-10: no vid line at all).
             {

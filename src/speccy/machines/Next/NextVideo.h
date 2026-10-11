@@ -150,10 +150,19 @@ public:
     // wait only for the posted lines that read guest RAM [o0, o1] of 16K bank `bank`
     static void c1DrainRange(uint8_t bank, uint16_t o0, uint16_t o1);
     static void c1Pump();      // core1 render_core loop
+    // core0 renders queued rows itself while it waits for core1 (640-wide pair
+    // frames: its own row scratch, ~8 KB SRAM). Freed when the OSD takes the
+    // screen (VIDEO::tsRenderDrain) and with the pair mode; re-taken by pairPoll.
+    static void helperFree();
+    static bool c0Help();          // core0: render one queued row, if it may
+    static uint8_t* lineBufShared() { return lineBuf; }
 
 private:
     static void captureLine(NextLineState& s);
     static void ScanlineWork();
+    static bool rowClaim(unsigned core, uint32_t& job);   // next queued row, logs applied
+    static void rowRelease(unsigned core);
+    static void renderJob(uint32_t job);
     static void emitRow(int row);          // post / draw one fb row
     static void emitRowBody(int row);     // NEXT_TRACE: emitRow's body, timed
     static void renderRowSegments(int row); // core0: a row with mid-line copper palette writes

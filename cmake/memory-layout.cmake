@@ -246,12 +246,17 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # NextIdle note (noteNew), the row-major band loop, the span-limited second
     # mix: content 50 152 B, trace 50 072. Ceiling while .dmaovl must stay
     # inside .ftovl: .tsovl + .ftovl - .dmaovl = 51 328 B.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 50688)
+    # +0.5 KB 2026-10-11 (NextBench 640): core1 + core0 share the row queue —
+    # rowClaim / rowRelease / renderJob, the per-core renderer context (NxCtx):
+    # content 50 712 B. 128 B left under the ceiling: the next growth here has
+    # to move something out (c0Help already lives in flash).
+    set(NXOVL_WIN_SIZE_EFFECTIVE 51200)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
     if (NEXT_TRACE)
-        set(NXOVL_WIN_SIZE_EFFECTIVE 50688)
+        # trace content 51 296 B (2026-10-11): AT the ceiling, nothing left
+        set(NXOVL_WIN_SIZE_EFFECTIVE 51328)
     endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})

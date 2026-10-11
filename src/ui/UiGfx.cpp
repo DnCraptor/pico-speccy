@@ -9,6 +9,7 @@
 #include "UiFont.h"
 #include "OSDMain.h"
 #include "speccy/video/Video.h"
+#include "speccy/machines/Next/NextVideo.h"
 #include "app/Config.h"     // ui_vga_solid / ui_rounded — the menu-look preferences
 
 extern "C" volatile bool profi_ds80_active;
@@ -228,6 +229,9 @@ void gfxInstallPalette() {
 
 void gfxBegin() {
     VIDEO::tsRenderDrain();   // core1 may still be painting TS-Conf content rows
+    // Next: core0's row-helper scratch (~8 KB SRAM) back to the heap for the
+    // menu / F5 browser; pairPoll takes it again when the machine runs
+    if (Config::arch == A_NEXT) NEXTVID::helperFree();
     VIDEO::ftHold();          // ...or a VDAC2 frame / video (FT812, core1)
     VIDEO::blVmapSuspend();   // borderless: show what is drawn over the fb row for row
     gfxComputeSurface();

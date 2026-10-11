@@ -2306,12 +2306,10 @@ void VIDEO::timexHiresApplyPending() {
 // (VIDEO::Reset rebuilds the standard driver tables under us — same reason
 // gmxForceOff and tsVideoForceOff exist).
 // ── ZX Spectrum Next 640-wide frames — see Video.h ───────────────────────────
-static void nextPairClearFb() {
-    if (!VIDEO::vga.frameBuffer) return;
-    for (int y = 0; y < (int)VIDEO::vga.yres; y++)
-        if (VIDEO::vga.frameBuffer[y]) memset(VIDEO::vga.frameBuffer[y], 0, VIDEO::vga.xres);
-}
-
+// The framebuffer is NOT cleared on the switch: NEXTVID re-encodes it in place
+// (palette indices <-> pair slots, NEXTVID::p80RemapFb), so the rows the beam
+// shows before they are re-rendered keep their picture instead of a black or
+// garbage frame.
 bool VIDEO::nextPairOn(const uint32_t pal16[16]) {
     if (profi_ds80_active) return false;          // another pair mode owns the driver
     init_profi_pair_lookup();
@@ -2324,7 +2322,6 @@ bool VIDEO::nextPairOn(const uint32_t pal16[16]) {
     }
     rebuildDS80ColorLut();
     Graphics8BitPalette::ds80_active = true;
-    nextPairClearFb();
     brdChange = brdnextframe = true;
     Debug::log("[NXV] 640-wide pair frame on");
     return true;
@@ -2334,7 +2331,6 @@ void VIDEO::nextPairOff() {
     if (!profi_ds80_active) return;
     profi_ds80_driver_set(false, nullptr, nullptr);
     Graphics8BitPalette::ds80_active = false;
-    nextPairClearFb();
     brdChange = brdnextframe = true;
     Debug::log("[NXV] 640-wide pair frame off");
 }
