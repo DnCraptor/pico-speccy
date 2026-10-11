@@ -52,7 +52,7 @@ for e in json.load(open('$B/compile_commands.json')):
     FLAGS=$(echo "$CMD" | sed -e 's/^[^ ]* //' -e 's/ -o [^ ]*//' -e 's/ -c [^ ]*//' -e 's/-Os//')
     arm-none-eabi-ld -r -o "$WORK/core.o" "$O/Z80_JLS.cpp.o" "$O/CPU.cpp.o"
     arm-none-eabi-nm -u "$WORK/core.o" | awk '{print $2}' > "$WORK/undef.txt"
-    arm-none-eabi-readelf -sW "$(ls "$B"/bin/*/*.elf | head -1)" | awk 'NF>=8 {print $8, $4, $3}' > "$WORK/fw.sym"
+    arm-none-eabi-readelf -sW "$(ls "$B"/bin/*/*.elf | grep -v bs2_default | head -1)" | awk 'NF>=8 {print $8, $4, $3}' > "$WORK/fw.sym"
     (cd "$WORK" && python3 "$HERE/gen_stubs.py")
     arm-none-eabi-as -mcpu=cortex-m33 -mthumb -o "$WORK/stubs.o" "$WORK/stubs.s"
     (cd "$REPO" && eval arm-none-eabi-g++ $FLAGS -O2 -c "$HERE/harness.cpp" -o "$WORK/harness.o")

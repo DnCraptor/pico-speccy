@@ -41,4 +41,28 @@ __attribute__((always_inline)) inline uint16_t peek16(uint16_t address) {
     return Z80Ops::peek16(address);
 }
 
+// IR on the bus (INC/DEC rr, LD SP,HL, PUSH ...): on the fast path only the
+// T-states, exactly as Z80Ops::addressOnBusIR does there.
+__attribute__((always_inline)) inline void addressOnBusIR(int32_t cycles) {
+    if (g_next_fastrd) CPU::tstates += (uint32_t)cycles;
+    else Z80Ops::addressOnBusIR(cycles);
+}
+
+// A write at 0x4000-0xFFFF on the Next fast path: what Z80Ops::poke8's fast
+// path does there (+3 T, no line tick until the next M1, a plain store) minus
+// two things that cannot apply on the Next — the TS-Conf/ATM write gates (zero
+// on this machine) and the ROM-pointer test (slots 2-7 never map ROM: the MMU
+// puts ROM in slots 0/1 only) — and the dirty mark, which on the Next goes to
+// mem_desc_t::dirty_sink. Everything below 0x4000 (Layer 2 write window, divMMC,
+// ROM) keeps the full path. Used by the Next opcode switch only
+// (tools/gen_next_dispatch.py), not by the shared handlers.
+__attribute__((always_inline)) inline void poke8(uint16_t address, uint8_t value) {
+    if (g_next_fastrd && address >= 0x4000) {
+        CPU::tstates += 3;
+        MemESP::ramCurrent[address >> 13][address & 0x1FFF] = value;
+        return;
+    }
+    Z80Ops::poke8(address, value);
+}
+
 } // namespace NextMemory

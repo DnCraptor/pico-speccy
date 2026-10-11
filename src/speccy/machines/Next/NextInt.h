@@ -62,6 +62,9 @@ bool nrRead(uint8_t r, uint8_t& out);
 // CTC ports 0x183B-0x1F3B (A10..A8 = channel).
 uint8_t ctcRead(uint8_t ch);
 void    ctcWrite(uint8_t ch, uint8_t v);
+#if PERF_TRACE && PERF_HIST
+void    ctcProfDump();   // profile builds: CTC writes / refresh paths / channel state, then clears
+#endif
 
 // NMI acknowledge on the Next: NR 0xC2/0xC3 always capture the return address;
 // with NR 0xC0 bit 3 the stack write is suppressed. Returns true when the push

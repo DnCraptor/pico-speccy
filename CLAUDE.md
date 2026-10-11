@@ -457,6 +457,30 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   tsconf/vdac2 при next, `claimForTsconf`/`claimForNext` отказывают при резидентном
   соседе, `regionsRebuild` сортирует окна по адресу. Растить любое окно = отнимать
   раннюю кучу у всех машин: считать `__ovl_low_start - __end__` против кадрового буфера.
+- **NXModPlayer, режим нот: 42-43 -> 49-50 FPS, IDL +2200 (2026-10-11, hw-confirmed на
+  `debug/DVp2-nxmod8-1.0.9`, владелец: «отлично, можно остановиться»).** Три шага, каждый
+  замерен: (1) `Z80::exec_nocheck_next` в `.nxovl` с `switch` по опкоду, тела обработчиков
+  ВСТАВЛЕНЫ в него генератором `tools/gen_next_dispatch.py` -> `src/speccy/z80/
+  next_dispatch.inc` (НЕ править руками; `--check` проверяет `NX_DISP_INL` у вызываемых
+  напрямую) с аксессорами `NextMemory::` (next_memory.h: запись >= 0x4000 и
+  addressOnBusIR инлайн, Next-ветка check_trdos/NextIdle — `nxCheckTrdos`); через таблицу
+  идут только префиксы, HALT, CP A, IN/OUT (n), DI/EI, RST. QEMU-стенд: -12% ARM-инструкций,
+  ZEXDOC 67/67, memcrc бит в бит. (2) Попытка убрать проверку prefixOpcode из головы цикла
+  дала +1% (GCC перезагружал адрес таблицы страниц) — откачено. (3) **CTC: быстрый путь для
+  «все активные каналы — работающие таймеры»** (`s_ctcIndep`, `s_ctcZc[4]` в NextInt.cpp):
+  у плеера ТРИ таймера (ch0 /16 TC56 = 31250 Гц, ch1 /256 TC35, ch2 /256 TC250, ~706 INT/кадр),
+  полный пересчёт всех каналов на каждом событии стоил ~9% core0. Первая версия (один таймер)
+  не сработала ни разу — `fast=0`, поэтому сначала мерить конфигурацию. Любая запись в CTC
+  (s_ctcNext = -kNever) возвращает полный путь. Дифф-тест fast/full (1000 сценариев, до 4
+  каналов, таймеры+счётчики, `-DNXI_NO_SOLO` выключает быстрый путь) + 4 мутации — в
+  сессионном scratch, не в tools/. Окно `.nxovl` AUTO 48 128 (содержимое 47 848, trace 48 120).
+  **Профилирующая сборка** (`-DPERF_TRACE=ON -DPERF_HIST=ON -DNEXT_TRACE=OFF`, окно 49152):
+  раз в секунду `NXPROF` — гистограмма опкодов, второй байт CB/DD/ED/FD, guest PC (32 B),
+  INT/кадр, MMU, строка `NXPROF ctc:` (fast/full, записи/чтения по каналам, состояние) и
+  `PROF` (SysTick PC core0). Адреса `.nxovl` резолвить ТОЛЬКО по символам этой секции
+  (окна делят VMA, addr2line отдаёт символ `.tsovl`). Остаток в режиме нот: ядро Z80 ~40%,
+  ED-инструкции ~3% (NEXTREG n,A, RETI, SWAPNIB, TEST n, SBC HL,DE, LD rr,(nn) — следующий
+  кандидат на вставку в switch), OUT/DAC ~3%, аудио-ISR ~2%.
 - **SRAM-проход 2026-10-10 (NOT hw-tested): `.data` DVp2 102 260 -> 93 020 B.** Таблица
   видеорежимов `video_mode` — `static const` во флеше (была 4.4 KB .data): изменяемые поля
   в RAM-массивах `s_div` (pio_clk_div) / `s_vtot` (v_total) в graphics.c, ISR VGA читает

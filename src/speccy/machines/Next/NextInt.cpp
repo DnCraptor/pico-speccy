@@ -9,6 +9,10 @@
 #include "speccy/video/Video.h"
 #include <cstdint>
 #include "pico.h"
+#if PERF_TRACE && PERF_HIST
+#include <cstdio>
+#include "app/Debug.h"
+#endif
 
 // The per-interrupt path (a CTC sample timer raises ~600 interrupts a frame:
 // NXModPlayer, hw 2026-10-10 — this code from flash was ~5 ms of core0) lives in
@@ -199,6 +203,21 @@ int64_t s_ctcNext = -kNever;
 // it: nextEventT() used to re-derive it per channel on every slice, and a CTC
 // sample timer (NXModPlayer: ~630 interrupts a frame) makes that every slice.
 int64_t s_ctcNextInt = kNever;
+// Set when every active CTC channel (state >= C_TRIGGER) is a RUNNING TIMER:
+// nothing can then propagate (no counter channel, no channel waiting for a
+// trigger), so each channel's ZC train is its own arithmetic and s_ctcZc[ch]
+// (kNever for an idle channel) is its next ZC. Derived by the full ctcRefresh
+// below and valid as long as s_ctcNext is (any CTC state change sets
+// s_ctcNext = -kNever, which forces the full path again). NXModPlayer runs
+// three such timers (31250 / 3125 / 437.5 Hz, ~706 interrupts a frame).
+bool s_ctcIndep = false;
+int64_t s_ctcZc[4];
+#if PERF_TRACE && PERF_HIST
+uint32_t s_pf_fast, s_pf_full, s_pf_wcw[4], s_pf_wtc[4], s_pf_rd[4], s_pf_inv;
+#define CTC_PF(x) (x)
+#else
+#define CTC_PF(x) ((void)0)
+#endif
 
 // The counters as of now (ctcRead / ctcWrite), without crossing an event: sync()
 // already advanced through every ZC/TO up to now.
@@ -226,6 +245,36 @@ NXI_HOT int64_t ctcNextZc(int ch, int64_t k, int depth) {
 // Advance the CTC to `now` and re-derive the next ZC/TO overall (s_ctcNext) and
 // among interrupt-enabled channels (s_ctcNextInt).
 NXI_HOT void ctcRefresh(int64_t now) {
+#ifndef NXI_NO_SOLO   // host differential test switch (tools/nextint_test.cpp)
+    if (s_ctcIndep && s_ctcNext != -kNever && now >= s_ctcNext) {
+        int64_t nx = kNever, nxInt = kNever;
+        for (int ch = 0; ch < 4; ch++) {
+            int64_t z = s_ctcZc[ch];
+            if (z >= kNever) continue;
+            Ctc& c = s_ctc[ch];
+            const uint32_t P = (uint32_t)c.tc << presShift(c);   // <= 65536
+            if (now >= z) {
+                const int64_t d = now - z;
+                const int64_t n = d < (int64_t)P ? 1 : 1 + udiv64s(d, P);
+                const int64_t tz = z + (n - 1) * (int64_t)P;
+                emit(ch, Stream{z, (int64_t)P, n});
+                // The state advanceTimer would leave, re-based on the last ZC:
+                // the counter has just reloaded (ticksTo(tz) is a whole tick).
+                c.ref = tz; c.cnt = c.tc;
+                z = tz + (int64_t)P;
+                s_ctcZc[ch] = z;
+            }
+            if (z < nx) nx = z;
+            if ((c.cw & 0x80) && z < nxInt) nxInt = z;
+        }
+        s_ctcNext = nx; s_ctcNextInt = nxInt;
+        CTC_PF(s_pf_fast++);
+        return;
+    }
+#endif
+    CTC_PF(s_pf_full++);
+    CTC_PF(s_ctcNext == -kNever ? s_pf_inv++ : 0);
+    s_ctcIndep = false;
     bool any = false;
     for (auto& c : s_ctc) if (c.st >= C_TRIGGER) { any = true; break; }
     s_ctcNext = s_ctcNextInt = kNever;
@@ -236,6 +285,15 @@ NXI_HOT void ctcRefresh(int64_t now) {
         if (t > now && t < s_ctcNext) s_ctcNext = t;
         if ((s_ctc[ch].cw & 0x80) && t > now && t < s_ctcNextInt) s_ctcNextInt = t;
     }
+    bool indep = true;
+    for (int ch = 0; ch < 4; ch++) {
+        const Ctc& c = s_ctc[ch];
+        if (c.st < C_TRIGGER) { s_ctcZc[ch] = kNever; continue; }
+        if (!running(c) || !timer(c)) { indep = false; break; }
+        s_ctcZc[ch] = ctcNextZc(ch, 1, 0);
+        if (s_ctcZc[ch] <= now) { indep = false; break; }   // not reachable after ctcAdvance
+    }
+    s_ctcIndep = indep && s_ctcNext < kNever;
 }
 
 NXI_HOT void sync() {
@@ -543,6 +601,7 @@ NXI_HOT bool dmaDelay() {
 
 uint8_t ctcRead(uint8_t ch) {
     if (ch > 3) return 0;   // channels 4..7 are not instantiated (zxnext.vhd 4064)
+    CTC_PF(s_pf_rd[ch]++);
     sync();
     ctcCatchUp();
     const Ctc& c = s_ctc[ch];
@@ -556,6 +615,7 @@ void ctcWrite(uint8_t ch, uint8_t v) {
     s_ctcNext = -kNever;
     const int64_t now = s_last28;
     Ctc& c = s_ctc[ch];
+    CTC_PF((c.st == C_RESET_TC || c.st == C_RUN_TC) ? s_pf_wtc[ch]++ : s_pf_wcw[ch]++);
     if (c.st == C_RESET_TC || c.st == C_RUN_TC) {          // time constant
         c.tc = v ? v : 256;
         if (c.st == C_RESET_TC) {
@@ -597,4 +657,17 @@ uint16_t stacklessRetn() {
     return (uint16_t)(NextReg::reg[0xC2] | (NextReg::reg[0xC3] << 8));
 }
 
+#if PERF_TRACE && PERF_HIST
+void ctcProfDump() {
+    char b[240]; int n = snprintf(b, sizeof b, "NXPROF ctc: fast=%u full=%u (inval %u) indep=%d |",
+        (unsigned)s_pf_fast, (unsigned)s_pf_full, (unsigned)s_pf_inv, (int)s_ctcIndep);
+    for (int ch = 0; ch < 4; ch++)
+        n += snprintf(b + n, sizeof b - n, " ch%d st%u cw%02X tc%u wcw%u wtc%u rd%u", ch,
+            (unsigned)s_ctc[ch].st, (unsigned)s_ctc[ch].cw, (unsigned)s_ctc[ch].tc,
+            (unsigned)s_pf_wcw[ch], (unsigned)s_pf_wtc[ch], (unsigned)s_pf_rd[ch]);
+    Debug::log("%s", b);
+    s_pf_fast = s_pf_full = s_pf_inv = 0;
+    for (int ch = 0; ch < 4; ch++) s_pf_wcw[ch] = s_pf_wtc[ch] = s_pf_rd[ch] = 0;
+}
+#endif
 }

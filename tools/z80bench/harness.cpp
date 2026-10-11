@@ -21,6 +21,8 @@ extern uint8_t old_memcyc asm("g_ts_memcyc") __attribute__((weak));
 extern uint8_t old_wr asm("g_tsconf_wr") __attribute__((weak));
 extern uint8_t old_ro asm("g_atm_ro") __attribute__((weak));
 extern uint32_t new_gates asm("g_memgates") __attribute__((weak));
+extern uint8_t g_ts_fastrd;                       // operand reads (CPU.cpp / Video.cpp)
+extern bool g_next_fastrd __attribute__((weak));  // Z80::exec_nocheck_next (Next loop)
 __attribute__((section(".guestmem"))) alignas(16) static uint8_t mem[65536];
 static bool dirty_sink;
 static volatile bool done;
@@ -57,14 +59,24 @@ int main(int argc, char** argv) {
     mem[0] = 0xD3; mem[1] = 0xFE;                         // OUT (#FE),A = exit
     mem[5] = 0xC3; mem[6] = 0x00; mem[7] = 0xFF;           // JP #FF00 (and SP top)
     mem[0xFF00] = 0xD3; mem[0xFF01] = 0xFF; mem[0xFF02] = 0xC9; // OUT (#FF),A ; RET
-    for (int i = 0; i < 4; i++) { MemESP::ramCurrent[i] = mem + i * 0x4000; MemESP::ramContended[i] = false; mem_desc_t::bank_dirty[i] = &dirty_sink; }
+    // 8 KB slots (MemESP: slot = addr >> 13).
+    for (int i = 0; i < 8; i++) { MemESP::ramCurrent[i] = mem + i * 0x2000; MemESP::ramContended[i] = false; mem_desc_t::bank_dirty[i] = &dirty_sink; }
+    // argv[5] == "next": the Spectrum Next loop (Z80::exec_nocheck_next) — every
+    // address on the fast path (fastmem 2), operand reads inline (fastrd 2).
+    const bool next = argc > 5 && !strcmp(argv[5], "next");
     Z80::create();
     Z80::reset();
     Z80::setRegPC(0x100); Z80::setRegSP(0xFF00);
     Z80Ops::isTsconf = true;
-    if (&new_gates) new_gates = 1;
+    if (&new_gates) new_gates = 2;   // fastmem 2 = every address on the fast path (TS-Conf shape)
     else { old_fastmem = 1; old_memcyc = 0; old_wr = 0; old_ro = 0; }
     VIDEO::ts_line_t = 0xFFFFFFFFu;
+    g_ts_fastrd = 2;
+    if (next) {   // the Next machine flag too: check_trdos / the switch take their Next branches
+        if (&g_next_fastrd) g_next_fastrd = true;
+        Z80Ops::isTsconf = false; Z80Ops::isNext = true;
+        printf("mode: Next loop\n");
+    }
     VIDEO::Draw = benchDraw; VIDEO::Draw_Opcode = benchDrawOp;
     CPU::tstates = 0;
     uint64_t tot = 0;

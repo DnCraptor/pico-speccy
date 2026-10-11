@@ -122,6 +122,11 @@ uint8_t Z80::sz53pn_subTable[256];
 // ahead of the object-wide RAM rule (rp2350-memmap.ld). Z80::interrupt() is NOT
 // cold: TS-Conf's LINE INT takes it up to 320 times a frame. (2026-09-22, -824 B)
 #define Z80_COLD __attribute__((section(".z80cold"), noinline))
+// Base-opcode handlers that Z80::exec_nocheck_next (the Next loop) calls
+// directly from its opcode switch (src/speccy/z80/next_dispatch.inc, generated
+// by tools/gen_next_dispatch.py): inlined there, while dcOpcode[] keeps the
+// out-of-line copy every other loop calls.
+#define NX_DISP_INL __attribute__((always_inline)) inline
 #if NEXT_TRACE
 void nxJumpNote(char t);
 #endif
@@ -903,7 +908,8 @@ static inline __attribute__((always_inline)) void nextIdleNote() {
     } else NextIdle::tgt = pc;
 }
 
-IRAM_ATTR void Z80::check_trdos() {
+// noinline: called from ~30 handlers, which Z80::exec_nocheck_next inlines.
+IRAM_ATTR __attribute__((noinline)) void Z80::check_trdos() {
 
     // TS-Conf owns its window-0 mapping (Page0/MemConfig) — the generic code
     // below writes ramCurrent[0]/romInUse directly and calls recoverPage0(),
@@ -1157,6 +1163,9 @@ void Z80::interrupt(void) {
     g_frm_int_taken++;   // machine-independent: was an interrupt taken this frame at all
     g_int_last_t = CPU::tstates;   // anchor for brdT's delta (see the [PERF] 60f d= field)
 #endif
+#if PERF_TRACE && PERF_HIST
+    { extern uint32_t nx_int_cnt; nx_int_cnt++; }
+#endif
 
     const bool wasHalted = halted;   // for TsConf::intTrace
     halted = false;
@@ -1404,6 +1413,49 @@ IRAM_ATTR void Z80::incRegR(uint32_t inc) {
 // by dcOpcode). Read + cleared by the [PERF] dump in Video.cpp every 600 frames.
 uint32_t z80_op_hist[256];
 uint32_t z80_chk_cnt;
+// Next profile (PERF_HIST, exec_nocheck_next): second byte of every prefixed
+// instruction ([0] CB, [1] DD, [2] ED, [3] FD) and guest PC in 32-byte buckets.
+// nxprof_dump() logs and clears them once a second (ESPectrum::loop).
+uint32_t nx_pfx_hist[4][256];
+uint32_t nx_pc_hist[2048];
+uint32_t nx_int_cnt;
+
+static void nxprofTop(const char* tag, const uint32_t* h, int n, int show, int shift, uint64_t total) {
+    char line[240]; int p = snprintf(line, sizeof line, "%s", tag);
+    static uint8_t used[2048];
+    memset(used, 0, n);
+    for (int k = 0; k < show && p < (int)sizeof line - 16; k++) {
+        int best = -1; uint32_t bv = 0;
+        for (int i = 0; i < n; i++) if (!used[i] && h[i] > bv) { bv = h[i]; best = i; }
+        if (best < 0) break;
+        used[best] = 1;
+        p += snprintf(line + p, sizeof line - p, " %0*X:%u", shift ? 4 : 2, best << shift,
+                      (unsigned)(total ? (uint64_t)bv * 1000 / total : 0));
+    }
+    Debug::log("%s", line);
+}
+
+void nxprof_dump(uint32_t frames) {
+    uint64_t total = 0, ptot = 0;
+    for (int i = 0; i < 256; i++) total += z80_op_hist[i];
+    for (int i = 0; i < 2048; i++) ptot += nx_pc_hist[i];
+    if (!frames) frames = 1;
+    Debug::log("NXPROF %u fr/s, %u ops/fr (incl. prefix bytes), %u INT/fr, MMU %02X %02X %02X %02X %02X %02X %02X %02X",
+               (unsigned)frames, (unsigned)(total / frames), (unsigned)(nx_int_cnt / frames),
+               NextReg::reg[0x50], NextReg::reg[0x51], NextReg::reg[0x52], NextReg::reg[0x53],
+               NextReg::reg[0x54], NextReg::reg[0x55], NextReg::reg[0x56], NextReg::reg[0x57]);
+    nxprofTop("NXPROF op:", z80_op_hist, 256, 24, 0, total);
+    static const char* const tags[4] = { "NXPROF CB:", "NXPROF DD:", "NXPROF ED:", "NXPROF FD:" };
+    for (int k = 0; k < 4; k++) nxprofTop(tags[k], nx_pfx_hist[k], 256, 14, 0, total);
+    nxprofTop("NXPROF pc:", nx_pc_hist, 2048, 20, 5, ptot);
+    for (int i = 0; i < 256; i++) z80_op_hist[i] = 0;
+    memset(nx_pfx_hist, 0, sizeof nx_pfx_hist);
+    memset(nx_pc_hist, 0, sizeof nx_pc_hist);
+    nx_int_cnt = 0;
+    NextInt::ctcProfDump();
+    extern void pcprof_dump();
+    pcprof_dump();
+}
 #endif
 
 IRAM_ATTR void Z80::execute() {
@@ -1527,7 +1579,27 @@ IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_ts() 
 // Separate from the multi-machine executor so its register allocation and
 // hot loop do not carry the generic memory gates or inlined automap machinery.
 // PC breakpoints use the original checked-per-PC path below.
-IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_next(bool divmmc) {
+// The unprefixed opcode is dispatched by a SWITCH, not through dcOpcode[]
+// (2026-10-11, NXModPlayer at 28 MHz): the handlers are inlined into it, the
+// LD r,r' / ALU r / INC / DEC families with the register fixed per case. Saves
+// the indirect call + return and the generic families' reg8[] lookups on every
+// instruction. In the .nxovl window (Next only): the inlined copies cost SRAM
+// on a Next boot alone. ZEXDOC through tools/z80bench (`next` mode) checks it
+// bit for bit against the table dispatch.
+// check_trdos() for the Next opcode switch: its Next branch inline (the
+// NextIdle candidate test, every JP/CALL/RET/JR). The full call otherwise:
+// a trace build (nxJumpNote) and z80bench's non-Next harness.
+#if NEXT_TRACE
+#define nxCheckTrdos() check_trdos()
+#else
+#define nxCheckTrdos() do { if (__builtin_expect(Z80Ops::isNext, 1)) { \
+        if (REG_PC == NextIdle::tgt) { if (z80_in_nocheck && REG_PC != NextIdle::rej) NextIdle::jump(); } \
+        else NextIdle::tgt = REG_PC; } else check_trdos(); } while (0)
+#endif
+// push() with the Next-inline write (next_dispatch.inc pastes handler bodies).
+#define nxPush(w) do { const uint16_t nx_w_ = (uint16_t)(w); \
+    NextMemory::poke8(--REG_SP, (uint8_t)(nx_w_ >> 8)); NextMemory::poke8(--REG_SP, (uint8_t)nx_w_); } while (0)
+NX_OVL_CODE __attribute__((optimize("O2"))) void Z80::exec_nocheck_next(bool divmmc) {
     do {
         const uint16_t pc = REG_PC;
         tsFastTick(4);
@@ -1537,10 +1609,21 @@ IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_next(
         REG_PC = pc + 1;
 #if PERF_TRACE && PERF_HIST
         z80_op_hist[opCode]++;
+        if (prefixOpcode == 0) {
+            nx_pc_hist[pc >> 5]++;
+            if (opCode == 0xCB || opCode == 0xDD || opCode == 0xED || opCode == 0xFD) {
+                const uint16_t q = pc + 1;
+                const uint8_t* sp = MemESP::ramCurrent[q >> 13];
+                if (sp) nx_pfx_hist[opCode == 0xCB ? 0 : opCode == 0xDD ? 1 : opCode == 0xED ? 2 : 3][sp[q & 0x1fff]]++;
+            }
+        }
 #endif
         if (__builtin_expect(prefixOpcode == 0, 1)) {
             flagQ = pendingEI = false;
-            dcOpcode[opCode]();
+            uint8_t nx_v; uint8_t* nx_p;   // next_dispatch.inc: shared ALU / INC / DEC tails
+            switch (opCode) {
+#include "next_dispatch.inc"
+            }
             lastFlagQ = flagQ;
             continue;
         }
@@ -1693,17 +1776,17 @@ IRAM_ATTR void Z80::exec_nocheck() {
 // re-measured per machine — the win it was introduced for was never isolated
 // from the other changes in its commit.
 
-void Z80::decodeOpcode00()
+NX_DISP_INL void Z80::decodeOpcode00()
 { /* NOP */
 }
 
-void Z80::decodeOpcode01()
+NX_DISP_INL void Z80::decodeOpcode01()
 { /* LD BC,nn */
     REG_BC = Z80Ops::peek16(REG_PC);
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeOpcode02()
+NX_DISP_INL void Z80::decodeOpcode02()
 { /* LD (BC),A */
     Z80Ops::poke8(REG_BC, regA);
     REG_W = regA;
@@ -1711,7 +1794,7 @@ void Z80::decodeOpcode02()
     //REG_WZ = (regA << 8) | (REG_C + 1);
 }
 
-void Z80::decodeOpcode03()
+NX_DISP_INL void Z80::decodeOpcode03()
 { /* INC BC */
     Z80Ops::addressOnBusIR(2);
     REG_BC++;
@@ -1719,14 +1802,14 @@ void Z80::decodeOpcode03()
 
 
 
-void Z80::decodeOpcode06()
+NX_DISP_INL void Z80::decodeOpcode06()
 { /* LD B,n */
     REG_B = Z80Ops::peek8(REG_PC);
     // PEEK8(REG_B,REG_PC);
     REG_PC++;
 }
 
-void Z80::decodeOpcode07()
+NX_DISP_INL void Z80::decodeOpcode07()
 { /* RLCA */
     carryFlag = (regA > 0x7f);
     regA <<= 1;
@@ -1737,7 +1820,7 @@ void Z80::decodeOpcode07()
     flagQ = true;
 }
 
-void Z80::decodeOpcode08()
+NX_DISP_INL void Z80::decodeOpcode08()
 { /* EX AF,AF' */
     uint8_t work8 = regA;
     regA = REG_Ax;
@@ -1748,20 +1831,20 @@ void Z80::decodeOpcode08()
     REG_Fx = work8;
 }
 
-void Z80::decodeOpcode09()
+NX_DISP_INL void Z80::decodeOpcode09()
 { /* ADD HL,BC */
     Z80Ops::addressOnBusIR(7);
     add16(regHL, REG_BC);
 }
 
-void Z80::decodeOpcode0a()
+NX_DISP_INL void Z80::decodeOpcode0a()
 { /* LD A,(BC) */
     regA = Z80Ops::peek8(REG_BC);
     // PEEK8(regA,REG_BC);
     REG_WZ = REG_BC + 1;
 }
 
-void Z80::decodeOpcode0b()
+NX_DISP_INL void Z80::decodeOpcode0b()
 { /* DEC BC */
     Z80Ops::addressOnBusIR(2);
     REG_BC--;
@@ -1770,14 +1853,14 @@ void Z80::decodeOpcode0b()
 
 
 
-void Z80::decodeOpcode0e()
+NX_DISP_INL void Z80::decodeOpcode0e()
 { /* LD C,n */
     REG_C = Z80Ops::peek8(REG_PC);
     // PEEK8(REG_C,REG_PC);
     REG_PC++;
 }
 
-void Z80::decodeOpcode0f()
+NX_DISP_INL void Z80::decodeOpcode0f()
 { /* RRCA */
     carryFlag = (regA & CARRY_MASK) != 0;
     regA >>= 1;
@@ -1788,7 +1871,7 @@ void Z80::decodeOpcode0f()
     flagQ = true;
 }
 
-void Z80::decodeOpcode10()
+NX_DISP_INL void Z80::decodeOpcode10()
 //         case 0x10:
 { /* DJNZ e */
     Z80Ops::addressOnBusIR(1);
@@ -1802,14 +1885,14 @@ void Z80::decodeOpcode10()
     }
 }
 
-void Z80::decodeOpcode11()
+NX_DISP_INL void Z80::decodeOpcode11()
 //         case 0x11:
 { /* LD DE,nn */
     REG_DE = Z80Ops::peek16(REG_PC);
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeOpcode12()
+NX_DISP_INL void Z80::decodeOpcode12()
 //         case 0x12:
 { /* LD (DE),A */
     Z80Ops::poke8(REG_DE, regA);
@@ -1818,7 +1901,7 @@ void Z80::decodeOpcode12()
     //REG_WZ = (regA << 8) | (REG_E + 1);
 }
 
-void Z80::decodeOpcode13()
+NX_DISP_INL void Z80::decodeOpcode13()
 //         case 0x13:
 { /* INC DE */
     Z80Ops::addressOnBusIR(2);
@@ -1827,7 +1910,7 @@ void Z80::decodeOpcode13()
 
 
 
-void Z80::decodeOpcode16()
+NX_DISP_INL void Z80::decodeOpcode16()
 //         case 0x16:
 { /* LD D,n */
     REG_D = Z80Ops::peek8(REG_PC);
@@ -1835,7 +1918,7 @@ void Z80::decodeOpcode16()
     REG_PC++;
 }
 
-void Z80::decodeOpcode17()
+NX_DISP_INL void Z80::decodeOpcode17()
 //         case 0x17:
 { /* RLA */
     bool oldCarry = carryFlag;
@@ -1848,7 +1931,7 @@ void Z80::decodeOpcode17()
     flagQ = true;
 }
 
-void Z80::decodeOpcode18()
+NX_DISP_INL void Z80::decodeOpcode18()
 //         case 0x18:
 { /* JR e */
     int8_t offset = Z80Ops::peek8(REG_PC);
@@ -1858,14 +1941,14 @@ void Z80::decodeOpcode18()
 
 }
 
-void Z80::decodeOpcode19()
+NX_DISP_INL void Z80::decodeOpcode19()
 //         case 0x19:
 { /* ADD HL,DE */
     Z80Ops::addressOnBusIR(7);
     add16(regHL, REG_DE);
 }
 
-void Z80::decodeOpcode1a()
+NX_DISP_INL void Z80::decodeOpcode1a()
 //         case 0x1A:
 { /* LD A,(DE) */
     regA = Z80Ops::peek8(REG_DE);
@@ -1873,7 +1956,7 @@ void Z80::decodeOpcode1a()
     REG_WZ = REG_DE + 1;
 }
 
-void Z80::decodeOpcode1b()
+NX_DISP_INL void Z80::decodeOpcode1b()
 //         case 0x1B:
 { /* DEC DE */
     Z80Ops::addressOnBusIR(2);
@@ -1882,7 +1965,7 @@ void Z80::decodeOpcode1b()
 
 
 
-void Z80::decodeOpcode1e()
+NX_DISP_INL void Z80::decodeOpcode1e()
 //         case 0x1E:
 { /* LD E,n */
     REG_E = Z80Ops::peek8(REG_PC);
@@ -1890,7 +1973,7 @@ void Z80::decodeOpcode1e()
     REG_PC++;
 }
 
-void Z80::decodeOpcode1f()
+NX_DISP_INL void Z80::decodeOpcode1f()
 //         case 0x1F:
 { /* RRA */
     bool oldCarry = carryFlag;
@@ -1903,7 +1986,7 @@ void Z80::decodeOpcode1f()
     flagQ = true;
 }
 
-void Z80::decodeOpcode20()
+NX_DISP_INL void Z80::decodeOpcode20()
 { /* JR NZ,e */
     int8_t offset = Z80Ops::peek8(REG_PC);
     // PEEK8(int8_t offset,REG_PC);
@@ -1918,13 +2001,13 @@ void Z80::decodeOpcode20()
     REG_PC++;
 }
 
-void Z80::decodeOpcode21()
+NX_DISP_INL void Z80::decodeOpcode21()
 { /* LD HL,nn */
     REG_HL = Z80Ops::peek16(REG_PC);
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeOpcode22()
+NX_DISP_INL void Z80::decodeOpcode22()
 { /* LD (nn),HL */
     REG_WZ = Z80Ops::peek16(REG_PC);
     Z80Ops::poke16(REG_WZ, regHL);
@@ -1932,7 +2015,7 @@ void Z80::decodeOpcode22()
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeOpcode23()
+NX_DISP_INL void Z80::decodeOpcode23()
 { /* INC HL */
     Z80Ops::addressOnBusIR(2);
     REG_HL++;
@@ -1940,19 +2023,19 @@ void Z80::decodeOpcode23()
 
 
 
-void Z80::decodeOpcode26()
+NX_DISP_INL void Z80::decodeOpcode26()
 { /* LD H,n */
     REG_H = Z80Ops::peek8(REG_PC);
     // PEEK8(REG_H, REG_PC);
     REG_PC++;
 }
 
-void Z80::decodeOpcode27()
+NX_DISP_INL void Z80::decodeOpcode27()
 { /* DAA */
     daa();
 }
 
-void Z80::decodeOpcode28()
+NX_DISP_INL void Z80::decodeOpcode28()
 { /* JR Z,e */
     int8_t offset = Z80Ops::peek8(REG_PC);
     // PEEK8(int8_t offset, REG_PC);
@@ -1967,13 +2050,13 @@ void Z80::decodeOpcode28()
     REG_PC++;
 }
 
-void Z80::decodeOpcode29()
+NX_DISP_INL void Z80::decodeOpcode29()
 { /* ADD HL,HL */
     Z80Ops::addressOnBusIR(7);
     add16(regHL, REG_HL);
 }
 
-void Z80::decodeOpcode2a()
+NX_DISP_INL void Z80::decodeOpcode2a()
 { /* LD HL,(nn) */
     REG_WZ = Z80Ops::peek16(REG_PC);
     REG_HL = Z80Ops::peek16(REG_WZ);
@@ -1981,7 +2064,7 @@ void Z80::decodeOpcode2a()
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeOpcode2b()
+NX_DISP_INL void Z80::decodeOpcode2b()
 { /* DEC HL */
     Z80Ops::addressOnBusIR(2);
     REG_HL--;
@@ -1989,14 +2072,14 @@ void Z80::decodeOpcode2b()
 
 
 
-void Z80::decodeOpcode2e()
+NX_DISP_INL void Z80::decodeOpcode2e()
 { /* LD L,n */
     REG_L = Z80Ops::peek8(REG_PC);
     // PEEK8(REG_L, REG_PC);
     REG_PC++;
 }
 
-void Z80::decodeOpcode2f()
+NX_DISP_INL void Z80::decodeOpcode2f()
 { /* CPL */
     regA ^= 0xff;
     sz5h3pnFlags = (sz5h3pnFlags & FLAG_SZP_MASK) | HALFCARRY_MASK
@@ -2004,7 +2087,7 @@ void Z80::decodeOpcode2f()
     flagQ = true;
 }
 
-void Z80::decodeOpcode30()
+NX_DISP_INL void Z80::decodeOpcode30()
 { /* JR NC,e */
     int8_t offset = Z80Ops::peek8(REG_PC);
     // PEEK8(int8_t offset, REG_PC);
@@ -2016,13 +2099,13 @@ void Z80::decodeOpcode30()
     REG_PC++;
 }
 
-void Z80::decodeOpcode31()
+NX_DISP_INL void Z80::decodeOpcode31()
 { /* LD SP,nn */
     REG_SP = Z80Ops::peek16(REG_PC);
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeOpcode32()
+NX_DISP_INL void Z80::decodeOpcode32()
 { /* LD (nn),A */
     REG_WZ = Z80Ops::peek16(REG_PC);
     Z80Ops::poke8(REG_WZ, regA);
@@ -2030,7 +2113,7 @@ void Z80::decodeOpcode32()
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeOpcode33()
+NX_DISP_INL void Z80::decodeOpcode33()
 { /* INC SP */
     Z80Ops::addressOnBusIR(2);
     REG_SP++;
@@ -2038,7 +2121,7 @@ void Z80::decodeOpcode33()
 
 
 
-void Z80::decodeOpcode36()
+NX_DISP_INL void Z80::decodeOpcode36()
 { /* LD (HL),n */
     // PEEK8(uint8_t value, REG_PC);
     // Z80Ops::poke8(REG_HL, value);
@@ -2046,7 +2129,7 @@ void Z80::decodeOpcode36()
     REG_PC++;
 }
 
-void Z80::decodeOpcode37()
+NX_DISP_INL void Z80::decodeOpcode37()
 { /* SCF */
     uint8_t regQ = lastFlagQ ? sz5h3pnFlags : 0;
     carryFlag = true;
@@ -2054,7 +2137,7 @@ void Z80::decodeOpcode37()
     flagQ = true;
 }
 
-void Z80::decodeOpcode38()
+NX_DISP_INL void Z80::decodeOpcode38()
 { /* JR C,e */
     int8_t offset = Z80Ops::peek8(REG_PC);
     // PEEK8(int8_t offset, REG_PC);
@@ -2066,13 +2149,13 @@ void Z80::decodeOpcode38()
     REG_PC++;
 }
 
-void Z80::decodeOpcode39()
+NX_DISP_INL void Z80::decodeOpcode39()
 { /* ADD HL,SP */
     Z80Ops::addressOnBusIR(7);
     add16(regHL, REG_SP);
 }
 
-void Z80::decodeOpcode3a()
+NX_DISP_INL void Z80::decodeOpcode3a()
 { /* LD A,(nn) */
     REG_WZ = Z80Ops::peek16(REG_PC);
     regA = Z80Ops::peek8(REG_WZ);
@@ -2081,7 +2164,7 @@ void Z80::decodeOpcode3a()
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeOpcode3b()
+NX_DISP_INL void Z80::decodeOpcode3b()
 { /* DEC SP */
     Z80Ops::addressOnBusIR(2);
     REG_SP--;
@@ -2089,14 +2172,14 @@ void Z80::decodeOpcode3b()
 
 
 
-void Z80::decodeOpcode3e()
+NX_DISP_INL void Z80::decodeOpcode3e()
 { /* LD A,n */
     regA = Z80Ops::peek8(REG_PC);
     // PEEK8(regA, REG_PC);
     REG_PC++;
 }
 
-void Z80::decodeOpcode3f()
+NX_DISP_INL void Z80::decodeOpcode3f()
 { /* CCF */
     uint8_t regQ = lastFlagQ ? sz5h3pnFlags : 0;
     sz5h3pnFlags = (sz5h3pnFlags & FLAG_SZP_MASK) | (((regQ ^ sz5h3pnFlags) | regA) & FLAG_53_MASK);
@@ -2312,14 +2395,14 @@ void Z80::decodeOpcode76()
 }
 
 
-void Z80::decodeOpcodec1()
+NX_DISP_INL void Z80::decodeOpcodec1()
 { /* POP BC */
     REG_BC = pop();
 
 }
 
 
-void Z80::decodeOpcodec3()
+NX_DISP_INL void Z80::decodeOpcodec3()
 { /* JP nn */
     REG_WZ = REG_PC = Z80Ops::peek16(REG_PC);
 
@@ -2328,13 +2411,13 @@ void Z80::decodeOpcodec3()
 }
 
 
-void Z80::decodeOpcodec5()
+NX_DISP_INL void Z80::decodeOpcodec5()
 { /* PUSH BC */
     Z80Ops::addressOnBusIR(1);
     push(REG_BC);
 }
 
-void Z80::decodeOpcodec6()
+NX_DISP_INL void Z80::decodeOpcodec6()
 { /* ADD A,n */
 
     // PEEK8(uint8_t value,REG_PC);
@@ -2348,7 +2431,7 @@ void Z80::decodeOpcodec6()
 
 
 
-void Z80::decodeOpcodec9()
+NX_DISP_INL void Z80::decodeOpcodec9()
 { /* RET */
     REG_PC = REG_WZ = pop();
 
@@ -2367,7 +2450,7 @@ void Z80::decodeOpcodecb()
 }
 
 
-void Z80::decodeOpcodecd()
+NX_DISP_INL void Z80::decodeOpcodecd()
 { /* CALL nn */
     REG_WZ = Z80Ops::peek16(REG_PC);
     Z80Ops::addressOnBus(REG_PC + 1, 1);
@@ -2378,7 +2461,7 @@ void Z80::decodeOpcodecd()
 
 }
 
-void Z80::decodeOpcodece()
+NX_DISP_INL void Z80::decodeOpcodece()
 { /* ADC A,n */
 
     // PEEK8(uint8_t value,REG_PC);
@@ -2390,7 +2473,7 @@ void Z80::decodeOpcodece()
 
 
 
-void Z80::decodeOpcoded1()
+NX_DISP_INL void Z80::decodeOpcoded1()
 { /* POP DE */
     REG_DE = pop();
 }
@@ -2407,13 +2490,13 @@ void Z80::decodeOpcoded3()
 }
 
 
-void Z80::decodeOpcoded5()
+NX_DISP_INL void Z80::decodeOpcoded5()
 { /* PUSH DE */
     Z80Ops::addressOnBusIR(1);
     push(REG_DE);
 }
 
-void Z80::decodeOpcoded6()
+NX_DISP_INL void Z80::decodeOpcoded6()
 { /* SUB n */
     // PEEK8(uint8_t value,REG_PC);
     // sub(value);
@@ -2424,7 +2507,7 @@ void Z80::decodeOpcoded6()
 
 
 
-void Z80::decodeOpcoded9()
+NX_DISP_INL void Z80::decodeOpcoded9()
 { /* EXX */
     uint16_t tmp;
     tmp = REG_BC;
@@ -2480,7 +2563,7 @@ void Z80::decodeOpcodedd()
     decodeDDFD(regIX);
 }
 
-void Z80::decodeOpcodede()
+NX_DISP_INL void Z80::decodeOpcodede()
 { /* SBC A,n */
 
     // PEEK8(uint8_t value,REG_PC);
@@ -2492,13 +2575,13 @@ void Z80::decodeOpcodede()
 
 
 
-void Z80::decodeOpcodee1() /* POP HL */
+NX_DISP_INL void Z80::decodeOpcodee1() /* POP HL */
 {
     REG_HL = pop();
 }
 
 
-void Z80::decodeOpcodee3()
+NX_DISP_INL void Z80::decodeOpcodee3()
 { /* EX (SP),HL */
     // Instrucción de ejecución sutil.
     RegisterPair work = regHL;
@@ -2512,13 +2595,13 @@ void Z80::decodeOpcodee3()
 }
 
 
-void Z80::decodeOpcodee5() /* PUSH HL */
+NX_DISP_INL void Z80::decodeOpcodee5() /* PUSH HL */
 {
     Z80Ops::addressOnBusIR(1);
     push(REG_HL);
 }
 
-void Z80::decodeOpcodee6() /* AND n */
+NX_DISP_INL void Z80::decodeOpcodee6() /* AND n */
 {
     // PEEK8(uint8_t value,REG_PC);
     // and_(value);
@@ -2529,7 +2612,7 @@ void Z80::decodeOpcodee6() /* AND n */
 
 
 
-void Z80::decodeOpcodee9() /* JP (HL) */
+NX_DISP_INL void Z80::decodeOpcodee9() /* JP (HL) */
 {
     REG_PC = REG_HL;
 
@@ -2538,7 +2621,7 @@ void Z80::decodeOpcodee9() /* JP (HL) */
 }
 
 
-void Z80::decodeOpcodeeb()
+NX_DISP_INL void Z80::decodeOpcodeeb()
 { /* EX DE,HL */
     uint16_t tmp = REG_HL;
     REG_HL = REG_DE;
@@ -2570,7 +2653,7 @@ void Z80::decodeOpcodeed() /*Subconjunto de instrucciones*/
     decodeED();
 }
 
-void Z80::decodeOpcodeee() /* XOR n */
+NX_DISP_INL void Z80::decodeOpcodeee() /* XOR n */
 {
 
     // PEEK8(uint8_t value,REG_PC);
@@ -2674,7 +2757,7 @@ Z80_COLD bool Z80::byte_tape_trap() {
     return false;
 }
 
-void Z80::decodeOpcodef1() /* POP AF */
+NX_DISP_INL void Z80::decodeOpcodef1() /* POP AF */
 {
     // Byte ROM LOAD trap: POP AF at 0x0556 (PC=0x0557 after fetch).
     // Byte ROM has POP AF;RET at 0x0556-0x0557 instead of LD-BYTES entry
@@ -2696,13 +2779,13 @@ void Z80::decodeOpcodef3() /* DI */
 }
 
 
-void Z80::decodeOpcodef5() /* PUSH AF */
+NX_DISP_INL void Z80::decodeOpcodef5() /* PUSH AF */
 {
     Z80Ops::addressOnBusIR(1);
     push(getRegAF());
 }
 
-void Z80::decodeOpcodef6() /* OR n */
+NX_DISP_INL void Z80::decodeOpcodef6() /* OR n */
 {
 
     // PEEK8(uint8_t value,REG_PC);
@@ -2714,7 +2797,7 @@ void Z80::decodeOpcodef6() /* OR n */
 
 
 
-void Z80::decodeOpcodef9() /* LD SP,HL */
+NX_DISP_INL void Z80::decodeOpcodef9() /* LD SP,HL */
 {
     Z80Ops::addressOnBusIR(2);
     REG_SP = REG_HL;
@@ -2762,7 +2845,7 @@ void Z80::decodeOpcodefd() /* Subconjunto de instrucciones */
     decodeDDFD(regIY);
 }
 
-void Z80::decodeOpcodefe() /* CP n */
+NX_DISP_INL void Z80::decodeOpcodefe() /* CP n */
 {
 
     // PEEK8(uint8_t value,REG_PC);
@@ -2905,7 +2988,7 @@ bool Z80::condMet(uint8_t cc) {
     return f == (bool)(cc & 1);
 }
 
-void Z80::decodeRETcc() {  /* RET cc */
+NX_DISP_INL void Z80::decodeRETcc() {  /* RET cc */
     Z80Ops::addressOnBusIR(1);
     if (condMet((opCode >> 3) & 7)) {
         REG_PC = REG_WZ = pop();
@@ -2913,7 +2996,7 @@ void Z80::decodeRETcc() {  /* RET cc */
     }
 }
 
-void Z80::decodeJPcc() {   /* JP cc,nn */
+NX_DISP_INL void Z80::decodeJPcc() {   /* JP cc,nn */
     REG_WZ = NextMemory::peek16(REG_PC);
     if (condMet((opCode >> 3) & 7)) {
         REG_PC = REG_WZ;
@@ -2923,7 +3006,7 @@ void Z80::decodeJPcc() {   /* JP cc,nn */
     REG_PC = REG_PC + 2;
 }
 
-void Z80::decodeCALLcc() { /* CALL cc,nn */
+NX_DISP_INL void Z80::decodeCALLcc() { /* CALL cc,nn */
     REG_WZ = NextMemory::peek16(REG_PC);
     if (condMet((opCode >> 3) & 7)) {
         Z80Ops::addressOnBus(REG_PC + 1, 1);

@@ -232,12 +232,19 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # (and the LDIR batch per iteration when it declines), see Z80_JLS.cpp.
     # +1 KB 2026-10-11 (NXModPlayer, ~630 CTC interrupts a frame): MemESP::applyMMU,
     # NextReg::writeHot, NextMf::portWrite and the DAC publish left flash.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 35840)
+    # +8 KB the same day: Z80::exec_nocheck_next moved here with its opcode SWITCH
+    # (src/speccy/z80/next_dispatch.inc) — the base-opcode handlers inlined into
+    # it, 7.8 KB at -O2 (content 42 936 B; trace 43 776). The switch then got the
+    # handler BODIES pasted in with the NextMemory accessors (tools/
+    # gen_next_dispatch.py): content 47 408 B, trace 47 688. +440 B the same day,
+    # the CTC independent-timers fast path (NextInt ctcRefresh): content 47 848 B,
+    # trace 48 120.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 48128)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
     if (NEXT_TRACE)
-        set(NXOVL_WIN_SIZE_EFFECTIVE 36864)
+        set(NXOVL_WIN_SIZE_EFFECTIVE 48640)
     endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})

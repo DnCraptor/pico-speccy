@@ -4092,6 +4092,21 @@ void ESPectrum::loop() {
     }
 #endif
 
+#if PERF_TRACE && PERF_HIST && !NEXT_TRACE
+    // Next profile build: opcode / prefix / guest-PC histograms + core0 PC samples.
+    if (Config::arch == A_NEXT) {
+        static uint64_t nxprof_at = 0;
+        static uint32_t nxprof_frames = 0;
+        nxprof_frames++;
+        const uint64_t now_np = time_us_64();
+        if (now_np >= nxprof_at) {
+            nxprof_at = now_np + 1000000ull;
+            extern void nxprof_dump(uint32_t);
+            nxprof_dump(nxprof_frames);
+            nxprof_frames = 0;
+        }
+    }
+#endif
 #if NEXT_TRACE
     // Next 1 Hz health line: machine state + the nextreg/automap event ring.
     // loop() runs once per emulated frame, so the frame delta doubles as FPS.
