@@ -573,10 +573,27 @@ bool TfeEngine::load(const uint8_t* f, uint32_t size, const char*& err, Meta& me
     // Length: a dry run of the cursor alone.
     m.cur.m = &m;
     m.cur.reset();
-    uint32_t frames = 1;
-    while (m.cur.nextFrame() && frames < MAX_FRAMES) frames++;
+    uint32_t frames = 1, loopAt = 0;
+    bool seen = m.loopPos == 0;                    // position 0 is where we start
+    while (m.cur.nextFrame() && frames < MAX_FRAMES) {
+        if (!seen && m.cur.p.pos == m.loopPos && m.cur.p.line == 0 && m.cur.p.quirk == 0) {
+            seen = true; loopAt = frames;
+        }
+        frames++;
+    }
     lenFrames_ = frames;
+    loopFrames_ = (seen && m.loopPos < m.posCount && frames < MAX_FRAMES && frames > loopAt)
+                  ? frames - loopAt : 0;
     m.cur.reset();
+    return true;
+}
+
+bool TfeEngine::loop() {
+    Impl& m = *d_;
+    if (!loopFrames_ || m.loopPos >= m.posCount) return false;
+    m.cur.setPosition(m.loopPos);
+    m.cur.p.frame = 0;                             // the MAX_FRAMES guard counts one pass
+    m.done = false;
     return true;
 }
 

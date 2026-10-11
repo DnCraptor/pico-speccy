@@ -11,7 +11,11 @@
 //  * PT3 / PT2 — S.V.Bulba's "Universal PT2 and PT3 Turbo Sound player"
 //    (ptsplay_bin.h): a PT 3.7 TurboSound module plays on two AY chips
 //  * STC / STP / SQT — mborik/ayplayers (ayplayers_bin.h)
-// All of them report the loop point in bit 7 of a status byte; that ends the track.
+// Loops (Decoder::loopPassed): PTSPlay runs with looping on and raises bit 7 of
+// its status byte at every loop pass. mborik's players flag only the END (bit 7
+// with looping off), so for them looping is turned on and the passes are counted
+// in frames off AyTime's length and loop point; without those (walker failed)
+// they keep looping off and end at the flag, as before.
 //
 // Track length: none of these formats stores one. AyTime.h (Ay_Emul's GetTime
 // routines) walks the pattern data at open and gets it in microseconds; it
@@ -81,7 +85,10 @@ public:
     const char* groupName(int i) const override { return i == 0 ? (ts_ ? "AY1" : "AY") : i == 3 ? "AY2" : nullptr; }
     void levels(uint8_t* out) override;
     uint32_t posMs() const override { return (uint32_t)((uint64_t)outFrames_ * 1000 / RATE); }
-    uint32_t lenMs() const override { return lenFrames_ * 20; }
+    uint32_t lenMs() const override {
+        if (!lenFrames_) return 0;
+        return loopFrames_ ? loopedLenMs(lenFrames_ * 20, loopFrames_ * 20) : lenFrames_ * 20;
+    }
 
     uint8_t* ram_ = nullptr;
     Z80      cpu_;
@@ -103,6 +110,9 @@ private:
     AyZ80Decoder* scan_ = nullptr;     // silent copy running ahead to find the loop
     uint32_t scanFrames_ = 0;
     uint32_t lenFrames_ = 0;           // 0 = not known (yet)
+    uint32_t loopFrames_ = 0;          // one loop pass, frames (0 = not known)
+    uint32_t playFrames_ = 0;          // PLAY calls so far (frame-counted loops)
+    uint32_t nextLoop_ = 0;            // frame of the next counted loop pass (0 = flag-driven)
 
     bool call(uint16_t addr, uint16_t hl, uint16_t de = 0);
     // Scanner side: plays frames silently until the loop flag, the cap or the
@@ -202,9 +212,13 @@ bool AyZ80Decoder::open(const char* path) {
         if (w) {
             memset(w, 0, 0x10000 + 16);
             memcpy(w, m, size_);
-            const long fr = aytime::frames(kFmt[kind_], w);
+            long lp = 0;
+            const long fr = aytime::frames(kFmt[kind_], w, &lp);
             Buffer::pfree(w);
-            if (fr > 0) lenFrames_ = fr < (long)(MAX_MS / 20) ? (uint32_t)fr : MAX_MS / 20;
+            if (fr > 0) {
+                lenFrames_ = fr < (long)(MAX_MS / 20) ? (uint32_t)fr : MAX_MS / 20;
+                if (fr < (long)(MAX_MS / 20)) loopFrames_ = (uint32_t)(fr - lp);
+            }
         }
     }
     memcpy(ram_ + p_->org, p_->bin, p_->size);
@@ -240,7 +254,10 @@ bool AyZ80Decoder::open(const char* path) {
             (uint32_t)s1 + s2 + 16 <= size_ && !memcmp(m + s1, "Vortex", 6) + !memcmp(m + s1, "ProTracker", 10))
             mod2 = (uint16_t)(p_->modAt + s1);
     }
-    ram_[p_->setup] = kind_ == K_PT2 ? 2 : kind_ == K_PT3 ? (mod2 ? 16 : 32) : 1;
+    // mborik: 0 = loop forever (passes counted in frames), 1 = end at the flag.
+    const bool counted = !silent_ && kind_ >= K_STC && lenFrames_ && loopFrames_;
+    if (counted) nextLoop_ = lenFrames_;
+    ram_[p_->setup] = kind_ == K_PT2 ? 2 : kind_ == K_PT3 ? (mod2 ? 16 : 32) : counted ? 0 : 1;
     if (!call(p_->init, p_->modAt, mod2)) { err = "Player init did not return"; return false; }
     ram_[p_->setup] &= 0x3F;
     if (kind_ == K_PT3 && ram_[PTS_IS_TS]) {
@@ -289,9 +306,18 @@ int AyZ80Decoder::render(int16_t* lr, int n) {
     while (o < n) {
         if (left_ == 0) {
             if (ended_) break;
-            if (posMs() >= MAX_MS) { ended_ = true; break; }
+            if (posMs() >= MAX_MS && !loopsDone()) { ended_ = true; break; }
+            if (nextLoop_ && playFrames_ == nextLoop_) {           // counted loop pass
+                if (!loopPassed()) { ended_ = true; break; }
+                nextLoop_ += loopFrames_;
+            }
             if (!call(p_->play, 0)) { ended_ = true; break; }
-            if (ram_[p_->setup] & 0x80) { ended_ = true; break; }   // passed the loop point
+            playFrames_++;
+            if (ram_[p_->setup] & 0x80) {                          // passed the loop point
+                // PTx: a loop pass (it keeps playing); mborik with looping off: the end.
+                if (kind_ >= K_STC || !loopPassed()) { ended_ = true; break; }
+                ram_[p_->setup] &= 0x7F;
+            }
             left_ = FRAME;
         }
         int c = n - o;

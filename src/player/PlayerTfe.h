@@ -27,11 +27,16 @@ public:
     // played through (its first wrap to the loop position).
     bool frame(WriteFn fn, void* ctx);
     uint32_t lengthFrames() const { return lenFrames_; }
+    // Frames of one loop pass (from the loop position to the end; 0 = none).
+    uint32_t loopFrames() const { return loopFrames_; }
+    // Restarts at the loop position after frame() reported the end; false when
+    // the song has no usable loop position.
+    bool loop();
 
     struct Impl;
 private:
     Impl*    d_ = nullptr;
-    uint32_t lenFrames_ = 0;
+    uint32_t lenFrames_ = 0, loopFrames_ = 0;
 };
 
 } // namespace pp

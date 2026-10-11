@@ -187,7 +187,7 @@ void feed() {
     for (int guard = 0; guard < 64; guard++) {
         const uint32_t used = w - pcm_player_r;
         if (g_ps->E.frames - used < (uint32_t)FEED) break;
-        const int n = g_ps->E.dec->render(g_ps->E.tmp, FEED);
+        const int n = g_ps->E.dec->play(g_ps->E.tmp, FEED);
         if (n <= 0) { g_ps->E.ended = true; break; }
         const int32_t g = g_ps->E.muted ? 0 : g_ps->E.gainQ8;
         const uint32_t m = g_ps->E.frames - 1;
@@ -767,7 +767,7 @@ void seekStep() {
     }
     const uint64_t t0 = time_us_64();
     while (g_ps->E.dec->posMs() < target) {
-        if (g_ps->E.dec->render(g_ps->E.tmp, FEED) <= 0) { g_ps->E.ended = true; g_ps->E.seekTo = -1; return; }
+        if (g_ps->E.dec->play(g_ps->E.tmp, FEED) <= 0) { g_ps->E.ended = true; g_ps->E.seekTo = -1; return; }
         if (time_us_64() - t0 >= SEEK_SLICE_US) return;
     }
     g_ps->E.seekTo = -1;

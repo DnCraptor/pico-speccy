@@ -13,7 +13,8 @@
 //
 // `M` is a MUTABLE 64 KB + 16 byte zero-filled copy with the module at offset 0
 // (SQT's pointers are relocated in it). Returns the length in 50 Hz frames, or
-// -1 when the structure is bad.
+// -1 when the structure is bad; `loop` (optional) gets the frame where the loop
+// position starts (Ay_Emul's Lp), i.e. a loop pass lasts length - loop frames.
 #pragma once
 
 #include <stdint.h>
@@ -27,6 +28,7 @@ enum Fmt : uint8_t { PT3, PT2, STC, STP, SQT };
 struct Walker {
     uint8_t* M;
     jmp_buf  bad;
+    long     lp = 0;                   // loop start, frames (set by the time* walkers)
     uint8_t  I(uint32_t a) const { return a < 65536 ? M[a] : 0; }
     uint16_t W(uint32_t a) const { return (uint16_t)(I(a) | (I(a + 1) << 8)); }
     void     fail() { longjmp(bad, 1); }
@@ -89,6 +91,7 @@ struct Walker {
         int dl = 256 * 256;
         const int npos = I(0x65);
         for (int i = 0; i < npos; i++) {
+            if (i == I(0x66)) lp = tm;
             pt3PatPtrs(v[0], I(0xC9 + i));
             v[0].a1 = v[0].a2 = v[0].a3 = 1;
             if (ts != 0x20) { pt3PatPtrs(v[1], ts * 3 - 3 - I(0xC9 + i)); v[1].a1 = v[1].a2 = v[1].a3 = 1; }
@@ -126,6 +129,7 @@ struct Walker {
             if (i >= 65536 - 131) fail();
             const uint8_t p = I(131 + i);
             if ((int8_t)p < 0) break;
+            if (i == I(2)) lp = tm;
             uint32_t j1 = W(pp + p * 6), j2 = W(pp + p * 6 + 2), j3 = W(pp + p * 6 + 4);
             for (;;) {
                 if (--a1 < 0) { if (I(j1) == 0) break; pt2Chan(a1, a11, j1); }
@@ -165,6 +169,7 @@ struct Walker {
                 inc(j1);
             }
         } while (j != I(pos));
+        lp = 0;                                // STC wraps to the first position
         return tm * I(0);
     }
 
@@ -173,7 +178,9 @@ struct Walker {
         long tm = 0;
         uint8_t a = 1;
         const uint32_t pos = W(1), pat = W(3);
+        long lpl = 0;
         for (int i = 0; i < I(pos); i++) {
+            if (i == I(pos + 1)) lpl = tm;
             uint32_t j1 = W(pat + I(pos + 2 + i * 2));
             while (I(j1) != 0) {
                 const uint8_t v = I(j1);
@@ -186,6 +193,7 @@ struct Walker {
         // mborik's STP player raises its end flag one line later than Ay_Emul
         // counts (checked on every local .stp): add that line, so the length is
         // where OUR playback stops.
+        lp = lpl * I(0) + I(0);
         return tm * I(0) + I(0);
     }
 
@@ -282,7 +290,9 @@ struct Walker {
         SqCh c[3] = {};
         uint32_t pp = W(8);
         const uint32_t pat = W(6);
+        const uint32_t loopAt = W(10);
         while (I(pp) != 0) {
+            if (pp == loopAt) lp = tm;
             for (int k = 0; k < 3; k++) {
                 c[k].f4 = (I(pp) & 128) != 0;
                 c[k].j = W((uint8_t)(I(pp) * 2) + pat);
@@ -303,18 +313,20 @@ struct Walker {
     }
 };
 
-inline long frames(Fmt f, uint8_t* M) {
+inline long frames(Fmt f, uint8_t* M, long* loop = nullptr) {
     Walker w;
     w.M = M;
     if (setjmp(w.bad)) return -1;
+    long t = -1;
     switch (f) {
-        case PT3: return w.timePT3();
-        case PT2: return w.timePT2();
-        case STC: return w.timeSTC();
-        case STP: return w.timeSTP();
-        case SQT: return w.timeSQT();
+        case PT3: t = w.timePT3(); break;
+        case PT2: t = w.timePT2(); break;
+        case STC: t = w.timeSTC(); break;
+        case STP: t = w.timeSTP(); break;
+        case SQT: t = w.timeSQT(); break;
     }
-    return -1;
+    if (loop) *loop = (w.lp >= 0 && w.lp < t) ? w.lp : 0;
+    return t;
 }
 
 } // namespace aytime

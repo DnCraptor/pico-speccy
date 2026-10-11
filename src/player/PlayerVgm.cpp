@@ -19,7 +19,6 @@
 #include "app/Buffer.h"
 #include "app/TryAlloc.h"
 #include "app/Debug.h"
-#include "app/Config.h"
 
 #include "speccy/devices/sound/AySound.h"
 #include "speccy/devices/sound/SAASound.h"
@@ -105,12 +104,7 @@ private:
     uint8_t* d_ = nullptr;         // file image (butter PSRAM)
     uint32_t n_ = 0;
     uint32_t pos_ = 0, dataStart_ = 0, loopPos_ = 0;
-    int      loopsLeft_ = 1;       // jumps back still to take; < 0 = forever
     bool     ended_ = false;
-    uint32_t fadeTotal_ = 0;       // fade length in output samples (0 = cut at the end)
-    uint32_t fadeLeft_ = 0;        // > 0 while fading
-    uint32_t fadeStep_ = 0;        // Q32 reciprocal of fadeTotal_
-    bool     fading_ = false;
     uint64_t acc_ = 0;             // 32.32 output-sample accumulator
     uint32_t pending_ = 0;         // output samples owed before the next command
     uint32_t outFrames_ = 0;
@@ -264,17 +258,10 @@ bool VgmDecoder::open(const char* path) {
     const uint32_t loopRel = hdr(0x1C);
     loopPos_ = loopRel ? 0x1C + loopRel : 0;
     if (loopPos_ < dataStart_ || loopPos_ >= n_) loopPos_ = 0;
-    // VGMPlay semantics: Loop count N = the looped part plays N times (the first
-    // pass included), then, with a fade time, one more pass fades out over it.
-    // A track without a loop point just ends — no fade, as in VGMPlay.
-    const int loops = Config::vgm_loops;               // 0 = forever
-    loopsLeft_ = !loopPos_ ? 0 : loops == 0 ? -1 : loops - 1;
-    fadeTotal_ = loopPos_ ? (uint32_t)Config::vgm_fade * RATE : 0;
-    fadeStep_ = fadeTotal_ ? (uint32_t)(0xFFFFFFFFull / fadeTotal_) : 0;
+    // Loop count / fade: Decoder::loopPassed() at every end-of-data (0x66).
     const uint32_t total = hdr(0x18), loopS = hdr(0x20);
-    if (loopPos_ && loops == 0) lenMs_ = 0;            // unknown: plays until stopped
-    else lenMs_ = (uint32_t)(((uint64_t)total + (loopPos_ ? (uint64_t)loopS * (loops - 1) : 0))
-                             * 1000 / 44100) + (uint32_t)Config::vgm_fade * (fadeTotal_ ? 1000 : 0);
+    const uint32_t totalMs = (uint32_t)((uint64_t)total * 1000 / 44100);
+    lenMs_ = loopPos_ ? loopedLenMs(totalMs, (uint32_t)((uint64_t)loopS * 1000 / 44100)) : totalMs;
 
     b_ = (Bufs*)tryMalloc(sizeof(Bufs));
     if (!b_) b_ = (Bufs*)Buffer::palloc(sizeof(Bufs), Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
@@ -430,12 +417,7 @@ bool VgmDecoder::step() {
     if (pos_ >= n_) return false;
     const uint8_t c = d_[pos_];
     if (c == 0x66) {
-        if (!loopPos_) return false;
-        if (loopsLeft_ != 0) { if (loopsLeft_ > 0) loopsLeft_--; pos_ = loopPos_; return true; }
-        // Loops done: fade out over one more pass (and further ones, if the loop
-        // is shorter than the fade). Without a fade time the track ends here.
-        if (!fadeTotal_) return false;
-        if (!fading_) { fading_ = true; fadeLeft_ = fadeTotal_; }
+        if (!loopPos_ || !loopPassed()) return false;
         pos_ = loopPos_;
         return true;
     }
@@ -554,19 +536,7 @@ int VgmDecoder::render(int16_t* lr, int n) {
         int c = n - o;
         if (c > CHUNK) c = CHUNK;
         if ((uint32_t)c > pending_) c = (int)pending_;
-        if (fading_ && (uint32_t)c > fadeLeft_) c = (int)fadeLeft_;
         gen(lr + 2 * o, c);
-        if (fading_) {
-            // Linear fade, Q15 gain per sample (<= 32768, so the product fits int32).
-            int16_t* p = lr + 2 * o;
-            for (int i = 0; i < c; i++) {
-                const int32_t g = (int32_t)(((uint64_t)(fadeLeft_ - i) * fadeStep_) >> 17);
-                p[2 * i]     = (int16_t)((p[2 * i] * g) >> 15);
-                p[2 * i + 1] = (int16_t)((p[2 * i + 1] * g) >> 15);
-            }
-            fadeLeft_ -= (uint32_t)c;
-            if (!fadeLeft_) { ended_ = true; pending_ = 0; o += c; break; }
-        }
         pending_ -= (uint32_t)c;
         o += c;
     }

@@ -8,6 +8,44 @@
 
 namespace pp {
 
+// ── loops and fade ───────────────────────────────────────────────────────────
+Decoder::Decoder() : loops_(Config::player_loops), fadeS_(Config::player_fade) {}
+
+bool Decoder::loopPassed() {
+    if (loopsSeen_ < 0xFFFF) loopsSeen_++;
+    if (fadeArm_ || fading_ || loops_ == 0 || loopsSeen_ < loops_) return true;
+    if (!fadeS_) return false;
+    fadeArm_ = true;                         // fade over the next pass
+    return true;
+}
+
+uint32_t Decoder::loopedLenMs(uint32_t firstMs, uint32_t loopMs) const {
+    if (loops_ == 0) return 0;
+    return firstMs + (loops_ - 1) * loopMs + (uint32_t)fadeS_ * 1000;
+}
+
+int Decoder::play(int16_t* lr, int n) {
+    if (faded_) return 0;
+    if (fadeArm_) {
+        fadeArm_ = false; fading_ = true;
+        fadeTotal_ = fadeLeft_ = (uint32_t)fadeS_ * RATE;
+        fadeStep_ = (uint32_t)(0xFFFFFFFFull / fadeTotal_);
+    }
+    if (fading_ && (uint32_t)n > fadeLeft_) n = (int)fadeLeft_;
+    const int got = render(lr, n);
+    if (fading_ && got > 0) {
+        // Linear fade, Q15 gain (<= 32768, so the product fits int32).
+        for (int i = 0; i < got; i++) {
+            const int32_t g = (int32_t)(((uint64_t)(fadeLeft_ - i) * fadeStep_) >> 17);
+            lr[2 * i]     = (int16_t)((lr[2 * i] * g) >> 15);
+            lr[2 * i + 1] = (int16_t)((lr[2 * i + 1] * g) >> 15);
+        }
+        fadeLeft_ -= (uint32_t)got;
+        if (!fadeLeft_) faded_ = true;
+    }
+    return got;
+}
+
 Decoder* createMp3Decoder();
 Decoder* createVgmDecoder();
 Decoder* createMidiDecoder();
