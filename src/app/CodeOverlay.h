@@ -159,6 +159,8 @@ bool claimForNext();
 // and whether the window is currently code (true) or heap (false).
 enum Which { WIN_TS = 0, WIN_DMA, WIN_DMAL, WIN_GS, WIN_NGS, WIN_FT, WIN_NX };
 unsigned windowBytes(Which w);
+// Do two windows share any address (both non-empty)? .dmaovl lives inside .ftovl.
+bool     windowsOverlap(Which a, Which b);
 unsigned contentBytes(Which w);
 bool     loaded(Which w);
 

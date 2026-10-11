@@ -839,18 +839,34 @@ void ESPectrum::setup() {
   // costs heap, missing it is a jump into heap data (UNDEFINSTR in
   // Z80DMA::executeTransfer, hw 2026-09-25). The backstop after the arch is
   // final covers anything this misses.
-  const bool dmaWin = Config::dma_mode != 0 || Config::arch == A_NEXT ||
+  // Config::mb02 too: MB02::init() turns dma_mode on only LATER in setup, after
+  // this decision — without it an MB-02+ boot with dma_mode 0 in NVS would leave
+  // Z80DMA::writePort in a released window.
+  const bool dmaWin = Config::dma_mode != 0 || Config::mb02 != 0 || Config::arch == A_NEXT ||
                       (Config::ram_file == NO_RAM_FILE && Config::pref_arch == A_NEXT);
   // The CLASSIC byte loop (a second window since 2026-10-11) is the one part of
   // the DMA the Next never runs: doEnable() takes nxRunSync() there. So the Next
   // alone gets the register file, everything with the card or an MB-02+ gets
   // both — and the MB-02+ half has to be in this test, because its deferred
   // transfer calls Z80DMA::executeTransfer() from the FDC port write.
-  const bool dmaClassic = Config::dma_mode != 0 || Config::mb02 != 0;
+  bool dmaClassic = Config::dma_mode != 0 || Config::mb02 != 0;
+  const bool vdac2Win = Config::tsconf_vdac2   // VDAC2 window (with TS-Conf only); its load
+                        && FlashRoms::intact(); // image is in .psramroms, gone once traded
+  // .dmaovl shares its addresses with .ftovl (rp2350-memmap.ld: it sits under
+  // .nxovl so a Next boot gets it back as base heap). TS-Conf + VDAC2 + the DMA
+  // card is the one combination that wants both: the machine wins, the DMA card
+  // goes off for this boot (MB-02+ is not offered on TS-Conf).
+  if (dmaClassic && Config::arch == A_TSCONF && vdac2Win &&
+      CodeOverlay::windowsOverlap(CodeOverlay::WIN_DMAL, CodeOverlay::WIN_FT)) {
+    Config::dma_mode = 0;
+    Config::mb02 = 0;
+    dmaClassic = false;
+    Debug::log2SD("setup: Z80 DMA off - its code window is VDAC2's on this boot");
+    OSD::bootNotice("Z80 DMA off: VDAC2 needs its code window");
+  }
   CodeOverlay::apply(Config::arch == A_TSCONF, Config::gs_enabled != 0, dmaWin, dmaClassic,
                      Config::gs_enabled == 2,    // NeoGS-only code/data window
-                     Config::tsconf_vdac2        // VDAC2 window (with TS-Conf only); its load
-                       && FlashRoms::intact(),   // image is in .psramroms, gone once traded
+                     vdac2Win,
                      // Next renderer window: same rule as the zxnDMA half of dmaWin
                      Config::arch == A_NEXT ||
                        (Config::ram_file == NO_RAM_FILE && Config::pref_arch == A_NEXT));

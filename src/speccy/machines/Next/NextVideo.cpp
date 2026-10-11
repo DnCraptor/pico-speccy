@@ -280,8 +280,10 @@ static volatile uint32_t nx_w = 0, nx_r = 0;
 // pinned at the size means the poster is waiting on a full ring — which
 // haltAdvanceTo always does after a HALT, because it posts a whole frame at
 // once. Printed once a second on the NEXT_TRACE `NEXT cpu:` line.
+#if NEXT_TRACE
 volatile uint32_t g_nx_ring_max = 0, g_nx_ring_now = 0;
 volatile uint32_t g_nx_ring_size = NEXT_C1_RING;   // one source of truth for the trace
+#endif
 static NextLineState  nx_sync;               // the queue-off path
 // Mid-line palette writes by the copper (copper.vhd WAIT H, 8-pixel steps):
 // recorded between the paper's left edge and the line end with the fb x they
@@ -1313,9 +1315,11 @@ __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
         __dmb();                    // job + state visible before the index
         nx_w = nx_w + 1;
         nx_st_job[nx_cur] = nx_w;
+#if NEXT_TRACE
         const uint32_t occ = nx_w - nx_r;      // ring occupancy (see g_nx_ring_max)
         if (occ > g_nx_ring_max) g_nx_ring_max = occ;
         g_nx_ring_now = occ;
+#endif
     } else {
         if (s_preCap) nx_sync = *s_preCap;
         else {
@@ -2164,6 +2168,10 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
         int xOrig = xPaperOff - 32;
         int xres = VIDEO::vga.xres;
         int cx1 = LS->clip[0][0] * 2, cx2 = LS->clip[0][1] * 2 + 1;
+        // The page changes every 32 columns: resolve it once per page, not per
+        // pixel (nextPgPtr tests nextRamReady and the strip bounds each call).
+        uint16_t curPage = 0xFFFF;
+        const uint8_t* pgp = nullptr;
         for (int tx = 0; tx < 320; tx++) {
             if (tx < cx1 || tx > cx2) continue;
             int fx = xOrig + tx;
@@ -2172,8 +2180,9 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
             if (sx >= 320) sx -= 320;
             uint32_t off = (uint32_t)sx * 256 + sy;
             uint16_t page = bank + (off >> 13);
-            if (page >= MemESP::NEXT_PAGES) continue;
-            const uint8_t b = MemESP::nextPgPtr(page)[off & 0x1FFF];
+            if (page != curPage) { curPage = page; pgp = MemESP::nextPgPtr(page); }
+            if (!pgp) continue;                   // >= NEXT_PAGES, or no Next RAM
+            const uint8_t b = pgp[off & 0x1FFF];
             uint16_t e, v;
             if (!hires) {
                 e = raw[(uint8_t)(b + palOfs)];

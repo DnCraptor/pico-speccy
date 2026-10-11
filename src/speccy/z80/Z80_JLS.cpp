@@ -3633,10 +3633,11 @@ void Z80::decodeDDFDCB(uint16_t address) {
 
 
 // Z80N extended opcodes (ZX Spectrum Next), dispatched from decodeED under
-// Z80Ops::isNext. In the .nxovl window from 2026-10-10; back in FLASH on
-// 2026-10-11 (SRAM pass for 576p + NeoGS + MIDI — see the block comment above
-// nextLdirBatch for why flash is enough here).
-Z80_COLD void Z80::decodeZ80N() {
+// Z80Ops::isNext — in the .nxovl window (2026-10-10). Briefly in flash on
+// 2026-10-11 and moved back the same day: it is entered on EVERY Z80N
+// instruction (NEXTREG, MUL, ADD rr,A... in guest loops), and flash code there
+// queues behind the guest's own PSRAM fetches on the shared XIP port.
+NX_OVL_CODE void Z80::decodeZ80N() {
     switch (opCode) {
         case 0x23:
         { /* SWAPNIB */
@@ -4317,14 +4318,11 @@ IRAM_ATTR void Z80::copyToRegister(uint8_t value)
 // 28 MHz blits its tiles with 16-byte LDIRs into Layer 2 (hw log 2026-10-10).
 // Removed general blockRepeat (2026-09-09) was a TS-Conf drain problem; the Next
 // renderer has no such queue drain on CPU writes.
-// IN FLASH since 2026-10-11, and that is a deliberate trade: these four Next
-// helpers (this one, nextInirBatch, nextSdPollBatch, decodeZ80N) were in the
-// .nxovl window, and the window is reserved heap on a Next boot. All four are
-// entered ONCE PER INSTRUCTION (the whole point of the batch is to run the block
-// inside one call), so a flash fetch per entry costs nothing measurable — where
-// the window cost 2 176 B of the heap the target config does not have. The
-// per-BYTE loops (Z80::ldx/nxByteNoDraw/Z80DMA::nxBatch) stay in SRAM.
-Z80_COLD void Z80::nextLdirBatch(int d) {
+// In the .nxovl window: it holds the batch's own per-byte copy loop, and when it
+// declines (source in slots 0/1, slot or frame boundary, divMMC slot 0) it is
+// called on EVERY LDIR iteration. nextInirBatch / nextSdPollBatch are rare
+// (an SD sector, ROM 2's CMD17 poll) and stay in flash (2026-10-11).
+NX_OVL_CODE void Z80::nextLdirBatch(int d) {
     if (!z80_in_nocheck || Config::numPcBP > 0) return;
     const uint32_t now = CPU::tstates;
     if (now >= CPU::stFrame) return;

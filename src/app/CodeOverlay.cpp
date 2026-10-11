@@ -210,6 +210,10 @@ bool CodeOverlay::claimForDma() {
     if (s_dmal_loaded) return true;
     const unsigned win = (unsigned)(__dmaovl_win_end - __dmaovl_win_start);
     if (!win) { s_dmal_loaded = true; return true; }   // compiled out
+    if (s_ft_loaded && windowsOverlap(WIN_DMAL, WIN_FT)) {   // same addresses (rp2350-memmap.ld)
+        Debug::log("[OVL] Z80 DMA loop window NOT claimed: the VDAC2 window is resident there");
+        return false;
+    }
     if (windowTouched(__dmaovl_win_start)) {
         Debug::log("[OVL] Z80 DMA loop window NOT claimed: heap grew into it (cursor %08lX, window %08lX) - transfers will not run",
                    (unsigned long)(uintptr_t)s_hr.cursor, (unsigned long)(uintptr_t)__dmaovl_win_start);
@@ -241,6 +245,22 @@ bool CodeOverlay::claimForNext() {
     regionsRebuild();
     Debug::log("[OVL] ZX Next window claimed late (%u B resident)", (unsigned)(__nxovl_end - __nxovl_start));
     return true;
+}
+
+static void winBounds(CodeOverlay::Which x, char*& ws, char*& we) {
+    using namespace CodeOverlay;
+    switch (x) { case WIN_GS:  ws = __gsovl_win_start;   we = __gsovl_win_end;   break;
+                 case WIN_NGS: ws = __ngsovl_win_start;  we = __ngsovl_win_end;  break;
+                 case WIN_DMA: ws = __dmarovl_win_start; we = __dmarovl_win_end; break;
+                 case WIN_DMAL:ws = __dmaovl_win_start;  we = __dmaovl_win_end;  break;
+                 case WIN_FT:  ws = __ftovl_win_start;   we = __ftovl_win_end;   break;
+                 case WIN_NX:  ws = __nxovl_win_start;   we = __nxovl_win_end;   break;
+                 default:      ws = __tsovl_win_start;   we = __tsovl_win_end;   break; }
+}
+bool CodeOverlay::windowsOverlap(Which a, Which b) {
+    char *as, *ae, *bs, *be;
+    winBounds(a, as, ae); winBounds(b, bs, be);
+    return as != ae && bs != be && as < be && bs < ae;
 }
 
 unsigned CodeOverlay::windowBytes(Which x) {
@@ -282,6 +302,7 @@ bool CodeOverlay::claimForTsconf()                { return true; }
 bool CodeOverlay::claimDmaRegs()                  { return true; }
 bool CodeOverlay::claimForDma()                   { return true; }
 unsigned CodeOverlay::windowBytes(Which)          { return 0; }
+bool CodeOverlay::windowsOverlap(Which, Which)    { return false; }
 unsigned CodeOverlay::contentBytes(Which)         { return 0; }
 bool CodeOverlay::loaded(Which)                   { return true; }
 

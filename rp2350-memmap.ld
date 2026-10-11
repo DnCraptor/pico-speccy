@@ -313,19 +313,13 @@ SECTIONS
     __nxovl_win_size   = @NXOVL_WIN_SIZE_EFFECTIVE@;
     __gsovl_win_start  = ORIGIN(RAM) + LENGTH(RAM) - __mos_mailbox - SIZEOF(.stack_dummy) - __gsovl_win_size;
     __gsovl_win_end    = __gsovl_win_start + __gsovl_win_size;
-    /* NeoGS-only window directly under .gsovl: a classic-GS or GS-off boot
-       releases it together with whatever is released below it (.dmaovl). */
+    /* NeoGS-only window directly under .gsovl. */
     __ngsovl_win_start = __gsovl_win_start - __ngsovl_win_size;
     __ngsovl_win_end   = __ngsovl_win_start + __ngsovl_win_size;
-    __dmaovl_win_start = __ngsovl_win_start - __dmaovl_win_size;
-    __dmaovl_win_end   = __dmaovl_win_start + __dmaovl_win_size;
     /* Z80 DMA register file + service path (.dmarovl): reachable on every boot
        that can touch the DMA — the DMA card, an MB-02+, or the Next's zxnDMA —
-       so it is the ONE DMA window a Next boot pays for. It sits below the
-       classic byte loop's window (.dmaovl), which the Next never loads
-       (doEnable() takes nxRunSync()). The two sizes add up to what the single
-       .dmaovl window used to be, so nothing below them moves. */
-    __dmarovl_win_start = __dmaovl_win_start - __dmarovl_win_size;
+       so it sits with the windows a Next boot loads, directly under .ngsovl. */
+    __dmarovl_win_start = __ngsovl_win_start - __dmarovl_win_size;
     __dmarovl_win_end   = __dmarovl_win_start + __dmarovl_win_size;
     __tsovl_win_start  = __dmarovl_win_start - __tsovl_win_size;
     __tsovl_win_end    = __tsovl_win_start + __tsovl_win_size;
@@ -343,8 +337,21 @@ SECTIONS
        with .tsovl, directly under .dmarovl (which a Next boot loads too). */
     __nxovl_win_start  = __dmarovl_win_start - __nxovl_win_size;
     __nxovl_win_end    = __nxovl_win_start + __nxovl_win_size;
+    /* Classic Z80-DMA byte loop (.dmaovl), directly UNDER .nxovl (or .tsovl if that
+       reaches lower, e.g. with the Next overlay compiled out), i.e. inside the
+       lower part of .ftovl (2026-10-11). The Next never loads it (doEnable() takes
+       nxRunSync()), and down here a released .dmaovl is contiguous with the base
+       heap region on a Next boot. Between two resident windows (its old place,
+       under .ngsovl) it was a 3.4 KB island that dlmalloc, which extends in 4 KB
+       pages, could never use — the whole point of splitting it off was lost on
+       Next + GS/NeoGS. The price: it shares addresses with .ftovl, so TS-Conf +
+       VDAC2 and the DMA card / MB-02+ exclude each other (CodeOverlay::apply,
+       claimForDma). With .ftovl present it stays above __ftovl_win_start, so the
+       early heap (__ovl_low_start) does not move. */
+    __dmaovl_win_start = (__nxovl_win_start < __tsovl_win_start ? __nxovl_win_start : __tsovl_win_start) - __dmaovl_win_size;
+    __dmaovl_win_end   = __dmaovl_win_start + __dmaovl_win_size;
     /* The heap ceiling before any window is applied. */
-    __ovl_low_start    = __ftovl_win_start < __nxovl_win_start ? __ftovl_win_start : __nxovl_win_start;
+    __ovl_low_start    = __ftovl_win_start < __dmaovl_win_start ? __ftovl_win_start : __dmaovl_win_start;
 
 @GSOVL_SECTION@
 @NGSOVL_SECTION@

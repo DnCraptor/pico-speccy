@@ -227,17 +227,15 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # the DMA-before-CPU frame head/tail). Still above .ftovl's base, so the early heap
     # of other machines does not move.
     # SD polling batch and headroom for both trace and normal Next builds.
-    # 2026-10-11 (SRAM pass for 576p + NeoGS + MIDI): the four Z80N helpers
-    # (decodeZ80N, nextLdirBatch, nextSdPollBatch, nextInirBatch — 2 176 B, all
-    # called once per INSTRUCTION, not per byte) moved to flash as Z80_COLD, so
-    # the window content fell 35 568 -> 33 392 and the term could follow: down
-    # 2 048 overall, which is another 2 KB of heap on a Next boot.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 33792)
+    # 2026-10-11: nextInirBatch / nextSdPollBatch (rare) moved to flash;
+    # decodeZ80N and nextLdirBatch stay here — both run per guest instruction
+    # (and the LDIR batch per iteration when it declines), see Z80_JLS.cpp.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 34816)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
     if (NEXT_TRACE)
-        set(NXOVL_WIN_SIZE_EFFECTIVE 34816)
+        set(NXOVL_WIN_SIZE_EFFECTIVE 35840)
     endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})
@@ -251,9 +249,9 @@ endif()
 # MB-02+ is present. The register file and the service path (handleDMA, the
 # write/read/command decoders, captureAttrAfterTransfer, 2 560 B) are needed by
 # BOTH, so they live in the window a Next boot does load.
-# The two sizes ADD UP to the 6144 the single window used, which leaves every
-# address below them — and therefore __ovl_low_start, i.e. the early heap — where
-# it was. What changes is only what a Next boot LOADS: 2 688 instead of 6 144.
+# .dmaovl sits UNDER .nxovl, inside .ftovl's lower part (rp2350-memmap.ld), so
+# a Next boot gets it back as base heap instead of a sub-4 KB island between two
+# resident windows; TS-Conf + VDAC2 and the DMA card exclude each other for it.
 if (DMAOVL_WIN_SIZE STREQUAL "AUTO")
     set(DMAOVL_WIN_SIZE_EFFECTIVE 3456)   # classic loop: executeTransfer 1948 + transferOneByte 1324 = 3 272 measured
 else()
