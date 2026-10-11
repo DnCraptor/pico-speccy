@@ -42,6 +42,12 @@ public:
     // What the page calls: render() with the loop-count fade applied. Returns 0
     // once the track has ended or faded out.
     int play(int16_t* lr, int n);
+    // Live loop count / fade change (the player page's L / F keys). A fade that
+    // already started finishes; one armed but not started is re-decided.
+    void setLoopFade(uint8_t loops, uint8_t fadeS);
+    // Length to show: lenMs() re-derived from the CURRENT loop count / fade for
+    // decoders that measured it with loopedLenMs().
+    uint32_t trackLenMs() const;
     // Opens and prepares the file. On failure returns false with `err` set.
     virtual bool open(const char* path) = 0;
     // Renders up to `n` stereo frames (interleaved L,R) at RATE. Returns the
@@ -79,6 +85,8 @@ protected:
 
 private:
     uint8_t  loops_, fadeS_;
+    mutable bool     lenLooped_ = false;     // loopedLenMs() was used
+    mutable uint32_t lenFirst_ = 0, lenLoop_ = 0;
     uint16_t loopsSeen_ = 0;
     bool     fadeArm_ = false, fading_ = false, faded_ = false;
     uint32_t fadeTotal_ = 0, fadeLeft_ = 0, fadeStep_ = 0;

@@ -20,8 +20,22 @@ bool Decoder::loopPassed() {
 }
 
 uint32_t Decoder::loopedLenMs(uint32_t firstMs, uint32_t loopMs) const {
+    lenLooped_ = true; lenFirst_ = firstMs; lenLoop_ = loopMs;
     if (loops_ == 0) return 0;
     return firstMs + (loops_ - 1) * loopMs + (uint32_t)fadeS_ * 1000;
+}
+
+void Decoder::setLoopFade(uint8_t loops, uint8_t fadeS) {
+    loops_ = loops; fadeS_ = fadeS;
+    if (fadeArm_ && ((loops_ == 0 || loopsSeen_ < loops_) || !fadeS_)) {
+        fadeArm_ = false;                    // not due any more (or no fade: ends at the next pass)
+        if (loops_ && loopsSeen_ >= loops_ && !fadeS_) faded_ = true;
+    }
+}
+
+uint32_t Decoder::trackLenMs() const {
+    const uint32_t l = lenMs();              // may (re)record the loop figures
+    return lenLooped_ ? loopedLenMs(lenFirst_, lenLoop_) : l;
 }
 
 int Decoder::play(int16_t* lr, int n) {
