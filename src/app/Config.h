@@ -274,6 +274,11 @@ public:
     // in the ROM's own "R Tape loading error". Non-zero IGNORES flashload (a fast
     // load never generates a pulse, so it could never go wrong). See Tape.cpp.
     static uint8_t  tape_wear;
+    // Pico-Zx-Player, VGM/VGZ files with a loop point (VGMPlay's LoopCount /
+    // FadeTime): vgm_loops = how many times the looped part plays (0 = forever),
+    // vgm_fade = seconds of fade-out over one more pass of the loop (0 = cut).
+    static uint8_t  vgm_loops;
+    static uint8_t  vgm_fade;
     static bool     rightSpace;
     static bool     wasd;
     enum BPType : uint8_t { BP_PC=0, BP_PORT_READ=1, BP_PORT_WRITE=2, BP_MEM_WRITE=3, BP_MEM_READ=4, BP_NONE=0xFF };

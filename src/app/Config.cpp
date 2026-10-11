@@ -95,6 +95,8 @@ volatile bool Config::real_player = false;
 bool     Config::profi_ext_keys = false; // Profi extended keyboard mode
 bool     Config::tape_timing_rg = false; // Rodolfo Guerra ROMs tape timings
 bool     Config::tape_autostart = true;  // auto-play tape on load + re-mount remembered tape after reset/boot
+uint8_t  Config::vgm_loops = 2;         // Audio > Pico-Zx-Player > VGM loops (VGMPlay default)
+uint8_t  Config::vgm_fade = 5;          // ... > VGM fade, seconds (VGMPlay default)
 uint8_t  Config::tape_wear = 0;         // Storage > Tape > Tape wear (0 off .. 3 heavy)
 bool     Config::rightSpace = true;
 bool     Config::wasd = true;
@@ -1385,6 +1387,10 @@ void Config::load() {
         nvs_get_b("tape_autostart", tape_autostart, sts);
         nvs_get_u8("tape_wear", tape_wear, sts);
         if (tape_wear > 3) tape_wear = 0;   // a stale/foreign NVS value
+        nvs_get_u8("vgm_loops", vgm_loops, sts);
+        if (vgm_loops > 16) vgm_loops = 2;
+        nvs_get_u8("vgm_fade", vgm_fade, sts);
+        if (vgm_fade > 30) vgm_fade = 5;
         // Fast load and tape wear are mutually exclusive (Tape.cpp fastLoadOn), and
         // since 2026-09-20 the menu enforces it by turning flashload OFF. Settle the
         // pair here too: a card written by an older build carries both, and the row
@@ -1798,6 +1804,8 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_str(buf,"tape_timing_rg",tape_timing_rg ? "true" : "false");
     nvs_set_str(buf,"tape_autostart", tape_autostart ? "true" : "false");
     nvs_set_u8(buf,"tape_wear", tape_wear);
+    nvs_set_u8(buf,"vgm_loops", vgm_loops);
+    nvs_set_u8(buf,"vgm_fade", vgm_fade);
     {
         // A quick-started download lives in /tmp and is gone after reboot — never
         // persist it (it would just fail to reopen). The in-RAM value still survives
