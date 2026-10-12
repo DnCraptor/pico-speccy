@@ -1550,10 +1550,30 @@ void Config::load() {
         // the PIO a fractional divider.  The menu refuses the combination up front
         // (resolveConstraints); this is the backstop for everything that does not
         // go through it.
+        // sys_clk 540 exists only where HDMI can take it: the standard modes switch
+        // to their 27 MHz twins there (graphics_540_mode) — PIO divider 2.0, or on
+        // HSTX clk_hstx 135 = 540/4. VGA on HSTX cannot (its clk_hstx is 126 MHz);
+        // main() folds that case once the output is known. SOFTTV/TV/TFT have no use
+        // for it — a config from another board falls back to 504.
+#if !defined(VGA_HDMI)
+        if (cpu_mhz == CPU_540_MHZ) cpu_mhz = 504;
+#endif
         if (cpu_mhz != VM_FAST_CPU_MHZ) {
             hdmi_video_mode = baseVideoMode(hdmi_video_mode);
             vga_video_mode  = baseVideoMode(vga_video_mode);
         }
+        // 1024x768 x4 is HDMI-only and needs the 54 MHz pixel = sys_clk 540 / 1.0.
+        if (isBigVideoMode(hdmi_video_mode) && !bigModeClockOk(hdmi_video_mode, cpu_mhz)) hdmi_video_mode = VM_640x480_60;
+#if !(defined(HDMI_HSTX) && HDMI_HSTX == 2)
+        if (hdmi_video_mode == VM_720x576_169) hdmi_video_mode = VM_720x576_50;   // HSTX TMDS only
+#endif
+        if (vga_video_mode == VM_720x576_169) vga_video_mode = VM_720x576_50;     // HDMI only
+        if (isHdmiOnlyVideoMode(vga_video_mode))
+            vga_video_mode = VM_640x480_60;                                    // HDMI only
+#if !defined(VGA_HDMI) || VGA_HSTX
+        // The VGA twins of the big modes are PIO-only (63 / 42 MHz pixel).
+        if (isBigVideoMode(vga_video_mode)) vga_video_mode = VM_640x480_60;
+#endif
         // The HDMI half is NOT degraded on an HSTX build any more.  It used to be,
         // for "clk_hstx 189 MHz is past the datasheet's 150" — and debug/HSTX runs
         // 720p at a 74.25 MHz pixel, i.e. clk_hstx 371.25 MHz, so that ceiling is
@@ -1567,7 +1587,9 @@ void Config::load() {
         nvs_get_b("v_sync_enabled", v_sync_enabled, sts);
         // ...and they drive the display faster than the machine, so v_sync pacing
         // (one emulated frame per display frame) would run it 50% fast.
-        if (isFastVideoMode(hdmi_video_mode) || isFastVideoMode(vga_video_mode))
+        if (isFastVideoMode(hdmi_video_mode) || isFastVideoMode(vga_video_mode)
+            || forcesVsyncOff(hdmi_video_mode, cpu_mhz)    // 59 Hz display, 50 Hz machine
+            || forcesVsyncOffVga(vga_video_mode))          // VGA 60 Hz
             v_sync_enabled = false;
         nvs_get_b("gigascreen_enabled", gigascreen_enabled, sts);
         nvs_get_u8("gigascreen_onoff", gigascreen_onoff, sts);

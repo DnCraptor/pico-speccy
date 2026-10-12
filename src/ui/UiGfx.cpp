@@ -199,6 +199,13 @@ void gfxComputeSurface() {
         Sf.h   = OSD::scrH;
         Sf.oy  = 0;
         Sf.glyphScale = 1;
+        // 1024x768 x4 / 800x600 x3 show only the centre of the framebuffer: the
+        // menu lives in that window (42-44 x 24-25 glyphs, above the 40-column minimum).
+        int bx, bw, by, bh;
+        if (VIDEO::bigWindow(bx, bw, by, bh) && Sf.w >= 320 && Sf.h >= 240) {
+            Sf.fbx = bx; Sf.w = bw;
+            Sf.oy  = by; Sf.h = bh;
+        }
     }
 }
 

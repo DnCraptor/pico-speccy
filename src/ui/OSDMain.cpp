@@ -1308,6 +1308,15 @@ void OSD::drawOSD(bool bottom_info) {
             case Config::VM_640x480_75: vmname = "640x480@75Hz"; break;
             case Config::VM_720x480_90: vmname = "720x480@90Hz"; break;
             case Config::VM_720x576_75: vmname = "720x576@75Hz"; break;
+            case Config::VM_1024x768_59: vmname = "1024x768@59Hz x4"; break;
+            case Config::VM_1024x768_59X3: vmname = "1024x768@59Hz x3"; break;
+            case Config::VM_800x600_X3: vmname = "800x600 x3"; break;
+            case Config::VM_800x600_X2: vmname = "800x600 x2"; break;
+            case Config::VM_720x576_169: vmname = "720x576@50 16:9"; break;
+            case Config::VM_1280x720_X3: vmname = "1280x720@50 x3"; break;
+            case Config::VM_1440x576_X3: vmname = "1440x576@50 x3"; break;
+            case Config::VM_1280x720_60: vmname = "1280x720@60 x3"; break;
+            case Config::VM_1440x480_60: vmname = "1440x480@60 x3"; break;
             default:                    vmname = "unknown";      break;
         }
         char buf2[41];
@@ -5766,8 +5775,20 @@ void OSD::HWInfo() {
         char vmode[24];
 #ifdef VGA_HDMI
         const struct video_mode_t vm = graphics_get_video_mode(VIDEO::video_mode);
-        snprintf(vmode, sizeof(vmode), "%dx%d @%dHz",
-                 vm.screen_width * 2, vm.v_active, vm.freq);
+        int w = vm.screen_width * 2, h = vm.v_active, hz = vm.freq;
+        if (SELECT_VGA && vm.vga_pixel_clk && (vm.x4_offset || vm.x3 || vm.x2_pad)) {
+            // VGA has its own timing in the vga_* fields (zero = inherit); the big
+            // modes run at 60 Hz there, so the refresh is computed, not nominal.
+            const int sw = vm.vga_screen_width ? vm.vga_screen_width : vm.screen_width;
+            const int ht = ((vm.vga_h_sync_bytes ? vm.vga_h_sync_bytes : vm.h_sync_bytes)
+                          + (vm.vga_h_bp_bytes ? vm.vga_h_bp_bytes : vm.h_bp_bytes)
+                          + sw + (vm.vga_h_fp_bytes ? vm.vga_h_fp_bytes : vm.h_fp_bytes)) * 2;
+            const int vt = vm.vga_v_total ? vm.vga_v_total : vm.v_total;
+            w = sw * 2;
+            h = vm.vga_v_active ? vm.vga_v_active : vm.v_active;
+            if (ht > 0 && vt > 0) hz = (int)(((uint64_t)vm.vga_pixel_clk + (uint64_t)ht * vt / 2) / ((uint64_t)ht * vt));
+        }
+        snprintf(vmode, sizeof(vmode), "%dx%d @%dHz", w, h, hz);
 #else
         // TFT/SOFTTV: no scanout-mode table (VIDEO::video_mode exists only on
         // VGA/HDMI) — show the framebuffer geometry instead.
@@ -6337,6 +6358,15 @@ static void buildEmulatorInfoText() {
             case Config::VM_640x480_75: vmname = "640x480@75"; break;
             case Config::VM_720x480_90: vmname = "720x480@90"; break;
             case Config::VM_720x576_75: vmname = "720x576@75"; break;
+            case Config::VM_1024x768_59: vmname = "1024x768@59 x4"; break;
+            case Config::VM_1024x768_59X3: vmname = "1024x768@59 x3"; break;
+            case Config::VM_800x600_X3: vmname = "800x600 x3"; break;
+            case Config::VM_800x600_X2: vmname = "800x600 x2"; break;
+            case Config::VM_720x576_169: vmname = "720x576@50 16:9"; break;
+            case Config::VM_1280x720_X3: vmname = "1280x720@50 x3"; break;
+            case Config::VM_1440x576_X3: vmname = "1440x576@50 x3"; break;
+            case Config::VM_1280x720_60: vmname = "1280x720@60 x3"; break;
+            case Config::VM_1440x480_60: vmname = "1440x480@60 x3"; break;
             default:                    vmname = "unknown";    break;
         }
         pos += infoAppend(buf, pos, bufsz, "\n --- Video ---\n");

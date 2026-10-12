@@ -1180,7 +1180,11 @@ static void __not_in_flash_func(psram_retiming)() {
     int rxdelay = divisor;
     if (clock_hz / divisor > 100000000) rxdelay += 1;
     const int clock_period_fs = 1000000000000000ll / clock_hz;
-    const int max_select = (125 * 1000000) / clock_period_fs;
+    // MAX_SELECT is a 6-bit field (units of 64 sys clocks, 8 us tCEM): 504 MHz gives
+    // exactly 63, anything faster overflowed into SELECT_HOLD and left a CS window
+    // of a few hundred ns — PSRAM corruption on both cores (found at 540 MHz).
+    int max_select = (125 * 1000000) / clock_period_fs;
+    if (max_select > 63) max_select = 63;
     const int min_deselect = (18 * 1000000 + (clock_period_fs - 1)) / clock_period_fs - (divisor + 1) / 2;
     qmi_hw->m[1].timing = 1 << QMI_M1_TIMING_COOLDOWN_LSB |
                           QMI_M1_TIMING_PAGEBREAK_VALUE_1024 << QMI_M1_TIMING_PAGEBREAK_LSB |
@@ -2078,6 +2082,12 @@ int main() {
         // the timing fix-up as one interrupt-disabled critical section, then bring
         // IRQs back only once flash/PSRAM timing matches the new clock. All four
         // helpers below are __not_in_flash so they execute safely with IRQs off.
+#if defined(VGA_HSTX) && VGA_HSTX
+        {   // 540 is HDMI-only on an HSTX build: VGA's clk_hstx is 126 MHz, 540/126 is not whole
+            extern bool SELECT_VGA;
+            if (SELECT_VGA && Config::cpu_mhz == Config::CPU_540_MHZ) Config::cpu_mhz = 504;
+        }
+#endif
         bool clk_changed = (Config::cpu_mhz != running_mhz);
         bool clk_locked  = true;
         {

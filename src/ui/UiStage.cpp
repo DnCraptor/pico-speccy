@@ -1,5 +1,6 @@
 // pico-speccy — staged settings overlay and the ordered commit (see UiStage.h).
 
+#include <hardware/vreg.h>   // VREG_VOLTAGE_1_80 (540 MHz edge)
 #include "OSDNewMenu.h"
 
 
@@ -1283,6 +1284,72 @@ static void resolveConstraints(CommitReport& rep) {
 #endif
         }
 
+#if defined(VGA_HSTX) && VGA_HSTX
+        // VGA on HSTX: clk_hstx is 126 MHz, which 540 cannot make.
+        if (SELECT_VGA && staged(SET_CPU_MHZ) == Config::CPU_540_MHZ)
+            changed |= force(SET_CPU_MHZ, 504, rep, "540 MHz is HDMI only on this board");
+#endif
+        // sys_clk 540 MHz. EDGE: picking it raises the core voltage to 1.80 V — at
+        // 1.60-1.70 V the DVp2 corrupted SRAM under a heavy TS-Conf scene (hw
+        // 2026-10-08), at 1.80 V it ran. The user may lower it again afterwards.
+        if (bmGet(g_dirty, SET_CPU_MHZ) && staged(SET_CPU_MHZ) == Config::CPU_540_MHZ
+            && g_base[SET_CPU_MHZ] != Config::CPU_540_MHZ
+            && staged(SET_VREG) < VREG_VOLTAGE_1_80
+            && g_seq[SET_VREG] <= g_seq[SET_CPU_MHZ])
+            changed |= force(SET_VREG, VREG_VOLTAGE_1_80, rep, "Core voltage 1.80 V for 540 MHz");
+        // 720x576 16:9 is HDMI on HSTX (TMDS expander) only.
+        if (staged(SET_VIDEO_MODE) == Config::VM_720x576_169) {
+            bool ok = false;
+#if defined(HDMI_HSTX) && HDMI_HSTX == 2
+            ok = !SELECT_VGA;
+#endif
+            if (!ok) changed |= force(SET_VIDEO_MODE, Config::VM_720x576_50, rep, "16:9 needs HDMI on HSTX");
+        }
+        // The big modes are PIO-HDMI only and need their own CPU clock (a clean PIO
+        // divider): 1024x768 at 540 (59 Hz) or 504 (50 Hz), 800x600 x3 at 378, x2 at
+        // 504. At 540 the display runs at 59 Hz, so V-Sync is off as for the 90/75 set.
+        {
+            const uint8_t vm = (uint8_t)staged(SET_VIDEO_MODE);
+            if (Config::isBigVideoMode(vm)) {
+                // VGA (PIO) runs them at its own pixel clocks, at any CPU clock.
+                bool vga = false, refuse = false;
+#ifdef VGA_HDMI
+                vga = SELECT_VGA;
+#endif
+#if defined(HDMI_HSTX) && HDMI_HSTX
+                // HSTX: the TMDS expander runs them (800x600 x2 at 378, see
+                // bigModeClockOk); the RAW back-end none.
+                if (!vga && HDMI_HSTX != 2) refuse = true;
+#endif
+#if defined(VGA_HSTX) && VGA_HSTX
+                if (vga) refuse = true;
+#endif
+                if (vga && Config::isHdmiOnlyVideoMode(vm)) refuse = true;   // HDMI only
+                if (refuse)
+                    changed |= force(SET_VIDEO_MODE, Config::VM_640x480_60, rep, "This mode needs the PIO output");
+                else if (vga) {
+                    // VGA runs them as VESA 60 Hz modes: no V-Sync pacing.
+                    if (Config::forcesVsyncOffVga(vm) && staged(SET_VSYNC))
+                        changed |= force(SET_VSYNC, 0, rep, "V-Sync off: the display runs at 60 Hz");
+                } else {
+                    if (!Config::bigModeClockOk(vm, (uint16_t)staged(SET_CPU_MHZ))) {
+                        static char nb[48];
+                        const unsigned pc = Config::bigModePrefClock(vm);
+                        if (g_seq[SET_VIDEO_MODE] >= g_seq[SET_CPU_MHZ]) {
+                            snprintf(nb, sizeof(nb), "CPU clock set to %u MHz for this mode", pc);
+                            changed |= force(SET_CPU_MHZ, pc, rep, nb);
+                        } else {
+                            snprintf(nb, sizeof(nb), "This mode needs CPU %u MHz", pc);
+                            changed |= force(SET_VIDEO_MODE, Config::VM_640x480_60, rep, nb);
+                        }
+                    }
+                    if (Config::forcesVsyncOff((uint8_t)staged(SET_VIDEO_MODE), (uint16_t)staged(SET_CPU_MHZ))
+                        && staged(SET_VSYNC))
+                        changed |= force(SET_VSYNC, 0, rep, "V-Sync off: the display is not 50 Hz");
+                }
+            }
+        }
+
         // MB-02+ and Profi both claim the upper MemESP pages; enabling MB-02+ on Profi
         // corrupts Profi's working set and the machine fails to boot (OSDMain.cpp:3374).
         if (staged(SET_MB02) && stagedIsProfi())
@@ -1690,7 +1757,7 @@ void commit(CommitReport& rep) {
         const uint8_t vmNew   = (uint8_t)g_val[SET_VIDEO_MODE];
         const char*  label    = (Config::baseVideoMode(vmNew) == Config::VM_720x480_60)
                               ? "720x480"
-                              : (Config::baseVideoMode(vmNew) == Config::VM_720x576_50)
+                              : (Config::baseVideoMode(vmNew) == Config::VM_720x576_50 || vmNew == Config::VM_720x576_169)
                               ? "720x576" : "640x480";
         bool fits = (grow == 0) || getFreeHeap() >= grow + Subsystems::SRAM_MARGIN;
         if (!fits && want_gs() &&

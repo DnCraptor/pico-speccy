@@ -120,6 +120,13 @@ float graphics_clk_div_at(int mode, unsigned sys_mhz, int vga);
 // when it has none.  The table owns its own layout: callers (VIDEO::Reset) have
 // no business adding VMODE_FAST_OFFSET themselves.
 int graphics_fast_mode(int mode);
+// ...the 27 MHz (sys_clk 540) twin of a standard mode, or `mode` itself; and the
+// index of the 1024x768 x4 / x3 mode (540 only).
+int graphics_540_mode(int mode);
+int graphics_xga_mode(int x3);
+// HDMI-only big modes (VM 8..11): table index at this clock / machine class, or -1.
+int graphics_big_mode(int vm, unsigned mhz, int klass);
+void graphics_big_mode_fit(int mode, int klass);
 
 #ifdef __cplusplus
 }
