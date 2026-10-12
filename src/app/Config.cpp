@@ -88,7 +88,10 @@ bool     Config::tsconf_vdac2_adapt = true;
 bool     Config::rtc_enabled = false;
 uint16_t Config::mouse_sens = 64;        // Q8: 64 = x1/4, the historical divisor
 bool     Config::psram_enabled = true;   // Debug > PSRAM (runtime set(PSRAM OFF) twin)
-bool     Config::dbg_uart = false;       // Debug > UART console
+#ifndef DBG_UART_DEFAULT
+#define DBG_UART_DEFAULT 0
+#endif
+bool     Config::dbg_uart = DBG_UART_DEFAULT;   // Debug > UART console
 bool     Config::flashload = true;
 bool     Config::tape_player = false; // Tape player mode
 volatile bool Config::real_player = false;

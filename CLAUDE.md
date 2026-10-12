@@ -14562,3 +14562,37 @@ Pico DV base already uses for butter PSRAM.
   (the module also moves I2S onto the radio's `auxPio` block), the LED on GP23,
   Network → Transport defaulting to the on-chip CYW43, a WiFi join + SNTP, and
   the SD card (pio1 now carries PS/2 + SD; I2S left that block).
+
+## PCp2w — `PICO_PC_W`: the W module in an Olimex PICO-PC (2026-10-12, NOT hw-tested)
+
+`-DPICO_PC_W=ON` → `PCp2w-speccy-VGA-HDMI[-HSTX]-<ver>`, the DVp2w shape again: the
+option turns `PICO_PC` on (cmake/board.cmake) and raises `PICOSPECCY_WIFI`; tag
+`PCp2w`, butter PSRAM on GPIO47 (the module's pads, not the Pico 2's GP8). The
+PICO_PC pin arm now takes GP26/27/28 (PWM R/L, beeper/595 latch, MIDI TX — this
+carrier has no I2S, its "unsupported" mark of three equal pins is kept at 40),
+GP29 (AY clock -> 255) and the LED (-> 23) from the `W_*` variables, identity on
+the plain board (checked: plain PICO_PC defines unchanged). MIDI TX lands on
+GPIO40 = UART1 funcsel 2. Keyboard, NESPAD (GP5/9/20/21), SD, ZiFi pairs and the
+display (GPIO 12-19) do not move, so nothing PIO moves either: pio1 keyboard+pad
+at base 0, the radio alone on `auxPio()`.
+
+**HSTX works as on PICO_PC** — `display.cmake`/`memory-layout.cmake` test
+`PICO_PC`, which the W option sets, and AUTO picks TMDS; `build_all.*` builds it
+twice (`HSTX_TARGETS`). MURM2_W already proved CYW43 beside the TMDS expander:
+the expander claims no PIO, VGA_HSTX neither, RAW only pio2's address converter,
+so `auxPio()` (pio0 under HDMI, pio2 under VGA) is free in all cases. Both images
+link (RAM 161 KB, SCRATCH_X 4064-4068 B); test ELFs in `debug/PCp2w-*`.
+**First hw run (2026-10-12):** boots to `loop()`, radio up (pio0 base 16), HDMI
+running — a MONITOR shows the picture; the owner's HDMI CAPTURE CARD does not lock
+(PIO and HSTX alike). Pads are already 12 mA / fast slew, so there is no firmware
+lever; suspected margin on the module's LDO 3V3, the m1p2w 378 MHz story again.
+Found on the way: `nespad_begin` took `auxPio()` on EVERY W board, so a pad wired
+below GP32 (PCp2w GP5/9/20/21, MURM_W GP14-16 with PWM audio) sat in the radio's
+block at base 0 and cyw43 had no block to re-base. It now takes the aux block only
+when its pins reach GPIO32+ (MURM2_W), pio1 otherwise; PCp2w log: `NESPAD: pio1`.
+`-DDBG_UART_DEFAULT_ON=ON` (cmake/trace.cmake) builds a diagnostic image whose
+UART console is on from `main()` entry even on a COLD boot with no SD card (the
+plain path starts it only from Config::load or a warm-reboot tag).
+Same day, owner: **WiFi works** (on-chip CYW43 join). The Olimex PICO-PC has no
+VGA connector, so the VGA half is not applicable on this carrier.
+**Still owed**: sound (PWM 41/42), MIDI (40), LED (23), NES pad (no pad to hand).

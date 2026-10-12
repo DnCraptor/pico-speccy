@@ -1,7 +1,7 @@
 # Per-board GPIO map: every pin the firmware drives, as compile definitions.
 # The RP2350B-Plus-W overrides come first, the carrier arms read them.
 
-# ── RP2350B-Plus-W pin overrides (MURM_W / MURM2_W / PICO_DV_W) ──────────────
+# ── RP2350B-Plus-W pin overrides (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) ──
 # The module's 40-pin header is Pico-compatible for GPIO0..GPIO22, so keyboard,
 # SD, display, MIDI/WAV and audio all keep their numbers. Three things
 # move, and the carrier arms below take them from these variables:
@@ -161,19 +161,19 @@ ELSEIF(PICO_PC)
         LOAD_WAV_PIO=5 # UXT1-10
 
         CLK_AY_PIN1=21 # not in use
-        LATCH_595_PIN=26
-        CLK_595_PIN=27
-        DATA_595_PIN=28
-        CLK_AY_PIN2=29
+        LATCH_595_PIN=${W_HDR26}
+        CLK_595_PIN=${W_HDR27}
+        DATA_595_PIN=${W_HDR28}
+        CLK_AY_PIN2=${W_AY_CLK2}
 
-        I2S_DATA_PIO=26 # not implemented
-        I2S_BCK_PIO=26  # I2S_BCK_PIO == I2S_LCK_PIO == I2S_DATA_PIO - unsupported mark
-        I2S_LCK_PIO=26
+        I2S_DATA_PIO=${W_HDR26} # not implemented
+        I2S_BCK_PIO=${W_HDR26}  # I2S_BCK_PIO == I2S_LCK_PIO == I2S_DATA_PIO - unsupported mark
+        I2S_LCK_PIO=${W_HDR26}
 
-        BEEPER_PIN=26 # not implemented
-        PWM_PIN0=27 # R
-        PWM_PIN1=28 # L
-        MIDI_TX_PIN=26
+        BEEPER_PIN=${W_HDR26} # not implemented
+        PWM_PIN0=${W_HDR27} # R
+        PWM_PIN1=${W_HDR28} # L
+        MIDI_TX_PIN=${W_HDR26}
 
         # SDCARD
         SDCARD_PIN_SPI0_MISO=4
@@ -204,7 +204,7 @@ ELSEIF(PICO_PC)
         HDMI_BASE_PIN=12
 
         DEFAULT_THROTTLING=0
-        PICO_DEFAULT_LED_PIN=25
+        PICO_DEFAULT_LED_PIN=${W_LED_PIN}
     )
 ELSEIF(PICO_DV)
     target_compile_definitions(${PROJECT_NAME} PRIVATE

@@ -2774,8 +2774,9 @@ void graphics_init_hdmi() {
     dma_chan_pal_conv = dma_claim_unused_channel(true);
 #endif
     // (The command expander build claims no PIO at all: the line ISR writes pixel
-    // words itself. BoardPins::auxPio() still assumes HDMI owns pio2 — untrue here,
-    // harmless on PCp2, which has no W-board peripheral asking it.)
+    // words itself. BoardPins::auxPio() still assumes HDMI owns pio2 — untrue here
+    // and harmless: under HDMI it answers pio0, which the W boards' radio (MURM2_W,
+    // PCp2w) then has to itself; pio2 simply stays empty.)
 
     // Palette is initialized centrally by Video.cpp Init()
     hdmi_init();

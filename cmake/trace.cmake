@@ -50,3 +50,8 @@ option(ZIFI_TRACE "Enable ZiFi (ESP-01S WiFi NIC) port/UART tracing" OFF)
 option(HID_TRACE "Enable the periodic 'HID kbd:' USB-keyboard health line (stuck-key / dead-endpoint diagnosis)" OFF)
 option(FT812_TRACE "TS-Conf VDAC2: [FT812] host/coprocessor/render/SD/GS counter lines every 60 frames (ZUMA loading-speed diagnosis)" OFF)
 option(ZIFI_NET_VERBOSE "Per-packet trace of the ZiFi net client (+IPD/chanSend); floods logs" OFF)
+
+# Debug > UART console ON from the first boot (Config default; NVS still wins once
+# saved). For diagnostic images on boards where the menu cannot be reached, e.g.
+# no picture. The board's DBG_UART_TX_PIN is where the log comes out.
+option(DBG_UART_DEFAULT_ON "Debug UART console enabled by default" OFF)

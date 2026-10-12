@@ -77,6 +77,9 @@ static const UartPair ZIFI_PAIRS[] = {
                                 // on QFN-60/A silicon by pinOnPackage(); see below)
 };
 #elif defined(PICO_PC)
+// Olimex PICO-PC — and PICO_PC_W (PCp2w) with the Waveshare RP2350B-Plus-W: every
+// pair here is a Pico-compatible header position below GP23, so the module moves
+// none of them and the two boards share the table.
 static const UartPair ZIFI_PAIRS[] = {
     {20, 21, "off: NESPAD"},    // UART1
     {2, 3, "QWST1"},            // UART0 (free)

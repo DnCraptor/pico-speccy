@@ -1,4 +1,4 @@
-# On-chip WiFi (MURM_W / MURM2_W / PICO_DV_W) and the W boards' PIO block assignment.
+# On-chip WiFi (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) and the W boards' PIO block assignment.
 
 # On-chip WiFi (MURM_W / MURM2_W / PICO_DV_W: Raspberry Pi Radio Module 2 = CYW43439).
 # This replaces a hook that had been dormant since it was written: it keyed off
@@ -42,6 +42,11 @@ endif()
 if (PICO_DV_W)
     target_compile_definitions(${PROJECT_NAME} PRIVATE PICO_DV_W=1)
 endif()
+# Fourth carrier: the Olimex PICO-PC. Same story — the PICO_PC arm carries the
+# module's pin moves, this macro only labels the image.
+if (PICO_PC_W)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE PICO_PC_W=1)
+endif()
 
 # PIO block assignment on the W boards. An RP2350 PIO reaches 32 CONSECUTIVE
 # GPIOs from its gpio_base (0 or 16), and the radio sits above GPIO31 — so CYW43
@@ -62,6 +67,13 @@ endif()
 #              thing unique to a Pico DV base — the SD card (SDCARD_PIO=pio1).
 #              pio0: CYW43 (5-7) + I2S (9, or 17 for CS4334)   = 14..24 / 32
 #              pio1: PS/2 (7) + SD SPI (4)                     = 11 / 32
+#   PICO_PC_W — nothing PIO moves: the audio block that goes to GPIO40/41/42 is
+#              PWM / beeper / MIDI UART (this carrier has no I2S), the pad (GP5/9/
+#              20/21) and keyboard stay on pio1 at base 0. pio0 (or pio2 under
+#              VGA) holds the radio alone. With HSTX — the AUTO default here, as
+#              on PICO_PC/MURM2_W — the display claims NO PIO at all (TMDS
+#              expander; VGA on HSTX likewise), and RAW keeps only the address
+#              converter on pio2, so auxPio's pick stays free in every case.
 #
 # pio2 keeps HDMI (18 / 32) on all three. cyw43_arch_init() must therefore run
 # AFTER graphics_init() and the keyboard have fixed their blocks at base 0, or the

@@ -57,7 +57,7 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - HDMI clock drive setting (Video → HDMI → Clock drive): Normal (12 mA, fast edge) or Soft (8 mA, slow edge, less crosstalk on marginal receivers), switchable at runtime (RP2350 only).
 - Capture card compatibility (Video → Capture card compatibility): snaps every palette entry to a level whose doubled HDMI pixel is a single TMDS symbol, so runtime palettes (TS-Conf CRAM, ULA+, Gigascreen blends) come through a USB HDMI grabber without the alternating-column artefact — invisible on a monitor (RP2350 only).
 - HDMI audio output (RP2350 only).
-- HSTX video back-end on boards with the display on GPIO 12-19 (PICO_PC, MURM2, MURM2_W): HDMI through the RP2350's HSTX serializer and its hardware TMDS encoder instead of PIO (a third of the video DMA, no PIO used, 240 palette slots for TS-Conf 256c), and VGA through the same serializer with per-pixel PWM colour. Shipped as a separate `-HSTX` image for those boards (their plain image uses the PIO path).
+- HSTX video back-end on boards with the display on GPIO 12-19 (PICO_PC, PICO_PC_W, MURM2, MURM2_W): HDMI through the RP2350's HSTX serializer and its hardware TMDS encoder instead of PIO (a third of the video DMA, no PIO used, 240 palette slots for TS-Conf 256c), and VGA through the same serializer with per-pixel PWM colour. Shipped as a separate `-HSTX` image for those boards (their plain image uses the PIO path).
 - TV-composite video out.
 - PCM5122 I2S audio DAC support (Waveshare PiZero boards - https://www.waveshare.com/wiki/PCM5122-Audio-Board-A).
 - Multicolor attribute effects emulated (Bifrost*2, Nirvana and Nirvana+ engines).
@@ -100,7 +100,7 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - esxDOS support (DivMMC, DivIDE, DivSD); DivIDE mounts HDF, Fixed VHD and raw HDD/IMG images in both hd0/hd1 slots (dynamic/differencing VHD is not supported) — [esxdos.org](https://esxdos.org/index.html).
 - Z-Controller emulation: raw SD card access via ports #57/#77, mutually exclusive with esxDOS and MB-02+ (RP2350 only).
 - FDD activity LED indicator and mechanical head click/seek sound emulation (optional, toggled via Betadisk menu).
-- ZiFi WiFi network interface via an ESP-01S module (stock Espressif AT firmware — no reflash) or, on the Waveshare RP2350B-Plus-W (MURM_W / MURM2_W / PICO_DV_W), the module's on-chip CYW43439 radio (Network → Transport → On-chip WiFi, lwIP on the RP2350): network access for ZX-Spectrum software (e.g. the MRF terminal) through the ZIFI-API FIFO, the 16550 UART window and the ZX-Uno UART window (#FC3B/#FD3B, as used by BridgeZX and the Karabas-Pro net tools), plus an MC146818 RTC (Pentagon "Mr Gluk" TimeKeeper) with SNTP time sync over WiFi; WiFi connect and time sync show the live ESP AT dialog in a scrollable log. The NIC also works with WiFi switched off, as a plain 115200 8N1 serial port the guest owns end to end (an Arduino or any other device on the 16550 window), and Network → Sync at boot turns the boot-time SNTP exchange off so nothing but the join is ever sent on that line (RP2350 only).
+- ZiFi WiFi network interface via an ESP-01S module (stock Espressif AT firmware — no reflash) or, on the Waveshare RP2350B-Plus-W (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W), the module's on-chip CYW43439 radio (Network → Transport → On-chip WiFi, lwIP on the RP2350): network access for ZX-Spectrum software (e.g. the MRF terminal) through the ZIFI-API FIFO, the 16550 UART window and the ZX-Uno UART window (#FC3B/#FD3B, as used by BridgeZX and the Karabas-Pro net tools), plus an MC146818 RTC (Pentagon "Mr Gluk" TimeKeeper) with SNTP time sync over WiFi; WiFi connect and time sync show the live ESP AT dialog in a scrollable log. The NIC also works with WiFi switched off, as a plain 115200 8N1 serial port the guest owns end to end (an Arduino or any other device on the 16550 window), and Network → Sync at boot turns the boot-time SNTP exchange off so nothing but the join is ever sent on that line (RP2350 only).
 - Unified F5 file browser with a location chooser (RP2350, when WiFi is configured): **Local (SD)**, **Remote (FTP/SFTP)**, **Web Archives** and **Add Remote** — all rendered in the same "Open File" window. **Enter** quick-starts a file (downloads to RAM and runs/mounts), **F5** saves it to a chosen SD folder; `..`/Backspace go up a level, Esc closes. Per-source listing cache (with manual F2 refresh) and remembered cursor/last location.
 - Network file transfer (FTP / SFTP / SSH client): saved connections with optional alias and start path (passwords optionally stored, masked entry; TAB reveals); browse / download / upload / copy (recursive) / delete; SSH/SFTP crypto (curve25519, AES-CTR, HMAC-SHA256) runs on the RP2350 via mbedTLS; SFTP host-key trust-on-first-use; selectable ESP-01S UART baud up to 921600. See the [Network wiki page](https://github.com/drewpo28/pico-speccy/wiki/EN-Network).
 - Web Archives: browse and download ZX disk/tape images, ALF cartridges and VGM music packs from online catalogs (Virtual TR-DOS, Spectrum Computing, ZX-Art, ALF, VGMRips) over HTTPS straight to SD or RAM; downloaded .vgz tracks are unpacked to .vgm in place, ready for the VGM player plugin. Serverless GitHub-Pages catalog, on-device TLS, Cyrillic titles rendered (RP2350 only).
@@ -263,7 +263,7 @@ GND          ──────────── GND (e.g. pin 6)
 
 ## Network (ZiFi / ESP-01S)
 
-On RP2350 boards, an **ESP-01S** (ESP8266) module on the UART adds networking. It runs the **stock Espressif AT firmware** — no reflashing needed. On the Waveshare RP2350B-Plus-W (MURM_W / MURM2_W / PICO_DV_W builds) the module's own **CYW43439** radio can be used instead — pick **On-chip WiFi (CYW43)** under Network → Transport; the TCP/IP stack then runs on the RP2350 and no ESP module is required. Configured under the OSD **Network** menu:
+On RP2350 boards, an **ESP-01S** (ESP8266) module on the UART adds networking. It runs the **stock Espressif AT firmware** — no reflashing needed. On the Waveshare RP2350B-Plus-W (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W builds) the module's own **CYW43439** radio can be used instead — pick **On-chip WiFi (CYW43)** under Network → Transport; the TCP/IP stack then runs on the RP2350 and no ESP module is required. Configured under the OSD **Network** menu:
 
 - **ZiFi NIC** — network interface for ZX-Spectrum software (port `#EF`, 16550-UART window); works with the **MRF** terminal/drivers (<https://zxart.ee/eng/software/prikladnoe-po/mrf/tabs:releases/>).
 - **WiFi** — scan / connect / autoconnect, with the live ESP AT dialog shown in a scrollable log pane; **SNTP** time sync into the RTC (same live log).
@@ -317,6 +317,7 @@ Your filesystem tree must be look like:
 | `-DMURM_W=ON` | Build for Murmulator 1.x + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi). Same carrier as `-DMURM=ON`; the module moves audio to GPIO40/41/42, the LED to GPIO23 and PSRAM to GPIO47, and the carrier's PIO SPI PSRAM is dropped so the radio fits on pio0. |
 | `-DMURM2_W=ON` | Build for Murmulator 2.0 + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi). Same carrier as `-DMURM2=ON`; audio is unchanged, the gamepad data pins move to GPIO40/41, the LED to GPIO23 and PSRAM to GPIO47. |
 | `-DPICO_DV_W=ON` | Build for Pimoroni Pico DV Demo Base + Waveshare RP2350B-Plus-W (DVp2w, on-chip CYW43439 WiFi). Same carrier as `-DPICO_DV=ON`; the module moves audio to GPIO40/41/42 and the LED to GPIO23, and brings the radio up on the PIO block the display is not using (pio0 under HDMI, pio2 under VGA). 16 MB flash, PSRAM pads on GPIO47 — the pin the base already uses for butter PSRAM. |
+| `-DPICO_PC_W=ON` | Build for Olimex PICO-PC + Waveshare RP2350B-Plus-W (PCp2w, on-chip CYW43439 WiFi). Same carrier as `-DPICO_PC=ON`, including the HSTX back-end (`-DHDMI_HSTX`); the module moves the PWM audio / beeper / MIDI TX to GPIO40/41/42 and the LED to GPIO23, PSRAM pads on GPIO47, 16 MB flash. |
 | `-DZERO2_PIO_USB=ON` | ZERO2: USB host on the second Type-C port (J2, PIO-USB on GP28/GP29). **Default OFF** — the bit-banged host costs ~18 KB of SRAM (RAM-resident code + endpoint pool), so it ships as a separate `z0p2-speccy-VGA-HDMI-PIOUSB-*.uf2` image instead. |
 | `-DVGA_HDMI=ON` | VGA/HDMI output (default) |
 | `-DSOFTTV=ON` | Software composite TV output |
@@ -324,7 +325,7 @@ Your filesystem tree must be look like:
 | `-DTFT=ON` | TFT display output |
 | `-DILI9341=ON` | ILI9341 TFT display output |
 | `-DHDMI_TMDS_LEVEL_CLAMP=OFF` | HDMI: disable the channel-level clamp to [0x08..0xF6] (on by default; costs ~3% black / ~4% white, improves link stability on marginal receivers). |
-| `-DHDMI_HSTX=AUTO` | HDMI/VGA back-end for boards with the display on GPIO 12-19 (PICO_PC, MURM2, MURM2_W): `TMDS` = HSTX serializer + hardware TMDS encoder, `RAW` (or `ON`) = HSTX serializer with PIO-built TMDS symbols, `OFF` = PIO. `AUTO` (default) picks TMDS on PICO_PC/MURM2 and PIO elsewhere. |
+| `-DHDMI_HSTX=AUTO` | HDMI/VGA back-end for boards with the display on GPIO 12-19 (PICO_PC, PICO_PC_W, MURM2, MURM2_W): `TMDS` = HSTX serializer + hardware TMDS encoder, `RAW` (or `ON`) = HSTX serializer with PIO-built TMDS symbols, `OFF` = PIO. `AUTO` (default) picks TMDS on PICO_PC/PICO_PC_W/MURM2/MURM2_W and PIO elsewhere. |
 | `-DHDMI_SOFT_CLK=ON` | HDMI: build DEFAULT for Video → HDMI → Clock drive — ON = Soft (8 mA + slow slew), OFF (default) = Normal (12 mA + fast slew). The user's menu setting overrides it. |
 | `-DTFT_ST7789=ON` | ST7789 TFT display variant |
 
@@ -346,9 +347,9 @@ To build firmware for all supported boards and display variants at once, use the
 ./build_all.sh [--clean] [-j JOBS_PER_BUILD] [-p MAX_PARALLEL] [TARGETS...]
 ```
 
-- Targets: `MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W` (default: all)
+- Targets: `MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W` (default: all)
 - ZERO2 builds twice: the plain image and a `PIOUSB` one (`-DZERO2_PIO_USB=ON`, USB host on the second Type-C)
-- PICO_PC, MURM2 and MURM2_W build twice: the plain image (PIO HDMI, `-DHDMI_HSTX=OFF`) and an `HSTX` one (`-DHDMI_HSTX=TMDS`, `...-VGA-HDMI-HSTX-*.uf2`)
+- PICO_PC, PICO_PC_W, MURM2 and MURM2_W build twice: the plain image (PIO HDMI, `-DHDMI_HSTX=OFF`) and an `HSTX` one (`-DHDMI_HSTX=TMDS`, `...-VGA-HDMI-HSTX-*.uf2`)
 - `--clean` — wipe build dirs first (default: incremental rebuild)
 - `-j` — threads per target build (default: `nproc / MAX_PARALLEL`)
 - `-p` — max number of targets built concurrently (default: 3)

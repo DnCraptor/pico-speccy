@@ -1841,7 +1841,14 @@ int main() {
     // tag (and no Config yet); its console starts in ESPectrum::setup. The UART
     // divider goes stale after set_sys_clock; Debug::uartReclock() below fixes it,
     // so no prints in between.
+    // A -DDBG_UART_DEFAULT_ON=ON image starts it on a COLD boot too: it exists for
+    // boards with no picture (no menu) and possibly no SD card (no Config::load,
+    // so board_dbg_uart_apply never runs).
+#if defined(DBG_UART_DEFAULT) && DBG_UART_DEFAULT
+    if (BoardPins::dbgUartInstance() >= 0)
+#else
     if (Debug::uartBootWanted() && BoardPins::dbgUartInstance() >= 0)
+#endif
         Debug::uartStart((unsigned)BoardPins::dbgUartInstance(), BoardPins::dbgUartTxPin());
     Debug::log("main: entry, wd_reboot=%d", (int)watchdog_caused_reboot());
     // Decode WHY the chip reset (hw-traced 2026-07-21: "wd_reboot=0 mid-ZIP-extract"
@@ -2015,7 +2022,7 @@ int main() {
         }
     }
 #endif
-    // NOTE: the on-chip radio (MURM_W / MURM2_W / PICO_DV_W) is NOT brought up
+    // NOTE: the on-chip radio (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) is NOT brought up
     // here — see the WifiNet::init() call after multicore_launch_core1() below,
     // and why.
     #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
@@ -2173,7 +2180,7 @@ int main() {
     Debug::log2SD("main: applyPalette done");
 #endif
 #if PICOSPECCY_WIFI
-    // On-chip radio (MURM_W / MURM2_W / PICO_DV_W) — brought up HERE and nowhere
+    // On-chip radio (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) — brought up HERE and nowhere
     // earlier, for two reasons that both bit on hardware (2026-09-06: LED
     // blinked, no picture):
     //
@@ -2193,7 +2200,12 @@ int main() {
     // without a radio and the log says why.
     Debug::log2SD("main: waiting for graphics_init_done (WiFi)");
     sem_acquire_blocking(&graphics_init_done_semaphore);
-    WifiNet::init();
+    {
+        extern bool SELECT_VGA;
+        const bool wok = WifiNet::init();
+        Debug::log2SD("main: WifiNet::init -> %d (SELECT_VGA=%d linkVGA01=%02X)",
+                      (int)wok, (int)SELECT_VGA, (unsigned)linkVGA01);
+    }
     #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
     // LED1 lives on the radio module's own GPIO0, so it only blinks once the bus
     // is really up — a one-glance "the radio answered" indicator that needs no

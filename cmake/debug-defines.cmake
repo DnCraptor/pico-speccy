@@ -286,3 +286,7 @@ if (HID_TRACE)
 else ()
     target_compile_definitions(${PROJECT_NAME} PRIVATE HID_TRACE=0)
 endif ()
+
+if(DBG_UART_DEFAULT_ON)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DBG_UART_DEFAULT=1)
+endif()
