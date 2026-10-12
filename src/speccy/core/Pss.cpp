@@ -123,6 +123,20 @@ static void writeAy(W& w, const AySound& c) {
     for (uint8_t i = 0; i < 16; i++) w.u8(c.reg(i));
 }
 
+// PSBD: u8 ver, u8 unit (0 Beta, 1 MB-02), u8 drive, u8 side, u8 track, u8 sector,
+// u8 data, u8 status, u8 sys (b0 HLT/test, b1 MFM), then 4 x u8 head cylinder
+// (#FF = no disk in that drive).
+static const uint8_t PSBD_VER = 1;
+static void writeFdc(W& w, uint8_t unit, const rvmWD1793& fd) {
+    w.begin("PSBD");
+    w.u8(PSBD_VER); w.u8(unit);
+    w.u8(fd.diskS); w.u8(fd.side); w.u8(fd.track); w.u8(fd.sector); w.u8(fd.data);
+    w.u8((uint8_t)fd.status);
+    w.u8(((fd.control & kRVMWD177XTest) ? 1 : 0) | ((fd.control & kRVMWD177XDDEN) ? 2 : 0));
+    for (int i = 0; i < 4; i++) w.u8(fd.disk[i] ? (uint8_t)fd.disk[i]->t : 0xFF);
+    w.end();
+}
+
 bool save(const string& path, const string& name) {
     if (!supported() || !FileUtils::fsMount) return false;
     const string tmp = path + ".tmp";
@@ -195,6 +209,14 @@ bool save(const string& path, const string& name) {
         w.u8(ESPectrum::multiplicator);
         w.end();
     }
+
+    // PSBD — the WD1793's registers and every drive's physical head position.
+    // TR-DOS positions the head by a SEEK RELATIVE TO THE TRACK REGISTER (ROM
+    // #3E63: IN A,(#3F) / SEEK), so after a load the register and the head must
+    // agree again — the machine reset leaves TR = #FF, and a game that calls
+    // #3D13 without its own RESTORE (UFO2 PHF) read the wrong tracks.
+    writeFdc(w, 0, ESPectrum::fdd);
+    if (Config::mb02) writeFdc(w, 1, ESPectrum::mb02_fdd);
 
     w.begin("AY\0\0"); w.u8(0); writeAy(w, chip0); w.end();
     if (chip1 || AySound::selected_chip || AySound::ts_fm_enabled || AySound::ts_status_read) {
@@ -304,6 +326,29 @@ static void readAy(R& r, AyState& a) {
     a.have = true;
     a.sel = r.u8();
     r.raw(a.regs, 16);
+}
+
+// Puts a WD1793 back as PSBD recorded it. The reset before the load has already
+// idled the state machine; only registers and head positions come back.
+static void applyFdc(rvmWD1793& fd, const uint8_t* b) {   // b = PSBD after ver/unit
+    if (b[0] < 4) fd.diskS = b[0];
+    fd.side = b[1]; fd.track = b[2]; fd.sector = b[3]; fd.data = b[4];
+    fd.status = b[5] & ~(kRVMWD177XStatusBusy | 0x02);   // no command in flight
+    fd.control = (fd.control & ~(kRVMWD177XTest | kRVMWD177XDDEN))
+               | ((b[6] & 1) ? kRVMWD177XTest : 0) | ((b[6] & 2) ? kRVMWD177XDDEN : 0);
+    for (int i = 0; i < 4; i++) {
+        rvmwdDisk* d = fd.disk[i];
+        if (!d || b[7 + i] == 0xFF) continue;
+        d->t = b[7 + i] < d->tracks ? b[7 + i] : (d->tracks ? d->tracks - 1 : 0);
+        d->s = d->t ? 0 : kRVMwdDiskOutTrack0;
+    }
+    rvmWD1793UpdateFastmode(&fd);
+}
+
+// A file from before PSBD: the reset left TR = #FF while the head stayed put, and
+// TR-DOS seeks relative to TR — make them agree, so a SEEK lands where it aims.
+static void syncFdcTrack(rvmWD1793& fd) {
+    if (fd.disk[fd.diskS]) fd.track = (uint8_t)fd.disk[fd.diskS]->t;
 }
 
 static void applyAy(AySound& c, int chipNo, const AyState& a) {
@@ -741,6 +786,7 @@ bool load(const string& path) {
     bool haveDmmc = false; uint8_t dmmcCtl = 0; bool dmmcPaged = false;
     bool haveAlf = false; uint8_t alfSel = 0, alfBit = 0;
     JoyProf::Profile joyOffer; bool joyMissing = false;
+    uint8_t bd[2][11] = {}; bool haveBd[2] = {};
 
     while (r.ok && r.next(id, sz, at)) {
         if (idIs(id, "Z80R") && sz >= sizeof(z)) { r.raw(z, sizeof(z)); haveZ80 = true; }
@@ -755,6 +801,12 @@ bool load(const string& path) {
         else if (idIs(id, "SCLD") && sz >= 2) { r.raw(scld, 2); haveScld = true; }
         else if (idIs(id, "PLTT") && sz >= 66) { r.raw(pltt, sz < sizeof(pltt) ? sz : sizeof(pltt)); havePltt = true; }
         else if (idIs(id, "COVX") && sz >= 1)  { covx = r.u8(); haveCovx = true; }
+        else if (idIs(id, "PSBD") && sz >= 13) {
+            if (r.u8() >= 1) {
+                const uint8_t unit = r.u8();
+                if (unit < 2) { r.raw(bd[unit], 11); haveBd[unit] = r.ok; }
+            }
+        }
         else if (idIs(id, "JOY "))             { joyMissing = applyJoy(r, sz, joyOffer); }
         else if (idIs(id, "PSPG") && sz >= 3)  { r.u16(); fileSparse = r.u8() != 0; }
         else if (idIs(id, "PSPF") && sz >= 3) {
@@ -860,6 +912,12 @@ bool load(const string& path) {
         VIDEO::timex_int_inhibit = Config::isTc2068() && (dec & 0x40);
         VIDEO::timexHiresRequest(VIDEO::timex_mode == 6);
         if (Config::isTc2068()) { Timex::decWrite(dec); Timex::writeHsr(scld[0]); }
+    }
+
+    // Disk controllers: registers and head positions (after applyLiveMedia + reset).
+    if (haveBd[0]) applyFdc(ESPectrum::fdd, bd[0]); else syncFdcTrack(ESPectrum::fdd);
+    if (Config::mb02) {
+        if (haveBd[1]) applyFdc(ESPectrum::mb02_fdd, bd[1]); else syncFdcTrack(ESPectrum::mb02_fdd);
     }
 
     // Border, #FE.
