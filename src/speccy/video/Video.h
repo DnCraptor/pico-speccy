@@ -702,6 +702,9 @@ public:
   static void loadCustomPalettes();
   static uint8_t paletteCount();           // built-in + custom
   static const char* paletteName(uint8_t idx); // name for menu display
+  // Menu preview: writes preset idx's 16 ZX colours into slots base..base+15.
+  static void palettePreview(uint8_t idx, uint8_t base);
+  static uint8_t paletteGen;               // bumped by every applyPalette()
 };
 
 #define zxColor(color,bright) VIDEO::spectrum_colors[bright ? color + 8 : color]

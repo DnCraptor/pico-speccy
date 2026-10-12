@@ -7,6 +7,7 @@
 
 #include "UiGfx.h"
 #include "UiFont.h"
+#include "UiRender.h"
 #include "OSDMain.h"
 #include "speccy/video/Video.h"
 #include "app/Config.h"     // ui_vga_solid / ui_rounded — the menu-look preferences
@@ -260,6 +261,7 @@ int             uiPaletteBase() { return UI_PAL_BASE; }
 uint8_t         uiPaletteSlot(UiColor c) { return palByte(c); }
 
 void gfxEnd() {
+    palPreviewEnd(false);            // Video > Palette swatches: hand the slots back
     VIDEO::restoreUiDS80Palette();   // latch-driven, see gfxSuspendPalette()
     // Standard mode: nothing to undo. 224..239 belong to the UI; the next
     // VIDEO::applyPalette() (palette change / reset) rewrites them from the G3R3B2
@@ -318,6 +320,19 @@ void fill(int x, int y, int w, int h, UiColor c) {
     if (y < 0) { h += y; y = 0; }
     if (y + h > Sf.h) h = Sf.h - y;
     for (int i = 0; i < h; i++) hline(x, y + i, w, c);
+}
+
+void fillSlot(int x, int y, int w, int h, uint8_t slot) {
+    if (Sf.ds80) return;
+    if (x < 0) { w += x; x = 0; }
+    if (x + w > Sf.w) w = Sf.w - x;
+    if (y < 0) { h += y; y = 0; }
+    if (y + h > Sf.h) h = Sf.h - y;
+    for (int j = 0; j < h; j++) {
+        uint8_t* row = fbRow(y + j);
+        if (!row) continue;
+        for (int i = 0; i < w; i++) row[(Sf.fbx + x + i) ^ 2] = slot;
+    }
 }
 
 void frame(int x, int y, int w, int h, UiColor c) {

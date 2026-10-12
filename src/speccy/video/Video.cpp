@@ -2102,8 +2102,11 @@ void VIDEO::mode16colUpdatePlanes() {
 // then apply color matrix to all palette entries.
 static void tsPalette256Flush(bool invalidate);   // TS-Conf 256-slot remap (defined below)
 
+uint8_t VIDEO::paletteGen = 0;
+
 void VIDEO::applyPalette() {
     tsRenderDrain();   // rewrites slots the core1 line queue maps into
+    paletteGen++;      // the menu's palette preview re-programs its slots on a change
     uint8_t p = Config::palette < total_palette_count() ? Config::palette : 0;
     Debug::log2SD("applyPalette: palette=%d", p);
     // Rebuild base 16 colors from brightness levels
@@ -2153,6 +2156,25 @@ void VIDEO::applyPalette() {
                    " (pal256=%d uiOwned=%d live0=%06lX)",
                    (int)ts_pal256_live, (int)profi_palette_ui_saved_valid,
                    (unsigned long)profi_palette_live[0]);
+    }
+}
+
+// The 16 ZX colours of palette preset `idx`, as they WOULD look (the preset's own
+// matrix, then the live CRT filter and capture-safe snap), written into the 16
+// hardware slots base..base+15. For the menu's preview swatches: the slots are
+// taken back by the next applyPalette(). Standard (non-pair) framebuffer only.
+void VIDEO::palettePreview(uint8_t idx, uint8_t base) {
+    const PaletteDef& d = getPaletteDef(idx < total_palette_count() ? idx : 0);
+    uint32_t rgb[16];
+    buildSpectrumRGB(d, rgb);
+    const uint16_t* m = d.matrix;
+    const bool ident = m[0] == 0x100 && m[4] == 0x100 && m[8] == 0x100 &&
+                       !m[1] && !m[2] && !m[3] && !m[5] && !m[6] && !m[7];
+    for (int i = 0; i < 16; i++) {
+        uint32_t c = ident ? rgb[i] : matrixTransform(rgb[i], m);
+        c = snapTransform(crtTransform(c));
+        graphics_set_palette((uint8_t)(base + i), c);
+        vga_set_palette_entry_solid((uint8_t)(base + i), c);
     }
 }
 
