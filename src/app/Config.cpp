@@ -86,6 +86,7 @@ bool     Config::tsconf_vdac2 = false;
 bool     Config::tsconf_vdac2_smooth = false;
 bool     Config::tsconf_vdac2_adapt = true;
 bool     Config::rtc_enabled = false;
+bool     Config::mouse_swap = true;  // Kempston original: D0 = right, D1 = left
 uint16_t Config::mouse_sens = 64;        // Q8: 64 = x1/4, the historical divisor
 bool     Config::psram_enabled = true;   // Debug > PSRAM (runtime set(PSRAM OFF) twin)
 #ifndef DBG_UART_DEFAULT
@@ -1321,6 +1322,7 @@ void Config::load() {
         nvs_get_b("Issue2", Issue2, sts);
         nvs_get_b("rtc_enabled", rtc_enabled, sts);
         nvs_get_u16("mouse_sens", mouse_sens, sts);
+        nvs_get_b("mouse_swap", mouse_swap, sts);
         if (mouse_sens < 8 || mouse_sens > 1024) mouse_sens = 64;   // a stale/foreign NVS value
         nvs_get_b("psram_enabled", psram_enabled, sts);
         nvs_get_b("dbg_uart", dbg_uart, sts);
@@ -1805,6 +1807,7 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_str(buf,"Issue2", Issue2 ? "true" : "false");
     nvs_set_str(buf,"rtc_enabled", rtc_enabled ? "true" : "false");
     nvs_set_i(buf,"mouse_sens", mouse_sens);
+    nvs_set_str(buf,"mouse_swap", mouse_swap ? "true" : "false");
     nvs_set_str(buf,"psram_enabled", psram_enabled ? "true" : "false");
     nvs_set_str(buf,"dbg_uart", dbg_uart ? "true" : "false");
     nvs_set_str(buf,"debug_log", Debug::log_enabled ? "true" : "false");

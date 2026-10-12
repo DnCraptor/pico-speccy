@@ -1140,6 +1140,7 @@ static int32_t mouse_frac_x = 0, mouse_frac_y = 0;
 static void mouse_apply(bool bl, bool br, bool bm, int32_t dx, int32_t dy, int32_t wheel)
 {
     ESPectrum::mouseSeen = true;
+    if (Config::mouse_swap) { const bool t = bl; bl = br; br = t; }   // Devices > Mouse > Swap buttons
     ESPectrum::mouseButtonL = bl;
     ESPectrum::mouseButtonR = br;
     ESPectrum::mouseButtonM = bm;

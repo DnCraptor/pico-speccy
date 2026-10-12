@@ -1918,6 +1918,22 @@ was silently doing all the work.
   offsets, or **`wheel: none (boot mouse)`** — that line is the one-glance answer to
   "why does the wheel do nothing" (`proto=boot` there means the SET_PROTOCOL did not
   take), and `foreign rpts` counts what the drop rule discarded.
+### Devices > Mouse: Swap buttons + Sensitivity (2026-10-12, NOT hw-tested)
+
+The row is a submenu `kMouse` (UiTree.cpp). **Swap buttons** (`Config::mouse_swap`, NVS
+`mouse_swap`, `SET_MOUSE_SWAP` AC_PURE, default off) exchanges L/R in `mouse_apply()`, i.e.
+for the Kempston byte AND the Profi serial mouse, like Karabas-Pro's AVR `mouse_swap`. Why
+it exists: the original Kempston interface (k1.spdns.de schematic + its driver `2 = left,
+1 = right`), Karabas-Pro RTL, ZEsarUX and the Next put the RIGHT button on D0 — our default —
+while UnrealSpeccy and software tested on it (Port Demonstration 3.2, Slava Strunov 2025:
+bit 0 lights the left button) use D0 = LEFT. Do not "fix" the default.
+Same day: the non-Profi decode follows the original's HIGH byte (k1.spdns.de: "decodes
+A5, A8, A9 and A10") — X = A10..A8 011, Y = 111, buttons A9=1 A8=0 with A10 free. It was
+`(addr & 0x05FF)` (A9 ignored, A10=0 for buttons): #FEDF now reads buttons, #F8DF/#F9DF/
+#00DF no longer do. The low byte stays the full #DF (the original decodes A5 alone, which
+would steal Kempston-joystick and Beta reads here). Z-Player 5.1 reads only #FADF/#FBDF/
+#FFDF and uses bits 4-7 as a counter (delta vs last read), bit 2 = middle — our model.
+
 ### Mouse sensitivity, and the truncation that made a slow hand drift (2026-09-15, NOT hw-tested)
 
 **Devices > "Mouse sensitivity"** — `Config::mouse_sens` (NVS `mouse_sens`,

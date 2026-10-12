@@ -196,7 +196,9 @@
 // files (swap, .idx) are deliberately not indicated. Not an on-screen indicator.
 #define TXT_HW_SDLED        "Board LED on SD access"
 #define TXT_HW_RTC          "CMOS + NVRAM"
-#define TXT_HW_MOUSE_SENS   "Mouse sensitivity"
+#define TXT_HW_MOUSE        "Mouse"
+#define TXT_HW_MOUSE_SENS   "Sensitivity"
+#define TXT_HW_MOUSE_SWAP   "Swap buttons"
 #define TXT_HW_OVERCLOCK    "Overclock"
 
 // ── Joystick ───────────────────────────────────────────────────────────────────

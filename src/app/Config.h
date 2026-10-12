@@ -255,6 +255,7 @@ public:
     // what the divisor in mouse_apply() always was, so it is the default. The serial
     // (COM) mouse has its own scaling at packet-build time and is not affected.
     static uint16_t mouse_sens;
+    static bool     mouse_swap;     // Devices > Mouse > Swap buttons: left/right exchanged at the source
     // Debug > PSRAM. Read once at boot (ESPectrum::setup, right after load()): false
     // makes the firmware behave as if the board had no PSRAM — the runtime twin of the
     // CMake set(PSRAM OFF) kill-switch. See board_psram_disable() in main.cpp.

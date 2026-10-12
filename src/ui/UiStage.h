@@ -372,7 +372,9 @@ const char* romsetName(int32_t composite);
     /* Audio > Pico-Zx-Player > Loop count / Fade time. AC_PURE: read when a track */ \
     /* opens, so an edit applies from the next track played.                      */ \
     X(SET_PL_LOOPS,       AC_PURE,   0,                     get_plLoops,    put_plLoops,   nullptr,        -1)          \
-    X(SET_PL_FADE,        AC_PURE,   0,                     get_plFade,     put_plFade,    nullptr,        -1)
+    X(SET_PL_FADE,        AC_PURE,   0,                     get_plFade,     put_plFade,    nullptr,        -1)          \
+    /* Devices > Mouse > Swap buttons. AC_PURE: mouse_apply() reads it per report. */ \
+    X(SET_MOUSE_SWAP,     AC_PURE,   0,                     get_mouseSwap,  put_mouseSwap, nullptr,        -1)
 
 #define NM_X_ENUM(id, cls, flags, g, p, h, f) id,
 enum SettingId : uint16_t {

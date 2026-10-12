@@ -1039,6 +1039,15 @@ static const Option opt_mouse_sens[] = {
     { "x4 (fastest)",   1024, "x4"   },
 };
 
+// Devices > Mouse. Swap buttons exists because the two bit orders both live in the
+// wild: the original Kempston interface (schematic + its own driver), Karabas-Pro,
+// ZEsarUX and the Next put the RIGHT button on D0, UnrealSpeccy and software tested
+// on it (Port Demonstration 3.2) the LEFT one. Karabas-Pro's AVR has the same switch.
+static const Node kMouse[] = {
+    NM_BOOL  (TXT_HW_MOUSE_SWAP, SET_MOUSE_SWAP, nullptr),
+    NM_RADIO (TXT_HW_MOUSE_SENS, SET_MOUSE_SENS, opt_mouse_sens, nullptr),
+};
+
 // Storage and Devices used to be two top-level items, which split one question ("what is
 // this machine plugged into?") across two menus — Betadisk sat in one and the Z-Controller
 // that also drives disks in the other. Merged, storage first in the order the classic
@@ -1065,7 +1074,7 @@ static const Node kHardware[] = {
                 opt_ide_slot_hints, p_hasSD, p_ideOn),
     NM_ACTION_EN(NM_IND TXT_IDE_CREATE,  act_ideCreate, p_hasSD, p_ideOn),
     NM_BOOL  (TXT_HW_RTC,        SET_RTC,     nullptr),
-    NM_RADIO (TXT_HW_MOUSE_SENS, SET_MOUSE_SENS, opt_mouse_sens, nullptr),
+    NM_SUB   (TXT_HW_MOUSE,      kMouse,      nullptr),
 };
 
 // ── Video > TFT panel ──────────────────────────────────────────────────────────
