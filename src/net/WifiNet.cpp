@@ -98,7 +98,7 @@ bool init() {
     // block at base 16 with the display on GPIO6-13: radio up, screen dead. With
     // pio0 already at 16 the FIRST pass finds it compatible (pio1/pio2 at base 0
     // are not), so the pick is deterministic whatever else has or has not run.
-    // I2S (MURM_W) / NESPAD (MURM2_W) may have set the same base already; the
+    // I2S (MURM_W, PICO_DV_W) / NESPAD (MURM2_W) may have set the same base already; the
     // SDK refuses a re-base once a program is loaded, which is fine if it is 16.
     // "pio0" above is the HDMI case; with VGA live it is pio2 (VGA owns pio0 at
     // base 0 and HDMI is not started) — BoardPins::auxPio() is the one decision.

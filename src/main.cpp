@@ -2015,8 +2015,9 @@ int main() {
         }
     }
 #endif
-    // NOTE: the on-chip radio (MURM_W / MURM2_W) is NOT brought up here — see the
-    // WifiNet::init() call after multicore_launch_core1() below, and why.
+    // NOTE: the on-chip radio (MURM_W / MURM2_W / PICO_DV_W) is NOT brought up
+    // here — see the WifiNet::init() call after multicore_launch_core1() below,
+    // and why.
     #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
     for (int i = 0; i < 6; i++) {
         sleep_ms(33);
@@ -2172,8 +2173,9 @@ int main() {
     Debug::log2SD("main: applyPalette done");
 #endif
 #if PICOSPECCY_WIFI
-    // On-chip radio (MURM_W / MURM2_W) — brought up HERE and nowhere earlier, for
-    // two reasons that both bit on hardware (2026-09-06: LED blinked, no picture):
+    // On-chip radio (MURM_W / MURM2_W / PICO_DV_W) — brought up HERE and nowhere
+    // earlier, for two reasons that both bit on hardware (2026-09-06: LED
+    // blinked, no picture):
     //
     //  1. The SDK's pio_claim_free_sm_and_add_program_for_gpio_range() walks the
     //     blocks pio2 -> pio1 -> pio0 and, on its second pass, moves the gpio_base

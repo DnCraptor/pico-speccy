@@ -41,7 +41,7 @@ MADCTL bit names now live in `src/drivers/st7789/st7789.h` (whose declarations g
 
 ## Source tree layout
 
-```
+```raw
 src/
   main.cpp
   app/        firmware core, not emulation: ESPectrum (main loop), Config, MachineSwitch,
@@ -2137,7 +2137,7 @@ of this could be tested without hardware. Reference images in the tests are buil
 byte, never through DskImage's own writer, so a parser bug cannot hide behind a matching
 writer bug.
 
-```
+```raw
 g++ -O2 -Wall -Wextra -Isrc -o /tmp/p3e tools/plus3e_ide_test.cpp && /tmp/p3e
 g++ -O2 -Wall -Wextra -Isrc -fsanitize=address,undefined -o /tmp/dsk_test \
     tools/dsk_test.cpp src/speccy/devices/disk/DskImage.cpp && /tmp/dsk_test
@@ -11206,7 +11206,7 @@ vDOS) uses to serve mounted TRD/SCL images, and what `TRDUMP.WMF` and the
 `TsConf::fddPortIo` (called first thing by both port paths, behind a one-test
 `(addr & 0x1F) == 0x1F` filter) is `zports.v` line for line:
 
-```
+```raw
 fddvrt = fddvirt[3:0];  open_vg = fddvirt[7];  virt_vg = fddvrt[drive_sel_raw]
 vg_wen   = (dos || open_vg) && !vdos && !virt_vg          // controller selected
 vg_wrDS  = iowr && vgsys_port && (dos || open_vg)         // drive latch, NOT gated
@@ -14520,3 +14520,45 @@ speccy4ever.speccy.org/_KA.htm (`curl -sk -A Mozilla`).
   and Symbol Shift at reset; Caps Shift at reset → service (Kramis / Reset Service
   0.2d); a 1 MB memory test on KAY1024 and 2 MB on the Phoenix (UMT); turbo with Alt+F2 on and a program writing
   1FFD D2; Reset Service's Gluk clock detect with CMOS + NVRAM on and off.
+
+## DVp2w — `PICO_DV_W`: the W module in a Pico DV base (2026-10-11, NOT hw-tested)
+
+`-DPICO_DV_W=ON` → `DVp2w-speccy-<display>-<ver>`, the third carrier for the
+Waveshare RP2350B-Plus-W module (the others: `m1p2w`, `m2p2w`). Same pattern as
+`MURM_W`/`MURM2_W`: the option turns `PICO_DV` on in `cmake/board.cmake` (before
+the default-board guard) and raises `PICOSPECCY_WIFI`, so every `#if PICO_DV` arm
+keeps working unchanged — SD on `pio1` (`SDCARD_PIO`), keyboard GP14/15, the
+dedicated ZiFi header on GP0/1, display base 6, `linkVGA01 == 0x1F`, the 8 KB
+TinyUSB CDC buffers, and `dbgUartNote()`'s "off: WAV input". The W board header
+(`picospeccy_rp2350b_w.h`) is shared with the Murmulator W boards and supplies
+16 MB flash, the CYW43439 on GPIO36-39 and PSRAM pads on GPIO47 — the pin the
+Pico DV base already uses for butter PSRAM.
+
+- **Only the module's own moves are new**: audio/LATCH/PWM 26/27/28 → 40/41/42,
+  LED 25 → 23, `CLK_AY_PIN2` 29 → 255. The PICO_DV pin arm now takes those from
+  `${W_HDR26/27/28}`, `${W_LED_PIN}`, `${W_AY_CLK2}`, which are the identity on
+  the plain board — SD, PSRAM, keyboard, display, MIDI/WAV and ZiFi keep their
+  numbers, because the module is Pico-compatible for GPIO0..GPIO22.
+- **PIO blocks**: pio2 = HDMI (or the radio + I2S while VGA is live), pio0 = VGA
+  (or radio + I2S under HDMI), pio1 = PS/2 (7 instructions) + the carrier's PIO
+  SD (4) = 11/32. `BoardPins::auxPio()` needed **no change**: its `PIO_VGA=pio0`
+  / `HDMI → pio2` assumption is exactly PICO_DV's, and `graphics_init()` brings
+  up only one of the two, so the other block really is free. I2S follows the
+  module's pins — `I2S_PIO=pio0` in `cmake/wifi.cmake` (same line as MURM_W) plus
+  pwm_audio's runtime `auxPio()` whenever an I2S pin is ≥ 32.
+- `BoardPins.cpp`'s ZiFi UART list is a CARRIER property here, so the plain
+  `PICO_DV` arm covers DVp2w: GP0/1 and GP20/21 are both still header positions
+  on the module, and its radio pins (36-39) are not offered on this board.
+- Measured against DVp2 (MinSizeRel): **+288.6 KB flash, +3788 B static SRAM**
+  (CYW43 blob + lwIP + WifiNet/WifiSock); `check-release.sh` projects 44 216 B of
+  free heap at `loop()` entry, between the two Murmulator W boards. The plain
+  `PICO_DV` arm and `MURM_W`/`MURM2_W` (all three images) were rebuilt after the
+  shared CMake changes and are unchanged.
+- **`check-release.sh`'s five non-W rows had stale ELF globs** (`m1-`, `m2-`,
+  `PC-`, `DV-`, `z0-` — the pre-"no chip suffix" tags), so MURM/MURM2/PICO_PC/
+  PICO_DV/ZERO2 always reported NOT BUILT. Fixed to `m1p2`/`m2p2`/`PCp2`/`DVp2`/
+  `z0p2` in the same change; the three W rows were already right.
+- **Hw check owed** (nothing has run): a picture over HDMI and over VGA, sound
+  (the module also moves I2S onto the radio's `auxPio` block), the LED on GP23,
+  Network → Transport defaulting to the on-chip CYW43, a WiFi join + SNTP, and
+  the SD card (pio1 now carries PS/2 + SD; I2S left that block).

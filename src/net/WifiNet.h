@@ -1,7 +1,7 @@
 #pragma once
 
-// On-chip WiFi (MURM_W / MURM2_W: Raspberry Pi Radio Module 2 = CYW43439) with
-// lwIP, in poll mode.
+// On-chip WiFi (MURM_W / MURM2_W / PICO_DV_W: Raspberry Pi Radio Module 2 =
+// CYW43439) with lwIP, in poll mode.
 //
 // This is the station/SNTP half of the on-chip network transport; WifiSock is the
 // TCP half. Neither is called by the application layer directly: `ZiFiAT` and

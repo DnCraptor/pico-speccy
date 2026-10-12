@@ -58,6 +58,11 @@ static const UartPair ZIFI_PAIRS[] = {
     {40, 41, "off: audio"},     // UART1 — the only non-UART0 pair here, as on MURM1
 };
 #elif defined(PICO_DV)
+// Pimoroni Pico DV Demo Base — and PICO_DV_W (DVp2w), the same base with a
+// Waveshare RP2350B-Plus-W module: the module moves nothing this list touches
+// (GP0/1 and GP20/21 are Pico-compatible header positions, and the radio's own
+// GPIO36-39 are not offered here), so the two boards share one table. The pair
+// list is a carrier property, the pin moves are the module's.
 static const UartPair ZIFI_PAIRS[] = {
     {0, 1, ""},                 // UART0, dedicated ZiFi header
     {20, 21, "off: WAV+MIDI"},  // UART1
