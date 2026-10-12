@@ -131,6 +131,7 @@ public:
     void levels(uint8_t* out) override;
     uint32_t posMs() const override { return (uint32_t)((uint64_t)outFrames_ * 1000 / RATE); }
     uint32_t lenMs() const override { return lenMs_ ? loopedLenMs(lenMs_, lenMs_) : 0; }
+    bool hasLoop() const override { return true; }   // libxmp restarts every module
 
 private:
     int      seenLoops_ = 0;

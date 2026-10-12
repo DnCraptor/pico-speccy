@@ -48,6 +48,11 @@ public:
     // Length to show: lenMs() re-derived from the CURRENT loop count / fade for
     // decoders that measured it with loopedLenMs().
     uint32_t trackLenMs() const;
+    // Does the song loop (a loop point, or a format that always wraps)? With
+    // an infinite loop count such a track never ends, so the page's Repeat key
+    // has nothing to do. Default: the decoder measured its length with
+    // loopedLenMs(), or has already passed a loop.
+    virtual bool hasLoop() const { (void)lenMs(); return lenLooped_ || loopsSeen_ != 0; }
     // Opens and prepares the file. On failure returns false with `err` set.
     virtual bool open(const char* path) = 0;
     // Renders up to `n` stereo frames (interleaved L,R) at RATE. Returns the

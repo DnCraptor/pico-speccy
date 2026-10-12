@@ -467,6 +467,11 @@ void layout() {
 
 const char* kTitle = "PICO-ZX-PLAYER";
 
+// Repeat cannot act: with Loop inf a looping track never ends.
+static bool repeatMoot() {
+    return Config::player_loops == 0 && g_ps->E.dec && g_ps->E.dec->hasLoop();
+}
+
 // The legend: one row per key; a toggle's label is lit while it is on.
 void drawLegend() {
     if (!s_legend) {
@@ -479,7 +484,7 @@ void drawLegend() {
     const int x = g_ps->L.cw, w = Sf.w - x;
     fill(x, g_ps->L.hdr_h, w, Sf.h - g_ps->L.hdr_h, C_PANEL);
     vline(x, g_ps->L.hdr_h + 2, Sf.h - g_ps->L.hdr_h - 4, C_SEP);
-    struct Row { const char* k; const char* what; int on; };   // on: -1 = not a toggle
+    struct Row { const char* k; const char* what; int on; };   // on: -1 = not a toggle, -2 = has no effect now
     char loopLbl[12], fadeLbl[12];
     if (Config::player_loops) snprintf(loopLbl, sizeof(loopLbl), "Loop x%u", Config::player_loops);
     else snprintf(loopLbl, sizeof(loopLbl), "Loop inf");
@@ -496,7 +501,7 @@ void drawLegend() {
         { "M",              "Mute",    g_ps->E.muted ? 1 : 0 },
         { "S",              "Shuffle", s_shuffle ? 1 : 0 },
         { "A",              "Auto",    s_auto ? 1 : 0 },
-        { "R",              "Repeat",  s_repeat ? 1 : 0 },
+        { "R",              "Repeat",  repeatMoot() ? -2 : s_repeat ? 1 : 0 },
         { "L",              loopLbl,   -1 },
         { "F",              fadeLbl,   -1 },
         { "Hm",             "First",   -1 },
@@ -511,7 +516,7 @@ void drawLegend() {
     for (const Row& r : rows) {
         if (y + UI_FONT_H > Sf.h - 2) break;
         text(kx, y, r.k, C_TEXT_DIM);
-        text(vx, y, r.what, r.on > 0 ? C_ACCENT : C_TEXT);
+        text(vx, y, r.what, r.on > 0 ? C_ACCENT : r.on == -2 ? C_TEXT_DIM : C_TEXT);
         y += lh;
     }
 }
@@ -1025,6 +1030,7 @@ void run(const string& startPath) {
     uint32_t shownBlink = 0;
     pp::Decoder* shownDec = g_ps->E.dec;
     bool lastPaused = g_ps->E.paused, lastMuted = g_ps->E.muted;
+    bool lastMoot = repeatMoot();
     uint32_t lastSec = 0xFFFFFFFF, lastMetaSeq = g_ps->E.dec ? g_ps->E.dec->metaSeq : 0;
     bool cfgDirty = false;                            // L / F changed the loop settings
 
@@ -1117,8 +1123,9 @@ void run(const string& startPath) {
             lastMetaSeq = g_ps->E.dec->metaSeq;
             drawInfo(); drawTime(); lastSec = 0xFFFFFFFF;
         }
-        if (hdr || g_ps->E.paused != lastPaused || g_ps->E.muted != lastMuted) {
-            lastPaused = g_ps->E.paused; lastMuted = g_ps->E.muted;
+        const bool moot = repeatMoot();             // follows the track and the L key
+        if (hdr || g_ps->E.paused != lastPaused || g_ps->E.muted != lastMuted || moot != lastMoot) {
+            lastPaused = g_ps->E.paused; lastMuted = g_ps->E.muted; lastMoot = moot;
             drawHeader();
             drawLegend();
         }
