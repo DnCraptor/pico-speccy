@@ -10751,6 +10751,79 @@ exactly two AT commands, `CWMODE` and `CWJAP`, and then silence.
   device seeing AT commands" is answered there.
 - The manual `Sync time (SNTP)` action is untouched: it is user-invoked.
 
+### The guest NIC on CYW43 = an ESP-AT emulator over lwIP (2026-10-12; MRF hw-confirmed)
+
+On Transport = On-chip WiFi there is no ESP and no UART, and every guest network
+program speaks ESP-AT itself, so the NIC used to be greyed there. Now `ZiFi::init()`
+(NIC on + transport 2) allocates the usual rings and starts `AtEmu` instead of a
+UART: the guest windows (`#xxEF` 16550/ZIFI-API, ZX-UNO `#FC3B/#FD3B`) and FIFOs are
+untouched, only the far end changed. Plan + command inventory:
+`~/.claude/plans/zifi-at-emulator-cyw43.md`.
+
+- **`src/net/AtEmuCore.{h,cpp}` is the protocol and depends on nothing** (sockets
+  through `AtTransport`). ESP8266 NONOS AT 1.7 framing, because the guests are
+  byte-scanners: MRF's `checkOkErr` (`OK\r` / `ERROR` / `FAIL` anywhere), its
+  `getPacket` (`+IPD,` -> length to `:`, `...OSED\r` ends the stream), NedoOS
+  `esp-com.c` `recvHead` (first `,` then length — so mux 0 has NO id after
+  `+IPD,`) and its `espReBoot`, which waits for `WIFI GOT IP` after `AT+RST`.
+  Done: AT, ATE0/1, RST/RESTORE (banner + `ready` after 300 ms), GMR, CWMODE*,
+  CWJAP* (owner's rule: the guest never moves the host WiFi — up = "connected"
+  whatever SSID, down = FAIL), CWQAP (OK, nothing dropped), CIFSR, CIPSTATUS,
+  CIPMUX 0/1 (5 links), CIPDINFO, CIPSERVER=0, CIPRECVMODE=0, CIPMODE=0, CIPSTO,
+  UART*, CIPSNTPCFG/CIPSNTPTIME? (from our RTC), CIPSTART TCP, CIPSEND (`> `,
+  `Recv N bytes`, `SEND OK`, ≤2048), CIPCLOSE[=id|5]; `busy p...` while a connect
+  or the RST banner is pending. Not yet: UDP, SSL, CIPSERVER=1, CIPRECVMODE=1,
+  CWLAP (all answer ERROR).
+- **An announced `+IPD` goes out whole before any queued text** (own header buffer),
+  and a link's `CLOSED` waits until its data is drained — MRF ends the page on it.
+  A CIPCLOSE mid-`+IPD` pads the promised bytes with zeros so the guest's parser
+  stays in step.
+- **Host test `tools/atemu_test.cpp`** plays the guest with C++ copies of MRF's and
+  esp-com's parsers, output drained in random slices (recipe in its header).
+  Four mutations (mux-0 header with id, CLOSED before drain, text inside +IPD data,
+  ATE0 ignored) each fail it. **Re-run after any change to AtEmuCore.**
+- **`src/net/AtEmu.cpp` = lwIP glue** (own 5 links, never the host's WifiSock
+  slots). Guest window = **2×MSS**, set right after `tcp_connect()` (which itself
+  sets TCP_WND; the SYN goes out with 5840 but the server sends after our ACK,
+  which carries 2920); `tcp_recved` only for what the guest took, and only while
+  all guest links together hold < 6 KB. DNS async with a generation tag.
+- **Paced at the NIC baud in guest time**: once a frame `credit += ΔT × baud/10 /
+  (3.5 MHz << multiplicator)`, capped at 2 KB; that is the rate guest drivers saw
+  from a real ESP (the wire was capped at 230400 by `ZIFI_NIC_MAX_BAUD`). Network →
+  Baud is enabled on transport 2 for this and changing it does NOT re-init (would
+  drop the guest's links). RX ring 2 KB there (data waits in pbufs).
+- **TX backpressure**: the ring is drained once a frame, so a full TX ring reads as
+  a busy transmitter (16550 LSR THRE = 0 — MRF's zxwifi `write` waits on it; ZX-UNO
+  bit 6 already did), and the port write paths call `AtEmu::drainTx()` once the
+  ring passes 128 bytes.
+- **Cost**: non-W boards unchanged in SRAM (DVp2 `.data`/`.bss` byte-identical to
+  HEAD; flash −8 B from the removed `p_espSerial` menu predicate). DVp2w: +160 B
+  static (the `atEmu` tests in the RAM-resident ZiFi handlers), +5.9 KB flash, heap
+  only while the NIC runs: `Ctx` (~1.5 KB) + 2 KB RX ring + 0.8 KB TX ring + up to
+  ~3.3 KB of pbufs per active link.
+- Hardware Info: `ZiFi NIC : On (AT emu, mux N, K links)`. AT traffic is logged
+  (`ZiFi AT< ...`) only in `-DZIFI_TRACE=ON` builds.
+- Test ELFs `debug/{DVp2w,PCp2w}-atemu-1.0.9.elf` (+ .uf2). **Hw 2026-10-12, owner:
+  MRF works — browsed and downloaded an SCL through it; the zxwifi and EVO UART driver
+  builds (16550 window `#F8EF..#FFEF`) and the real UN-64 / UNO UART build (ZX-UNO
+  `#FC3B/#FD3B`) all work** — every guest window the emulator serves is confirmed. The AYWiFi56 build
+  does NOT, and that is not this emulator: it is the ZX128 RS232 bit-banged through
+  AY register 14 at 57600 baud, which nothing in the firmware emulates (it would not
+  reach a real ESP either) — a separate feature, see the plan file. ATM-64 does not
+  work either, for the same kind of reason: it talks to the ATM Turbo 2+ COM port
+  behind the KEYBOARD CONTROLLER (`IN (#55FE)` = command mode, then the command in
+  the high address byte: #C3 baud, #C2 RX count, #02 read, #42 status, #03 write),
+  which is not emulated. Builds in MRF.TRD: ZW-64/ZW-64-SC/GZ-80 = zxwifi 16550,
+  EVO-64 = 16550, UN-64 = ZX-UNO, AY-64/AY-80/AY-64-SC = AY bit-bang, ATM-64 = ATM
+  keyboard-controller COM. **Beware UN-64 in distributed MRF.TRDs**: the MRF Makefile's
+  `godzilla` target builds the AY56 driver (`-DAY56`) under `BINNAME "UN-64.C"`, so a
+  TRD built with it has an UN-64 that is really AYWiFi56 (banner `[AYWiFi56]`) — the
+  owner's copy is one. The real ZX-UNO build says `[UNO UART]`; the MRF.TRD in
+  `debug/NedoOS/src.r2698/mrabbit-fusion/data/` has it. **Still owed**: NedoOS
+  time2/gopher/girc,
+  a long CIPSEND, the host FTP server while a guest link is open, NIC off/on and a
+  transport switch with links open, `[ZiFi] AT emulator up` in the boot log.
+
 ### UART TX/RX pins — runtime, per-board (`src/BoardPins.*`)
 - **No compile-time pin define** anymore (old `-DZIFI_TX_PIN` removed). `ZiFi::init()` reads `Config::zifi_tx_pin`/`zifi_rx_pin` and resolves via `BoardPins::resolveZifiPins()` + `uartInstanceForTx()` (authoritative RP2350 pinmux from `rp2350[ab]_interface_pins.json` — the old `(pin/4)%2` heuristic was WRONG for GPIO 8/10/24/26). UART instance/funcsel chosen at runtime; `g_uart`/`g_uart_irq` statics.
 - Config sentinels: `0xFE` = board default, `0xFF` = OFF (no UART, FIFO-only), else explicit TX (RX = odd partner). Stored in NVS (`zifi_tx_pin`/`zifi_rx_pin`).

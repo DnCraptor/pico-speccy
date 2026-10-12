@@ -609,6 +609,11 @@ static bool hook_zifiBaud(int32_t, int32_t) {
     Config::saveWifiConfig();
     // Re-handshake the link at the new rate whenever it is up (NIC or WiFi), and
     // re-associate if the switch dropped the association — the classic pickBaud body.
+#if PICOSPECCY_WIFI
+    // On the on-chip radio the rate is only the AT emulator's pace, read live —
+    // re-initialising would drop the guest's open connections for nothing.
+    if (Config::zifi_transport == 2) return true;
+#endif
     if (ZiFi::linkUp()) { ZiFi::deinit(); ZiFi::init(); }
     if (Config::wifi_enabled && !ZiFiAT::connected && !Config::wifi_ssid.empty()) {
         uiBusy(MSG_WIFI_CONNECTING);    // re-association takes seconds — say so

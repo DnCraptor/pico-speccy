@@ -79,6 +79,9 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/devices/sound/dls_conv.h"
 #include "speccy/devices/zifi/ZiFi.h"
 #include "net/ZiFiAT.h"
+#if PICOSPECCY_WIFI
+#include "net/AtEmu.h"
+#endif
 #include "drivers/usbhost/UsbMsc.h"
 #include "drivers/board/BoardPins.h"
 #include "drivers/graphics/graphics.h"
@@ -6768,6 +6771,13 @@ static void buildEmulatorInfoText() {
             pos += infoAppend(buf, pos, bufsz, " ZiFi NIC       : Off\n");
         } else if (Config::zifi_transport == 1) {
             pos += infoAppend(buf, pos, bufsz, " ZiFi NIC       : On (USB-CDC)\n");
+#if PICOSPECCY_WIFI
+        } else if (Config::zifi_transport == 2) {
+            char st[40];
+            AtEmu::status(st, sizeof st);
+            pos += infoAppend(buf, pos, bufsz, " ZiFi NIC       : On (%s)\n",
+                              st[0] ? st : "AT emu not running");
+#endif
         } else {
             // Pins are resolved at runtime from the board's UART pinmux, so show
             // what the NIC actually claimed rather than the stored sentinel.
