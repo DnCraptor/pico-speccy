@@ -113,7 +113,27 @@ const char* errText(RzxReader::Err e) {
     }
 }
 
+// esxDOS is taken off the bus for the whole replay: no recording in the archives
+// was made with a DivMMC, and its automap traps entry points every ROM uses, so a
+// live card only ever desyncs the replay. Session-only — Config::esxdos and the
+// card's buffers stay as they are, and stop()/a failed start hand it back.
+bool s_esxOff = false;
+void esxSuspend() {
+    if (!DivMMC::enabled) return;
+    DivMMC::automap = DivMMC::conmem = DivMMC::mapram = false;
+    DivMMC::applyMapping();      // unmapped: page 0 back to the machine's ROM
+    DivMMC::enabled = false;
+    s_esxOff = true;
+    Debug::log("[RZX] esxDOS off for the replay");
+}
+void esxResume() {
+    if (!s_esxOff) return;
+    s_esxOff = false;
+    DivMMC::enabled = true;
+}
+
 void release() {
+    esxResume();
     if (s) {
         s->rd.close();
         f_close(&s->fil);
@@ -449,9 +469,7 @@ void desyncStop() {
     static const char* const kDos[] = { "5.03", "5.04TM", "5.05D", "Custom", "6.11e", "5.04T" };
     char m[160];
     int n = snprintf(m, sizeof m, "RZX: desync at frame %u\n", (unsigned)s_played);
-    if (DivMMC::enabled)
-        snprintf(m + n, sizeof m - n, "esxDOS is on: recordings are\nmade without it - turn it off");
-    else if (s_badDos && !Config::trdosBaseOwnedByMachine())
+    if (s_badDos && !Config::trdosBaseOwnedByMachine())
         snprintf(m + n, sizeof m - n, "inside TR-DOS %s - try another\nTR-DOS ROM (Devices > Beta 128)",
                  Config::trdosBios < 6 ? kDos[Config::trdosBios] : "?");
     else
@@ -565,6 +583,7 @@ bool startPlayback(const std::string& path) {
     // else from the current machine state (the format allows it; the recording
     // is then only meaningful on the same machine).
     s_sideSnap.clear();
+    esxSuspend();     // before any snapshot load: the machine must start without the card
     if (!s->rd.hasSnapshot() && !sideSnapLoad()) { release(); return false; }
     if (!seekFrame()) { release(); return false; }
 

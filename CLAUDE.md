@@ -13438,7 +13438,19 @@ Fuse's `rzx.c` / `z80.c` for the playback semantics.
     `DEC C / JR NZ` delay at #3E01 off by 18). Keeping the line up after the ack in the
     simulator reproduces the board's log. **Three rounds of guessing (ROM version, Gluk set,
     esxDOS) came before the log and none was the cause — ask for the trace first.**
-  - **Owner's rule: playback runs on the CURRENT settings; nothing is switched or disabled.**
+  - **esxDOS is the one exception (owner, 2026-10-12, NOT hw-tested):** DivMMC is taken
+    off the bus for the replay (`esxSuspend` in startPlayback before any snapshot load,
+    `esxResume` from `release()` = every stop/failure path; `Config::esxdos` and the card's
+    buffers untouched). No archive recording was made with one and its automap traps ROM
+    entry points (dungeonraiders desynced at frame 15 with it on).
+  - **Some recordings are simply inconsistent**: dungeonraiders.rzx (Spectaculator, 128K)
+    desyncs at frame 336 in our firmware, in `tools/rzx_replay_sim.c` AND in SkoolKit's
+    `rzxplay.py` alike ("Port readings exhausted for frame 336") — an IN 2-34 fetches
+    before a boundary is logged in the NEXT frame, a ~30-fetch per-frame offset no INT
+    length / ROM / opcode-count rule explains. Run SkoolKit (`pip download skoolkit`,
+    `rzxplay.main(['--no-screen','--fps','0',file])`) as the second opinion before
+    chasing a desync.
+  - **Owner's rule: playback runs on the CURRENT settings; nothing else is switched or disabled.**
     A first cut pinned TR-DOS 5.04T, forced `R_PENT` and took esxDOS off the bus
     (`Config::rzxRoms`, `cardsOff`) — all REMOVED: another recording may need another ROM.
     Instead a desync (an IN with no recorded byte, or 16 frames leaving recorded INs unread —
