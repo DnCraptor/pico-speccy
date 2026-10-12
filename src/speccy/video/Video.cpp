@@ -445,6 +445,9 @@ void VIDEO::profiPaletteWrite(uint8_t index, uint8_t profi_color) {
 //   → (8,8) gets its OWN slot → both pixels render as palette[8] → solid color, no stripes.
 //   → ink=8 is fully independent from ink=0 → changing palette[8] can't corrupt black pixels.
 // written[] guard in hdmi_set_profi_ds80_mode() ensures paper=0 TMDS wins for merged slots.
+#if defined(VGA_HDMI) && HDMI_HSTX < 2
+extern "C" bool hdmi_mode_uses_x3(int mode);
+#endif
 static void init_profi_pair_lookup() {
     // safe[]: all slots except 240..244 (sync/scanline) and 255 (border) → 250 slots.
     // With HDMI audio the Data Island machinery owns 40 more indices (184..199 =
@@ -452,17 +455,24 @@ static void init_profi_pair_lookup() {
     // pair_lut must avoid them → 210 slots; the bright-ink × bright-paper merges
     // below free exactly the difference (40 extra merges). VGA video or any
     // non-HDMI audio driver keeps the full 250-pair palette.
-    bool reserve_di = false;
+    bool reserve_di = false, reserve_x3 = false;
 #if defined(VGA_HDMI) && HDMI_HSTX < 2
     // The HSTX command-expander build keeps its islands in the line buffer, so the
     // pair table has all 250 slots whatever the audio driver.
     extern bool SELECT_VGA;
     reserve_di = !SELECT_VGA && Config::audio_driver == 4;
+    // The x3 modes (1280x720 / 1440x576 / 1024x768 x3 on the PIO/RAW path) keep
+    // line structure in slots 245..249 of their own palette page; a pixel on one of
+    // those is a control/preamble symbol in active video = lost sync (hw 2026-10-12).
+    // Five more merges: paper 8 -> 0 for inks 6..10 as well.
+    reserve_x3 = !SELECT_VGA && hdmi_mode_uses_x3(VIDEO::video_mode);
 #endif
+    const int p8_inks = reserve_x3 ? 10 : 5;
     int safe[256], ns = 0;
     for (int i = 0; i < 256; i++) {
         if (i >= 240 && i <= 244) continue;
         if (i == 255) continue;
+        if (reserve_x3 && i >= 245 && i <= 249) continue;
         if (reserve_di && ((i >= 184 && i <= 199) || (i >= 216 && i <= 239))) continue;
         safe[ns++] = i;  // ns == 250 (210 with reserve_di)
     }
@@ -472,7 +482,7 @@ static void init_profi_pair_lookup() {
         for (int paper = 0; paper < 16; paper++) {
             // For inks 0..5 only: paper=8 → paper=0 (6 merges to fit in 250 slots).
             // For inks 6..15 (including ink=8): full independence — paper=8 is own slot.
-            int cp = (paper == 8 && ink <= 5) ? 0 : paper;
+            int cp = (paper == 8 && ink <= p8_inks) ? 0 : paper;
             // HDMI-audio slot diet: bright ink (9..15) on a DIFFERENT bright paper
             // renders on the base paper (p-8) instead — 42 candidates minus the two
             // preserved classic text schemes (white-on-bright-blue and
@@ -5272,6 +5282,10 @@ void VIDEO::Reset() {
     } else if (!SELECT_VGA && Config::cpu_mhz == Config::CPU_540_MHZ) {
         video_mode = graphics_540_mode(video_mode);
     }
+    // The pair table above was built before video_mode was final, and on an x3 mode
+    // it has to keep out of slots 245..249 (init_profi_pair_lookup) — rebuild it now.
+    if (Config::arch == A_PROFI || g_scorp_gmx || Config::arch == A_TSCONF || Config::arch == A_ATM)
+        init_profi_pair_lookup();
     // The 50 Hz modes above are per MACHINE — one display frame is tuned to be
     // exactly one emulated frame (v_total 644 Pentagon 48.83 Hz / 629 128K
     // 50.02 Hz / 628 48K, Profi, Scorpion 50.08 Hz) — and with v_sync pacing the
