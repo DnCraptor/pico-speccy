@@ -368,7 +368,11 @@ const char* romsetName(int32_t composite);
     X(SET_RZX_LOOP,        AC_PURE,   0,                     get_rzxLoop,    put_rzxLoop,    nullptr,        -1)          \
     /* ZX Evolution BaseConf raster (Config::evo_raster: Pentagon/60 Hz/48K/128K).   */ \
     /* Live: restarts the machine, which re-derives frame, audio and video timing.   */ \
-    X(SET_EVO_RASTER,      AC_LIVE,   0,                     get_evoRaster,  put_evoRaster,  hook_evoRaster, -1)
+    X(SET_EVO_RASTER,      AC_LIVE,   0,                     get_evoRaster,  put_evoRaster,  hook_evoRaster, -1) \
+    /* Audio > Pico-Zx-Player > Loop count / Fade time. AC_PURE: read when a track */ \
+    /* opens, so an edit applies from the next track played.                      */ \
+    X(SET_PL_LOOPS,       AC_PURE,   0,                     get_plLoops,    put_plLoops,   nullptr,        -1)          \
+    X(SET_PL_FADE,        AC_PURE,   0,                     get_plFade,     put_plFade,    nullptr,        -1)
 
 #define NM_X_ENUM(id, cls, flags, g, p, h, f) id,
 enum SettingId : uint16_t {

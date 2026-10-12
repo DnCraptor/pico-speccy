@@ -148,9 +148,11 @@ private:
     TfeEngine* tfe_ = nullptr;
     // TFD stream
     uint32_t pos_ = 0; int chip_ = 0; bool first_ = true; bool ended_ = false;
+    uint32_t loopMark_ = 0;        // stream offset right after the FA loop mark (0 = none)
     // TFC expansion
     TfcChan  ch_[6];
     uint32_t total_ = 0, frame_ = 0;
+    uint32_t span_ = 0, nextLoop_ = 0;   // loop pass length / frame of the next pass
     // timing
     uint32_t frameLen_ = RATE / 50;
     uint32_t pending_ = 0;
@@ -240,7 +242,17 @@ bool TfmDecoder::expandTfc() {
     total_ = 0;
     for (int i = 0; i < 6; i++) if (ch_[i].nframes > total_) total_ = ch_[i].nframes;
     if (!total_) { err = "Empty TFC"; return false; }
-    lenMs_ = (uint32_t)((uint64_t)total_ * frameLen_ * 1000 / RATE);
+    // Every channel wraps to its own loop mark (tfcFrame); a song pass is the
+    // longest channel's loop span.
+    for (int i = 0; i < 6; i++)
+        if (ch_[i].nframes == total_) {
+            const uint32_t s = total_ - (ch_[i].loop < total_ ? ch_[i].loop : 0);
+            if (s > span_) span_ = s;
+        }
+    if (!span_) span_ = total_;
+    nextLoop_ = total_;
+    lenMs_ = loopedLenMs((uint32_t)((uint64_t)total_ * frameLen_ * 1000 / RATE),
+                         (uint32_t)((uint64_t)span_ * frameLen_ * 1000 / RATE));
     snprintf(meta.format, sizeof(meta.format), "TurboFM compiled %.3s, %d Hz", (const char*)d_ + 6,
              (int)(RATE / frameLen_));
     return true;
@@ -296,7 +308,8 @@ bool TfmDecoder::open(const char* path) {
     if (tfe_) {
         if (!tfe_->load(d_, n_, err, meta)) return false;
         Buffer::pfree(d_); d_ = nullptr;           // the engine kept what it needs
-        lenMs_ = tfe_->lengthFrames() * 20;
+        lenMs_ = tfe_->loopFrames() ? loopedLenMs(tfe_->lengthFrames() * 20, tfe_->loopFrames() * 20)
+                                    : tfe_->lengthFrames() * 20;
         return true;
     }
 
@@ -306,16 +319,19 @@ bool TfmDecoder::open(const char* path) {
     p = cstr(p, meta.author, sizeof(meta.author));
     p = cstr(p, meta.extra, sizeof(meta.extra));
     pos_ = p;
-    uint32_t frames = 0;
+    uint32_t frames = 0, markFrames = 0;
     for (uint32_t q = p; q < n_; ) {
         const uint8_t v = d_[q++];
         if (v == 0xFB) break;
         if (v == 0xFF) frames++;
         else if (v == 0xFE) { if (q < n_) frames += 3u + d_[q++]; }
-        else if (v == 0xFD || v == 0xFC || v == 0xFA) {}
+        else if (v == 0xFA) { if (!loopMark_) { loopMark_ = q; markFrames = frames; } }
+        else if (v == 0xFD || v == 0xFC) {}
         else q++;
     }
-    lenMs_ = (uint32_t)((uint64_t)frames * 20);
+    lenMs_ = loopMark_ && frames > markFrames ? loopedLenMs(frames * 20, (frames - markFrames) * 20)
+                                              : (uint32_t)((uint64_t)frames * 20);
+    if (loopMark_ && frames <= markFrames) loopMark_ = 0;     // an empty loop would spin
     snprintf(meta.format, sizeof(meta.format), "TurboFM dump, 50 Hz");
     return true;
 }
@@ -347,7 +363,10 @@ bool TfmDecoder::tfdStep() {
     while (pos_ < n_) {
         const uint8_t v = d_[pos_++];
         switch (v) {
-        case 0xFB: return false;
+        case 0xFB:                                         // end: one loop pass
+            if (!loopMark_ || !loopPassed()) return false;
+            pos_ = loopMark_; chip_ = 0;
+            break;
         case 0xFF: case 0xFE: {
             uint32_t c = 1;
             if (v == 0xFE) { if (pos_ >= n_) return false; c = 3u + d_[pos_++]; }
@@ -359,7 +378,7 @@ bool TfmDecoder::tfdStep() {
         }
         case 0xFD: chip_ = 1; break;
         case 0xFC: chip_ = 0; break;
-        case 0xFA: break;                                  // loop mark: we play once
+        case 0xFA: break;                                  // loop mark (found at open)
         default:
             if (pos_ >= n_) return false;
             if (!first_) write(chip_, v, d_[pos_]);        // writes before frame 0 are ignored
@@ -372,13 +391,18 @@ bool TfmDecoder::tfdStep() {
 
 bool TfmDecoder::tfeFrame() {
     TFM_TRACE(0, -1, 0);
-    if (!tfe_->frame(tfeWrite, this)) return false;
+    if (!tfe_->frame(tfeWrite, this)) {                    // end: one loop pass
+        if (!loopPassed() || !tfe_->loop() || !tfe_->frame(tfeWrite, this)) return false;
+    }
     pending_ += frameLen_;
     return true;
 }
 
 bool TfmDecoder::tfcFrame() {
-    if (frame_ >= total_) return false;
+    if (frame_ >= nextLoop_) {                             // one song pass
+        if (!loopPassed()) return false;
+        nextLoop_ += span_;
+    }
     TFM_TRACE(0, -1, 0);
     for (int i = 0; i < 6; i++) {
         const TfcChan& c = ch_[i];

@@ -37,7 +37,17 @@ struct Meta {
 
 class Decoder {
 public:
+    Decoder();                       // snapshots the loop / fade settings
     virtual ~Decoder() {}
+    // What the page calls: render() with the loop-count fade applied. Returns 0
+    // once the track has ended or faded out.
+    int play(int16_t* lr, int n);
+    // Live loop count / fade change (the player page's L / F keys). A fade that
+    // already started finishes; one armed but not started is re-decided.
+    void setLoopFade(uint8_t loops, uint8_t fadeS);
+    // Length to show: lenMs() re-derived from the CURRENT loop count / fade for
+    // decoders that measured it with loopedLenMs().
+    uint32_t trackLenMs() const;
     // Opens and prepares the file. On failure returns false with `err` set.
     virtual bool open(const char* path) = 0;
     // Renders up to `n` stereo frames (interleaved L,R) at RATE. Returns the
@@ -58,6 +68,28 @@ public:
     // file); the page redraws the info rows when it moves.
     uint32_t    metaSeq = 0;
     const char* err = nullptr;
+
+protected:
+    // Loops and fade (Audio > Pico-Zx-Player, VGMPlay's LoopCount / FadeTime).
+    // A decoder whose song has a loop point calls loopPassed() every time
+    // playback reaches the end of the song: true = keep playing (jump back to
+    // the loop), false = the track ends here. After `loops` passes it arms a
+    // fade over the next pass, which play() applies and ends the track with.
+    // A song without a loop point simply ends — no fade, as in VGMPlay.
+    bool     loopPassed();
+    bool     loopsDone() const { return loopsSeen_ != 0; }   // past the first pass
+    bool     loopForever() const { return loops_ == 0; }
+    // Displayed length: first pass (to the loop point's end) + further loop
+    // passes + the fade. 0 (unknown) when looping forever.
+    uint32_t loopedLenMs(uint32_t firstMs, uint32_t loopMs) const;
+
+private:
+    uint8_t  loops_, fadeS_;
+    mutable bool     lenLooped_ = false;     // loopedLenMs() was used
+    mutable uint32_t lenFirst_ = 0, lenLoop_ = 0;
+    uint16_t loopsSeen_ = 0;
+    bool     fadeArm_ = false, fading_ = false, faded_ = false;
+    uint32_t fadeTotal_ = 0, fadeLeft_ = 0, fadeStep_ = 0;
 };
 
 // Lower-case extension (no dot) → is it a format the player plays?

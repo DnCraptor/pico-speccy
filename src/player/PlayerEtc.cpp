@@ -195,7 +195,11 @@ int EtcDecoder::render(int16_t* lr, int n) {
     while (o < n) {
         if (left_ == 0) {
             if (ended_) break;
-            if (looped_ || posMs() >= MAX_MS) { ended_ = true; break; }
+            if (looped_) {                             // E-Tracker wrapped: one loop pass
+                looped_ = false;
+                if (!loopPassed()) { ended_ = true; break; }
+            }
+            if (posMs() >= MAX_MS && !loopsDone()) { ended_ = true; break; }
             if (!call(0x8006)) { ended_ = true; break; }
             left_ = FRAME;
         }

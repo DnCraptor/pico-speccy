@@ -1319,6 +1319,20 @@ static const Node kVgmChips[] = {
     NM_RADIO(NM_IND TXT_SN_CLOCK, SET_SN_CLOCK,    opt_sn_clock,   nullptr),
 };
 
+// Pico-Zx-Player: VGMPlay's two playback knobs for every track with a loop point.
+static const Option opt_pl_loops[] = {
+    { "1", 1 }, { "2", 2 }, { "3", 3 }, { "4", 4 }, { "5", 5 }, { "8", 8 },
+    { "Forever", 0 },
+};
+static const Option opt_pl_fade[] = {
+    { "Off", 0 }, { "1 s", 1 }, { "2 s", 2 }, { "3 s", 3 }, { "5 s", 5 },
+    { "8 s", 8 }, { "10 s", 10 },
+};
+static const Node kPlayerOpts[] = {
+    NM_RADIO(TXT_PL_LOOPS, SET_PL_LOOPS, opt_pl_loops, nullptr),
+    NM_RADIO(TXT_PL_FADE,  SET_PL_FADE,  opt_pl_fade,  nullptr),
+};
+
 static const Node kAudio[] = {
     NM_RADIO(TXT_AUD_DRIVER,     SET_AUDIO_DRIVER, opt_audio_driver, nullptr),
     NM_BOOL (TXT_AUD_AY,         SET_AY48,         nullptr),
@@ -1344,6 +1358,7 @@ static const Node kAudio[] = {
     NM_RADIO   (NM_IND TXT_GS_CLOCK, SET_NGS_CLOCK, opt_ngs_clock, p_gsNeo),
     NM_RADIO_DE(NM_IND TXT_GS_RAM,   SET_GS_RAM,    gs_ramOpts,    p_gsAvail, p_gsNeo),
     NM_RADIO   (TXT_AUD_BOOST,       SET_AUDIO_BOOST, opt_boost,  nullptr),
+    NM_SUB     (TXT_AUD_PLAYER,      kPlayerOpts,     p_player),
 };
 
 // ── Joystick ───────────────────────────────────────────────────────────────────
