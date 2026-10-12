@@ -255,7 +255,13 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
     if (NEXT_TRACE)
-        # trace content 51 296 B (2026-10-11): AT the ceiling, nothing left
+        # trace content 51 296 B (2026-10-11): AT the ceiling, nothing left.
+        # NEXTEST's one-walk pair text tilemap (+0.3 KB) was paid for by the
+        # trace row probe moving to flash and 32-bit layer timer marks:
+        # trace 51 216, normal 50 952. 2026-10-12: the Timex hi-res ULA path
+        # (nxHiresInkPaper / nxHiresUlaRow / nxHiresPairRow) went to flash and
+        # RenderSpritesLine to -O2 no-unroll (4308 -> 1208 B): content 47 248,
+        # trace 47 608 — ~3.5 KB under the terms again. Terms unchanged.
         set(NXOVL_WIN_SIZE_EFFECTIVE 51328)
     endif()
 else()

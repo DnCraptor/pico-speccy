@@ -382,7 +382,7 @@ void drawGlyph(Id i, int xpix, int ypix, uint8_t fg, uint8_t bg) {
 static void drawPanel() {
     const int xres = (int)VIDEO::vga.xres, yres = (int)VIDEO::vga.yres;
     const int y0 = (yres >= 288) ? 268 : 220;
-    if (!VIDEO::vga.frameBuffer || yres < y0 + 16) { VIDEO::setLedBar(0); return; }
+    if (!VIDEO::vga.frameBuffer || yres < y0 + 16) { VIDEO::setLedBar(0); VIDEO::setLedCarve(0, 0, 0, -1); return; }
     const int sx = (xres >= 360) ? 188 : 168;       // where the stats box starts
 
     int n = 0;
@@ -391,6 +391,8 @@ static void drawPanel() {
     if (n > maxn) n = maxn;
     const int w = (n * CELL_W + 8 + 7) & ~7;        // 4 px margin each side, 8-aligned
     VIDEO::setLedBar(w);                            // moves the carve + asks for a repaint on change
+    VIDEO::setLedCarve(0, y0, w, y0 + 16);          // the Next whole-line renderer's carve
+    VIDEO::setLedStrip(-1);
 
     // nm::available() runs the menu layout pass — decide once per geometry.
     static int  nm_key = -1;
@@ -456,7 +458,9 @@ void draw() {
     VIDEO::setLedBar(0);
 
     int base_x = 0, base_y = 0;
-    if (!resolveLayout(base_x, base_y)) return;
+    VIDEO::setLedCarve(0, 0, 0, -1);                // the panel's carve, not the strip's
+    if (!resolveLayout(base_x, base_y)) { VIDEO::setLedStrip(-1); return; }
+    VIDEO::setLedStrip(base_y);                     // the Next renderer stamps the rows itself
 
     // Borderless: the strip sits on the picture, which the scaler repaints every
     // line — reserve it (next frame on) and give it a border-coloured backing so
@@ -481,6 +485,23 @@ void draw() {
         if (!isVisible((Id)i)) continue;
         int xpix = base_x + slot * CELL_W;
         drawSprite((Id)i, xpix, base_y, fgColor((Id)i));
+        slot++;
+    }
+}
+
+void stampStripRow(int r, uint8_t* line) {
+    if (!Config::ledIndicators || Config::led_panel) return;
+    int base_x = 0, base_y = 0;
+    if (!resolveLayout(base_x, base_y)) return;
+    uint8_t slot = 0;
+    for (uint8_t i = 0; i < COUNT; i++) {
+        if (!isVisible((Id)i)) continue;
+        const uint8_t bits = SPRITE[i][r];
+        if (bits) {
+            const uint8_t fg = fgColor((Id)i);
+            const int x = base_x + slot * CELL_W;
+            for (int c = 0; c < 8; c++) if (bits & (0x80 >> c)) line[(x + c) ^ 2] = fg;
+        }
         slot++;
     }
 }

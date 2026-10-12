@@ -425,6 +425,11 @@ public:
   // DS80 at 640x480): the banner sits on the first content rows and the mode's
   // renderer carves them out, like the F8 stats rectangle.
   static void setNoticeCarve(int x0, int y0, int x1, int y1);
+  // LED strip / panel rect (LED::draw) the Next whole-line renderer leaves
+  // alone, the way it leaves the stats box and the notify banner: those rows
+  // are repainted by core1 every frame, after the glyphs were drawn. y1 = -1: none.
+  static void setLedCarve(int x0, int y0, int x1, int y1);
+  static void setLedStrip(int y0);   // first fb row of the LED strip, -1 = none (Next: stamped per row)
   static void clearNoticeCarve();
   // LED indicator panel ("Solid background"): w fb bytes from the left edge of
   // the F8 stats box's 16 rows. Every renderer leaves the rect to LED::draw.

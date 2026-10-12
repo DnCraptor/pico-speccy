@@ -288,6 +288,16 @@ void next_trace_dump(uint32_t frames) {
                     (unsigned)(g_nx_c0_us / f % 1000u / 100u), (unsigned)(g_nx_c1_rows / f),
                     (unsigned)(g_nx_claim_blk / f));
                 g_nx_c0_us = g_nx_c0_rows = g_nx_c1_rows = g_nx_claim_blk = 0;
+                extern volatile uint32_t g_nx_mix[5];
+                Debug::log("NEXT mix: rows L2 %u/fr spr %u/fr full %u/fr | 640 second pass %u rows/fr, %u px/row",
+                    (unsigned)(g_nx_mix[0] / f), (unsigned)(g_nx_mix[1] / f), (unsigned)(g_nx_mix[2] / f),
+                    (unsigned)(g_nx_mix[3] / f), (unsigned)(g_nx_mix[3] ? g_nx_mix[4] / g_nx_mix[3] : 0));
+                for (int i = 0; i < 5; i++) g_nx_mix[i] = 0;
+                extern volatile uint32_t g_nx_spr[4];
+                Debug::log("NEXT spr: resolve %u/fr (span %u) | tested %u/fr drawn %u/fr",
+                    (unsigned)(g_nx_spr[0] / f), (unsigned)(g_nx_spr[0] ? g_nx_spr[1] / g_nx_spr[0] : 0),
+                    (unsigned)(g_nx_spr[2] / f), (unsigned)(g_nx_spr[3] / f));
+                for (int i = 0; i < 4; i++) g_nx_spr[i] = 0;
             }
             // Printed here, right after perf: the later lines are the ones a
             // saturated UART drops (NXModPlayer, hw 2026-10-10: no vid line at all).

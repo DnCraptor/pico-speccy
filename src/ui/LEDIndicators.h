@@ -61,6 +61,10 @@ namespace LED {
 
     void decay();
     void draw();
+    // Next whole-line renderer: paint glyph row r (0..7) of the strip over an
+    // already rendered framebuffer row — the strip has no backing of its own,
+    // so a carve would freeze the border under it (hw 2026-10-12).
+    void stampStripRow(int r, uint8_t* line);
     void clear();
     void drawGlyph(Id i, int xpix, int ypix, uint8_t fg, uint8_t bg);
     // Foreground pixels only, via dotFast (so DS80 index→pair mapping applies);

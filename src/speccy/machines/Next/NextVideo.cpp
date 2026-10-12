@@ -22,9 +22,11 @@ pico-speccy: ZX Spectrum Next scanline video renderer
 #include "hardware/sync.h"
 #include "hardware/regs/addressmap.h"
 #include "pico/time.h"
+#include "hardware/timer.h"
 #include "app/TryAlloc.h"
 #include "app/Buffer.h"
 #include "app/Config.h"
+#include "ui/LEDIndicators.h"
 #include "speccy/devices/Z80DMA.h"
 
 // Hot render path in SRAM, like the rest of the video code
@@ -476,15 +478,22 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::rowRelease(unsigned core) {
     spin_unlock_unsafe(nx_lock);
 }
 
+#if NEXT_TRACE
+static volatile uint8_t s_frameSeq;   // walks the layer-timing sample across the rows
+#endif
 __attribute__((noinline)) IRAM_ATTR void NEXTVID::renderJob(uint32_t j) {
     LS = &nx_st[j >> 16];
 #if NEXT_TRACE
-    if ((j & 15) == 0) {
-        const uint64_t t0 = time_us_64();
+    // every 16th job, shifted by one each frame: 240 rows a frame keep a plain
+    // /16 counter on the same rows every frame (and rows 0, 16, 32... are
+    // always the pair frame's histogram rows)
+    static uint32_t s_sampleN = 0;
+    if (((++s_sampleN + s_frameSeq) & 15) == 0) {
+        const uint32_t t0 = timer_hw->timerawl;   // one load; time_us_64 is a retry loop
         nx_layer_sample = true;
         RenderLine((int)(j & 0xFFFF));
         nx_layer_sample = false;
-        g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
+        g_nextvid_us += (timer_hw->timerawl - t0) * 16;
     } else
 #endif
     RenderLine((int)(j & 0xFFFF));
@@ -511,15 +520,34 @@ __attribute__((noinline)) bool NEXTVID::c0Help() {
 }
 
 // core0's own row scratch: lineBuf 384 | 4 layer lines 4 x 768 | nxT2 768 |
-// nxUs 768 | p80Line2 384 | band 2560. SRAM or nothing (read per pixel).
-static constexpr unsigned NX_C0_BLK = 384 + 4 * 768 + 768 + 768 + 384 + 320 * 8;
+// nxUs 768 | p80Line2 384, and the Layer 2 band (2560) as a SECOND block: one
+// 7.9 KB piece was often not there on a fragmented heap (trace builds, NEXTEST:
+// "no SRAM" and core1 rendered alone). SRAM or nothing (read per pixel).
+static constexpr unsigned NX_C0_LINES = 384 + 4 * 768 + 768 + 768 + 384;
+static constexpr unsigned NX_C0_BAND  = 320 * 8;
+static uint8_t* s_c0Band = nullptr;
 static uint32_t s_c0Retry = 0;   // frames until the next allocation attempt
+// Plain heap with a 3 KB margin, not HOT_SRAM's 8 KB: this block is freed on
+// every menu / F5 entry (nm::gfxBegin -> helperFree), and a trace build at
+// NEXTEST had ~13 KB left after the 640 tables — never enough for the 8 KB rule.
+extern "C" size_t getLargestAllocatable(void);
+static uint8_t* nxC0Sram(unsigned n) {
+    if (getLargestAllocatable() < n + 3072) return nullptr;
+    uint8_t* b = (uint8_t*)tryMalloc(n);
+    if (b && !nxIsSram(b)) { free(b); b = nullptr; }
+    return b;
+}
 static void nxHelperAlloc() {
     if (s_c0Blk || !g_next_c1_live) return;
     if (s_c0Retry) { s_c0Retry--; return; }
-    uint8_t* b = (uint8_t*)Buffer::palloc(NX_C0_BLK, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
-    if (b && !nxIsSram(b)) { Buffer::pfree(b); b = nullptr; }
-    if (!b) { s_c0Retry = 250; Debug::log("[NXC1] core0 row helper: no SRAM (%u B)", NX_C0_BLK); return; }
+    uint8_t* b = nxC0Sram(NX_C0_LINES);
+    uint8_t* bb = b ? nxC0Sram(NX_C0_BAND) : nullptr;
+    if (!bb) {
+        free(b);
+        s_c0Retry = 250;
+        Debug::log("[NXC1] core0 row helper: no SRAM (%u + %u B)", NX_C0_LINES, NX_C0_BAND);
+        return;
+    }
     NxCtx& c = s_nxc[0];
     c.line  = b;
     c.u     = (uint16_t*)(b + 384);
@@ -527,11 +555,13 @@ static void nxHelperAlloc() {
     c.t2    = c.s + 384;
     c.us    = c.t2 + 384;
     c.line2 = (uint8_t*)(c.us + 384);
-    s_band[1].buf = c.line2 + 384;
+    s_band[1].buf = bb;
     s_band[1].key = 0xFFFFFFFFu; s_band[1].row = -1000; s_band[1].lastRow = 0;
     c.band = &s_band[1];
+    s_c0Band = bb;
     s_c0Blk = b;                     // last: c0Help tests it
-    Debug::log("[NXC1] core0 row helper on, %u B @%08X", NX_C0_BLK, (unsigned)(uintptr_t)b);
+    Debug::log("[NXC1] core0 row helper on, %u B @%08X + %u B @%08X", NX_C0_LINES,
+               (unsigned)(uintptr_t)b, NX_C0_BAND, (unsigned)(uintptr_t)bb);
 }
 
 void NEXTVID::helperFree() {
@@ -541,7 +571,9 @@ void NEXTVID::helperFree() {
     s_c0Blk = nullptr;
     nxCtxShared(s_nxc[0]);
     s_band[1].buf = nullptr;
-    Buffer::pfree(b);
+    free(b);
+    free(s_c0Band);
+    s_c0Band = nullptr;
     s_c0Retry = 0;
     Debug::log("[NXC1] core0 row helper off");
 }
@@ -648,13 +680,13 @@ void NEXTVID::c1DrainRange(uint8_t bank, uint16_t o0, uint16_t o1) {
         const uint32_t j = nx_ring[i % NEXT_C1_RING];
         if (nxLineReads(nx_st[j >> 16], (int)(j & 0xFFFF), paperTopRow, bank, o0, o1)) {
 #if NEXT_TRACE
-            const uint64_t t0 = time_us_64();
+            const uint32_t t0 = timer_hw->timerawl;
 #endif
             nxWaitUntil(i + 1);
 #if NEXT_TRACE
             g_nx_drain_n = g_nx_drain_n + 1;
             g_nx_drain_src[0] = g_nx_drain_src[0] + 1;
-            g_nx_drain_us = g_nx_drain_us + (uint32_t)(time_us_64() - t0);
+            g_nx_drain_us = g_nx_drain_us + (timer_hw->timerawl - t0);
 #endif
             return;
         }
@@ -983,6 +1015,14 @@ void NEXTVID::pairPoll() {
 }
 
 // Renderer (or core0 with the queue drained): apply the palette log up to `upto`.
+// Per palette: the one 9-bit colour every entry holds (all 256 the same), or
+// 0xFFFF; recomputed lazily (s_palMonoDirty, set by every rawPal[] writer —
+// palApply, the ULANext reset, renderRowSegments' rollback). RenderL2Line
+// skips a layer whose palette is all one transparent colour: NEXTEST enables
+// Layer 2 with an all-black palette over NR 0x14 = 0 and runs its memory test
+// through the banks — 192 PSRAM rows a frame (5 ms of the render) for no pixel.
+static uint16_t s_palMono[8] = { 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF };
+static volatile uint8_t s_palMonoDirty[8];
 IRAM_ATTR void NEXTVID::palApply(uint32_t upto) {
     uint32_t i = pal_app;
     // A line captured before core0 applied the log ahead (renderRowSegments,
@@ -997,7 +1037,7 @@ IRAM_ATTR void NEXTVID::palApply(uint32_t upto) {
         const uint32_t e = palLog[i % PAL_LOG];
         const uint8_t p = (e >> 24) & 7, x = (uint8_t)(e >> 16);
         const uint16_t v = (uint16_t)e;
-        rawPal[p][x] = v;
+        rawPal[p][x] = v; s_palMonoDirty[p] = 1;
         lut[p][x] = remap[v & 0x1FF];
     }
     __dmb();
@@ -1077,7 +1117,7 @@ void NEXTVID::defaultPalettes() {
     for (int pal = 0; pal < 8; pal++) {
         palHasPrio[pal] = false;
         for (int i = 0; i < 256; i++)
-            rawPal[pal][i] = rgb332_to_333((uint8_t)i);
+            rawPal[pal][i] = rgb332_to_333((uint8_t)i); s_palMonoDirty[pal] = 1;
     }
     for (int pal = 0; pal < 8; pal += 4) { // both ULA palettes
         for (int c = 0; c < 16; c++) {
@@ -1086,7 +1126,7 @@ void NEXTVID::defaultPalettes() {
             uint16_t v = ((base & 2) ? (l << 6) : 0)   // R
                        | ((base & 4) ? (l << 3) : 0)   // G
                        | ((base & 1) ? l : 0);         // B
-            rawPal[pal][c] = v;        // ink
+            rawPal[pal][c] = v; s_palMonoDirty[pal] = 1;   // ink
             rawPal[pal][16 + c] = v;   // paper (same colours)
         }
     }
@@ -1587,6 +1627,8 @@ __attribute__((noinline)) bool NEXTVID::idleAdvanceTo(uint32_t stEnd) {
 }
 
 extern int ts_notice_x0, ts_notice_x1, ts_notice_y0, ts_notice_y1;   // Video.cpp
+extern int led_carve_x0, led_carve_x1, led_carve_y0, led_carve_y1;   // Video.cpp: LED panel
+extern int led_strip_y0;   // Video.cpp: LED strip, stamped over the rendered row
 #if NEXT_TRACE
 void nxErrPoll();   // Z80_JLS.cpp: ERR_NR turning #15 -> dump the RST 8 ring
 #endif
@@ -1635,6 +1677,7 @@ __attribute__((noinline)) void NEXTVID::gigsFrame() {
 
 IRAM_ATTR void NEXTVID::EndFrame() {
 #if NEXT_TRACE
+    s_frameSeq = (uint8_t)(s_frameSeq + 1);
     nxErrPoll();
     if (!skipFrame) ++g_nextvid_frames;
 #endif
@@ -1715,9 +1758,11 @@ volatile uint32_t g_nextvid_us = 0;
 volatile uint32_t g_nextvid_layer_us[7] = {0, 0, 0, 0, 0, 0, 0};   // [6] = log apply (spr/pal) before the layers
 volatile uint32_t g_nx_logapply_spr = 0, g_nx_logapply_pal = 0;     // entries applied (all rows)   // + mix, out (RenderLine copy)
 volatile uint32_t g_nx_rows = 0;            // rows composed (all, not only sampled)
-#define NX_LT_BEGIN() uint64_t _lt0 = nx_layer_sample ? time_us_64() : 0
-#define NX_LT_END(i) do { if (nx_layer_sample) { const uint64_t _t = time_us_64(); \
-    g_nextvid_layer_us[i] += (uint32_t)(_t - _lt0) * 16; _lt0 = _t; } } while (0)
+// one 32-bit load of the raw timer (time_us_64 is a hi/lo retry loop): these
+// marks sit in the full .nxovl window, the delta is wrap-safe
+#define NX_LT_BEGIN() uint32_t _lt0 = nx_layer_sample ? timer_hw->timerawl : 0
+#define NX_LT_END(i) do { if (nx_layer_sample) { const uint32_t _t = timer_hw->timerawl; \
+    g_nextvid_layer_us[i] += (_t - _lt0) * 16; _lt0 = _t; } } while (0)
 #endif
 #if !NEXT_TRACE
 #define NX_LT_BEGIN() do {} while (0)
@@ -1805,9 +1850,9 @@ volatile uint32_t g_nx_rowprobe[2][8];
 #endif
 __attribute__((noinline)) IRAM_ATTR void NEXTVID::emitRow(int row) {
 #if NEXT_TRACE
-    const uint64_t _em0 = time_us_64();
+    const uint32_t _em0 = timer_hw->timerawl;
     emitRowBody(row);
-    g_nx_emit_us = g_nx_emit_us + (uint32_t)(time_us_64() - _em0);
+    g_nx_emit_us = g_nx_emit_us + (timer_hw->timerawl - _em0);
 }
 __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
 #endif
@@ -1850,11 +1895,11 @@ __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
         LS = &nx_sync;
 #if NEXT_TRACE
         if ((row & 15) == 0) {
-            uint64_t t0 = time_us_64();
+            const uint32_t t0 = timer_hw->timerawl;
             nx_layer_sample = true;
             RenderLine(row);
             nx_layer_sample = false;
-            g_nextvid_us += (uint32_t)(time_us_64() - t0) * 16;
+            g_nextvid_us += (timer_hw->timerawl - t0) * 16;
         } else
 #endif
         RenderLine(row);
@@ -1919,14 +1964,14 @@ __attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
     uint8_t acc[400];
     const int xres = VIDEO::vga.xres;
     for (int i = s_pdn - 1; i >= 0; i--) {
-        rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].old;
+        rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].old; s_palMonoDirty[s_pd[i].pal] = 1;
         lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].old & 0x1FF];
     }
     int x0 = 0, i = 0;
     while (x0 < xres) {
         // apply every write that takes effect at or before x0
         while (i < s_pdn && s_pd[i].x <= x0) {
-            rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].neu;
+            rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].neu; s_palMonoDirty[s_pd[i].pal] = 1;
             lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].neu & 0x1FF];
             i++;
         }
@@ -1936,7 +1981,7 @@ __attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
         x0 = x1;
     }
     for (; i < s_pdn; i++) {   // writes past the visible line: still the final palette
-        rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].neu;
+        rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].neu; s_palMonoDirty[s_pd[i].pal] = 1;
         lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].neu & 0x1FF];
     }
     for (int x = 0; x < xres; x++) lineBuf[x] = acc[x];
@@ -1946,44 +1991,71 @@ __attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
     s_lineReady = false;
 }
 
+// The framebuffer words a row copy must leave alone: the F8 stats box rows,
+// or the OSD::notify banner (VIDEO::setNoticeCarve, 4-aligned) — drawn by
+// their own painters, a row copy would erase them on the very next frame.
+// [l0, l1) = the LED strip / panel words (left of the stats box by construction:
+// LED::drawPanel never reaches it, the strip is at x 4 and short).
+static inline __attribute__((always_inline)) void nxCarve(int row, int words, int& k0, int& k1,
+                                                           int& l0, int& l1) {
+    k0 = words; k1 = words; l0 = 0; l1 = 0;
+    if (row >= led_carve_y0 && row < led_carve_y1) {
+        l0 = led_carve_x0 >> 2; l1 = (led_carve_x1 + 3) >> 2;
+        if (l1 > words) l1 = words;
+    }
+    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    if ((LS->osd & 0x07) != 0 && row >= cy0 && row < cy0 + 16) {
+        k0 = ((VIDEO::vga.xres >= 360) ? 188 : 168) >> 2;
+        k1 = k0 + 144 / 4;
+    } else if (row >= ts_notice_y0 && row < ts_notice_y1) {
+        k0 = ts_notice_x0 >> 2;
+        k1 = (ts_notice_x1 + 3) >> 2;
+    }
+}
+
+// Packed-pair frame (Timex hi-res): the ULA left HIRES_MARK where its
+// 512-pixel line goes (hiresRow, already pair slots); everything else is a
+// palette index and becomes a solid pair. Word at a time: almost every 4-byte
+// group is either all HIRES_MARK (take the hi-res word as is) or one colour
+// (border, ULA-free paper); only groups that mix layers go byte by byte.
+// xPaperOff is a multiple of 4 in both fb widths (32 / 52), so paper words
+// line up with hiresRow. Flash: Timex hi-res is rare on the Next, and the
+// .nxovl window is full (2026-10-12).
+__attribute__((noinline)) static void nxHiresPairRow(uint8_t* lineBuf, const uint8_t* hiresRow,
+                                                     const uint8_t* pairMap, int x0, int words) {
+    uint32_t* lw = (uint32_t*)lineBuf;
+    const uint32_t* hw = (const uint32_t*)hiresRow;
+    for (int k = 0; k < words; k++) {
+        const uint32_t w = lw[k];
+        const int x = k << 2;
+        if (w == 0x10101010u && (unsigned)(x - x0) < 256u) { lw[k] = hw[(x - x0) >> 2]; continue; }
+        const uint8_t b0 = (uint8_t)w;
+        if (w == b0 * 0x01010101u && b0 != HIRES_MARK) { lw[k] = pairMap[b0] * 0x01010101u; continue; }
+        uint8_t* b = (uint8_t*)&lw[k];
+        for (int i = 0; i < 4; i++) {
+            const uint8_t v = b[i];
+            b[i] = (v == HIRES_MARK && (unsigned)(x + i - x0) < 256u) ? hiresRow[x + i - x0] : pairMap[v];
+        }
+    }
+}
+
 IRAM_ATTR void NEXTVID::RenderLine(int row) {
     uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
     uint8_t* const lineBuf = nxCtx()->line;
     if (!s_lineReady) RenderLayers(lineBuf, row);
 #if NEXT_TRACE
     g_nx_rows = g_nx_rows + 1;
-    const uint64_t _out0 = nx_layer_sample ? time_us_64() : 0;
+    const uint32_t _out0 = nx_layer_sample ? timer_hw->timerawl : 0;
 #endif
     if (LS->hires == 1) {
-        // Packed-pair frame (Timex hi-res): the ULA left HIRES_MARK where its
-        // 512-pixel line goes (hiresRow, already pair slots); everything else
-        // is a palette index and becomes a solid pair.
-        // Word at a time: almost every 4-byte group is either all HIRES_MARK
-        // (take the hi-res word as is) or one colour (border, ULA-free paper);
-        // only groups that mix layers go byte by byte. xPaperOff is a multiple
-        // of 4 in both fb widths (32 / 52), so paper words line up with hiresRow.
-        const int x0 = xPaperOff, words = ((int)VIDEO::vga.xres + 3) >> 2;
-        uint32_t* lw = (uint32_t*)lineBuf;
-        const uint32_t* hw = (const uint32_t*)hiresRow;
-        for (int k = 0; k < words; k++) {
-            const uint32_t w = lw[k];
-            const int x = k << 2;
-            if (w == 0x10101010u && (unsigned)(x - x0) < 256u) { lw[k] = hw[(x - x0) >> 2]; continue; }
-            const uint8_t b0 = (uint8_t)w;
-            if (w == b0 * 0x01010101u && b0 != HIRES_MARK) { lw[k] = pairMap[b0] * 0x01010101u; continue; }
-            uint8_t* b = (uint8_t*)&lw[k];
-            for (int i = 0; i < 4; i++) {
-                const uint8_t v = b[i];
-                b[i] = (v == HIRES_MARK && (unsigned)(x + i - x0) < 256u) ? hiresRow[x + i - x0] : pairMap[v];
-            }
-        }
+        nxHiresPairRow(lineBuf, hiresRow, pairMap, xPaperOff, ((int)VIDEO::vga.xres + 3) >> 2);
     } else if (LS->hires == 2) {
         // 640-wide pair frame: lineBuf = left pixels, p80Line2 = right pixels
         // (only on rows whose 80-column tilemap phases differ); count what is
-        // shown for the frame's 16 colours (pairPoll), every other row.
+        // shown for the frame's 16 colours (pairPoll), every 4th row.
         const int xres = (int)VIDEO::vga.xres;
         uint32_t* const hist = p80Hist;
-        if (!(row & 1)) {
+        if (!(row & 3)) {                       // every 4th row: pairPoll only ranks colours
             for (int x = 0; x < xres; x++) hist[lineBuf[x]]++;
             if (s_rowDiff) for (int x = s_dx0; x < s_dx1; x++) hist[p80Line2[x]]++;
         }
@@ -2003,22 +2075,17 @@ IRAM_ATTR void NEXTVID::RenderLine(int row) {
     }
     const uint32_t* src = (const uint32_t*)lineBuf;
     const int words = ((int)VIDEO::vga.xres + 3) >> 2;
-    int k0 = words, k1 = words;                    // [k0, k1) = words left alone
-    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
-    if ((LS->osd & 0x07) != 0 && row >= cy0 && row < cy0 + 16) {
-        k0 = ((VIDEO::vga.xres >= 360) ? 188 : 168) >> 2;
-        k1 = k0 + 144 / 4;
-    }
-    // OSD::notify banner (VIDEO::setNoticeCarve, 4-aligned): left to drawNotify,
-    // or this row copy erased it on the very next frame (hw 2026-10-07).
-    else if (row >= ts_notice_y0 && row < ts_notice_y1) {
-        k0 = ts_notice_x0 >> 2;
-        k1 = (ts_notice_x1 + 3) >> 2;
-    }
-    for (int k = 0; k < k0; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
+    int k0, k1, l0, l1;                            // [l0, l1) and [k0, k1) = words left alone
+    nxCarve(row, words, k0, k1, l0, l1);
+    if (l1 > k0) l1 = k0;
+    for (int k = 0; k < l0; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
+    for (int k = l1; k < k0; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
     for (int k = k1; k < words; k++) { const uint32_t v = src[k]; dst[k] = (v >> 16) | (v << 16); }
+    // The LED strip: glyphs over whatever this row shows (border, tilemap, Layer
+    // 2), fresh every frame; 8 rows a frame, flash. A carve froze the border.
+    if ((unsigned)(row - led_strip_y0) < 8u) LED::stampStripRow(row - led_strip_y0, (uint8_t*)dst);
 #if NEXT_TRACE
-    if (nx_layer_sample) g_nextvid_layer_us[5] += (uint32_t)(time_us_64() - _out0) * 16;
+    if (nx_layer_sample) g_nextvid_layer_us[5] += (timer_hw->timerawl - _out0) * 16;
 #endif
 }
 
@@ -2091,6 +2158,61 @@ __attribute__((noinline)) static uint8_t nxZxNearest(uint16_t v) {
     return best;
 }
 
+// Timex hi-res (port FF mode 1xx, zxula.vhd border_clr_tmx): the ULA's
+// attribute is fixed at 01 & ~ink & ink — BRIGHT, paper = the inverse of the
+// ink in port FF 5:3 — and the border takes that paper colour too. Ink / paper
+// go through whatever palette the ULA uses (classic, ULANext, ULA+) like any
+// attribute. Flash, with nxHiresUlaRow below: hi-res is rare on the Next and
+// the .nxovl window is full (2026-10-12).
+__attribute__((noinline)) static void nxHiresInkPaper(const NextLineState* ls, const uint16_t* raw,
+                                                      uint8_t mask, uint16_t fallback, bool ulaNext,
+                                                      bool ulap, uint16_t& hrInk, uint16_t& hrPap) {
+    const uint8_t ink = (ls->r69 >> 3) & 7;
+    const uint8_t a = (uint8_t)(0x40 | ((~ink & 7) << 3) | ink);
+    if (ulaNext) {
+        uint8_t shift = 0;
+        for (uint8_t m = mask; m; m >>= 1) shift++;
+        const bool bgnd = (mask & (uint8_t)(mask + 1)) != 0 || mask == 0xFF || mask == 0;
+        hrInk = raw[a & mask] & 0x1FF;
+        hrPap = bgnd ? (fallback & 0x1FF) : (raw[128 + (a >> shift)] & 0x1FF);
+    } else if (ulap) {
+        hrInk = raw[0xD0 | ink] & 0x1FF;
+        hrPap = raw[0xD8 | ((a >> 3) & 7)] & 0x1FF;
+    } else {
+        hrInk = raw[8 | ink] & 0x1FF;
+        hrPap = raw[16 + (8 | ((a >> 3) & 7))] & 0x1FF;
+    }
+}
+// Timex hi-res 512x192 (zxula.vhd vram_a, shift_reg_32): each 16-pixel column
+// is the "pixel" byte (left 8) then the "attribute" byte (right 8), fetched per
+// mode bits 1:0 — mode 6: 0x4000 / 0x6000 pixels (the usual hi-res), 7: 0x6000
+// twice, 4: 0x4000 pixels / 0x5800 attributes, 5: 0x6000 pixels / 0x7800
+// attributes. hiresRow gets pair slots of the nearest ZX colours of ink /
+// paper; the paper carries HIRES_MARK as a ready fb slot so layers drawn over
+// the ULA win.
+__attribute__((noinline)) static void nxHiresUlaRow(const NextLineState* ls, uint16_t* p, int sy,
+                                                    uint16_t hrInk, uint16_t hrPap, uint8_t* hiresRow) {
+    const uint8_t m = ls->r69 & 7;
+    const uint8_t ci = nxZxNearest(hrInk), cp = nxZxNearest(hrPap);
+    uint16_t hl[16];
+    for (int n = 0; n < 16; n++) {
+        const uint8_t c3 = (n & 8) ? ci : cp, c2 = (n & 4) ? ci : cp;
+        const uint8_t c1 = (n & 2) ? ci : cp, c0 = (n & 1) ? ci : cp;
+        hl[n] = (uint16_t)(VIDEO::profi_pair_lookup[c3][c2]
+              | ((uint16_t)VIDEO::profi_pair_lookup[c1][c0] << 8));
+    }
+    const uint8_t* lb = ls->grmem + ((m & 1) << 13) + VIDEO::offBmp[sy];
+    const uint8_t* rb = (m & 2) ? ls->grmem + 0x2000 + VIDEO::offBmp[sy]
+                                : ls->grmem + ((m & 1) << 13) + VIDEO::offAtt[sy];
+    uint32_t* hrw = (uint32_t*)hiresRow;
+    for (int col = 0; col < 32; col++) {
+        const uint8_t e = lb[col], o = rb[col];
+        hrw[2 * col]     = (uint32_t)hl[e >> 4] | ((uint32_t)hl[e & 0x0F] << 16);
+        hrw[2 * col + 1] = (uint32_t)hl[o >> 4] | ((uint32_t)hl[o & 0x0F] << 16);
+    }
+    for (int x = 0; x < 256; x++) p[x] = NX_SLOT | HIRES_MARK;
+}
+
 // Returns false when the whole row (border included) is transparent; nxU is
 // then just filled transparent and the mixer may leave the ULA out.
 IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
@@ -2118,23 +2240,7 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
     // ULA+) like any attribute.
     const bool hr = LS->hires == 1 && !(LS->r69 & 0x40);
     uint16_t hrInk = 0, hrPap = 0;
-    if (hr) {
-        const uint8_t ink = (LS->r69 >> 3) & 7;
-        const uint8_t a = (uint8_t)(0x40 | ((~ink & 7) << 3) | ink);
-        if (ulaNext) {
-            uint8_t shift = 0;
-            for (uint8_t m = mask; m; m >>= 1) shift++;
-            const bool bgnd = (mask & (uint8_t)(mask + 1)) != 0 || mask == 0xFF || mask == 0;
-            hrInk = raw[a & mask] & 0x1FF;
-            hrPap = bgnd ? (fallback & 0x1FF) : (raw[128 + (a >> shift)] & 0x1FF);
-        } else if (ulap) {
-            hrInk = raw[0xD0 | ink] & 0x1FF;
-            hrPap = raw[0xD8 | ((a >> 3) & 7)] & 0x1FF;
-        } else {
-            hrInk = raw[8 | ink] & 0x1FF;
-            hrPap = raw[16 + (8 | ((a >> 3) & 7))] & 0x1FF;
-        }
-    }
+    if (hr) nxHiresInkPaper(LS, raw, mask, fallback, ulaNext, ulap, hrInk, hrPap);
     const uint16_t borderV = hr ? (uint16_t)(hrPap | NX_BRD) : bc[LS->border & 7];
     const int y = row - paperTopRow;
 
@@ -2207,32 +2313,7 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
     // shadow screen (bank 7, NR 0x69 bit 6 = port 7FFD bit 3) is displayed —
     // zxula.vhd: "limit timex modes to bank 5 as bank 7 only has 8k bram".
     if (hr) {
-        // Timex hi-res 512x192 (zxula.vhd vram_a, shift_reg_32): each 16-pixel
-        // column is the "pixel" byte (left 8) then the "attribute" byte (right
-        // 8), fetched per mode bits 1:0 — mode 6: 0x4000 / 0x6000 pixels (the
-        // usual hi-res), 7: 0x6000 twice, 4: 0x4000 pixels / 0x5800 attributes,
-        // 5: 0x6000 pixels / 0x7800 attributes. hiresRow gets pair slots of
-        // the nearest ZX colours of ink / paper; the paper carries HIRES_MARK
-        // as a ready fb slot so layers drawn over the ULA win.
-        const uint8_t m = LS->r69 & 7;
-        const uint8_t ci = nxZxNearest(hrInk), cp = nxZxNearest(hrPap);
-        uint16_t hl[16];
-        for (int n = 0; n < 16; n++) {
-            const uint8_t c3 = (n & 8) ? ci : cp, c2 = (n & 4) ? ci : cp;
-            const uint8_t c1 = (n & 2) ? ci : cp, c0 = (n & 1) ? ci : cp;
-            hl[n] = (uint16_t)(VIDEO::profi_pair_lookup[c3][c2]
-                  | ((uint16_t)VIDEO::profi_pair_lookup[c1][c0] << 8));
-        }
-        const uint8_t* lb = LS->grmem + ((m & 1) << 13) + VIDEO::offBmp[sy];
-        const uint8_t* rb = (m & 2) ? LS->grmem + 0x2000 + VIDEO::offBmp[sy]
-                                    : LS->grmem + ((m & 1) << 13) + VIDEO::offAtt[sy];
-        uint32_t* hrw = (uint32_t*)hiresRow;
-        for (int col = 0; col < 32; col++) {
-            const uint8_t e = lb[col], o = rb[col];
-            hrw[2 * col]     = (uint32_t)hl[e >> 4] | ((uint32_t)hl[e & 0x0F] << 16);
-            hrw[2 * col + 1] = (uint32_t)hl[o >> 4] | ((uint32_t)hl[o & 0x0F] << 16);
-        }
-        for (int x = 0; x < 256; x++) p[x] = NX_SLOT | HIRES_MARK;
+        nxHiresUlaRow(LS, p, sy, hrInk, hrPap, hiresRow);
     } else {
         // zxula.vhd vram_a: pixel = mode(0) & pixel address, attribute =
         // '1' & PIXEL address when mode(1) (hi-colour 8x1 attributes at
@@ -2554,6 +2635,43 @@ static IRAM_ATTR void nxMixBlend(const NxMix& m, int xres, bool minus5) {
     }
 }
 
+#if NEXT_TRACE
+// NEXT mix: which rows take the full mixer (Layer 2 / sprite opaque on the
+// row) and how wide the 640 frame's second pass is. Flash: one call a row.
+volatile uint32_t g_nx_mix[5] = {};   // rows: l2, spr, either, p2; p2 pixels
+// NEXT spr: resolves a frame and the attribute span each covered, sprites
+// tested per row (the visible list) and sprites drawn per row.
+volatile uint32_t g_nx_spr[4] = {};
+__attribute__((noinline)) static void nxSprNote(int k, uint32_t n) { g_nx_spr[k] = g_nx_spr[k] + n; }
+__attribute__((noinline)) static void nxMixNote(bool l2, bool spr, bool p2, int p2px) {
+    if (l2) g_nx_mix[0] = g_nx_mix[0] + 1;
+    if (spr) g_nx_mix[1] = g_nx_mix[1] + 1;
+    if (l2 || spr) g_nx_mix[2] = g_nx_mix[2] + 1;
+    if (p2) { g_nx_mix[3] = g_nx_mix[3] + 1; g_nx_mix[4] = g_nx_mix[4] + (uint32_t)p2px; }
+}
+#endif
+
+#if NEXT_TRACE
+// Warhawk bottom-stripe probe (trace only, flash — the .nxovl window is full):
+// for paper rows 0 and 191, which layers are opaque, the Layer 2 source row and
+// a hash of each layer's paper pixels.
+__attribute__((noinline)) static void nxRowProbe(int y, int xres, int x0) {
+    extern volatile uint32_t g_nx_rowprobe[2][8];
+    volatile uint32_t* pr = g_nx_rowprobe[y ? 1 : 0];
+    uint32_t nl = 0, ns = 0, nu = 0, hl = 2166136261u, hs = 2166136261u, hu = 2166136261u;
+    for (int x = x0; x < x0 + 256 && x < xres; x++) {
+        const uint16_t l = nxL[x], sp = nxS[x], u = nxU[x];
+        if (!(l & NX_TR)) nl++;
+        if (!(sp & NX_TR)) ns++;
+        if (!(u & NX_TR)) nu++;
+        hl = (hl ^ l) * 16777619u; hs = (hs ^ sp) * 16777619u; hu = (hu ^ u) * 16777619u;
+    }
+    uint16_t sy = (uint16_t)(y + LS->r17); if (sy >= 192) sy -= 192;
+    pr[0] = LS->r17; pr[1] = sy; pr[2] = nl; pr[3] = ns; pr[4] = nu;
+    pr[5] = hl; pr[6] = hs; pr[7] = hu;
+}
+#endif
+
 IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     const int xres = VIDEO::vga.xres;
     const int y = row - paperTopRow;
@@ -2615,21 +2733,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
 #if NEXT_TRACE
     // Warhawk bottom-stripe probe: for paper rows 0 and 191, which layers are
     // opaque, the Layer 2 source row and a hash of each layer's paper pixels.
-    if (y == 0 || y == 191) {
-        extern volatile uint32_t g_nx_rowprobe[2][8];
-        volatile uint32_t* pr = g_nx_rowprobe[y ? 1 : 0];
-        uint32_t nl = 0, ns = 0, nu = 0, hl = 2166136261u, hs = 2166136261u, hu = 2166136261u;
-        for (int x = xPaperOff; x < xPaperOff + 256 && x < xres; x++) {
-            const uint16_t l = nxL[x], sp = nxS[x], u = nxU[x];
-            if (!(l & NX_TR)) nl++;
-            if (!(sp & NX_TR)) ns++;
-            if (!(u & NX_TR)) nu++;
-            hl = (hl ^ l) * 16777619u; hs = (hs ^ sp) * 16777619u; hu = (hu ^ u) * 16777619u;
-        }
-        uint16_t sy = (uint16_t)(y + LS->r17); if (sy >= 192) sy -= 192;
-        pr[0] = LS->r17; pr[1] = sy; pr[2] = nl; pr[3] = ns; pr[4] = nu;
-        pr[5] = hl; pr[6] = hs; pr[7] = hu;
-    }
+    if (y == 0 || y == 191) nxRowProbe(y, xres, xPaperOff);
 #endif
     NxMix m;
     m.fb = fb;
@@ -2650,6 +2754,9 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
         const uint32_t* a = (const uint32_t*)nxU; uint32_t* b = (uint32_t*)nxUs;
         for (int k = dx0 >> 1; k < (dx1 + 1) >> 1; k++) b[k] = a[k];
     }
+#if NEXT_TRACE
+    nxMixNote(m.l2, m.spr, p2, p2 ? dx1 - dx0 : 0);
+#endif
     if (order < 6) nxMixOrder(m, xres, order);
     else nxMixBlend(m, xres, order == 7);
     if (p2) {
@@ -2712,6 +2819,14 @@ __attribute__((noinline)) static bool nxL2SlowRow(uint16_t* o, const uint8_t* br
 // Layer 2: 256x192x8bpp (row-major) or 320x256x8bpp (column-major, covers
 // the border window). the palette priority bit
 // rides along as NX_PRIO for the mixer.
+// Flash: runs once per palette change, not per row (inline it was 244 B of
+// the full .nxovl window).
+__attribute__((noinline)) static void nxPalMono(uint8_t pal, const uint16_t* raw) {
+    s_palMonoDirty[pal] = 0;
+    const uint16_t c = raw[0] & 0x1FF;
+    for (int i = 1; i < 256; i++) if ((raw[i] & 0x1FF) != c) { s_palMono[pal] = 0xFFFF; return; }
+    s_palMono[pal] = c;
+}
 __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns")))
 IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
     uint8_t pal = (LS->palCtrl & 0x04) ? 5 : 1;
@@ -2721,6 +2836,13 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
     uint8_t palOfs = (LS->r70 & 0x0F) << 4;
     uint16_t bank = (uint16_t)(LS->r12 & 0x7F) * 2;
     uint16_t* const out = nxL;
+    // Every entry of the palette transparent: nothing this layer can show,
+    // whatever its banks hold — NEXTEST enables Layer 2 with an all-black
+    // palette over NR 0x14 = 0 and runs its memory test through the banks,
+    // which cost 192 PSRAM rows (5 ms of the frame's render) for no pixel.
+    // The scan stops at the first opaque entry (entry 0 or 1 on a real picture).
+    if (s_palMonoDirty[pal]) nxPalMono(pal, raw);
+    if ((s_palMono[pal] >> 1) == transp) return;   // 0xFFFF >> 1 never equals an 8-bit colour
 
     if (mode == 0) {
         // 256x192, aligned with the paper area
@@ -2858,13 +2980,15 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
 // so the pixel pair is ORed and 1-pixel strokes of the font survive (deviation).
 // Flash on purpose: text mode is rare and this keeps ~1 KB out of every board's
 // SRAM (RenderTilemapLine is RAM-resident).
+// pairPhase: one phase of a 640-wide pair frame (odd X scroll only — the even
+// case is RenderTilemapLine's one-walk loop): every other pixel, never ORed.
 __attribute__((noinline)) static void tmTextSpan(uint16_t* o, int n, uint8_t b, int u0, int step,
                                                  uint8_t palHi, const uint16_t* rawTM, uint8_t r14,
-                                                 uint16_t below) {
+                                                 uint16_t below, bool pairPhase) {
     for (int k = 0; k < n; k++) {
         const int u = u0 + k * step;
         uint8_t bit = (b >> (7 - u)) & 1;
-        if (step == 2 && u < 7) bit |= (b >> (6 - u)) & 1;
+        if (step == 2 && !pairPhase && u < 7) bit |= (b >> (6 - u)) & 1;
         const uint16_t v = rawTM[(uint8_t)(palHi | bit)] & 0x1FF;
         if ((v >> 1) != r14) o[k] = (uint16_t)(v | below);
     }
@@ -2918,6 +3042,54 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
     const int wrap = cols80 ? 640 : 320;
     // 640-wide pair frame: the odd source pixels go to nxT2 (a second pass).
     const bool pair = cols80 && LS->hires == 2;
+    if (pair && text && !(scrollX & 1)) {
+        // 640-wide pair frame, text mode, even X scroll: both phases in ONE walk
+        // of the tiles — a tile's even source pixels go to nxT, the odd ones to
+        // nxT2, and the two colours are rebuilt only when the attribute changes
+        // (NEXTEST: one attribute for the whole map, tilemap 13.7 ms of the
+        // frame's render with the two-pass loop below, hw 2026-10-11).
+        uint16_t* __restrict const o0 = nxT + xOrig;
+        uint16_t* __restrict const o1 = nxT2 + xOrig;
+        const uint8_t r14 = LS->r14, a6C = LS->r6C;
+        int tx = t0;
+        int sx = (tx * 2 + scrollX) % 640;
+        int lastAttr = -1;
+        uint16_t c0 = NX_TR, c1 = NX_TR;
+        while (tx <= t1) {
+            const int u0 = sx & 7;                     // even
+            int n = (8 - u0) >> 1;
+            if (n > t1 - tx + 1) n = t1 - tx + 1;
+            const uint8_t* e = mrow + (sx >> 3) * entrySz;
+            const uint8_t attr = noAttr ? a6C : e[1];
+            if (attr != lastAttr) {
+                lastAttr = attr;
+                const uint16_t below = (!onTop && ((attr & 0x01) || m512)) ? NX_BELOW : 0;
+                const uint8_t ph2 = (uint8_t)(attr & 0xFE);
+                const uint16_t v0 = rawTM[ph2] & 0x1FF, v1 = rawTM[(uint8_t)(ph2 | 1)] & 0x1FF;
+                c0 = ((v0 >> 1) != r14) ? (uint16_t)(v0 | below) : NX_TR;
+                c1 = ((v1 >> 1) != r14) ? (uint16_t)(v1 | below) : NX_TR;
+            }
+            const uint16_t tnum = (uint16_t)(e[0] | ((m512 && (attr & 0x01)) ? 0x100 : 0));
+            const uint32_t b = (uint32_t)defsBank[(uint16_t)(defsOff + tnum * 8 + inRow) & 0x3FFF] << u0;
+            uint16_t* __restrict p0 = o0 + tx;
+            uint16_t* __restrict p1 = o1 + tx;
+            if (n == 4) {
+                p0[0] = (b & 0x80) ? c1 : c0; p1[0] = (b & 0x40) ? c1 : c0;
+                p0[1] = (b & 0x20) ? c1 : c0; p1[1] = (b & 0x10) ? c1 : c0;
+                p0[2] = (b & 0x08) ? c1 : c0; p1[2] = (b & 0x04) ? c1 : c0;
+                p0[3] = (b & 0x02) ? c1 : c0; p1[3] = (b & 0x01) ? c1 : c0;
+            } else {
+                for (int k = 0; k < n; k++) {
+                    p0[k] = ((b << (2 * k)) & 0x80) ? c1 : c0;
+                    p1[k] = ((b << (2 * k)) & 0x40) ? c1 : c0;
+                }
+            }
+            tx += n;
+            sx += 2 * n;
+            if (sx >= 640) sx -= 640;
+        }
+        return;
+    }
     for (int ph = 0; ph <= (pair ? 1 : 0); ph++) {
     uint16_t* const out = (ph ? nxT2 : nxT) + xOrig;
     int tx = t0;
@@ -2950,16 +3122,7 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
                 tx += 8; sx += 8; if (sx >= wrap) sx -= wrap;
                 continue;
             }
-            if (pair) {
-                // one source pixel per output pixel of this phase: no ORed pair
-                const uint8_t ph2 = (uint8_t)(attr & 0xFE), r14 = LS->r14;
-                const uint16_t v0 = rawTM[ph2] & 0x1FF, v1 = rawTM[(uint8_t)(ph2 | 1)] & 0x1FF;
-                const uint16_t c0 = ((v0 >> 1) != r14) ? (uint16_t)(v0 | below) : NX_TR;
-                const uint16_t c1 = ((v1 >> 1) != r14) ? (uint16_t)(v1 | below) : NX_TR;
-                uint16_t* __restrict o = out + tx;
-                for (int k = 0; k < n; k++) o[k] = ((b << (u0 + 2 * k)) & 0x80) ? c1 : c0;
-            } else
-                tmTextSpan(out + tx, n, b, u0, step, (uint8_t)(attr & 0xFE), rawTM, LS->r14, below);
+            tmTextSpan(out + tx, n, b, u0, step, (uint8_t)(attr & 0xFE), rawTM, LS->r14, below, pair);
         } else {
             const bool xm = attr & 0x08, ym = attr & 0x04, rot = attr & 0x02;
             const uint16_t defBase = (uint16_t)(defsOff + tnum * 32);
@@ -3081,6 +3244,9 @@ IRAM_ATTR void NEXTVID::resolveSprites() {
     int s0 = d.lo, s1 = d.hi + 1;
     while (s0 > 0 && sprIsRel(d.attr[s0])) s0--;
     while (s1 < 128 && sprIsRel(d.attr[s1])) s1++;
+#if NEXT_TRACE
+    nxSprNote(0, 1); nxSprNote(1, (uint32_t)(s1 - s0));
+#endif
     bool visChanged = false;
     int ax = 0, ay = 0, apat = 0, azx = 0, azy = 0;
     uint8_t apal = 0;
@@ -3151,6 +3317,7 @@ IRAM_ATTR void NEXTVID::resolveSprites() {
 // Render all visible sprites crossing paper line y (0-191). Sprite
 // coordinate space puts (32,32) at the paper top-left corner; rendering is
 // clipped to the paper area for now (sprites-over-border comes later).
+__attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns")))
 IRAM_ATTR void NEXTVID::RenderSpritesLine(int y) {
     if (sprR->dirty) resolveSprites();  // RenderLayers applied this line's log
     const SprRender& sn = *sprR;
@@ -3174,12 +3341,16 @@ IRAM_ATTR void NEXTVID::RenderSpritesLine(int y) {
     if (lo < -xPaperOff) lo = -xPaperOff;
     if (hi > (int)VIDEO::vga.xres - 1 - xPaperOff) hi = (int)VIDEO::vga.xres - 1 - xPaperOff;
     if (lo > hi) return;
-    uint8_t coverage[40]; // 320-bit line coverage for the collision flag
-    memset(coverage, 0, sizeof(coverage));
+    // Line coverage for the collision flag, bit = paper x + 32 (0..351): an
+    // unscaled sprite row is one 16-bit mask ORed in as a word — the byte
+    // read-modify-write per pixel was most of the blit (NEXTEST: ~17 sprites a
+    // row on 103 rows, 5.4 ms of the frame's render, hw 2026-10-12).
+    uint32_t coverage[11];
+    for (int k = 0; k < 11; k++) coverage[k] = 0;
     uint16_t* const fbp = nxS + xPaperOff;    // indexed by paper x
     int rendered = 0;
     const int nv = sn.n;
-    uint8_t collided = 0;
+    uint32_t collided = 0;
 
     for (int i = 0; i < nv; i++) {
         const SprRes& r = sn.res[sn.vis[zeroOnTop ? nv - 1 - i : i]];
@@ -3198,44 +3369,90 @@ IRAM_ATTR void NEXTVID::RenderSpritesLine(int y) {
         if (p1 > width - 1) p1 = width - 1;
         if (p0 > p1) continue;
 
-        // The 16 source pixels of this sprite row, mirror/rotate applied;
-        // 0xFFFF = transparent.
+        // The 16 pixels of this sprite row as 9-bit colours, mirror/rotate and
+        // the palette applied; 0xFFFF = transparent. Unrotated rows read the
+        // pattern row in order (NEXTEST: 109 sprites, ~13 on a line, sprites
+        // 5.4 ms of the frame's render with the per-pixel mirror/rotate loop).
         uint16_t row[16];
         uint8_t v = rowIn >> ys;
         if (r.flags & SR_YM) v = 15 - v;
         const uint8_t* pat = sprPatterns + r.pat;
         const bool xm = r.flags & SR_XM, rot = r.flags & SR_ROT;
-        if (r.flags & SR_4BPP) {
-            const uint8_t tr = transp & 0x0F;
-            for (int u = 0; u < 16; u++) {
-                const int su = xm ? 15 - u : u;
-                const int uu = rot ? v : su, vv = rot ? 15 - su : v;
-                const uint8_t b = pat[vv * 8 + (uu >> 1)];
-                const uint8_t px = (uu & 1) ? (b & 0x0F) : (b >> 4);
-                row[u] = (px == tr) ? 0xFFFF : (uint16_t)(px | r.pal);
+        const bool b4 = r.flags & SR_4BPP;
+        const uint8_t tr = b4 ? (uint8_t)(transp & 0x0F) : transp;
+        if (!rot) {
+            if (b4) {
+                const uint8_t* pr = pat + v * 8;
+                for (int k = 0; k < 8; k++) {
+                    const uint8_t b = pr[k], h = b >> 4, l = b & 0x0F;
+                    row[2 * k]     = (h == tr) ? 0xFFFF : (uint16_t)(sprRaw[h | r.pal] & 0x1FF);
+                    row[2 * k + 1] = (l == tr) ? 0xFFFF : (uint16_t)(sprRaw[l | r.pal] & 0x1FF);
+                }
+            } else {
+                const uint8_t* pr = pat + v * 16;
+                for (int u = 0; u < 16; u++) {
+                    const uint8_t px = pr[u];
+                    row[u] = (px == tr) ? 0xFFFF : (uint16_t)(sprRaw[(uint8_t)(px + r.pal)] & 0x1FF);
+                }
             }
+            if (xm)
+                for (int u = 0; u < 8; u++) { const uint16_t t = row[u]; row[u] = row[15 - u]; row[15 - u] = t; }
         } else {
             for (int u = 0; u < 16; u++) {
                 const int su = xm ? 15 - u : u;
-                const int uu = rot ? v : su, vv = rot ? 15 - su : v;
-                const uint8_t px = pat[vv * 16 + uu];
-                row[u] = (px == transp) ? 0xFFFF : (uint16_t)(uint8_t)(px + r.pal);
+                const int uu = v, vv = 15 - su;
+                uint8_t px;
+                if (b4) { const uint8_t b = pat[vv * 8 + (uu >> 1)]; px = (uu & 1) ? (b & 0x0F) : (b >> 4); }
+                else px = pat[vv * 16 + uu];
+                const uint8_t ci = b4 ? (uint8_t)(px | r.pal) : (uint8_t)(px + r.pal);
+                row[u] = (px == tr) ? 0xFFFF : (uint16_t)(sprRaw[ci] & 0x1FF);
             }
         }
 
+        if (xs == 0) {
+            // Unscaled (nearly every sprite): the opaque pixels of the row as a
+            // mask, clipped to [p0, p1]; one word for the coverage, one store
+            // per set bit.
+            uint32_t m = 0;
+            for (int u = 0; u < 16; u++) if (row[u] != 0xFFFF) m |= 1u << u;
+            m = (m >> p0) & ((2u << (p1 - p0)) - 1u);
+            if (!m) continue;
+            const unsigned b0 = (unsigned)(x0 + 32 + p0);     // >= 0: lo >= -32
+            const unsigned sh = b0 & 31;
+            const uint32_t w0 = m << sh;
+            collided |= coverage[b0 >> 5] & w0;
+            coverage[b0 >> 5] |= w0;
+            if (sh > 16) {
+                const uint32_t w1 = m >> (32 - sh);
+                collided |= coverage[(b0 >> 5) + 1] & w1;
+                coverage[(b0 >> 5) + 1] |= w1;
+            }
+            uint16_t* const o = fbp + x0 + p0;
+            const uint16_t* const rp = row + p0;
+            while (m) {
+                const int b = __builtin_ctz(m);
+                o[b] = rp[b];
+                m &= m - 1;
+            }
+            nxRowSpr = true;
+            continue;
+        }
         for (int px = p0; px <= p1; px++) {
             const uint16_t c = row[px >> xs];
             if (c == 0xFFFF) continue;
             const int xp = x0 + px;
             const unsigned cbit = (unsigned)(xp + 32);
-            const uint8_t mask = 1 << (cbit & 7);
-            collided |= coverage[cbit >> 3] & mask;
-            coverage[cbit >> 3] |= mask;
-            fbp[xp] = (uint16_t)(sprRaw[c] & 0x1FF);
+            const uint32_t mask = 1u << (cbit & 31);
+            collided |= coverage[cbit >> 5] & mask;
+            coverage[cbit >> 5] |= mask;
+            fbp[xp] = c;
             nxRowSpr = true;
         }
     }
     if (collided) sprFlags |= 0x01;
+#if NEXT_TRACE
+    nxSprNote(2, (uint32_t)nv); nxSprNote(3, (uint32_t)rendered);
+#endif
 }
 
 

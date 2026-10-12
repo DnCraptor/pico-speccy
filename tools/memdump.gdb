@@ -68,12 +68,12 @@ if $nslots == 8
   end
   printf "reg8C=%02X altrom_rd=%d altrom_wr=%d altrom_sel=%d\n", NextReg::reg[0x8C], MemESP::altrom_rd, MemESP::altrom_wr, MemESP::altrom_sel
   dump binary memory /tmp/picospec_page0B.bin MemESP::nextPg[0x0B] (MemESP::nextPg[0x0B] + 8192)
-  dump binary memory /tmp/picospec_page10.bin (MemESP::nextStrip + 0x0) ((MemESP::nextStrip + 0x0) + 8192)
-  dump binary memory /tmp/picospec_page11.bin (MemESP::nextStrip + 0x2000) ((MemESP::nextStrip + 0x2000) + 8192)
-  dump binary memory /tmp/picospec_page20.bin (MemESP::nextStrip + 0x20000) ((MemESP::nextStrip + 0x20000) + 8192)
-  dump binary memory /tmp/picospec_page21.bin (MemESP::nextStrip + 0x22000) ((MemESP::nextStrip + 0x22000) + 8192)
-  dump binary memory /tmp/picospec_page30.bin (MemESP::nextStrip + 0x40000) ((MemESP::nextStrip + 0x40000) + 8192)
-  dump binary memory /tmp/picospec_page31.bin (MemESP::nextStrip + 0x42000) ((MemESP::nextStrip + 0x42000) + 8192)
+  dump binary memory /tmp/picospec_page10.bin (MemESP::nextStrip+0x0) (MemESP::nextStrip+0x0+8192)
+  dump binary memory /tmp/picospec_page11.bin (MemESP::nextStrip+0x2000) (MemESP::nextStrip+0x2000+8192)
+  dump binary memory /tmp/picospec_page20.bin (MemESP::nextStrip+0x20000) (MemESP::nextStrip+0x20000+8192)
+  dump binary memory /tmp/picospec_page21.bin (MemESP::nextStrip+0x22000) (MemESP::nextStrip+0x22000+8192)
+  dump binary memory /tmp/picospec_page30.bin (MemESP::nextStrip+0x40000) (MemESP::nextStrip+0x40000+8192)
+  dump binary memory /tmp/picospec_page31.bin (MemESP::nextStrip+0x42000) (MemESP::nextStrip+0x42000+8192)
   printf "slots: %08X %08X %08X %08X %08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[1], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[3], (unsigned)MemESP::ramCurrent[4], (unsigned)MemESP::ramCurrent[5], (unsigned)MemESP::ramCurrent[6], (unsigned)MemESP::ramCurrent[7]
   printf "nextRomBase=%08X nextDivRomBase=%08X\n", (unsigned)MemESP::nextRomBase, (unsigned)MemESP::nextDivRomBase
   printf "palCtrl=%02X palIdx=%02X border=%d\n", NEXTVID::palCtrl, NEXTVID::palIdx, VIDEO::borderColor
@@ -332,24 +332,6 @@ if Z80Ops::isTc2068
 end
 
 # ── cores (ARM) ─────────────────────────────────────────────────────────────
-# Where each ARM core actually is. The NeoGS block above gives the GS-Z80's own
-# PC, i.e. WHICH emulated instruction is parked — but when core1 wedges inside
-# GS::pump() (the NGS_TRACE line shows it as pe/px frozen with rs=1) that says
-# nothing about WHY. This does: a backtrace separates "a callback is looping"
-# from "the load itself is stalled on the shared XIP/QMI bus", which is the one
-# question a frozen Z80 PC cannot answer.
-# Deliberately names NO symbol, so it cannot abort the sourced file the way an
-# unresolved one would (see the fishbone trap list) — and it is last regardless.
-# `thread apply all` restores the selected thread itself.
-set logging file /tmp/picospec_cores.txt
-set logging overwrite on
-set logging redirect on
-set logging enabled on
-printf "== cores (ARM) ==\n"
-info threads
-thread apply all bt 12
-set logging enabled off
-set logging redirect off
 
 # ATM-Turbo: CP/M and Beta-128 share the DOS/FDC signal, but the generic dump
 # does not record the ATM latches that produce it. Keep this after every other
@@ -370,6 +352,10 @@ if Z80Ops::isAtm
   if Atm::evo
     printf "evo: eff7=%02X fddMask=%X vgSys=%02X inNmi=%d nmiClr=%d inTrdemu=%d fnt=%d\n", (unsigned char)EvoBase::pEFF7, (unsigned char)EvoBase::fddMask, (unsigned char)EvoBase::vgSys, (int)EvoBase::inNmi, (int)EvoBase::nmiClrPending, (int)EvoBase::inTrdemu, (int)g_atm_fnt
   end
+  set logging enabled off
+  set logging redirect off
+end
+
 # ── ZX Spectrum Next state (appended LAST — the rule of this file: an
 # unresolved symbol must not lose the main dump). NextReg register file +
 # MMU/paging/divMMC-automap/TBBLUE-window snapshot: a Browser or .tap hang
@@ -387,11 +373,28 @@ if Config::arch == 11
   printf "port7FFD=%02X port1FFD=%02X portDFFD=%02X port123B=%02X portFF=%02X\n", NextReg::port7FFD, NextReg::port1FFD, NextReg::portDFFD, NextReg::port123B, NextReg::portFF
   printf "bootrom=%d configMode=%d configPage=%02X\n", (int)MemESP::nextBootRomActive, (int)MemESP::nextConfigMode, MemESP::nextConfigPage
   printf "divmmc: automap=%d conmem=%d mapram=%d bank=%d mapped=%d armed=%d\n", (int)DivMMC::automap, (int)DivMMC::conmem, (int)DivMMC::mapram, (int)DivMMC::bank, (int)MemESP::divmmc_mapped, (int)g_next_automap_armed
-  printf "wr_overlay=%d multiplicator=%d\n", (int)MemESP::wr_overlay_active, (int)ESPectrum::multiplicator
+  printf "wr_overlay_mask=%02X multiplicator=%d\n", (unsigned char)MemESP::wr_overlay_mask, (int)ESPectrum::multiplicator
   printf "slots: %08X %08X %08X %08X %08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[1], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[3], (unsigned)MemESP::ramCurrent[4], (unsigned)MemESP::ramCurrent[5], (unsigned)MemESP::ramCurrent[6], (unsigned)MemESP::ramCurrent[7]
   set logging enabled off
   set logging redirect off
 end
+
+# Where the selected ARM core is: PC / LR / SP only — no backtrace and NO thread
+# switch: `thread apply all` (bt or even a plain printf) selects the other core's
+# frame, and with a PC in .nxovl that alone hung GDB (2026-10-11, twice).
+# `thread apply all bt` hung the whole dump on a Next session (2026-10-11): core0
+# was parked in c1Drain inside .nxovl, a window that shares its addresses with
+# .tsovl/.ftovl, GDB unwound it through TS-Conf/FT812 symbols into garbage and
+# never came back, so nothing after this point ran. Resolve PCs by hand against
+# the overlay that is actually loaded. Kept LAST, after every other block.
+set logging file /tmp/picospec_cores.txt
+set logging overwrite on
+set logging redirect on
+set logging enabled on
+printf "== cores (ARM) ==\n"
+printf "selected core: pc=%08X lr=%08X sp=%08X\n", $pc, $lr, $sp
+set logging enabled off
+set logging redirect off
 
 # Last line: tell the VS Code extension the dump is complete.
 shell touch /tmp/picospec_gdb_done

@@ -1173,6 +1173,8 @@ static bool ds80_border_geom = false;
 // owns the rows it sits on: the TS-Conf whole-line renderer and its band rows,
 // the borderless scaler, and the Profi DS80 content renderer + border machine.
 int ts_notice_x0 = 0, ts_notice_x1 = 0, ts_notice_y0 = 0, ts_notice_y1 = -1;   // NEXTVID reads them too
+int led_carve_x0 = 0, led_carve_x1 = 0, led_carve_y0 = 0, led_carve_y1 = -1;   // LED panel, NEXTVID reads them
+int led_strip_y0 = -1;   // LED strip, NEXTVID stamps its glyphs per row
 
 // LED indicator panel (Interface > LED indicators > Solid background): width in
 // fb bytes (a multiple of 8), 0 = none. It starts at the left edge of the F8
@@ -7377,6 +7379,12 @@ void VIDEO::setNoticeCarve(int x0, int y0, int x1, int y1) {
 
 void VIDEO::clearNoticeCarve() { ts_notice_y1 = -1; }
 
+void VIDEO::setLedCarve(int x0, int y0, int x1, int y1) {
+    led_carve_x0 = x0; led_carve_x1 = x1;
+    led_carve_y0 = y0; led_carve_y1 = y1;
+}
+void VIDEO::setLedStrip(int y0) { led_strip_y0 = y0; }
+
 // LED panel width in fb bytes (0 = no panel). Any change moves the carve, so the
 // rows it gives up have to be repainted by whoever owns them: the border machine
 // / gmxBorderFrame through the two flags, the content renderers by themselves.
@@ -8543,6 +8551,13 @@ IRAM_ATTR void VIDEO::EndFrame() {
         // generic call at the end of EndFrame, so on the Next the banner never
         // timed out — cancelNotify never ran, the carve stayed and NEXTVID kept
         // skipping those words until something else repainted them (hw 2026-10-08).
+        // The LED strip / panel, as the classic path below does it: the Next
+        // returns before that code, so the indicators never showed (hw 2026-10-12).
+        // The rows they sit in are rendered by core1 every frame; LED::draw
+        // publishes its rect (setLedCarve) and NEXTVID::RenderLine skips it.
+        LED::decay();
+        if (Config::ledIndicators) LED::draw();
+        else { setLedBar(0); setLedCarve(0, 0, 0, -1); setLedStrip(-1); }
         OSD::drawNotify();
         tsFastMemRecalc();   // TsFastMem.h: breakpoints can revoke it per frame
         framecnt++;
@@ -9328,6 +9343,8 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         LED::draw();
     } else {
         setLedBar(0);                 // panel gone: its rect goes back to the renderers
+        setLedCarve(0, 0, 0, -1);
+        setLedStrip(-1);
         if (bl_live) blClearCarve(BL_CARVE_LED);   // strip gone: the scaler takes its rows back
     }
 
