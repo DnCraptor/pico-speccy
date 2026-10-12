@@ -528,6 +528,35 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   «висел»; `MemESP::nextStrip + x` с пробелами и `wr_overlay_active` (теперь `_mask`)
   роняли его под `logging redirect`; блок ядер — только PC/LR/SP текущего ядра:
   `thread apply all` (даже printf) переключается на ядро в `.nxovl` и вешает GDB.
+- **Ядро Z80 под RAMTEST-цикл (2026-10-12, NOT hw-tested, `debug/DVp2-next-core1-1.0.9`
+  + `-trace-`).** QEMU-стенда `tools/z80bench` на машине нет (нет qemu-system-arm/glib) —
+  замер статический: `exec_nocheck_next` дизассемблирован (`objdump --disassemble=
+  _ZN3Z8017exec_nocheck_nextEb`, таблица `tbh` индексируется `opcode-1`), по каждому
+  опкоду цикла RAMTEST (bank 5 #6E63: PUSH HL x8/ADD HL,DE/DJNZ, затем POP DE/CP E/JP NZ/
+  ADD A,C/CP D/JP NZ/ADD A,C x128) посчитаны ARM-инструкции. Вывод: **на инструкцию Z80
+  ~29 ARM фиксированных** (tsFastTick 5, divmmc 2, fetch 4, regR 3, PC 3, prefixOpcode 3,
+  opCode/flagQ/pendingEI/lastFlagQ 4, диспетч 3, хвост `tstates < stFrame` 4) + тело
+  30-35 — т.е. >50% времени вне тел. Сделано: (1) **флаги add/adc/sub/sbc/cp/add16 без
+  ветвлений** (H = бит 4 `a^op^res`, V = бит 7 `(a^res)&~(a^op)` >> 5; `cp` берёт биты
+  5/3 из операнда, не из таблицы) — ДЛЯ ВСЕХ машин, бит в бит со старыми формулами на всех
+  (A, op, carry) (`alu_check.cpp` в сессионном scratch: исчерпывающе 8-бит + 60M add16,
+  две мутации ловит); (2) `JP/RET/CALL cc`: условие вычисляется в case (`nx_cc = ...`,
+  генератор `CC[]`), общее тело по метке — вместо `bl Z80::condMet` на каждом условном
+  переходе; (3) **gate-free аксессоры `NextMemory::*_nx`** только для вставленных тел
+  (`g_next_fastrd` в цикле инвариант: табличные обработчики и префиксные декодеры —
+  единственные, кто может его уронить портовой записью — выходят из цикла сразу
+  (`lastFlagQ = flagQ; return;`), так что тест `ldr/ldrb/cmp/beq` на каждый доступ не
+  платится; `peek16_nx`/`poke16_nx` — один поиск слота, если слово не пересекает границу
+  8K; `nxPush`/`nxPop` через них). Итог по статике: PUSH HL 50 -> 33, DJNZ 47 -> 35,
+  ADD A,C 40 -> 34, CP E 39 -> 36, JP NZ ~48 -> ~41 (без вызова), POP без изменений;
+  на блок RAMTEST ≈ −6..8% ARM-инструкций, `.nxovl` 47 248 -> 46 576 (trace 46 952),
+  `.data` −72 B. Честно: мало — главный остаток это 29 фиксированных на инструкцию и
+  регистры Z80 в памяти (каждый PC/SP/HL/F — load/store); дальше только ядро с
+  регистрами Z80 в регистрах ARM внутри цикла (спиллы вокруг вызовов) — отдельная
+  большая работа. Не взято: `regR` в локальной переменной (−2 insn/instr; `NextIdle`
+  читает `Z80::regR` — нужна синхронизация вокруг `nxCheckTrdos`), объединение теста
+  `stFrame` с line-tick. Hw owed: NEXTEST FPS не хуже split17, RAMTEST FPS, любая игра
+  на 48K/Pentagon (флаги — общие).
 - **SRAM-проход 2026-10-10 (NOT hw-tested): `.data` DVp2 102 260 -> 93 020 B.** Таблица
   видеорежимов `video_mode` — `static const` во флеше (была 4.4 KB .data): изменяемые поля
   в RAM-массивах `s_div` (pio_clk_div) / `s_vtot` (v_total) в graphics.c, ISR VGA читает

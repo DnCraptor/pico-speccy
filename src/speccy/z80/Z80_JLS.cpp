@@ -451,24 +451,20 @@ void Z80::dec8(uint8_t &oper8) {
     return;
 }
 
+// The 8-bit add/sub family computes H and V branch-free (2026-10-12): the
+// half-carry is bit 4 of A ^ op ^ result (the carry into bit 4), the overflow
+// is bit 7 of (A ^ result) & ~(A ^ op) for an add, (A ^ result) & (A ^ op) for
+// a subtract, moved to bit 2. Byte-identical to the compare-and-branch forms
+// they replace over every (A, op, carry) — checked exhaustively on the host
+// (scratch alu_check.cpp, 2026-10-12); ~18 fewer ARM instructions each.
 // Suma de 8 bits afectando a los flags
 void Z80::add(uint8_t oper8) {
-    uint16_t res = regA + oper8;
+    const uint32_t a = regA, r = a + oper8;
+    const uint8_t res = (uint8_t)r;
 
-    carryFlag = res > 0xff;
-    res &= 0xff;
-    sz5h3pnFlags = sz53n_addTable[res];
-
-    /* El módulo 16 del resultado será menor que el módulo 16 del registro A
-     * si ha habido HalfCarry. Sucede lo mismo para todos los métodos suma
-     * SIN carry */
-    if ((res & 0x0f) < (regA & 0x0f)) {
-        sz5h3pnFlags |= HALFCARRY_MASK;
-    }
-
-    if (((regA ^ ~oper8) & (regA ^ res)) > 0x7f) {
-        sz5h3pnFlags |= OVERFLOW_MASK;
-    }
+    carryFlag = r > 0xff;
+    sz5h3pnFlags = sz53n_addTable[res] | ((a ^ oper8 ^ res) & HALFCARRY_MASK)
+            | ((((a ^ oper8 ^ 0x80) & (a ^ res)) >> 5) & OVERFLOW_MASK);
 
     regA = res;
     flagQ = true;
@@ -476,23 +472,12 @@ void Z80::add(uint8_t oper8) {
 
 // Suma con acarreo de 8 bits
 void Z80::adc(uint8_t oper8) {
-    uint16_t res = regA + oper8;
+    const uint32_t a = regA, r = a + oper8 + (carryFlag ? 1 : 0);
+    const uint8_t res = (uint8_t)r;
 
-    if (carryFlag) {
-        res++;
-    }
-
-    carryFlag = res > 0xff;
-    res &= 0xff;
-    sz5h3pnFlags = sz53n_addTable[res];
-
-    if (((regA ^ oper8 ^ res) & 0x10) != 0) {
-        sz5h3pnFlags |= HALFCARRY_MASK;
-    }
-
-    if (((regA ^ ~oper8) & (regA ^ res)) > 0x7f) {
-        sz5h3pnFlags |= OVERFLOW_MASK;
-    }
+    carryFlag = r > 0xff;
+    sz5h3pnFlags = sz53n_addTable[res] | ((a ^ oper8 ^ res) & HALFCARRY_MASK)
+            | ((((a ^ oper8 ^ 0x80) & (a ^ res)) >> 5) & OVERFLOW_MASK);
 
     regA = res;
     flagQ = true;
@@ -500,16 +485,14 @@ void Z80::adc(uint8_t oper8) {
 
 // Suma dos operandos de 16 bits sin carry afectando a los flags
 void Z80::add16(RegisterPair &reg16, uint16_t oper16) {
-    uint32_t tmp = oper16 + reg16.word;
+    const uint32_t old = reg16.word, tmp = old + oper16;
 
-    REG_WZ = reg16.word + 1;
+    REG_WZ = old + 1;
     carryFlag = tmp > 0xffff;
-    reg16.word = tmp;
-    sz5h3pnFlags = (sz5h3pnFlags & FLAG_SZP_MASK) | ((reg16.word >> 8) & FLAG_53_MASK);
-
-    if ((reg16.word & 0x0fff) < (oper16 & 0x0fff)) {
-        sz5h3pnFlags |= HALFCARRY_MASK;
-    }
+    reg16.word = (uint16_t)tmp;
+    // H = the carry out of bit 11 = bit 12 of old ^ op ^ result.
+    sz5h3pnFlags = (sz5h3pnFlags & FLAG_SZP_MASK) | ((tmp >> 8) & FLAG_53_MASK)
+            | (((old ^ oper16 ^ tmp) >> 8) & HALFCARRY_MASK);
 
     flagQ = true;
     return;
@@ -547,22 +530,12 @@ void Z80::adc16(uint16_t reg16) {
 
 // Resta de 8 bits
 void Z80::sub(uint8_t oper8) {
-    int16_t res = regA - oper8;
+    const uint32_t a = regA, r = a - oper8;
+    const uint8_t res = (uint8_t)r;
 
-    carryFlag = res < 0;
-    res &= 0xff;
-    sz5h3pnFlags = sz53n_subTable[res];
-
-    /* El módulo 16 del resultado será mayor que el módulo 16 del registro A
-     * si ha habido HalfCarry. Sucede lo mismo para todos los métodos resta
-     * SIN carry, incluido cp */
-    if ((res & 0x0f) > (regA & 0x0f)) {
-        sz5h3pnFlags |= HALFCARRY_MASK;
-    }
-
-    if (((regA ^ oper8) & (regA ^ res)) > 0x7f) {
-        sz5h3pnFlags |= OVERFLOW_MASK;
-    }
+    carryFlag = (r >> 8) != 0;
+    sz5h3pnFlags = sz53n_subTable[res] | ((a ^ oper8 ^ res) & HALFCARRY_MASK)
+            | ((((a ^ oper8) & (a ^ res)) >> 5) & OVERFLOW_MASK);
 
     regA = res;
     flagQ = true;
@@ -570,23 +543,12 @@ void Z80::sub(uint8_t oper8) {
 
 // Resta con acarreo de 8 bits
 void Z80::sbc(uint8_t oper8) {
-    int16_t res = regA - oper8;
+    const uint32_t a = regA, r = a - oper8 - (carryFlag ? 1 : 0);
+    const uint8_t res = (uint8_t)r;
 
-    if (carryFlag) {
-        res--;
-    }
-
-    carryFlag = res < 0;
-    res &= 0xff;
-    sz5h3pnFlags = sz53n_subTable[res];
-
-    if (((regA ^ oper8 ^ res) & 0x10) != 0) {
-        sz5h3pnFlags |= HALFCARRY_MASK;
-    }
-
-    if (((regA ^ oper8) & (regA ^ res)) > 0x7f) {
-        sz5h3pnFlags |= OVERFLOW_MASK;
-    }
+    carryFlag = (r >> 8) != 0;
+    sz5h3pnFlags = sz53n_subTable[res] | ((a ^ oper8 ^ res) & HALFCARRY_MASK)
+            | ((((a ^ oper8) & (a ^ res)) >> 5) & OVERFLOW_MASK);
 
     regA = res;
     flagQ = true;
@@ -654,22 +616,14 @@ void Z80::or_(uint8_t oper8) {
 // Los flags SIGN y ZERO se calculan a partir del resultado
 // Los flags 3 y 5 se copian desde el operando (sigh!)
 void Z80::cp(uint8_t oper8) {
-    int16_t res = regA - oper8;
+    const uint32_t a = regA, r = a - oper8;
+    const uint8_t res = (uint8_t)r;
 
-    carryFlag = res < 0;
-    res &= 0xff;
-
-    sz5h3pnFlags = (sz53n_addTable[oper8] & FLAG_53_MASK)
-            | // No necesito preservar H, pero está a 0 en la tabla de todas formas
-            (sz53n_subTable[res] & FLAG_SZHN_MASK);
-
-    if ((res & 0x0f) > (regA & 0x0f)) {
-        sz5h3pnFlags |= HALFCARRY_MASK;
-    }
-
-    if (((regA ^ oper8) & (regA ^ res)) > 0x7f) {
-        sz5h3pnFlags |= OVERFLOW_MASK;
-    }
+    carryFlag = (r >> 8) != 0;
+    // Bits 5/3 come from the operand (the table copies them from its index).
+    sz5h3pnFlags = (oper8 & FLAG_53_MASK) | (sz53n_subTable[res] & FLAG_SZHN_MASK)
+            | ((a ^ oper8 ^ res) & HALFCARRY_MASK)
+            | ((((a ^ oper8) & (a ^ res)) >> 5) & OVERFLOW_MASK);
 
     flagQ = true;
 }
@@ -1590,9 +1544,11 @@ IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_ts() 
 #define nxCheckTrdos() do { if (__builtin_expect(Z80Ops::isNext, 1)) NextIdle::note(REG_PC); \
         else check_trdos(); } while (0)
 #endif
-// push() with the Next-inline write (next_dispatch.inc pastes handler bodies).
+// push()/pop() with the gate-free Next-inline access (next_dispatch.inc pastes
+// handler bodies): one slot lookup for the word when it does not straddle a slot.
 #define nxPush(w) do { const uint16_t nx_w_ = (uint16_t)(w); \
-    NextMemory::poke8(--REG_SP, (uint8_t)(nx_w_ >> 8)); NextMemory::poke8(--REG_SP, (uint8_t)nx_w_); } while (0)
+    REG_SP -= 2; NextMemory::poke16_nx(REG_SP, nx_w_); } while (0)
+#define nxPop() ([]() __attribute__((always_inline)) { const uint16_t nx_w_ = NextMemory::peek16_nx(REG_SP); REG_SP += 2; return nx_w_; }())
 NX_OVL_CODE __attribute__((optimize("O2"))) void Z80::exec_nocheck_next(bool divmmc) {
     do {
         const uint16_t pc = REG_PC;
@@ -1614,7 +1570,7 @@ NX_OVL_CODE __attribute__((optimize("O2"))) void Z80::exec_nocheck_next(bool div
 #endif
         if (__builtin_expect(prefixOpcode == 0, 1)) {
             flagQ = pendingEI = false;
-            uint8_t nx_v; uint8_t* nx_p;   // next_dispatch.inc: shared ALU / INC / DEC tails
+            uint8_t nx_v; uint8_t* nx_p; bool nx_cc;   // next_dispatch.inc: shared ALU / INC / DEC / cc tails
             switch (opCode) {
 #include "next_dispatch.inc"
             }
@@ -1626,6 +1582,9 @@ NX_OVL_CODE __attribute__((optimize("O2"))) void Z80::exec_nocheck_next(bool div
         else if (prefixOpcode == 0xFD) { prefixOpcode = 0; decodeDDFD(regIY); }
         else continue;
         if (prefixOpcode == 0) lastFlagQ = flagQ;
+        // A port write in a prefixed handler (OUT (C),r / NEXTREG) may have dropped the
+        // gate: the pasted bodies assume it (NextMemory::*_nx), so leave at once.
+        if (__builtin_expect(!g_next_fastrd, 0)) return;
     } while (CPU::tstates < CPU::stFrame);   // a g_next_fastrd drop ends the slice (Video.cpp nextFastrdSet)
 }
 

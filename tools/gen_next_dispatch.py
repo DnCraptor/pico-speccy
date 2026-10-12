@@ -4,7 +4,7 @@
 #
 #   python3 tools/gen_next_dispatch.py
 #
-# Declares nothing itself: the includer provides `uint8_t nx_v; uint8_t* nx_p;`.
+# Declares nothing itself: the includer provides `uint8_t nx_v; uint8_t* nx_p; bool nx_cc;`.
 # Every unprefixed opcode either
 #   - is SPECIALISED inline here (LD r,r' / ALU r / INC r / DEC r: the generic
 #     decodeLD8 / decodeALU8 / decodeINCDEC8 bodies with the register picked at
@@ -12,14 +12,15 @@
 #   - calls its handler DIRECTLY (the handler is marked NX_DISP_INL, so GCC
 #     inlines it here while dcOpcode[] keeps its out-of-line copy), or
 #   - goes through dcOpcode[] as before (prefixes, HALT, the tape trap, RST,
-#     IN/OUT, EI/DI: rare, or with hooks that read opCode / the slice).
+#     IN/OUT, EI/DI: rare, or with hooks that read opCode / the slice) — and
+#     returns from the loop if the handler dropped g_next_fastrd.
 # The handlers' semantics are therefore the core's own; only the dispatch moves.
 # A directly-called handler is in fact pasted in: its body is copied out of
-# Z80_JLS.cpp with the memory accessors swapped for the Next-inline ones
-# (Z80Ops::peek8/peek16/poke8/addressOnBus[IR] -> NextMemory::..., push -> nxPush,
-# check_trdos -> nxCheckTrdos: its Next branch inline).
-# On the Next fast path those are exactly the accessors' own fast paths; off it
-# they call the Z80Ops originals. A body with `static` or a loop around a `return` keeps the call.
+# Z80_JLS.cpp with the memory accessors swapped for the gate-free Next-inline
+# ones (Z80Ops::/NextMemory::peek8/peek16/poke8/addressOnBus[IR] ->
+# NextMemory::..._nx, push -> nxPush, pop -> nxPop, check_trdos -> nxCheckTrdos:
+# its Next branch inline, condMet((opCode >> 3) & 7) -> nx_cc).
+# A body with `static` or a loop around a `return` keeps the call.
 import re, os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 src = open(os.path.join(ROOT, 'src/speccy/z80/Z80_JLS.cpp')).read()
@@ -50,13 +51,30 @@ def body_of(name):
     if re.search(r'\breturn\b', body):
         if re.search(r'\b(for|while|switch|do)\b', body): return None
         body = re.sub(r'\breturn\s*;', 'break;', body)
-    for a, b in (('Z80Ops::peek8(', 'NextMemory::peek8('), ('Z80Ops::peek16(', 'NextMemory::peek16('),
-                 ('Z80Ops::poke8(', 'NextMemory::poke8('), ('Z80Ops::addressOnBusIR(', 'NextMemory::addressOnBusIR('),
-                 ('Z80Ops::addressOnBus(', 'NextMemory::addressOnBus(')):
+    # The gate-free accessors (next_memory.h): inside this loop g_next_fastrd
+    # is an invariant — see the TABLE cases below, which end the slice when a
+    # handler dropped it. A body already written against NextMemory:: (the
+    # shared handlers) is rewritten the same way.
+    for a, b in (('Z80Ops::peek8(', 'NextMemory::peek8_nx('), ('Z80Ops::peek16(', 'NextMemory::peek16_nx('),
+                 ('Z80Ops::poke8(', 'NextMemory::poke8_nx('), ('Z80Ops::addressOnBusIR(', 'NextMemory::addressOnBusIR_nx('),
+                 ('Z80Ops::addressOnBus(', 'NextMemory::addressOnBus_nx('),
+                 ('NextMemory::peek8(', 'NextMemory::peek8_nx('), ('NextMemory::peek16(', 'NextMemory::peek16_nx('),
+                 ('NextMemory::poke8(', 'NextMemory::poke8_nx('), ('NextMemory::addressOnBusIR(', 'NextMemory::addressOnBusIR_nx('),
+                 ('NextMemory::addressOnBus(', 'NextMemory::addressOnBus_nx(')):
         body = body.replace(a, b)
     body = re.sub(r'(?<![\w:.])push\(', 'nxPush(', body)
+    body = re.sub(r'(?<![\w:.])pop\(\)', 'nxPop()', body)
     body = re.sub(r'(?<![\w:.])check_trdos\(\)', 'nxCheckTrdos()', body)
+    # The cc families: the condition is decided per case (nx_cc, below), not
+    # by a condMet() call on the stored opcode.
+    body = body.replace('condMet((opCode >> 3) & 7)', 'nx_cc')
     return ' '.join(body.split())
+
+# cc = (opcode >> 3) & 7: NZ Z NC C PO PE P M — condMet()'s table, inline.
+CC = ['(sz5h3pnFlags & ZERO_MASK) == 0', '(sz5h3pnFlags & ZERO_MASK) != 0',
+      '!carryFlag', 'carryFlag',
+      '(sz5h3pnFlags & PARITY_MASK) == 0', '(sz5h3pnFlags & PARITY_MASK) != 0',
+      '(sz5h3pnFlags & SIGN_MASK) == 0', '(sz5h3pnFlags & SIGN_MASK) != 0']
 
 def call(name):
     b = body_of(name)
@@ -74,30 +92,33 @@ inl = set()
 for op in range(256):
     n = names[op]
     if op in TABLE or n == 'decodeRST':
-        body = 'dcOpcode[0x%02X]();' % op
+        # The only handlers that can drop g_next_fastrd (a port write): leave
+        # the loop at once, so the gate-free bodies never run without it.
+        body = ('dcOpcode[0x%02X](); if (__builtin_expect(!g_next_fastrd, 0)) { lastFlagQ = flagQ; return; }' % op)
     elif n == 'decodeLD8':
         d, s = (op >> 3) & 7, op & 7
-        if s == 6:   body = '%s = NextMemory::peek8(REG_HL);' % R8[d]
-        elif d == 6: body = 'NextMemory::poke8(REG_HL, %s);' % R8[s]
+        if s == 6:   body = '%s = NextMemory::peek8_nx(REG_HL);' % R8[d]
+        elif d == 6: body = 'NextMemory::poke8_nx(REG_HL, %s);' % R8[s]
         else:        body = '%s = %s;' % (R8[d], R8[s])
     elif n == 'decodeALU8':
         # The operand per case, the operation once per group (shared labels at
         # the end): eight inlined copies of add/adc/.../cp, not sixty-three.
         s = op & 7
-        v = 'NextMemory::peek8(REG_HL)' if s == 6 else R8[s]
+        v = 'NextMemory::peek8_nx(REG_HL)' if s == 6 else R8[s]
         body = 'nx_v = %s; goto nx_alu%d;' % (v, (op >> 3) & 7)
     elif n == 'decodeINCDEC8':
         r = (op >> 3) & 7
         f = 'dec8' if op & 1 else 'inc8'
         if r == 6:
-            body = ('{ uint8_t work8 = NextMemory::peek8(REG_HL); %s(work8); '
-                    'NextMemory::addressOnBus(REG_HL, 1); NextMemory::poke8(REG_HL, work8); }' % f)
+            body = ('{ uint8_t work8 = NextMemory::peek8_nx(REG_HL); %s(work8); '
+                    'NextMemory::addressOnBus_nx(REG_HL, 1); NextMemory::poke8_nx(REG_HL, work8); }' % f)
         else:
             body = 'nx_p = &%s; goto nx_%s;' % (R8[r], f)
     elif n in ('decodeRETcc', 'decodeJPcc', 'decodeCALLcc'):
-        # These read the condition from opCode themselves: one inlined copy
-        # per family behind a shared label.
-        body = 'goto nx_%s;' % n
+        # The condition per case (two or three instructions, where the
+        # handler's condMet() on the stored opcode was a call), the family's
+        # body once behind a shared label.
+        body = 'nx_cc = %s; goto nx_%s;' % (CC[(op >> 3) & 7], n)
         inl.add(n)
     else:
         body = call(n)
