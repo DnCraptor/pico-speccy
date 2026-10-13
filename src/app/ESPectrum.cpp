@@ -696,13 +696,13 @@ static void assign_ram(int i, bool butterOnly = false) {
 // donors it does not reach keep their pages in SRAM (see fbDonorsUsed below).
 // Boards without butter PSRAM (MURM1 SPI, no chip, the Debug > PSRAM kill-switch)
 // keep the static SRAM pages and are byte-for-byte unchanged.
-// ONLY PAGES 0-3 ARE DONATED, 4-7 stay in SRAM (hw 2026-10-13): the Pentagon 16col
-// screen is four planes in pages 4/5 or 6/7, and a guest that redraws it every frame
-// pays for every write through the XIP cache — TheLink's dragon (P1024, 7 MHz, 16col)
-// ran cpu 20.9 ms / 41 FPS with all eight pages in butter, 14.9-15.2 ms / 48.8 with
-// 4-7 in SRAM, same as all eight there. Pages 5/7 are also every ZX machine's screen.
-// The FB takes 64 KB from the strip and the rest from the heap (576p ~38 KB, 480p
-// ~11.5 KB).
+// PAGES 0-4 AND 6 ARE DONATED, 5/7 stay in SRAM (hw 2026-10-13). All eight in butter
+// cost TheLink's 16col dragon (P1024, 7 MHz) 6 ms a frame: cpu 20.9 ms / 41 FPS against
+// 15.2 with 4-7 in SRAM. COL16_TRACE showed why and what can go: the dragon double-
+// buffers (#7FFD D3 flips every frame), WRITES ~1460 bytes a frame to each of 4/5/6/7,
+// never reads 4/6/7, and runs its code in page 5; BALLQ the same shape at 1/5 the load.
+// With 4/6 in butter the dragon measures 16.1 ms (+0.9), 48.8 FPS. Pages 5/7 are also
+// every ZX machine's screen.
 // Two halves that must agree: the donation (here, before reserveFrameBuffer()) and
 // the re-binding (MEMORY SETUP below). Only pages whose donor the FB map actually
 // took leave SRAM — VIDEO::fbDonorsUsed() is the one source of that fact.
@@ -736,7 +736,7 @@ static void donateZxPagesToFb() {
     return;
   }
   VIDEO::fbDonate(p0, 4u * MEM_PG_SZ, 0x0Fu);
-  // pages46 / pages57 are NOT donated: the screen pages stay in SRAM (see above).
+  VIDEO::fbDonate(p4, 2u * MEM_PG_SZ, 0x50u);   // pages 4/6; pages57 is NOT donated (see above)
 }
 
 // One line with everything a machine-switch bug hides in: the paging latches that

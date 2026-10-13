@@ -8503,8 +8503,35 @@ void VIDEO::gmxBorderFrame(bool skipFrame) {
 }
 
 
+#if COL16_TRACE
+#include "app/Col16Trace.h"
+// One [C16] line per 60 frames: guest accesses per frame by ZX page (fetch /
+// read / write), #7FFD D3 flips and window-3 re-pagings, frames with 16col on.
+static __attribute__((noinline)) void c16TraceTick() {
+    static uint32_t fr = 0, on = 0, d3 = 0;
+    fr++;
+    if (VIDEO::mode16col_enabled) on++;
+    if (MemESP::videoLatch) d3++;
+    if (fr < 60) return;
+    char line[240]; int p = 0;
+    for (int i = 0; i < 9; i++)
+        p += snprintf(line + p, sizeof(line) - p, " %c:%lu/%lu/%lu", i < 8 ? '0' + i : 'R',
+                      (unsigned long)(c16_fe[i] / fr), (unsigned long)(c16_rd[i] / fr),
+                      (unsigned long)(c16_wr[i] / fr));
+    Debug::log("[C16] fe/rd/wr per frame:%s", line);
+    Debug::log("[C16] 16col %lu/%lu frames, D3=1 at %lu frame ends, D3 flips %lu, bank changes %lu (per 60f), bank=%lu",
+               (unsigned long)on, (unsigned long)fr, (unsigned long)d3, (unsigned long)c16_flip,
+               (unsigned long)c16_bank, (unsigned long)MemESP::bankLatch);
+    for (int i = 0; i < 9; i++) c16_fe[i] = c16_rd[i] = c16_wr[i] = 0;
+    c16_flip = c16_bank = 0; fr = on = d3 = 0;
+}
+#endif
+
 IRAM_ATTR void VIDEO::EndFrame() {
     PERF_BUCKET_SCOPE(PB_ENDFRAME);
+#if COL16_TRACE
+    c16TraceTick();
+#endif
 
     // Console drain, once per frame. Debug::log lands in a 4 KB ring that
     // pumpUart() empties into the 32-byte UART FIFO, and until 2026-09-09 the

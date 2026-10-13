@@ -7485,7 +7485,21 @@ console's 4 KB ring is the price of the console (the boot burst is ~3.6 KB of li
 (PIO palette), aligning the window bases (the base tail dlmalloc cannot use would just
 become window slack).
 
-### ZX pages 0-3 live in butter PSRAM, their 64 KB is the framebuffer; pages 4-7 stay in SRAM (2026-10-13, plan item A; hw-measured)
+### ZX pages 0-4 and 6 live in butter PSRAM, their 96 KB is the framebuffer; pages 5/7 stay in SRAM (2026-10-13, plan item A; hw-measured)
+
+**Third revision, same day: pages 4/6 are donated too** (`pages46`, tag 0x50), only
+`pages57` stays SRAM. `-DCOL16_TRACE=ON` (CMake, `src/app/Col16Trace.h`, one `[C16]`
+pair of lines per 60 frames: fetch/read/write per ZX page 0-7 + ROM, #7FFD D3 flips,
+window-3 re-pagings) settled it: TheLink's dragon double-buffers — D3 flips every frame,
+~1460 WRITES a frame into EACH of 4/5/6/7, zero reads of 4/6/7 by the CPU, its code in
+page 5 (~7900 fetches a frame); BALLQ (16c game) the same shape at a fifth of the load.
+So "keep the two pages that follow the screen" is impossible (the pair changes every
+frame) and the static split is the answer: dragon 16.1 ms with 4/6 in butter vs 15.2
+with all of 4-7 in SRAM (+0.9 ms, 48.8 FPS; PERF build `debug/DVp2-zx57-perf-1.0.9`,
+plain `DVp2-zx57-1.0.9`). Owner 2026-10-13: "на данный момент в порядке", testing goes
+on. Still owed: ATM EGA (pages 1/3 have been butter since the first cut, never
+measured), heap figure at 576p + NeoGS. The text below is the 0-3-only state.
+
 
 **Revised the same day — read this first.** All eight pages in butter cost TheLink's
 16col dragon (P1024, 7 MHz) 6 ms a frame: cpu 20.9 ms / 41 FPS against 14.9 with the

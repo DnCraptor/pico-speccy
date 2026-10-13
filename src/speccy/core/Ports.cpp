@@ -96,6 +96,7 @@ extern "C" const uint32_t profi_default_palette16[16];
 #define PROFI_PORT_TRACE 0
 #endif
 
+#include "app/Col16Trace.h"
 #ifndef MC7FFD_TRACE
 #define MC7FFD_TRACE 0
 #endif
@@ -1973,11 +1974,13 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
             }
           }
           if (MemESP::bankLatch != page) {
+            C16_BANK();
             MemESP::bankLatch = page;
             MemESP::ramCurrent[3] = MemESP::ram[page].sync(3);
             MemESP::ramContended[3] = page & 0x01 ? true : false;
           }
           if (MemESP::videoLatch != bitRead(data, 3)) {
+        C16_FLIP();
             MemESP::videoLatch = bitRead(data, 3);
             if (PROFI && (portDFFD & 0x80)) {
               VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[6].direct() : MemESP::ram[4].direct();
@@ -4023,6 +4026,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
         if (profi_page < profi_pages) page = profi_page;
       }
       if (MemESP::bankLatch != page) {
+        C16_BANK();
         MemESP::bankLatch = page;
         MemESP::ramContended[3] =
             (Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion) ? false : (page & 0x01 ? true : false);
@@ -4074,6 +4078,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
       }
       if (!ESPectrum::trdos) MemESP::recoverPage0();
       if (MemESP::videoLatch != bitRead(data, 3)) {
+        C16_FLIP();
         MemESP::videoLatch = bitRead(data, 3);
         if (PROFI && (portDFFD & 0x80)) {
           VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[6].direct() : MemESP::ram[4].direct();

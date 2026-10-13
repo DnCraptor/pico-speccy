@@ -256,6 +256,10 @@ endif ()
 if (TIMEX_PORT_TRACE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE TIMEX_PORT_TRACE=1)
 endif ()
+if (COL16_TRACE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE COL16_TRACE=1)
+endif()
+
 # One-shot #7FFD multicolor phase capture (see Ports.cpp `#if MC7FFD_TRACE`).
 if (MC7FFD_TRACE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE MC7FFD_TRACE=1)

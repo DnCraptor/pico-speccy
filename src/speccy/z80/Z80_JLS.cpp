@@ -29,6 +29,7 @@
 #include "drivers/graphics/graphics.h"
 #include "speccy/core/MemESP.h"
 #include "CPU.h"
+#include "app/Col16Trace.h"
 #include "speccy/machines/Atm.h"
 #include "speccy/machines/EvoBase.h"
 #include "speccy/devices/tape/Tape.h"
@@ -1387,6 +1388,7 @@ IRAM_ATTR __attribute__((noinline, optimize("O2"))) void Z80::exec_nocheck_ts() 
         tsFastTick(4);
         if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(pc)) tsFastTick(TsConf::cpuMemMiss(pc, true));   // DRAM model: a cache miss
         opCode = MemESP::ramCurrent[pc >> 14][pc & 0x3fff];
+        C16_FE(pc);
         regR++;
         REG_PC = pc + 1;
 #if PERF_TRACE && PERF_HIST
@@ -1469,6 +1471,7 @@ IRAM_ATTR void Z80::exec_nocheck() {
         } else
         opCode = MemESP::romPeek(pg, MemESP::ramCurrent[pg], REG_PC & 0x3fff);
         }
+        C16_FE(REG_PC);
 
         regR++;
         REG_PC++;
