@@ -28,6 +28,15 @@ public:
     // panning, guest-switchable clock, timer INT divider, SD-card interface,
     // host control port #33 (reset/NMI/LED). Set once in init().
     static bool neogs;
+    // The idle throttle is on: the card is unobserved (no host port access and a
+    // flat DAC for GS_IDLE_US, firmware in its dispatcher idle loop) and pump()
+    // advances GS time at 1/8 wall clock. Written by pump() on core1, read by
+    // core1's render_core: while this holds, queued TS-Conf render lines ALWAYS
+    // go first — slicing an unobservable card between every few lines cost
+    // fishbone at 576p ~1.1 ms of core0 `wait` per frame (hw 2026-10-13). A
+    // plain static like `enabled`, deliberately not in the GS overlay's data
+    // tail: it is read on every core1 loop iteration of a TS-Conf session.
+    static volatile bool idleThrottled;
 
     static bool init(uint32_t ram_size_bytes);
     static void deinit();
@@ -149,7 +158,8 @@ public:
     static void snapLoadBegin();
     static void snapLoadState(Pss::R& r, uint32_t size);
     static void snapLoadPage(Pss::R& r, const char id[4], uint32_t size);
-    static void snapLoadEnd();
+    // `sd`: the PSNS block (NeoGS SD interface), applied before the card resumes.
+    static void snapLoadEnd(const uint8_t* sd = nullptr, uint32_t sdLen = 0);
 
     static int16_t getSampleLeft();
     static int16_t getSampleRight();

@@ -447,6 +447,9 @@ void VIDEO::profiPaletteWrite(uint8_t index, uint8_t profi_color) {
 //   → (8,8) gets its OWN slot → both pixels render as palette[8] → solid color, no stripes.
 //   → ink=8 is fully independent from ink=0 → changing palette[8] can't corrupt black pixels.
 // written[] guard in hdmi_set_profi_ds80_mode() ensures paper=0 TMDS wins for merged slots.
+#if defined(VGA_HDMI) && HDMI_HSTX < 2
+extern "C" bool hdmi_mode_uses_x3(int mode);
+#endif
 static void init_profi_pair_lookup() {
     // safe[]: all slots except 240..244 (sync/scanline) and 255 (border) → 250 slots.
     // With HDMI audio the Data Island machinery owns 40 more indices (184..199 =
@@ -454,17 +457,24 @@ static void init_profi_pair_lookup() {
     // pair_lut must avoid them → 210 slots; the bright-ink × bright-paper merges
     // below free exactly the difference (40 extra merges). VGA video or any
     // non-HDMI audio driver keeps the full 250-pair palette.
-    bool reserve_di = false;
+    bool reserve_di = false, reserve_x3 = false;
 #if defined(VGA_HDMI) && HDMI_HSTX < 2
     // The HSTX command-expander build keeps its islands in the line buffer, so the
     // pair table has all 250 slots whatever the audio driver.
     extern bool SELECT_VGA;
     reserve_di = !SELECT_VGA && Config::audio_driver == 4;
+    // The x3 modes (1280x720 / 1440x576 / 1024x768 x3 on the PIO/RAW path) keep
+    // line structure in slots 245..249 of their own palette page; a pixel on one of
+    // those is a control/preamble symbol in active video = lost sync (hw 2026-10-12).
+    // Five more merges: paper 8 -> 0 for inks 6..10 as well.
+    reserve_x3 = !SELECT_VGA && hdmi_mode_uses_x3(VIDEO::video_mode);
 #endif
+    const int p8_inks = reserve_x3 ? 10 : 5;
     int safe[256], ns = 0;
     for (int i = 0; i < 256; i++) {
         if (i >= 240 && i <= 244) continue;
         if (i == 255) continue;
+        if (reserve_x3 && i >= 245 && i <= 249) continue;
         if (reserve_di && ((i >= 184 && i <= 199) || (i >= 216 && i <= 239))) continue;
         safe[ns++] = i;  // ns == 250 (210 with reserve_di)
     }
@@ -474,7 +484,7 @@ static void init_profi_pair_lookup() {
         for (int paper = 0; paper < 16; paper++) {
             // For inks 0..5 only: paper=8 → paper=0 (6 merges to fit in 250 slots).
             // For inks 6..15 (including ink=8): full independence — paper=8 is own slot.
-            int cp = (paper == 8 && ink <= 5) ? 0 : paper;
+            int cp = (paper == 8 && ink <= p8_inks) ? 0 : paper;
             // HDMI-audio slot diet: bright ink (9..15) on a DIFFERENT bright paper
             // renders on the base paper (p-8) instead — 42 candidates minus the two
             // preserved classic text schemes (white-on-bright-blue and
@@ -814,26 +824,55 @@ static void tsC1WaitJob(uint32_t w1) {
 // frame's critical path (fishbone: c1 16.7 ms of a 20.48 ms frame, core0 waiting
 // 4.1 ms). Same lesson as "the framebuffer is claimed FIRST".
 // Idempotent; a failure leaves ts_c1_ring null and the renderer on core0.
+// On a VDAC2 boot the same block also carries the FT812 glue + band + render
+// scratch (ftGlueEnsure borrows it while the FT output is live — the line ring is
+// idle then, the whole-line renderer is off), so it is sized max(ring, FT) and
+// claimed here, while the heap is pristine. At 720x576 + NeoGS the FT state did not
+// fit the fragmented runtime heap at all (hw 2026-10-13), and PSRAM was too slow.
+static uint8_t* s_c1blk = nullptr;        // the block (ring layout, or borrowed by the FT output)
+static size_t   s_c1blkBytes = 0;
+static int      s_ftRows = 0;             // band rows the block holds for the FT output (0 = none)
+static bool     s_c1borrowed = false;     // the FT output owns the block right now
+static size_t   ftSramNeed(int rows);     // below, after FtGlue
+extern "C" size_t getLargestAllocatable(void);  // OSDMain.cpp
+static size_t tsC1RingBytes() {
+    return sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU + 512 * TS_C1_SFILE
+         + sizeof(uint32_t) * (TS_C1_TSU + TS_C1_SFILE);
+}
+static void tsC1RingCarve(uint8_t* blk) {
+    ts_c1_ring = (TsRenderJob*)blk;
+    ts_c1_tsu  = (TsuState*)(blk + sizeof(TsRenderJob) * TS_C1_RING);
+    ts_c1_sf   = (uint16_t*)(blk + sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU);
+    ts_c1_tsu_job = (uint32_t*)(blk + sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU
+                                    + 512 * TS_C1_SFILE);
+    ts_c1_sf_job  = ts_c1_tsu_job + TS_C1_TSU;
+    memset(ts_c1_tsu_job, 0, sizeof(uint32_t) * TS_C1_TSU);
+    memset(ts_c1_sf_job, 0, sizeof(uint32_t) * TS_C1_SFILE);
+    ts_c1_tsu_cur = ts_c1_sf_cur = 0; ts_c1_sf_gen = 0xFFFFFFFFu;
+    ts_c1_r = ts_c1_w = 0;
+}
 void VIDEO::tsC1RingAlloc() {
-    if (ts_c1_ring) return;
-    const size_t bytes = sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU + 512 * TS_C1_SFILE
-                       + sizeof(uint32_t) * (TS_C1_TSU + TS_C1_SFILE);
-    uint8_t* blk = (uint8_t*)Buffer::palloc(bytes, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
-    if (blk) {
-        ts_c1_ring = (TsRenderJob*)blk;
-        ts_c1_tsu  = (TsuState*)(blk + sizeof(TsRenderJob) * TS_C1_RING);
-        ts_c1_sf   = (uint16_t*)(blk + sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU);
-        ts_c1_tsu_job = (uint32_t*)(blk + sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU
-                                        + 512 * TS_C1_SFILE);
-        ts_c1_sf_job  = ts_c1_tsu_job + TS_C1_TSU;
-        memset(ts_c1_tsu_job, 0, sizeof(uint32_t) * TS_C1_TSU);
-        memset(ts_c1_sf_job, 0, sizeof(uint32_t) * TS_C1_SFILE);
-        ts_c1_tsu_cur = ts_c1_sf_cur = 0; ts_c1_sf_gen = 0xFFFFFFFFu;
+    if (ts_c1_ring || s_c1borrowed) return;
+    const size_t ring = tsC1RingBytes();
+    uint8_t* blk = nullptr;
+    size_t bytes = ring;
+    if (Config::arch == A_TSCONF && Config::tsconf_vdac2 && butter_psram_size()) {
+        // SRAM only (core1 reads the FT state per pixel): 8 rows of band, else 4.
+        for (int rows = 8; rows >= 4 && !blk; rows >>= 1) {
+            const size_t want = ftSramNeed(rows) > ring ? ftSramNeed(rows) : ring;
+            if (getLargestAllocatable() < want + 1024) continue;
+            blk = (uint8_t*)tryMalloc(want);
+            if (blk) { bytes = want; s_ftRows = rows; }
+        }
+        if (!blk) Debug::log("[FT812] no SRAM block for the VDAC2 output at boot - it will try the heap when it goes live");
     }
+    if (!blk) blk = (uint8_t*)Buffer::palloc(bytes, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+    if (blk) { s_c1blk = blk; s_c1blkBytes = bytes; tsC1RingCarve(blk); }
     // The address names the tier: 0x2000xxxx = SRAM heap, 0x11xxxxxx = butter PSRAM.
-    Debug::log("[TSC1] core1 line renderer %s (%u-job ring + %u TSU states + %u SFILE slots, %u B @%08lX)",
+    Debug::log("[TSC1] core1 line renderer %s (%u-job ring + %u TSU states + %u SFILE slots, %u B @%08lX%s)",
                ts_c1_ring ? "ON" : "unavailable (no RAM)", (unsigned)TS_C1_RING, (unsigned)TS_C1_TSU,
-               (unsigned)TS_C1_SFILE, (unsigned)bytes, (unsigned long)(uintptr_t)blk);
+               (unsigned)TS_C1_SFILE, (unsigned)bytes, (unsigned long)(uintptr_t)blk,
+               s_ftRows ? ", shared with VDAC2" : "");
 }
 
 uint32_t VIDEO::tsTraceState() {
@@ -1065,6 +1104,14 @@ extern "C" void TS_RENDER_HOT ts_render_core1_pump() { VIDEO::tsRenderCore1Pump(
 // the renderer and playing GS music the music will run slow; video wins.
 extern "C" bool TS_RENDER_HOT ts_render_core1_prio() {
     return ts_c1_ring && (ts_c1_core0_waiting || (ts_c1_w - ts_c1_r) > 32);
+}
+// Any line queued at all. The stricter rule for an idle-throttled GS (main.cpp):
+// a HALT-synced title posts a few lines per interrupt window (fishbone: 289
+// windows a frame), so the backlog never reaches 32 and the >32 rule above let
+// an unobservable card take a pump slice between every batch — core0 then waited
+// for those lines (hw 2026-10-13, 576p: `wait` 0.6 -> 1.7 ms, 48.8 -> 46 FPS).
+extern "C" bool TS_RENDER_HOT ts_render_core1_busy() {
+    return ts_c1_ring && ts_c1_w != ts_c1_r;
 }
 // (ts_render_queue_on_c() is gone: GS::pump reads g_ts_c1_live directly. It
 // gates the NeoGS turbo-boot — 8x GS time per wall second on core1 while the
@@ -2107,8 +2154,11 @@ void VIDEO::mode16colUpdatePlanes() {
 // then apply color matrix to all palette entries.
 static void tsPalette256Flush(bool invalidate);   // TS-Conf 256-slot remap (defined below)
 
+uint8_t VIDEO::paletteGen = 0;
+
 void VIDEO::applyPalette() {
     tsRenderDrain();   // rewrites slots the core1 line queue maps into
+    paletteGen++;      // the menu's palette preview re-programs its slots on a change
     uint8_t p = Config::palette < total_palette_count() ? Config::palette : 0;
     Debug::log2SD("applyPalette: palette=%d", p);
     // Rebuild base 16 colors from brightness levels
@@ -2172,6 +2222,25 @@ void VIDEO::applyPalette() {
                    " (pal256=%d uiOwned=%d live0=%06lX)",
                    (int)ts_pal256_live, (int)profi_palette_ui_saved_valid,
                    (unsigned long)profi_palette_live[0]);
+    }
+}
+
+// The 16 ZX colours of palette preset `idx`, as they WOULD look (the preset's own
+// matrix, then the live CRT filter and capture-safe snap), written into the 16
+// hardware slots base..base+15. For the menu's preview swatches: the slots are
+// taken back by the next applyPalette(). Standard (non-pair) framebuffer only.
+void VIDEO::palettePreview(uint8_t idx, uint8_t base) {
+    const PaletteDef& d = getPaletteDef(idx < total_palette_count() ? idx : 0);
+    uint32_t rgb[16];
+    buildSpectrumRGB(d, rgb);
+    const uint16_t* m = d.matrix;
+    const bool ident = m[0] == 0x100 && m[4] == 0x100 && m[8] == 0x100 &&
+                       !m[1] && !m[2] && !m[3] && !m[5] && !m[6] && !m[7];
+    for (int i = 0; i < 16; i++) {
+        uint32_t c = ident ? rgb[i] : matrixTransform(rgb[i], m);
+        c = snapTransform(crtTransform(c));
+        graphics_set_palette((uint8_t)(base + i), c);
+        vga_set_palette_entry_solid((uint8_t)(base + i), c);
     }
 }
 
@@ -3920,9 +3989,30 @@ static int fbCalcLines(int count) {
 #if FB_FORCE_CHUNKS && (FB_FORCE_CHUNKS < MAIN_CHUNKS_MIN || FB_FORCE_CHUNKS > MAIN_CHUNKS_MAX)
 #error "FB_FORCE_CHUNKS must be 0 or between MAIN_CHUNKS_MIN and MAIN_CHUNKS_MAX"
 #endif
-static uint8_t *sharedFB_mainChunk[MAIN_CHUNKS_MAX] = { nullptr };
-static int      sharedFB_main_nchunks = 0;   // 0 = single block
-static int      sharedFB_main_chunk_rows = 0;
+// Donated SRAM (2026-10-13, plan item A): on a butter-PSRAM board ESPectrum::setup
+// hands the framebuffer the 128 KB `.ram_128k` strip behind ZX pages 0-7 (the pages
+// are re-bound to butter PSRAM — measured within the noise at 14 MHz, see
+// donateZxPagesToFb) as three donors, one per static array: pages0123 (64 KB),
+// pages46, pages57 (32 KB each). A donor is a whole number of rows of the CURRENT
+// stride — 182 / 91 / 91 rows at 360, 204 / 102 / 102 at 320 — so the whole 288-row
+// FB fits the strip and 0 rows come off the heap; at 240 rows the third donor is
+// not reached and its pages stay in SRAM. Registered BEFORE reserveFrameBuffer();
+// the live map reports back which donors it took (fbDonorsUsed), and ONLY those
+// pages leave SRAM — the two decisions must not drift apart, or a page and the
+// framebuffer would share one block.
+#define FB_EXT_MAX 4
+struct FbDonor { uint8_t* p; size_t bytes; uint32_t tag; };
+static FbDonor  sharedFB_donor[FB_EXT_MAX];
+static int      sharedFB_ndonors = 0;
+static uint32_t sharedFB_donor_used = 0;     // OR of the tags the live map uses
+
+// The chunk map: every piece is a whole number of rows and pieces need not be equal
+// (a donor is as tall as its bytes allow, the heap remainder is one block or 2..8
+// equal pieces). nchunks == 0 is the plain single heap block in sharedFB_main —
+// byte-for-byte the path every board took before donors existed.
+struct FbChunk { uint8_t* p; uint16_t row0; uint16_t rows; bool ext; };
+static FbChunk  sharedFB_chunk[FB_EXT_MAX + MAIN_CHUNKS_MAX];
+static int      sharedFB_nchunks = 0;        // 0 = single block
 
 static uint8_t *sharedFB_main = nullptr;  // sized for current mode
 static uint8_t *sharedFB_prev = nullptr;  // sized for current mode (Gigascreen only)
@@ -3978,11 +4068,26 @@ extern size_t getFreeHeap(void);                // OSDMain.cpp (also declared be
 
 // Row `row` of the main FB, whichever way it is backed. Chunking is invisible
 // above the pointer arrays this fills.
+// Boot-time only (the self-check and the pointer-array fill), so the linear scan
+// over at most 12 chunks costs nothing anyone measures.
 static inline uint8_t* mainRowPtr(int row, int stride) {
-    if (!sharedFB_main_nchunks) return sharedFB_main + (size_t)row * stride;
-    const int c = row / sharedFB_main_chunk_rows;
-    return sharedFB_mainChunk[c]
-         + (size_t)(row - c * sharedFB_main_chunk_rows) * stride;
+    if (!sharedFB_nchunks) return sharedFB_main + (size_t)row * stride;
+    for (int c = 0; c < sharedFB_nchunks; c++) {
+        const FbChunk& k = sharedFB_chunk[c];
+        if (row < k.row0 + k.rows)
+            return k.p + (size_t)(row - k.row0) * stride;
+    }
+    const FbChunk& last = sharedFB_chunk[sharedFB_nchunks - 1];   // unreachable for row < lines
+    return last.p + (size_t)(last.rows - 1) * stride;
+}
+
+void VIDEO::fbDonate(uint8_t* p, size_t bytes, uint32_t tag) {
+    if (!p || sharedFB_ndonors >= FB_EXT_MAX) return;
+    sharedFB_donor[sharedFB_ndonors++] = { p, bytes, tag };
+}
+
+uint32_t VIDEO::fbDonorsUsed() {
+    return sharedFB_main ? sharedFB_donor_used : 0;
 }
 
 // Prove the chunk map before anything renders through it: every row must be
@@ -4020,72 +4125,114 @@ mainFBSelfCheck(int lines, int stride) {
 }
 
 static void mainFBFree() {
-    if (sharedFB_main_nchunks) {
-        for (int c = 0; c < sharedFB_main_nchunks; c++) {
-            free(sharedFB_mainChunk[c]);
-            sharedFB_mainChunk[c] = nullptr;
+    if (sharedFB_nchunks) {
+        for (int c = 0; c < sharedFB_nchunks; c++) {
+            if (!sharedFB_chunk[c].ext) free(sharedFB_chunk[c].p);   // donors are not ours
+            sharedFB_chunk[c].p = nullptr;
         }
     } else {
         free(sharedFB_main);
     }
     sharedFB_main = nullptr;
     sharedFB_main_size = 0;
-    sharedFB_main_nchunks = 0;
-    sharedFB_main_chunk_rows = 0;
+    sharedFB_nchunks = 0;
+    sharedFB_donor_used = 0;
 }
 
-static bool ensureMainFB(int lines, int stride) {
-    size_t want = fbMainBytes(lines, stride);
-    if (sharedFB_main && sharedFB_main_size == want) return true;
-    if (sharedFB_main) mainFBFree();
+// Fill `rest` rows starting at `row0` from the heap: one block when a hole that big
+// exists, else 2..8 equal whole-row pieces. Appends to sharedFB_chunk[] (from index
+// `nch`) and returns the new chunk count, or -1 with everything it took freed again.
+static int mainFBHeapRows(int nch, int row0, int rest, int stride) {
     // Probe before asking: pico_malloc PANICS on OOM instead of returning NULL, so
-    // the `!p` branch below never fires on this SDK and a too-small heap took the
-    // whole firmware down with "*** PANIC *** Out of memory" (hw 2026-08-13: 720x576
-    // + NeoGS + MIDI, 149 KB free but no contiguous 104 040 B block). With the probe
-    // the caller gets false and can fall back / report.
-    if (!FB_FORCE_CHUNKS && getLargestAllocatable() >= want) {
-        uint8_t *p = (uint8_t*)malloc(want);
+    // a `!p` test alone never fires on this SDK and a too-small heap took the whole
+    // firmware down with "*** PANIC *** Out of memory" (hw 2026-08-13: 720x576 +
+    // NeoGS + MIDI, 149 KB free but no contiguous 104 040 B block). With the probe
+    // the caller gets a failure and can fall back / report.
+    if (!FB_FORCE_CHUNKS && getLargestAllocatable() >= (size_t)rest * stride) {
+        uint8_t *p = (uint8_t*)malloc((size_t)rest * stride);
         if (p) {
-            memset(p, 0, want);
-            sharedFB_main = p;
-            sharedFB_main_size = want;
-            return true;
+            memset(p, 0, (size_t)rest * stride);
+            sharedFB_chunk[nch++] = { p, (uint16_t)row0, (uint16_t)rest, false };
+            return nch;
         }
     }
     // No hole that big: split across whole-row chunks, fewest first.
     for (int n = FB_FORCE_CHUNKS ? FB_FORCE_CHUNKS : MAIN_CHUNKS_MIN;
          n <= MAIN_CHUNKS_MAX; n *= 2) {
-        const int rows = (lines + n - 1) / n;
-        int got = 0;
+        const int rows = (rest + n - 1) / n;
+        int got = nch;
         bool ok = true;
         for (int c = 0; c < n; c++) {
             const int r0 = c * rows;
-            if (r0 >= lines) break;                      // fewer chunks than n suffice
-            const int rc = (r0 + rows <= lines) ? rows : (lines - r0);
+            if (r0 >= rest) break;                       // fewer chunks than n suffice
+            const int rc = (r0 + rows <= rest) ? rows : (rest - r0);
             const size_t bytes = (size_t)rc * stride;
             if (getLargestAllocatable() < bytes) { ok = false; break; }
             uint8_t *cp = (uint8_t*)malloc(bytes);
             if (!cp) { ok = false; break; }
             memset(cp, 0, bytes);
-            sharedFB_mainChunk[c] = cp;
-            got = c + 1;
+            sharedFB_chunk[got++] = { cp, (uint16_t)(row0 + r0), (uint16_t)rc, false };
         }
-        if (ok) {
-            sharedFB_main_nchunks    = got;
-            sharedFB_main_chunk_rows = rows;
-            sharedFB_main            = sharedFB_mainChunk[0];  // also the "exists" marker
-            sharedFB_main_size       = want;
-            // A broken map must not reach the renderer: fail the allocation instead,
-            // which the callers already handle (mode downgrade / legacy path).
-            if (!mainFBSelfCheck(lines, stride)) { mainFBFree(); return false; }
-            Debug::log("VIDEO: main FB %uKB in %d chunks x %d rows%s",
-                       (unsigned)(want >> 10), got, rows,
-                       FB_FORCE_CHUNKS ? " (FB_FORCE_CHUNKS)" : " (fragmented heap)");
-            return true;
-        }
-        for (int c = 0; c < got; c++) { free(sharedFB_mainChunk[c]); sharedFB_mainChunk[c] = nullptr; }
+        if (ok) return got;
+        for (int c = nch; c < got; c++) { free(sharedFB_chunk[c].p); sharedFB_chunk[c].p = nullptr; }
     }
-    return false;
+    return -1;
+}
+
+static bool ensureMainFB(int lines, int stride) {
+    size_t want = fbMainBytes(lines, stride);
+    // Donors registered since the block was built (the pre-Config claim in setup()
+    // has none) mean a rebuild even at the same size — that is the whole point.
+    const bool donorsPending = sharedFB_ndonors && !sharedFB_donor_used;
+    if (sharedFB_main && sharedFB_main_size == want && !donorsPending) return true;
+    if (sharedFB_main) mainFBFree();
+    if (!sharedFB_ndonors) {
+        // The plain path: ONE heap block (nchunks stays 0 — every board, every boot
+        // without donors is byte-for-byte what it always was), else the pieces.
+        if (!FB_FORCE_CHUNKS && getLargestAllocatable() >= want) {
+            uint8_t *p = (uint8_t*)malloc(want);
+            if (p) {
+                memset(p, 0, want);
+                sharedFB_main = p;
+                sharedFB_main_size = want;
+                return true;
+            }
+        }
+    }
+    int nch = 0, row = 0;
+    uint32_t used = 0;
+    for (int d = 0; d < sharedFB_ndonors && row < lines; d++) {
+        int rows = (int)(sharedFB_donor[d].bytes / (size_t)stride);
+        if (rows > lines - row) rows = lines - row;
+        if (rows <= 0) continue;
+        sharedFB_chunk[nch++] = { sharedFB_donor[d].p, (uint16_t)row, (uint16_t)rows, true };
+        used |= sharedFB_donor[d].tag;
+        row += rows;
+    }
+    const int heapRows = lines - row;
+    if (heapRows > 0) {
+        const int got = mainFBHeapRows(nch, row, heapRows, stride);
+        if (got < 0) return false;
+        nch = got;
+    }
+    sharedFB_nchunks    = nch;
+    sharedFB_main       = sharedFB_chunk[0].p;   // also the "exists" marker
+    sharedFB_main_size  = want;
+    sharedFB_donor_used = used;
+    // A broken map must not reach the renderer: fail the allocation instead,
+    // which the callers already handle (mode downgrade / legacy path).
+    if (!mainFBSelfCheck(lines, stride)) { mainFBFree(); return false; }
+    int extRows = 0, extN = 0;
+    for (int c = 0; c < nch; c++) if (sharedFB_chunk[c].ext) { extRows += sharedFB_chunk[c].rows; extN++; }
+    if (extN)
+        Debug::log("VIDEO: main FB %uKB: %d rows in %d donated SRAM block(s) + %d rows (%uKB) of heap in %d chunk(s)",
+                   (unsigned)(want >> 10), extRows, extN, heapRows,
+                   (unsigned)(((size_t)heapRows * stride) >> 10), nch - extN);
+    else
+        Debug::log("VIDEO: main FB %uKB in %d chunks x %d rows%s",
+                   (unsigned)(want >> 10), nch, sharedFB_chunk[0].rows,
+                   FB_FORCE_CHUNKS ? " (FB_FORCE_CHUNKS)" : " (fragmented heap)");
+    return true;
 }
 
 // Row `row` of the prev-FB, whichever way it is backed. The ONLY way the render
@@ -4786,7 +4933,7 @@ void VIDEO::reserveFrameBuffer(bool configKnown) {
     if (sharedFB_arr1 && ensureMainFB(lines, stride)) {
         Debug::log("VIDEO: FB reserved %ux%u (%u B) in %d block(s), freeHeap=%u largest=%u",
                    (unsigned)stride, (unsigned)lines, (unsigned)fbMainBytes(lines, stride),
-                   sharedFB_main_nchunks ? sharedFB_main_nchunks : 1,
+                   sharedFB_nchunks ? sharedFB_nchunks : 1,
                    (unsigned)getFreeHeap(), (unsigned)getLargestAllocatable());
         return;
     }
@@ -5004,6 +5151,10 @@ void VIDEO::pickMachineVideoMode() {
     } else if (!SELECT_VGA && Config::cpu_mhz == Config::CPU_540_MHZ) {
         video_mode = graphics_540_mode(video_mode);
     }
+    // The pair table above was built before video_mode was final, and on an x3 mode
+    // it has to keep out of slots 245..249 (init_profi_pair_lookup) — rebuild it now.
+    if (Config::arch == A_PROFI || g_scorp_gmx || Config::arch == A_TSCONF || Config::arch == A_ATM)
+        init_profi_pair_lookup();
     // The 50 Hz modes above are per MACHINE — one display frame is tuned to be
     // exactly one emulated frame (v_total 644 Pentagon 48.83 Hz / 629 128K
     // 50.02 Hz / 628 48K, Profi, Scorpion 50.08 Hz) — and with v_sync pacing the
@@ -5539,6 +5690,7 @@ void VIDEO::InitPrevBuffer() {
 bool VIDEO::bl_live = false;
 bool VIDEO::ft_live = false;
 static void ftModeSwitch(bool on);      // VDAC2 glue, end of this file
+static bool ftGlueEnsure();
 static uint32_t* bl_stage_ptr = nullptr;
 static bool bl_line_done = false;
 // A line just completed inside this Draw call — scale it once its last columns
@@ -6553,9 +6705,29 @@ void VIDEO::tsFastMemRecalc() {
     nextFastrdSet(v == 1 && g_ts_fastrd == 2);
     if (v != g_ts_fastmem) {
         g_ts_fastmem = v;
-        Debug::log("[TSF] fast memory path %s%s (render=%u armed=%u ft=%u bp=%d/%d zxdma=%u divmmc=%u)", v ? "ON" : "off", v == 1 ? " (Next, >= 0x4000)" : "",
-                   ts_render_live, (unsigned)ts_fast_armed, (unsigned)ft_live, Config::numMemReadBP, Config::numMemWriteBP,
-                   (unsigned)g_ngs_zxdma, (unsigned)MemESP::divmmc_mapped);
+        // The NeoGS ZX-DMA window flips this on EVERY open/close, and a demo that
+        // streams through it (TheLink's dragon: tens of DMA blocks a frame) made
+        // this one line the dominant cost of the frame on a UART-console build —
+        // each Debug::log is a vsnprintf plus an IRQ-off ring push, hundreds of
+        // them a frame (hw 2026-10-13: 41.8 FPS / IDL -3.3 ms with the log
+        // interleaving itself into garbage; the ring was overflowing). The first
+        // transitions are printed as before — they say WHY the path is off — and
+        // after that one summary line a second carries the count.
+        static uint32_t s_tsf_lines = 0, s_tsf_toggles = 0, s_tsf_last_us = 0;
+        const uint32_t now = time_us_32();
+        ++s_tsf_toggles;
+        if (s_tsf_lines < 8) {
+            ++s_tsf_lines;
+            Debug::log("[TSF] fast memory path %s%s (render=%u armed=%u ft=%u bp=%d/%d zxdma=%u divmmc=%u)", v ? "ON" : "off", v == 1 ? " (Next, >= 0x4000)" : "",
+                       ts_render_live, (unsigned)ts_fast_armed, (unsigned)ft_live, Config::numMemReadBP, Config::numMemWriteBP,
+                       (unsigned)g_ngs_zxdma, (unsigned)MemESP::divmmc_mapped);
+            s_tsf_last_us = now;
+        } else if ((uint32_t)(now - s_tsf_last_us) >= 1000000u) {
+            Debug::log("[TSF] fast memory path %s - %u toggles (zxdma=%u divmmc=%u)", v ? "ON" : "off",
+                       (unsigned)s_tsf_toggles, (unsigned)g_ngs_zxdma, (unsigned)MemESP::divmmc_mapped);
+            s_tsf_toggles = 0;
+            s_tsf_last_us = now;
+        }
     }
 }
 
@@ -7476,9 +7648,19 @@ void VIDEO::tsVideoApplyPending() {
     // renderer owns every framebuffer row; the whole-line renderer stays off.
     {
         const bool wantFt = Ft812::enabled && (vc & 0x04);
-        if (wantFt != ft_live) {
-            if (wantFt) { if (ts_render_live) tsVideoForceOff(); ftModeSwitch(true); }
-            else ftModeSwitch(false);
+        // A refused output (no memory for the glue) is latched until the guest drops
+        // FT_EN: retrying every frame tore the TS mode down and rebuilt it each time
+        // (FB cleared per frame = a black screen, hw 2026-10-13).
+        static bool s_ftRefused = false;
+        if (!wantFt) s_ftRefused = false;
+        if (wantFt != ft_live && !(wantFt && s_ftRefused)) {
+            if (wantFt) {
+                // Whole-line renderer off FIRST: on a VDAC2 boot the glue borrows its
+                // core1 line-ring block. A refusal then costs one TS mode rebuild.
+                if (ts_render_live) tsVideoForceOff();
+                if (ftGlueEnsure()) ftModeSwitch(true);
+                else s_ftRefused = true;
+            } else ftModeSwitch(false);
         }
         if (ft_live) return;
     }
@@ -7568,7 +7750,7 @@ void VIDEO::tsVideoApplyPending() {
         }
         Debug::log("[TSU] tile-map prefetch ring %s (%u B @%08lX)", blk ? "ON" : "unavailable (no RAM) - reading the map at render time", (unsigned)bytes, (unsigned long)(uintptr_t)blk);
     }
-    if (wantRender && ts_c1_enabled && !ts_c1_ring) {
+    if (wantRender && ts_c1_enabled && !ts_c1_ring && !s_c1borrowed) {
         tsC1RingAlloc();
         ts_c1_r = ts_c1_w = 0;
         TsConf::wrGateRecalc(); tsC1LiveRecalc();
@@ -8515,8 +8697,35 @@ void VIDEO::gmxBorderFrame(bool skipFrame) {
 }
 
 
+#if COL16_TRACE
+#include "app/Col16Trace.h"
+// One [C16] line per 60 frames: guest accesses per frame by ZX page (fetch /
+// read / write), #7FFD D3 flips and window-3 re-pagings, frames with 16col on.
+static __attribute__((noinline)) void c16TraceTick() {
+    static uint32_t fr = 0, on = 0, d3 = 0;
+    fr++;
+    if (VIDEO::mode16col_enabled) on++;
+    if (MemESP::videoLatch) d3++;
+    if (fr < 60) return;
+    char line[240]; int p = 0;
+    for (int i = 0; i < 9; i++)
+        p += snprintf(line + p, sizeof(line) - p, " %c:%lu/%lu/%lu", i < 8 ? '0' + i : 'R',
+                      (unsigned long)(c16_fe[i] / fr), (unsigned long)(c16_rd[i] / fr),
+                      (unsigned long)(c16_wr[i] / fr));
+    Debug::log("[C16] fe/rd/wr per frame:%s", line);
+    Debug::log("[C16] 16col %lu/%lu frames, D3=1 at %lu frame ends, D3 flips %lu, bank changes %lu (per 60f), bank=%lu",
+               (unsigned long)on, (unsigned long)fr, (unsigned long)d3, (unsigned long)c16_flip,
+               (unsigned long)c16_bank, (unsigned long)MemESP::bankLatch);
+    for (int i = 0; i < 9; i++) c16_fe[i] = c16_rd[i] = c16_wr[i] = 0;
+    c16_flip = c16_bank = 0; fr = on = d3 = 0;
+}
+#endif
+
 IRAM_ATTR void VIDEO::EndFrame() {
     PERF_BUCKET_SCOPE(PB_ENDFRAME);
+#if COL16_TRACE
+    c16TraceTick();
+#endif
 
     // Console drain, once per frame. Debug::log lands in a 4 KB ring that
     // pumpUart() empties into the 32-byte UART FIFO, and until 2026-09-09 the
@@ -10286,20 +10495,55 @@ FtGlue* ftg = nullptr;
 }
 
 static void ftVideoSinkAttach();   // CMD_PLAYVIDEO direct path, below
+// The glue, the band buffer and the render scratch are core1's per-pixel state and
+// live in SRAM (PSRAM was tried 2026-10-13 and cost too much speed). On a VDAC2 boot
+// they are carved out of the core1 line-ring block claimed at boot (tsC1RingAlloc,
+// sized for both — the ring is idle while the FT output is live); otherwise, and if
+// that block is too small, from the heap. All of it is handed back when the output
+// goes off (ftGlueRelease), so F11 / leaving VDAC2 leaves no lasting heap cost.
+static constexpr size_t ftA8(size_t n) { return (n + 7) & ~(size_t)7; }
+// The FB width: vga.xres is still 0 when tsC1RingAlloc sizes the block at boot
+// (vga.init runs in VIDEO::Init), so take it from the reserved framebuffer's mode.
+// Using xres there sized the block with NO band, and the live output fell back to
+// the heap (hw 2026-10-13: "no heap for the glue (6672 B, largest 4076)").
+static int ftFbWidth() {
+    return VIDEO::vga.xres ? (int)VIDEO::vga.xres : fbModeStride(fbModeIndex());
+}
+static size_t ftSramNeed(int rows) {
+    return ftA8(sizeof(FtGlue)) + ftA8(Ft812::ft812RenderScratchBytes()) + (size_t)ftFbWidth() * rows * 4;
+}
+static bool s_ftShared = false;          // the glue sits in the borrowed ring block
+static void* s_ftMipBlk = nullptr;       // the PSRAM block behind ftg->mip
 static bool ftGlueEnsure() {
     if (ftg) return true;
-    FtGlue* g = (FtGlue*)tryMalloc(sizeof(FtGlue));
-    if (!g) { Debug::log("[FT812] no heap for the glue (%u B) - VDAC2 output stays off", (unsigned)sizeof(FtGlue)); return false; }
-    memset(g, 0, sizeof(FtGlue));
-    // The band: 8 rows of ARGB8888 (11.5 KB at 360 wide) in SRAM — halved until it fits.
     const int w = (int)VIDEO::vga.xres;
-    for (int rows = 8; rows >= 2; rows >>= 1) {
-        g->band = (uint32_t*)tryMalloc((size_t)w * rows * 4);
-        if (g->band) { g->bandRows = rows; break; }
+    FtGlue* g = nullptr; uint32_t* band = nullptr; void* walk = nullptr; int rows = 0;
+    if (s_c1blk && s_ftRows && s_c1blkBytes >= ftSramNeed(s_ftRows)) {
+        // Borrow the line ring: the whole-line renderer is off (tsVideoForceOff ran),
+        // wait out anything still queued, then the block is ours.
+        VIDEO::tsRenderDrain();
+        ts_c1_ring = nullptr; ts_c1_tsu = nullptr; ts_c1_sf = nullptr; ts_c1_tsu_job = nullptr; ts_c1_sf_job = nullptr;
+        ts_c1_r = ts_c1_w = 0;
+        s_c1borrowed = true;
+        tsC1LiveRecalc();
+        rows = s_ftRows;
+        g    = (FtGlue*)s_c1blk;
+        walk = s_c1blk + ftA8(sizeof(FtGlue));
+        band = (uint32_t*)(s_c1blk + ftA8(sizeof(FtGlue)) + ftA8(Ft812::ft812RenderScratchBytes()));
+        s_ftShared = true;
+    } else {
+        g = (FtGlue*)tryMalloc(sizeof(FtGlue));
+        if (!g) { Debug::log("[FT812] no heap for the glue (%u B, largest %u; boot block %u B, %d rows, need %u) - VDAC2 output stays off",
+                             (unsigned)sizeof(FtGlue), (unsigned)getLargestAllocatable(), (unsigned)s_c1blkBytes, s_ftRows,
+                             (unsigned)(s_ftRows ? ftSramNeed(s_ftRows) : 0)); return false; }
+        for (int r = 8; r >= 2 && !band; r >>= 1) { band = (uint32_t*)tryMalloc((size_t)w * r * 4); if (band) rows = r; }
+        if (!band) { Debug::log("[FT812] no heap for the band buffer - VDAC2 output stays off"); free(g); return false; }
+        walk = tryMalloc(Ft812::ft812RenderScratchBytes());
+        if (!walk) { Debug::log("[FT812] no heap for the render scratch (%u B) - VDAC2 output stays off", (unsigned)Ft812::ft812RenderScratchBytes()); free(band); free(g); return false; }
+        s_ftShared = false;
     }
-    if (!g->band) { Debug::log("[FT812] no heap for the band buffer - VDAC2 output stays off"); free(g); return false; }
-    g->walk = tryMalloc(Ft812::ft812RenderScratchBytes());
-    if (!g->walk) { Debug::log("[FT812] no heap for the render scratch (%u B) - VDAC2 output stays off", (unsigned)Ft812::ft812RenderScratchBytes()); free(g->band); free(g); return false; }
+    memset(g, 0, sizeof(FtGlue));
+    g->band = band; g->bandRows = rows; g->walk = walk;
     // The MJPEG player's stack (TJpgDec on core1, FT_VSTACK_BYTES) and its per-pixel
     // tables (4 KB) are the band buffer itself: a separate 8 KB did not fit beside
     // the adaptive palette at 576p + NeoGS (hw 2026-10-01: "no heap for the video
@@ -10321,12 +10565,13 @@ static bool ftGlueEnsure() {
         if ((uintptr_t)blk < 0x11000000u) { Buffer::pfree(blk); break; }      // landed on the heap: no cache
         g->mip = Ft812::ft812MipInit(blk, bytes);
         if (!g->mip) { Buffer::pfree(blk); break; }
+        s_ftMipBlk = blk;
         g->mipBytes = (uint32_t)bytes;
     }
     if (!g->mip) Debug::log("[FT812] no PSRAM for the bitmap cache - cells are blitted from their source");
     ftg = g;
     ftVideoSinkAttach();
-    Debug::log("[FT812] glue %u B + band %d rows x %d, bitmap cache %u KB", (unsigned)sizeof(FtGlue), g->bandRows, w, (unsigned)(g->mipBytes >> 10));
+    Debug::log("[FT812] glue %u B @%p (%s) + band %d rows x %d, bitmap cache %u KB", (unsigned)sizeof(FtGlue), (void*)g, s_ftShared ? "core1 ring block" : "heap", g->bandRows, w, (unsigned)(g->mipBytes >> 10));
     return true;
 }
 
@@ -10405,6 +10650,29 @@ void VIDEO::ftPaletteProgram() {
     Ft812::renderRequest();
 }
 
+// Everything ftGlueEnsure / ftAdaptEnsure took, handed back. core1 is out of the
+// pump (ftModeSwitch(false) waited for it). A video still playing keeps the glue
+// (its sink decodes into it); the next output-off releases it.
+static void ftGlueRelease() {
+    if (!ftg || Ft812::videoActive()) return;
+    FtGlue* g = ftg;
+    Ft812::videoSetSink(nullptr);
+    ftg = nullptr;
+    __dmb();
+    if (g->vback) Buffer::pfree(g->vback);
+    if (g->alut) free(g->alut);
+    if (g->ap) Buffer::pfree(g->ap);
+    if (s_ftMipBlk) { Buffer::pfree(s_ftMipBlk); s_ftMipBlk = nullptr; }
+    if (s_ftShared) {
+        tsC1RingCarve(s_c1blk);          // the line ring gets its block back
+        s_c1borrowed = false;
+        tsC1LiveRecalc();
+    } else {
+        free(g->walk); free(g->band); free(g);
+    }
+    s_ftShared = false;
+}
+
 static void ftModeSwitch(bool on) {
     if (on) {
         if (!ftGlueEnsure()) return;
@@ -10467,6 +10735,7 @@ static void ftModeSwitch(bool on) {
         VIDEO::brdnextframe = true;
         VIDEO::tsCramDirty = true;
         Debug::log("[FT812] VDAC2 output off (%lu frames rendered)", (unsigned long)(ftg ? ftg->frames : 0));
+        ftGlueRelease();
     }
 }
 

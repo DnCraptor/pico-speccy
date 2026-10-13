@@ -1049,6 +1049,7 @@ void repeat_me_for_input() {
 
 extern "C" void ts_render_core1_pump(void);
 extern "C" bool ts_render_core1_prio(void);   // render queue pre-empts GS::pump (Video.cpp)
+extern "C" bool ts_render_core1_busy(void);   // ...and ANY queued line does while the GS is idle-throttled
 extern "C" volatile bool g_ts_c1_live;       // TS-Conf lines on core1 right now (Video.cpp)
 extern "C" volatile bool g_ft_c1_live;       // TS-Conf VDAC2: the FT812 frame renderer is live (Video.cpp)
 extern "C" void ft812_render_core1_pump(void);
@@ -1122,7 +1123,19 @@ void __not_in_flash_func(render_core)() {
         // Sound = Off, so calling either there would be a jump into heap data.
         // This is the ONLY GS entry point outside src/speccy/devices/gs/ that was not already
         // behind GS::enabled / GS::neogs / g_ngs_zxdma.
-        if (GS::enabled && (!g_ts_c1_live || !ts_render_core1_prio() || GS::hostActive())) GS::pump();
+        // Idle-throttled card (GS::idleThrottled, set by pump() itself): nobody can
+        // observe it, so ANY queued line goes first — the >32 rule let it take a
+        // slice between every batch of a HALT-synced title's lines (fishbone,
+        // 289 windows a frame): core0 `wait` 0.6 -> 1.7 ms, 48.8 -> 46 FPS at 576p
+        // (hw 2026-10-13). hostActive() is false by construction while throttled.
+        if (GS::enabled) {
+            bool run = true;
+            if (g_ts_c1_live) {
+                if (GS::idleThrottled)            run = !ts_render_core1_busy();
+                else if (ts_render_core1_prio())  run = GS::hostActive();
+            }
+            if (run) GS::pump();
+        }
 #endif
         tight_loop_contents();
     }
@@ -1851,7 +1864,14 @@ int main() {
     // tag (and no Config yet); its console starts in ESPectrum::setup. The UART
     // divider goes stale after set_sys_clock; Debug::uartReclock() below fixes it,
     // so no prints in between.
+    // A -DDBG_UART_DEFAULT_ON=ON image starts it on a COLD boot too: it exists for
+    // boards with no picture (no menu) and possibly no SD card (no Config::load,
+    // so board_dbg_uart_apply never runs).
+#if defined(DBG_UART_DEFAULT) && DBG_UART_DEFAULT
+    if (BoardPins::dbgUartInstance() >= 0)
+#else
     if (Debug::uartBootWanted() && BoardPins::dbgUartInstance() >= 0)
+#endif
         Debug::uartStart((unsigned)BoardPins::dbgUartInstance(), BoardPins::dbgUartTxPin());
     Debug::log("main: entry, wd_reboot=%d", (int)watchdog_caused_reboot());
     // Decode WHY the chip reset (hw-traced 2026-07-21: "wd_reboot=0 mid-ZIP-extract"
@@ -2025,8 +2045,9 @@ int main() {
         }
     }
 #endif
-    // NOTE: the on-chip radio (MURM_W / MURM2_W) is NOT brought up here — see the
-    // WifiNet::init() call after multicore_launch_core1() below, and why.
+    // NOTE: the on-chip radio (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) is NOT brought up
+    // here — see the WifiNet::init() call after multicore_launch_core1() below,
+    // and why.
     #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
     for (int i = 0; i < 6; i++) {
         sleep_ms(33);
@@ -2182,8 +2203,9 @@ int main() {
     Debug::log2SD("main: applyPalette done");
 #endif
 #if PICOSPECCY_WIFI
-    // On-chip radio (MURM_W / MURM2_W) — brought up HERE and nowhere earlier, for
-    // two reasons that both bit on hardware (2026-09-06: LED blinked, no picture):
+    // On-chip radio (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) — brought up HERE and nowhere
+    // earlier, for two reasons that both bit on hardware (2026-09-06: LED
+    // blinked, no picture):
     //
     //  1. The SDK's pio_claim_free_sm_and_add_program_for_gpio_range() walks the
     //     blocks pio2 -> pio1 -> pio0 and, on its second pass, moves the gpio_base
@@ -2201,7 +2223,12 @@ int main() {
     // without a radio and the log says why.
     Debug::log2SD("main: waiting for graphics_init_done (WiFi)");
     sem_acquire_blocking(&graphics_init_done_semaphore);
-    WifiNet::init();
+    {
+        extern bool SELECT_VGA;
+        const bool wok = WifiNet::init();
+        Debug::log2SD("main: WifiNet::init -> %d (SELECT_VGA=%d linkVGA01=%02X)",
+                      (int)wok, (int)SELECT_VGA, (unsigned)linkVGA01);
+    }
     #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
     // LED1 lives on the radio module's own GPIO0, so it only blinks once the bus
     // is really up — a one-glance "the radio answered" indicator that needs no

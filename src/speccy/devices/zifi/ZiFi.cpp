@@ -14,6 +14,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include "tusb.h"   // tuh_cdc_* — USB-CDC transport (CH340/CP210x/FTDI dongle)
+#if PICOSPECCY_WIFI
+#include "net/AtEmu.h"   // the NIC on the on-chip radio (no ESP, no UART)
+#endif
 
 // ZiFi port map (A0..A7 == 0xEF, function selected by A8..A15):
 //   0x00..0xBF  DR   R/W  Data register (ZIFI or RS-232 stream)
@@ -374,6 +377,11 @@ static bool     s_rx_session    = false;   // a ZiFiSock session holds the 8 KB 
 static uint32_t s_rx_shrink_at  = 0;       // ms: no shrink attempt before this (failed alloc)
 
 static uint16_t rxWantSize() {
+#if PICOSPECCY_WIFI
+    // The AT emulator feeds the ring at the NIC baud, so data waits in lwIP's
+    // pbufs (inside the window) rather than here: 2 KB is plenty.
+    if (ZiFi::atEmu) return 2048;
+#endif
     return s_rx_session ? 8192 : (Config::zifi_enabled ? 4096 : 2048);
 }
 
@@ -598,9 +606,14 @@ void ZiFi::init(bool background) {
     // and claiming the UART pins for one would steal them from the peripheral
     // that owns them (NESPAD, audio). ZiFiAT/ZiFiSock dispatch to WifiNet instead;
     // the guest-visible NIC windows stay dark on this transport.
+    // With the guest NIC on, the AT emulator stands in for the ESP: the rings
+    // below are allocated as usual and the emulator is their far end.
     if (Config::zifi_transport == 2) {
-        Debug::log("ZiFi: transport is on-chip WiFi — ESP link not started");
-        return;
+        if (!ZiFi::enabled) {
+            Debug::log("ZiFi: transport is on-chip WiFi — ESP link not started");
+            return;
+        }
+        atEmu = true;
     }
 #endif
     // Allocate the RX/TX rings on the heap (freed in deinit) so they cost nothing
@@ -634,6 +647,15 @@ void ZiFi::init(bool background) {
     zifi_out_head = zifi_out_tail = 0;
     u16550_lcr = u16550_ier = u16550_mcr = u16550_scr = u16550_dlm = 0;
     u16550_dll = 1;
+
+#if PICOSPECCY_WIFI
+    if (atEmu) {
+        g_uart = nullptr; g_tx = g_rx = BoardPins::PIN_OFF;
+        if (!AtEmu::start()) Debug::log("ZiFi: NIC ports stay dark (no emulator)");
+        hw_initialized = true;
+        return;
+    }
+#endif
 
 #if CFG_TUH_CDC
     // USB-CDC transport: no GPIO UART at all. The dongle enumerates asynchronously
@@ -721,6 +743,9 @@ bool ZiFi::linkUp() { return hw_initialized; }
 void ZiFi::deinit() {
     zifi_finish_init();
     if (!hw_initialized) return;
+#if PICOSPECCY_WIFI
+    if (atEmu) { AtEmu::stop(); atEmu = false; }
+#endif
     if (g_uart) {
         irq_set_enabled(g_uart_irq, false);
         uart_set_irq_enables(g_uart, false, false);
@@ -822,6 +847,9 @@ void __not_in_flash("zifi") ZiFi::write(uint8_t hi, uint8_t data) {
         // DR write: push to ZIFI-out FIFO if api_mode == 1
         if (api_mode == 1 && !fifo_full(zifi_out_head, zifi_out_tail))
             zifi_out_buf[zifi_out_head++] = data;
+#if PICOSPECCY_WIFI
+        if (atEmu && fifo_fill(zifi_out_head, zifi_out_tail) >= 128) AtEmu::drainTx();
+#endif
         return;
     }
     switch (hi) {
@@ -849,6 +877,9 @@ void __not_in_flash("zifi") ZiFi::write(uint8_t hi, uint8_t data) {
 // ─── TX drain (call from emulator main loop) ─────────────────────────────────
 
 void __not_in_flash("zifi") ZiFi::tick() {
+#if PICOSPECCY_WIFI
+    if (atEmu) { AtEmu::tick(); return; }
+#endif
     if (!initReady()) return;
     if (!linkActive()) return;
     rxSpillTick(); // spill backed-up RX to SD swap so the ring can't overflow
@@ -996,6 +1027,11 @@ uint8_t __not_in_flash("zifi") ZiFi::uart16550Read(uint8_t reg_hi) {
         case 4: return u16550_mcr;    // MCR
         case 5: {                     // LSR: THRE+TEMT always set; DR if RX waiting
             uint8_t lsr = 0x60;
+#if PICOSPECCY_WIFI
+            // The emulator drains the TX ring once a frame, so a full ring must
+            // read as a busy transmitter (MRF's zxwifi driver waits on THRE).
+            if (atEmu && fifo_full(zifi_out_head, zifi_out_tail)) lsr = 0x00;
+#endif
             if (rxAvailable()) lsr |= 0x01;
             return lsr;
         }
@@ -1013,6 +1049,9 @@ void __not_in_flash("zifi") ZiFi::uart16550Write(uint8_t reg_hi, uint8_t data) {
             // the guest's OUT path; the per-frame tick() owns RX spilling.
             if (!fifo_full(zifi_out_head, zifi_out_tail))
                 zifi_out_buf[zifi_out_head++] = data;
+#if PICOSPECCY_WIFI
+            if (atEmu && fifo_fill(zifi_out_head, zifi_out_tail) >= 128) AtEmu::drainTx();
+#endif
             // g_uart guard: on the CDC transport g_uart is null (the ring drains
             // via cdcPump()/tick()) and uart_is_writable(nullptr) reads ROM.
             while (g_uart && !fifo_empty(zifi_out_head, zifi_out_tail) && uart_is_writable(g_uart)) {
@@ -1074,6 +1113,9 @@ void __not_in_flash("zifi") ZiFi::unoUartWrite(bool dataPort, uint8_t data) {
     // drains via cdcPump()/tick() instead).
     if (!fifo_full(zifi_out_head, zifi_out_tail))
         zifi_out_buf[zifi_out_head++] = data;
+#if PICOSPECCY_WIFI
+    if (atEmu && fifo_fill(zifi_out_head, zifi_out_tail) >= 128) AtEmu::drainTx();
+#endif
     while (g_uart && !fifo_empty(zifi_out_head, zifi_out_tail) && uart_is_writable(g_uart)) {
         uart_get_hw(g_uart)->dr = zifi_out_buf[zifi_out_tail++];
         tx_bytes++;
@@ -1098,6 +1140,29 @@ void ZiFi::bridgeTx(uint8_t data) {
     }
     LED::touchW(LED::NET);
 }
+
+// ─── AT emulator ends of the FIFOs (on-chip-WiFi boards only) ──────────────────
+#if PICOSPECCY_WIFI
+bool ZiFi::atEmu = false;
+
+int ZiFi::txPopByte() {
+    if (!zifi_out_buf || fifo_empty(zifi_out_head, zifi_out_tail)) return -1;
+    tx_bytes++;
+    return zifi_out_buf[zifi_out_tail++];
+}
+
+uint16_t ZiFi::rxRoom() {
+    return zifi_in_buf ? (uint16_t)(zifi_in_size - in_fill()) : 0;
+}
+
+void ZiFi::rxPushBytes(const uint8_t* p, uint16_t n) {
+    for (uint16_t i = 0; i < n && !in_full(); i++)
+        zifi_in_buf[zifi_in_head++ & zifi_in_mask] = p[i];
+    rx_bytes += n;
+}
+
+uint32_t ZiFi::nicBaud() { return nicSafeBaud(); }
+#endif
 
 // ─── USB-CDC transport (CH340/CP210x/FTDI dongle) ─────────────────────────────
 // A USB-serial dongle carries the ESP-01 over the host port instead of a GPIO

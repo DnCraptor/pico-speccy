@@ -187,7 +187,7 @@ void feed() {
     for (int guard = 0; guard < 64; guard++) {
         const uint32_t used = w - pcm_player_r;
         if (g_ps->E.frames - used < (uint32_t)FEED) break;
-        const int n = g_ps->E.dec->render(g_ps->E.tmp, FEED);
+        const int n = g_ps->E.dec->play(g_ps->E.tmp, FEED);
         if (n <= 0) { g_ps->E.ended = true; break; }
         const int32_t g = g_ps->E.muted ? 0 : g_ps->E.gainQ8;
         const uint32_t m = g_ps->E.frames - 1;
@@ -467,6 +467,11 @@ void layout() {
 
 const char* kTitle = "PICO-ZX-PLAYER";
 
+// Repeat cannot act: with Loop inf a looping track never ends.
+static bool repeatMoot() {
+    return Config::player_loops == 0 && g_ps->E.dec && g_ps->E.dec->hasLoop();
+}
+
 // The legend: one row per key; a toggle's label is lit while it is on.
 void drawLegend() {
     if (!s_legend) {
@@ -479,7 +484,12 @@ void drawLegend() {
     const int x = g_ps->L.cw, w = Sf.w - x;
     fill(x, g_ps->L.hdr_h, w, Sf.h - g_ps->L.hdr_h, C_PANEL);
     vline(x, g_ps->L.hdr_h + 2, Sf.h - g_ps->L.hdr_h - 4, C_SEP);
-    struct Row { const char* k; const char* what; int on; };   // on: -1 = not a toggle
+    struct Row { const char* k; const char* what; int on; };   // on: -1 = not a toggle, -2 = has no effect now
+    char loopLbl[12], fadeLbl[12];
+    if (Config::player_loops) snprintf(loopLbl, sizeof(loopLbl), "Loop x%u", Config::player_loops);
+    else snprintf(loopLbl, sizeof(loopLbl), "Loop inf");
+    if (Config::player_fade) snprintf(fadeLbl, sizeof(fadeLbl), "Fade %us", Config::player_fade);
+    else snprintf(fadeLbl, sizeof(fadeLbl), "Fade off");
     const Row rows[] = {
         { "Spc",            "Pause",   g_ps->E.paused ? 1 : 0 },
         { SYM_UP SYM_DOWN,  "Track",   -1 },
@@ -491,7 +501,9 @@ void drawLegend() {
         { "M",              "Mute",    g_ps->E.muted ? 1 : 0 },
         { "S",              "Shuffle", s_shuffle ? 1 : 0 },
         { "A",              "Auto",    s_auto ? 1 : 0 },
-        { "R",              "Repeat",  s_repeat ? 1 : 0 },
+        { "R",              "Repeat",  repeatMoot() ? -2 : s_repeat ? 1 : 0 },
+        { "L",              loopLbl,   -1 },
+        { "F",              fadeLbl,   -1 },
         { "Hm",             "First",   -1 },
         { "End",            "Last",    -1 },
         { "F5",             "Files",   -1 },
@@ -504,7 +516,7 @@ void drawLegend() {
     for (const Row& r : rows) {
         if (y + UI_FONT_H > Sf.h - 2) break;
         text(kx, y, r.k, C_TEXT_DIM);
-        text(vx, y, r.what, r.on > 0 ? C_ACCENT : C_TEXT);
+        text(vx, y, r.what, r.on > 0 ? C_ACCENT : r.on == -2 ? C_TEXT_DIM : C_TEXT);
         y += lh;
     }
 }
@@ -514,11 +526,14 @@ void drawHeader() {
     text(g_ps->L.m, 3, kTitle, C_WHITE);
     char s[64];
     // While the folder scan runs the count is still growing: "LOADING  12/345+".
-    snprintf(s, sizeof(s), "%s%s%s%s%sVOL %d  %d/%d%s",
+    char lf[16];
+    if (Config::player_loops) snprintf(lf, sizeof(lf), "L%u F%u  ", Config::player_loops, Config::player_fade);
+    else snprintf(lf, sizeof(lf), "L* F%u  ", Config::player_fade);
+    snprintf(s, sizeof(s), "%s%s%s%s%s%sVOL %d  %d/%d%s",
              // blinks at ~2 Hz; the blank phase keeps the width so nothing shifts
              g_ps->SC.active ? ((time_us_64() / 400000) & 1 ? "         " : "LOADING  ") : "",
              g_ps->E.muted ? "MUTE  " : "", g_ps->E.paused ? "PAUSE  " : "",
-             s_shuffle ? "SHUF  " : "", s_repeat ? "REP  " : s_auto ? "AUTO  " : "",
+             s_shuffle ? "SHUF  " : "", s_repeat ? "REP  " : s_auto ? "AUTO  " : "", lf,
              s_vol, g_ps->P.cur >= 0 ? g_ps->P.cur + 1 : 0, g_ps->P.n, g_ps->SC.active ? "+" : "");
     text(Sf.w - g_ps->L.m - textWidth(s), 3, s, C_TEXT);
 }
@@ -562,7 +577,7 @@ void drawTime() {
     const int y = g_ps->L.timeY;
     fill(0, y, g_ps->L.cw, UI_FONT_H, C_PANEL);
     char a[16], b[16], s[40];
-    const uint32_t pos = shownPosMs(), len = g_ps->E.dec ? g_ps->E.dec->lenMs() : 0;
+    const uint32_t pos = shownPosMs(), len = g_ps->E.dec ? g_ps->E.dec->trackLenMs() : 0;
     fmtTime(a, sizeof(a), pos);
     if (len) { fmtTime(b, sizeof(b), len); snprintf(s, sizeof(s), "%s / %s", a, b); }
     else snprintf(s, sizeof(s), "%s", a);
@@ -741,7 +756,7 @@ void seekBy(int delta) {
     if (!g_ps->E.dec || g_ps->E.ended) return;
     int64_t t = (int64_t)shownPosMs() + delta;
     if (t < 0) t = 0;
-    const uint32_t len = g_ps->E.dec->lenMs();
+    const uint32_t len = g_ps->E.dec->trackLenMs();
     if (len && t >= (int64_t)len) t = len > 500 ? len - 500 : 0;
     g_ps->E.seekTo = (int32_t)t;
     ringFlush();
@@ -767,7 +782,7 @@ void seekStep() {
     }
     const uint64_t t0 = time_us_64();
     while (g_ps->E.dec->posMs() < target) {
-        if (g_ps->E.dec->render(g_ps->E.tmp, FEED) <= 0) { g_ps->E.ended = true; g_ps->E.seekTo = -1; return; }
+        if (g_ps->E.dec->play(g_ps->E.tmp, FEED) <= 0) { g_ps->E.ended = true; g_ps->E.seekTo = -1; return; }
         if (time_us_64() - t0 >= SEEK_SLICE_US) return;
     }
     g_ps->E.seekTo = -1;
@@ -909,7 +924,7 @@ bool browse() {
 }
 
 enum PlAct : uint8_t { PA_NONE, PA_UP, PA_DOWN, PA_LEFT, PA_RIGHT, PA_PAUSE, PA_BACK,
-                       PA_MUTE, PA_SHUF, PA_AUTO, PA_REPEAT, PA_SEEKB, PA_SEEKF, PA_DIRP, PA_DIRN, PA_FILES, PA_HOME, PA_END, PA_LEGEND };
+                       PA_MUTE, PA_SHUF, PA_AUTO, PA_REPEAT, PA_SEEKB, PA_SEEKF, PA_DIRP, PA_DIRN, PA_FILES, PA_HOME, PA_END, PA_LEGEND, PA_LOOPS, PA_FADE };
 
 PlAct plAct(fabgl::VirtualKey vk) {
     switch (vk) {
@@ -930,7 +945,9 @@ PlAct plAct(fabgl::VirtualKey vk) {
         case fabgl::VK_s: case fabgl::VK_S:                                                           return PA_SHUF;
         case fabgl::VK_a: case fabgl::VK_A:                                                           return PA_AUTO;
         case fabgl::VK_r: case fabgl::VK_R:                                                           return PA_REPEAT;
-        case fabgl::VK_F5: case fabgl::VK_TAB: case fabgl::VK_f: case fabgl::VK_F:                   return PA_FILES;
+        case fabgl::VK_F5: case fabgl::VK_TAB:                                                        return PA_FILES;
+        case fabgl::VK_l: case fabgl::VK_L:                                                           return PA_LOOPS;
+        case fabgl::VK_f: case fabgl::VK_F:                                                           return PA_FADE;
         case fabgl::VK_HOME:                                                                          return PA_HOME;
         case fabgl::VK_END:                                                                           return PA_END;
         default:                                                                                      return PA_NONE;
@@ -1013,7 +1030,9 @@ void run(const string& startPath) {
     uint32_t shownBlink = 0;
     pp::Decoder* shownDec = g_ps->E.dec;
     bool lastPaused = g_ps->E.paused, lastMuted = g_ps->E.muted;
+    bool lastMoot = repeatMoot();
     uint32_t lastSec = 0xFFFFFFFF, lastMetaSeq = g_ps->E.dec ? g_ps->E.dec->metaSeq : 0;
+    bool cfgDirty = false;                            // L / F changed the loop settings
 
     while (true) {
         seekStep();
@@ -1040,6 +1059,19 @@ void run(const string& startPath) {
                 case PA_SHUF:  s_shuffle = !s_shuffle; hdr = true; break;
                 case PA_AUTO:  s_auto = !s_auto; hdr = true; break;
                 case PA_REPEAT: s_repeat = !s_repeat; hdr = true; break;
+                case PA_LOOPS: case PA_FADE: {
+                    // The same steps as Audio > Pico-Zx-Player; saved when the page closes.
+                    static const uint8_t kLoops[] = { 1, 2, 3, 4, 5, 8, 0 };
+                    static const uint8_t kFade[]  = { 0, 1, 2, 3, 5, 8, 10 };
+                    const uint8_t* t = a == PA_LOOPS ? kLoops : kFade;
+                    uint8_t& v = a == PA_LOOPS ? Config::player_loops : Config::player_fade;
+                    int i = 0;
+                    while (i < 7 && t[i] != v) i++;
+                    v = t[(i + 1) % 7];                  // an unlisted value restarts the cycle
+                    if (g_ps->E.dec) g_ps->E.dec->setLoopFade(Config::player_loops, Config::player_fade);
+                    cfgDirty = true; hdr = true; lastSec = 0xFFFFFFFF;
+                    break;
+                }
                 case PA_DIRP: case PA_DIRN: {
                     const int j = a == PA_DIRP ? folderPrev() : folderNext();
                     if (j >= 0) { failRun = 0; pushHist(g_ps->P.cur); playIndex(j); }
@@ -1091,8 +1123,9 @@ void run(const string& startPath) {
             lastMetaSeq = g_ps->E.dec->metaSeq;
             drawInfo(); drawTime(); lastSec = 0xFFFFFFFF;
         }
-        if (hdr || g_ps->E.paused != lastPaused || g_ps->E.muted != lastMuted) {
-            lastPaused = g_ps->E.paused; lastMuted = g_ps->E.muted;
+        const bool moot = repeatMoot();             // follows the track and the L key
+        if (hdr || g_ps->E.paused != lastPaused || g_ps->E.muted != lastMuted || moot != lastMoot) {
+            lastPaused = g_ps->E.paused; lastMuted = g_ps->E.muted; lastMoot = moot;
             drawHeader();
             drawLegend();
         }
@@ -1117,6 +1150,7 @@ void run(const string& startPath) {
     }
 
     engineStop();
+    if (cfgDirty) Config::save();
     plFree();
     drainKeys();
 }

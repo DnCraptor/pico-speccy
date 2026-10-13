@@ -55,6 +55,7 @@ public:
     void levels(uint8_t* out) override;
     uint32_t posMs() const override { return (uint32_t)((uint64_t)outFrames_ * 1000 / RATE); }
     uint32_t lenMs() const override { return 0; }
+    bool hasLoop() const override { return true; }   // E-Tracker always wraps
 
     // Z80 callbacks
     uint8_t* ram_ = nullptr;
@@ -195,7 +196,11 @@ int EtcDecoder::render(int16_t* lr, int n) {
     while (o < n) {
         if (left_ == 0) {
             if (ended_) break;
-            if (looped_ || posMs() >= MAX_MS) { ended_ = true; break; }
+            if (looped_) {                             // E-Tracker wrapped: one loop pass
+                looped_ = false;
+                if (!loopPassed()) { ended_ = true; break; }
+            }
+            if (posMs() >= MAX_MS && !loopsDone()) { ended_ = true; break; }
             if (!call(0x8006)) { ended_ = true; break; }
             left_ = FRAME;
         }

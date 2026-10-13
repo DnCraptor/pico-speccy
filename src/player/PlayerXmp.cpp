@@ -5,8 +5,11 @@
 // every allocation libxmp makes — the module structures and all the sample data —
 // is redirected to butter PSRAM too (pp_xmp_alloc.h, forced into its sources by
 // CMakeLists), so a multi-megabyte IT costs the SRAM heap nothing. The mixer
-// renders 31250 Hz 16-bit stereo directly. The song ends at its first loop;
-// libxmp's own scan gives the length. Meter: every channel's current volume.
+// renders 31250 Hz 16-bit stereo directly. libxmp plays with no loop limit and
+// counts the song's loops; each one is a Decoder::loopPassed(). libxmp's scan
+// gives the first-pass length; a loop pass is taken as the same length (most
+// modules restart from the top — the restart position's time is not public).
+// Meter: every channel's current volume.
 
 #include "PicoPlayer.h"
 #include "app/Buffer.h"
@@ -127,9 +130,11 @@ public:
     const char* groupName(int i) const override { return i ? nullptr : grp_; }
     void levels(uint8_t* out) override;
     uint32_t posMs() const override { return (uint32_t)((uint64_t)outFrames_ * 1000 / RATE); }
-    uint32_t lenMs() const override { return lenMs_; }
+    uint32_t lenMs() const override { return lenMs_ ? loopedLenMs(lenMs_, lenMs_) : 0; }
+    bool hasLoop() const override { return true; }   // libxmp restarts every module
 
 private:
+    int      seenLoops_ = 0;
     xmp_context ctx_ = nullptr;
     bool     loaded_ = false, started_ = false;
     int      nch_ = 0;
@@ -219,8 +224,14 @@ void XmpDecoder::close() {
 
 int XmpDecoder::render(int16_t* lr, int n) {
     if (ended_) return 0;
-    // loop = 1: -XMP_END once the song has played through.
-    if (xmp_play_buffer(ctx_, lr, n * 4, 1) != 0 || posMs() >= MAX_MS) { ended_ = true; return 0; }
+    // loop = 0: no limit; the loops are counted here (frame info loop_count).
+    if (xmp_play_buffer(ctx_, lr, n * 4, 0) != 0 || (posMs() >= MAX_MS && !loopsDone())) { ended_ = true; return 0; }
+    xmp_frame_info fi;
+    xmp_get_frame_info(ctx_, &fi);
+    while (seenLoops_ < fi.loop_count) {
+        seenLoops_++;
+        if (!loopPassed()) { ended_ = true; break; }   // this buffer still plays out
+    }
     outFrames_ += (uint32_t)n;
     return n;
 }

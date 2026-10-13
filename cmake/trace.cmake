@@ -15,6 +15,7 @@ option(IDE_PORT_TRACE "Enable PROFI IDE/HDD port access tracing" OFF)
 option(FDD_PORT_TRACE "Enable WD1793 (ВГ93) FDD command/port tracing" OFF)
 option(RTC_PORT_TRACE "Enable MC146818 Mr Gluk RTC port access tracing" OFF)
 option(PROFI_PORT_TRACE "Enable 0x7FFD/0xDFFD paging-port write tracing" OFF)
+option(COL16_TRACE "Per-ZX-page access counts + #7FFD D3 flip rate for Pentagon 16col ([C16] every 60 frames)" OFF)
 option(MC7FFD_TRACE "One-shot capture of #7FFD write tstates when a frame carries >=90 of them (beam-raced multicolor phase diagnosis)" OFF)
 option(SCORP_FF_TRACE "Trace Scorpion IN/OUT on port #FF (ТЕСТ SCORPION port-FF diagnostic), capped" OFF)
 option(VDISK_TRACE "Trace the SMUC virtual-FDD bridge: #7FBA select + WD1793 RDSEC/WRSEC + HDD LBA, correlated, low-noise" OFF)
@@ -52,3 +53,8 @@ option(ZIFI_TRACE "Enable ZiFi (ESP-01S WiFi NIC) port/UART tracing" OFF)
 option(HID_TRACE "Enable the periodic 'HID kbd:' USB-keyboard health line (stuck-key / dead-endpoint diagnosis)" OFF)
 option(FT812_TRACE "TS-Conf VDAC2: [FT812] host/coprocessor/render/SD/GS counter lines every 60 frames (ZUMA loading-speed diagnosis)" OFF)
 option(ZIFI_NET_VERBOSE "Per-packet trace of the ZiFi net client (+IPD/chanSend); floods logs" OFF)
+
+# Debug > UART console ON from the first boot (Config default; NVS still wins once
+# saved). For diagnostic images on boards where the menu cannot be reached, e.g.
+# no picture. The board's DBG_UART_TX_PIN is where the log comes out.
+option(DBG_UART_DEFAULT_ON "Debug UART console enabled by default" OFF)

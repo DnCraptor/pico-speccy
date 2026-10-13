@@ -57,8 +57,12 @@ visit https://zxespectrum.speccy.org/contacto
 #include "app/CodeOverlay.h" // TS_OVL_CODE (CPU::tsFrameLoop)
 #include "speccy/core/Rzx.h"
 #include "MemGates.h"
+#include "app/Col16Trace.h"
 
 alignas(4) MemGates g_memgates = {};   // MemGates.h: the fast-path gates, one word
+#if COL16_TRACE
+uint32_t c16_rd[9], c16_wr[9], c16_fe[9], c16_flip, c16_bank;
+#endif
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Next/NextVideo.h"
 #include "speccy/machines/Next/NextInt.h"
@@ -1230,6 +1234,7 @@ static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_dram(uint16_t address) 
 }
 IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
     TS_PAGE_HIT(address);
+    C16_RD(address);
     const uint32_t gates = g_memgates.w;   // MemGates.h: one load for the whole gate set
     if (__builtin_expect(g_ts_fastrd > tsFastLo8(address) && MEMGATES_READ_PLAIN(gates), 1)) {
         // No line test here: the line-boundary tick is taken at the next M1
@@ -1300,6 +1305,7 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
     if (g_ts_fastmem > tsFastLo8(pc)) {
         tsFastTick(4);
         if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(pc)) tsFastTick(TsConf::cpuMemMiss(pc, true));
+        C16_FE(pc);
         return MemESP::ramCurrent[pg][pc & 0x1fff];
     }
     if (g_ts_fastrd == 2) {   // Next below 0x4000 (see exec_nocheck)
@@ -1346,6 +1352,7 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
     if (__builtin_expect(g_timex_mmu != 0, 0) && Timex::rd[pc >> 13])
         return timexPeek8(pc);
     TS_PAGE_HIT(pc);
+    C16_FE(pc);
     return MemESP::romPeek(pg, MemESP::ramCurrent[pg], pc);
 }
 
@@ -1445,6 +1452,7 @@ static IRAM_ATTR __attribute__((noinline)) void poke8_cold(uint16_t address, uin
 }
 IRAM_ATTR void Z80Ops::poke8(uint16_t address, uint8_t value) {
     TS_PAGE_HIT(address);
+    C16_WR(address);
     const uint32_t gates = g_memgates.w;
     if (__builtin_expect(g_ts_fastmem > tsFastLo8(address) && MEMGATES_WRITE_PLAIN(gates), 1)) {
         CPU::tstates += 3;   // line tick at the next M1 (see peek8)
@@ -1511,6 +1519,7 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_dram(uint16_t address
 }
 IRAM_ATTR uint16_t Z80Ops::peek16(uint16_t address) {
     TS_PAGE_HIT(address);
+    C16_RD(address); C16_RD((uint16_t)(address + 1));
     const uint32_t gates = g_memgates.w;
     if (__builtin_expect(g_ts_fastrd > tsFastLo16(address) && MEMGATES_READ_PLAIN(gates), 1)) {
         CPU::tstates += 6;   // line tick at the next M1 (see peek8)
@@ -1593,6 +1602,7 @@ static IRAM_ATTR __attribute__((noinline)) void poke16_cold(uint16_t address, Re
 }
 IRAM_ATTR void Z80Ops::poke16(uint16_t address, RegisterPair word) {
     TS_PAGE_HIT(address);
+    C16_WR(address); C16_WR((uint16_t)(address + 1));
     const uint32_t gates = g_memgates.w;
     if (__builtin_expect(g_ts_fastmem > tsFastLo16(address) && MEMGATES_WRITE_PLAIN(gates), 1)) {
         CPU::tstates += 6;   // line tick at the next M1 (see peek8)

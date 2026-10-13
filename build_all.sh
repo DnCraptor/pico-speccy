@@ -28,7 +28,7 @@ while [ $# -gt 0 ]; do
 Usage: $0 [--clean] [-j JOBS_PER_BUILD] [-p MAX_PARALLEL] [TARGETS...]
 
 Env vars: BUILD_TYPE, MAX_PARALLEL, JOBS_PER_BUILD, CMAKE_GENERATOR
-Targets:  MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W (default: all)
+Targets:  MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W (default: all)
 EOF
             exit 0 ;;
         *) POSITIONAL+=("$1"); shift ;;
@@ -87,7 +87,7 @@ else
 fi
 
 # All available targets (RP2350 only — RP2040 boards were dropped)
-ALL_TARGETS="MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W"
+ALL_TARGETS="MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W"
 
 # Targets that support TFT+ILI9341 display variant
 TFT_TARGETS="MURM MURM2"
@@ -109,7 +109,7 @@ PIOUSB_TARGETS="ZERO2"
 # lives: they also ship an HSTX image (-DHDMI_HSTX=TMDS, named ...-VGA-HDMI-HSTX-*).
 # Their plain VGA_HDMI image is pinned to the PIO back-end (-DHDMI_HSTX=OFF), or
 # CMake's AUTO would make it HSTX too and the two images would be the same.
-HSTX_TARGETS="PICO_PC MURM2 MURM2_W"
+HSTX_TARGETS="PICO_PC MURM2 MURM2_W PICO_PC_W"
 
 # Parse arguments: pass target names to build specific ones, or nothing for all
 if [ $# -gt 0 ]; then

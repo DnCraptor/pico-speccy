@@ -17,7 +17,7 @@ option(SOFTTV "Enable TV soft composite output" OFF)
 # TMDS words through the PIO address converter (HDMI_HSTX=1); TMDS = HSTX with the
 # command expander and the hardware TMDS encoder, the line as a command list of
 # XRGB8888 pixels and no converter at all (HDMI_HSTX=2, see hdmi_tmds_line.h);
-# ON = RAW (the old spelling); AUTO = TMDS on PICO_PC and MURM2/MURM2_W.
+# ON = RAW (the old spelling); AUTO = TMDS on PICO_PC/PICO_PC_W and MURM2/MURM2_W.
 set(HDMI_HSTX AUTO CACHE STRING "HDMI back-end: AUTO / OFF / RAW / TMDS (ON = RAW)")
 set_property(CACHE HDMI_HSTX PROPERTY STRINGS AUTO OFF RAW TMDS ON)
 option(MURM "Murmulator 1.x + Pi Pico 2" OFF)
@@ -32,6 +32,17 @@ option(ZERO2 "Waveshare RP2350-PiZero" OFF)
 # module moves. See src/drivers/board/boards/picospeccy_rp2350b_w.h.
 option(MURM_W "Murmulator 1.x + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
 option(MURM2_W "Murmulator 2.0 + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
+# The same module in the PIMORONI Pico DV Demo Base instead of a Murmulator
+# carrier: 16 MB flash, the CYW43439 radio and PSRAM pads on GPIO47 (a pin
+# PICO_DV already uses for butter PSRAM). The base keeps its own layout — SD on
+# SPI1, keyboard on GP14/15, ZiFi header on GP0/1, display base 6 — but the three
+# Pico positions for GP26/27/28 carry GPIO40/41/42 here, so the audio block
+# moves, exactly as on MURM_W. See src/drivers/board/boards/picospeccy_rp2350b_w.h.
+option(PICO_DV_W "Pimoroni Pico DV + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
+# And in the Olimex RP2040-PICO-PC (PCp2w): the display stays on GPIO 12-19, so the
+# HSTX back-ends work exactly as on PICO_PC; the module moves the GP26/27/28 audio
+# block (PWM, beeper/595 latch, MIDI TX) to GPIO40/41/42 and the LED to GPIO23.
+option(PICO_PC_W "Olimex PICO-PC + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
 # OFF by default and shipped as a SEPARATE z0p2 firmware ("-PIOUSB" in the file name):
 # Pico-PIO-USB costs 17.7 KB of SRAM that cannot be reclaimed at runtime — 11.0 KB of
 # .time_critical code (the bit-banged host has to run from RAM) plus 6.7 KB of .bss,

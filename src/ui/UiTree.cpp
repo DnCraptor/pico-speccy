@@ -1080,6 +1080,15 @@ static const Option opt_mouse_sens[] = {
     { "x4 (fastest)",   1024, "x4"   },
 };
 
+// Devices > Mouse. Swap buttons exists because the two bit orders both live in the
+// wild: the original Kempston interface (schematic + its own driver), Karabas-Pro,
+// ZEsarUX and the Next put the RIGHT button on D0, UnrealSpeccy and software tested
+// on it (Port Demonstration 3.2) the LEFT one. Karabas-Pro's AVR has the same switch.
+static const Node kMouse[] = {
+    NM_BOOL  (TXT_HW_MOUSE_SWAP, SET_MOUSE_SWAP, nullptr),
+    NM_RADIO (TXT_HW_MOUSE_SENS, SET_MOUSE_SENS, opt_mouse_sens, nullptr),
+};
+
 // Storage and Devices used to be two top-level items, which split one question ("what is
 // this machine plugged into?") across two menus — Betadisk sat in one and the Z-Controller
 // that also drives disks in the other. Merged, storage first in the order the classic
@@ -1106,7 +1115,7 @@ static const Node kHardware[] = {
                 opt_ide_slot_hints, p_hasSD, p_ideOn),
     NM_ACTION_EN(NM_IND TXT_IDE_CREATE,  act_ideCreate, p_hasSD, p_ideOn),
     NM_BOOL  (TXT_HW_RTC,        SET_RTC,     nullptr),
-    NM_RADIO (TXT_HW_MOUSE_SENS, SET_MOUSE_SENS, opt_mouse_sens, nullptr),
+    NM_SUB   (TXT_HW_MOUSE,      kMouse,      nullptr),
 };
 
 // ── Video > TFT panel ──────────────────────────────────────────────────────────
@@ -1360,6 +1369,20 @@ static const Node kVgmChips[] = {
     NM_RADIO(NM_IND TXT_SN_CLOCK, SET_SN_CLOCK,    opt_sn_clock,   nullptr),
 };
 
+// Pico-Zx-Player: VGMPlay's two playback knobs for every track with a loop point.
+static const Option opt_pl_loops[] = {
+    { "1", 1 }, { "2", 2 }, { "3", 3 }, { "4", 4 }, { "5", 5 }, { "8", 8 },
+    { "Forever", 0 },
+};
+static const Option opt_pl_fade[] = {
+    { "Off", 0 }, { "1 s", 1 }, { "2 s", 2 }, { "3 s", 3 }, { "5 s", 5 },
+    { "8 s", 8 }, { "10 s", 10 },
+};
+static const Node kPlayerOpts[] = {
+    NM_RADIO(TXT_PL_LOOPS, SET_PL_LOOPS, opt_pl_loops, nullptr),
+    NM_RADIO(TXT_PL_FADE,  SET_PL_FADE,  opt_pl_fade,  nullptr),
+};
+
 static const Node kAudio[] = {
     NM_RADIO(TXT_AUD_DRIVER,     SET_AUDIO_DRIVER, opt_audio_driver, nullptr),
     NM_BOOL (TXT_AUD_AY,         SET_AY48,         nullptr),
@@ -1385,6 +1408,7 @@ static const Node kAudio[] = {
     NM_RADIO   (NM_IND TXT_GS_CLOCK, SET_NGS_CLOCK, opt_ngs_clock, p_gsNeo),
     NM_RADIO_DE(NM_IND TXT_GS_RAM,   SET_GS_RAM,    gs_ramOpts,    p_gsAvail, p_gsNeo),
     NM_RADIO   (TXT_AUD_BOOST,       SET_AUDIO_BOOST, opt_boost,  nullptr),
+    NM_SUB     (TXT_AUD_PLAYER,      kPlayerOpts,     p_player),
 };
 
 // ── Joystick ───────────────────────────────────────────────────────────────────
@@ -1677,26 +1701,19 @@ static bool p_espLink() {
 // says "turn WiFi on first" instead of a toast after the fact. Transport and baud
 // stay editable regardless: the link is CONFIGURED before it is brought up.
 static bool p_wifiOn() { return Config::wifi_enabled && p_espLink(); }
-// Rows that only make sense with an ESP-01 on a serial link: its baud rate, and
-// the guest-visible NIC (the serial window the guest sees) — neither exists on the
-// on-chip radio, where there is no UART at all and the TCP/IP stack is ours.
-static bool p_espSerial() {
-#if PICOSPECCY_WIFI
-    if (Config::zifi_transport == 2) return false;
-#endif
-    return true;
-}
 // The NIC needs a link to hand the guest and nothing else. It is deliberately NOT
 // gated on WiFi: with WiFi off the guest gets a plain UART that the firmware never
-// writes to, which is how a non-ESP device on those pins is talked to.
-static bool p_nicAvail() { return p_espLink() && p_espSerial(); }
+// writes to, which is how a non-ESP device on those pins is talked to. On the
+// on-chip radio there is no UART: the NIC is served by the AT emulator
+// (src/net/AtEmu), and Baud is the pace it feeds the guest at.
+static bool p_nicAvail() { return p_espLink(); }
 
 static const Node kNetwork[] = {
     NM_ACTIONV_EN(TXT_NET_WIFI, act_wifi, vl_wifi, nullptr, p_espLink),
     // The ESP link settings, shared by WiFi and the NIC — indented under WiFi.
     // Transport's option list is per-board (GPIO pairs), hence the runtime radio.
     NM_RADIO_D(NM_IND TXT_NET_TRANSPORT, SET_ZIFI_TRANSPORT, zifi_transportOpts, nullptr),
-    NM_RADIO_EN(NM_IND TXT_NET_BAUD,     SET_ZIFI_BAUD,      opt_zifi_baud,     nullptr, p_espSerial),
+    NM_RADIO    (NM_IND TXT_NET_BAUD,     SET_ZIFI_BAUD,      opt_zifi_baud,     nullptr),
     NM_RADIO    (TXT_NET_TZ,   SET_WIFI_TZ, opt_tz, nullptr),
     NM_ACTION_EN(TXT_NET_SYNC, act_sntp, nullptr, p_wifiOn),
     // Not greyed with WiFi off: it is a setting for the NEXT boot, the same class as

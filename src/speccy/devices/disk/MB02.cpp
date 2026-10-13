@@ -10,6 +10,7 @@
 #include "wd1793.h"
 #include "speccy/devices/Z80DMA.h"
 #include "speccy/roms/mb02boot.h"
+#include "app/CodeOverlay.h"   // claimForDma: the DMA code window must be resident before dma_mode is set
 
 bool MB02::enabled = false;
 uint8_t MB02::paging_reg = 0;
@@ -107,9 +108,18 @@ void MB02::init() {
     rvmWD1793Reset(&ESPectrum::mb02_fdd);
     ESPectrum::mb02_fdd.wd2797_mode = true;
 
-    // MB-02+ requires Z80-DMA on port #0B
+    // MB-02+ requires Z80-DMA on port #0B. The DMA engine's code lives in the
+    // `.dmaovl` overlay window (src/app/CodeOverlay.h), which the heap owns on a
+    // session that came up with DMA off — so a LIVE enable must claim the window
+    // BEFORE Config::dma_mode goes non-zero: CPU::loop calls Z80DMA::handleDMA()
+    // on every slice and Ports hands every #0B OUT to Z80DMA::writePort() while
+    // it is, and both are inside the window (hw 2026-10-13: SIGBUS in
+    // Z80DMA::processWR6 right after enabling MB-02+ from the menu — this line
+    // used to write dma_mode = 1 outright). A refused claim leaves the DMA off;
+    // BS-DOS then runs its transfers through the plain port path.
     if (!Config::dma_mode) {
-        Config::dma_mode = 1;
+        if (CodeOverlay::claimForDma()) Config::dma_mode = 1;
+        else Debug::log("MB02: Z80 DMA overlay window unavailable this session - DMA stays off");
     }
     Z80DMA::mb02_deferred = true;
 

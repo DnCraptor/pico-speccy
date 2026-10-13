@@ -87,9 +87,13 @@ bool     Config::tsconf_vdac2_smooth = false;
 bool     Config::tsconf_vdac2_adapt = true;
 uint8_t  Config::next_clk_cap = 2;     // nextreg 0x07 cap: 14 MHz (28 not real-time yet)
 bool     Config::rtc_enabled = false;
+bool     Config::mouse_swap = true;  // Kempston original: D0 = right, D1 = left
 uint16_t Config::mouse_sens = 64;        // Q8: 64 = x1/4, the historical divisor
 bool     Config::psram_enabled = true;   // Debug > PSRAM (runtime set(PSRAM OFF) twin)
-bool     Config::dbg_uart = false;       // Debug > UART console
+#ifndef DBG_UART_DEFAULT
+#define DBG_UART_DEFAULT 0
+#endif
+bool     Config::dbg_uart = DBG_UART_DEFAULT;   // Debug > UART console
 bool     Config::flashload = true;
 bool     Config::tape_player = false; // Tape player mode
 volatile bool Config::real_player = false;
@@ -97,6 +101,8 @@ bool     Config::profi_ext_keys = false; // Profi extended keyboard mode
 bool     Config::next_ext_keys = false;  // Spectrum Next PS/2 keymap (keymaps.vhd)
 bool     Config::tape_timing_rg = false; // Rodolfo Guerra ROMs tape timings
 bool     Config::tape_autostart = true;  // auto-play tape on load + re-mount remembered tape after reset/boot
+uint8_t  Config::player_loops = 2;         // Audio > Pico-Zx-Player > Loop count (VGMPlay default)
+uint8_t  Config::player_fade = 5;          // ... > Fade time, seconds (VGMPlay default)
 uint8_t  Config::tape_wear = 0;         // Storage > Tape > Tape wear (0 off .. 3 heavy)
 bool     Config::rightSpace = true;
 bool     Config::wasd = true;
@@ -1346,6 +1352,7 @@ void Config::load() {
         nvs_get_b("Issue2", Issue2, sts);
         nvs_get_b("rtc_enabled", rtc_enabled, sts);
         nvs_get_u16("mouse_sens", mouse_sens, sts);
+        nvs_get_b("mouse_swap", mouse_swap, sts);
         if (mouse_sens < 8 || mouse_sens > 1024) mouse_sens = 64;   // a stale/foreign NVS value
         nvs_get_b("psram_enabled", psram_enabled, sts);
         nvs_get_b("dbg_uart", dbg_uart, sts);
@@ -1416,6 +1423,10 @@ void Config::load() {
         nvs_get_b("tape_autostart", tape_autostart, sts);
         nvs_get_u8("tape_wear", tape_wear, sts);
         if (tape_wear > 3) tape_wear = 0;   // a stale/foreign NVS value
+        nvs_get_u8("pl_loops", player_loops, sts);
+        if (player_loops > 16) player_loops = 2;
+        nvs_get_u8("pl_fade", player_fade, sts);
+        if (player_fade > 30) player_fade = 5;
         // Fast load and tape wear are mutually exclusive (Tape.cpp fastLoadOn), and
         // since 2026-09-20 the menu enforces it by turning flashload OFF. Settle the
         // pair here too: a card written by an older build carries both, and the row
@@ -1830,6 +1841,7 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_str(buf,"Issue2", Issue2 ? "true" : "false");
     nvs_set_str(buf,"rtc_enabled", rtc_enabled ? "true" : "false");
     nvs_set_i(buf,"mouse_sens", mouse_sens);
+    nvs_set_str(buf,"mouse_swap", mouse_swap ? "true" : "false");
     nvs_set_str(buf,"psram_enabled", psram_enabled ? "true" : "false");
     nvs_set_str(buf,"dbg_uart", dbg_uart ? "true" : "false");
     nvs_set_str(buf,"debug_log", Debug::log_enabled ? "true" : "false");
@@ -1855,6 +1867,8 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_str(buf,"tape_timing_rg",tape_timing_rg ? "true" : "false");
     nvs_set_str(buf,"tape_autostart", tape_autostart ? "true" : "false");
     nvs_set_u8(buf,"tape_wear", tape_wear);
+    nvs_set_u8(buf,"pl_loops", player_loops);
+    nvs_set_u8(buf,"pl_fade", player_fade);
     {
         // A quick-started download lives in /tmp and is gone after reboot — never
         // persist it (it would just fail to reopen). The in-RAM value still survives
@@ -2217,6 +2231,10 @@ static const char* const kSnapAskKeys[] = {
 static const char* const kSnapLiveKeys[] = {
     "drive0.file", "drive1.file", "drive2.file", "drive3.file",
     "p3d0.file", "p3d1.file", "tape_file",
+    // Write protect travels with the disk it protects (a snapshot of a game that saves
+    // to its disk must not come back unable to — nor able to, if it was protected).
+    "drive0.wp", "drive1.wp", "drive2.wp", "drive3.wp",
+    "mb02d0.wp", "mb02d1.wp", "mb02d2.wp", "mb02d3.wp", "p3d0.wp", "p3d1.wp",
 };
 
 // What the user calls each of them (the menu's names), for the load question.

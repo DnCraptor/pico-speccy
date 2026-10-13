@@ -125,7 +125,7 @@ MADCTL bit names now live in `src/drivers/st7789/st7789.h` (whose declarations g
 
 ## Source tree layout
 
-```
+```raw
 src/
   main.cpp
   app/        firmware core, not emulation: ESPectrum (main loop), Config, MachineSwitch,
@@ -2442,6 +2442,22 @@ was silently doing all the work.
   offsets, or **`wheel: none (boot mouse)`** — that line is the one-glance answer to
   "why does the wheel do nothing" (`proto=boot` there means the SET_PROTOCOL did not
   take), and `foreign rpts` counts what the drop rule discarded.
+### Devices > Mouse: Swap buttons + Sensitivity (2026-10-12, NOT hw-tested)
+
+The row is a submenu `kMouse` (UiTree.cpp). **Swap buttons** (`Config::mouse_swap`, NVS
+`mouse_swap`, `SET_MOUSE_SWAP` AC_PURE, default off) exchanges L/R in `mouse_apply()`, i.e.
+for the Kempston byte AND the Profi serial mouse, like Karabas-Pro's AVR `mouse_swap`. Why
+it exists: the original Kempston interface (k1.spdns.de schematic + its driver `2 = left,
+1 = right`), Karabas-Pro RTL, ZEsarUX and the Next put the RIGHT button on D0 — our default —
+while UnrealSpeccy and software tested on it (Port Demonstration 3.2, Slava Strunov 2025:
+bit 0 lights the left button) use D0 = LEFT. Do not "fix" the default.
+Same day: the non-Profi decode follows the original's HIGH byte (k1.spdns.de: "decodes
+A5, A8, A9 and A10") — X = A10..A8 011, Y = 111, buttons A9=1 A8=0 with A10 free. It was
+`(addr & 0x05FF)` (A9 ignored, A10=0 for buttons): #FEDF now reads buttons, #F8DF/#F9DF/
+#00DF no longer do. The low byte stays the full #DF (the original decodes A5 alone, which
+would steal Kempston-joystick and Beta reads here). Z-Player 5.1 reads only #FADF/#FBDF/
+#FFDF and uses bits 4-7 as a counter (delta vs last read), bit 2 = middle — our model.
+
 ### Mouse sensitivity, and the truncation that made a slow hand drift (2026-09-15, NOT hw-tested)
 
 **Devices > "Mouse sensitivity"** — `Config::mouse_sens` (NVS `mouse_sens`,
@@ -2661,7 +2677,7 @@ of this could be tested without hardware. Reference images in the tests are buil
 byte, never through DskImage's own writer, so a parser bug cannot hide behind a matching
 writer bug.
 
-```
+```raw
 g++ -O2 -Wall -Wextra -Isrc -o /tmp/p3e tools/plus3e_ide_test.cpp && /tmp/p3e
 g++ -O2 -Wall -Wextra -Isrc -fsanitize=address,undefined -o /tmp/dsk_test \
     tools/dsk_test.cpp src/speccy/devices/disk/DskImage.cpp && /tmp/dsk_test
@@ -5727,6 +5743,96 @@ at 0x153E where Sinclair's says `1982 Sinclair Research Ltd`.
   poll on an unattached `#5F`).
 
 
+## Z80 core speed-up (ported from ccr-05d4d17f d2c05088 via drew-zx-next, 2026-10-13, NOT hw-tested)
+
+Taken WITHOUT that branch's TS-Conf "28 MHz (turbo)" CPU cap (owner, on drew-zx-next:
+the speed-ups serve 14 MHz too) — `tsconf_clk_cap` stays 0..2 and the DRAM wait
+model keeps `multiplicator >= 2`. The rest is the commit as it was: section
+anchors on Z80_JLS/CPU, `exec_nocheck_ts`, `MemGates.h`, `addressOnBusIR`, the TS
+`check_trdos` edge test, the line tick at the next M1, the `fetchOpcode` fast path,
+and `tools/z80bench`.
+
+Same port, from drew-zx-next's SRAM pass (0a29478e): the `video_mode` table is
+`static const` (flash; it was 4.4 KB of .data) with the run-time fields in
+`s_div`/`s_vtot` (graphics.c) and the VGA ISR reading a RAM copy of the active
+entry (`graphics_live_video_mode`); `_arm_addsubdf3` and `process_kbd_report` are
+in flash (the only RAM caller of the former is EndFrame's one f2d per frame).
+DVp2 VGA-HDMI MinSizeRel: .data 90 244 -> 81 692, .bss 49 632 -> 50 004,
+`__end__` 8180 B lower, flash unchanged. Test ELF `debug/DVp2-z80sram-1.0.9.elf`.
+
+**`tools/z80bench`** is how every number below was taken: the firmware's own
+`Z80_JLS.cpp.o` + `CPU.cpp.o` linked with generated stubs into a Cortex-M33 image
+(QEMU `mps2-an505`), running a CP/M .COM on the TS-Conf fast path, a TCG plugin
+counting executed ARM instructions. It also prints T-states, every register and a
+CRC of guest memory at the end — **every step below left them bit-identical**,
+and the full ZEXDOC passes on the result (4 parallel shards, `z80bench.sh zex`).
+Two workloads, because ZEXDOC is a CRC loop whatever test it runs: ZEXDOC for
+300 M T, and `mkmix.py`'s game-like loop (LDIR, (IX+d)/(IY+d), DD CB, CALL/PUSH,
+JR/DJNZ) for 30 M T. It counts INSTRUCTIONS, not cycles: no SRAM wait states, no
+butter-PSRAM line fills — compare two cores with it, then measure on hardware.
+Toolchain here: the xPack arm-none-eabi-gcc 14.2.1 (developer.arm.com is behind
+the proxy; github.com/xpack-dev-tools works) + pico-sdk 2.3.1 cloned with the
+mbedtls/cyw43/lwip submodules.
+
+| step | ZEXDOC ARM insns / T | mix | SRAM |
+|---|---|---|---|
+| base | 13.34 | 13.63 | — |
+| `Z80_JLS.cpp` + `CPU.cpp` at `-fno-data-sections -fsection-anchors` | 12.35 (−7.4%) | | −2048 B |
+| `Z80::exec_nocheck_ts` (fast-path inner loop, `optimize("O2")`) + `tsFastTick` always_inline | 10.99 (−11.0%) | | +320 B |
+| `MemGates.h`: the four gates in one word | 10.52 (−4.3%) | | |
+| `addressOnBusIR` + TS `check_trdos` edge test | 10.13 (−3.7%) | | |
+| no line test per guest access (tick at the next M1) | 9.60 (−5.3%) | 10.50 | |
+| `fetchOpcode` fast path (2nd byte of CB/DD/ED/FD) | 9.59 | 9.42 (−10.2%) | |
+| **total** | **−28%** | **−31%** | **−1.7 KB** |
+
+- **Section anchors were the cheapest win and the reason is general**: with
+  `-fdata-sections` every static of the core (regA, the flags, PC, opCode,
+  prefixOpcode, regR...) sat in its own section and cost its own literal-pool
+  load per access; anchored, they are one base register + offsets. The core got
+  SMALLER too. Any other hot TU with many file-scope statics would gain the same.
+- **`exec_nocheck_ts`** is the old fast branch of `exec_nocheck` as a loop of its
+  own: same order (slice test, +4 T and line tick, DRAM miss, fetch, R++, PC++,
+  dispatch), same prefix handling, returns when the slice ends or `g_ts_fastmem`
+  drops mid-slice (NeoGS ZX-DMA window, 16col off) so the generic loop continues
+  at the next instruction. A PC breakpoint keeps the generic loop. 53 -> 34 ARM
+  instructions of dispatch per Z80 instruction — the generic loop's register
+  pressure had made GCC re-load ~14 literals per iteration. `tsFastTick` was being
+  OUTLINED at `-Os` (a call per fetch) until it became `always_inline`.
+- **`MemGates.h`**: `g_ts_fastmem`, `g_ts_memcyc`, `g_tsconf_wr`, `g_atm_ro` are now
+  the four bytes of `g_memgates` (CPU.cpp), kept under their old names by macros,
+  so every owner is untouched. A read is fast when `(w & 0xFFFF) == 1`, a write when
+  `w == 1`: one load and one compare. `tools/memdump.gdb` reads
+  `g_memgates.b.atm_ro` now — a stale symbol there HANGS Ctrl+Alt+D.
+- **No line test per guest access on the fast path**: the whole-line renderer is
+  ticked at the next M1 (`exec_nocheck_ts` / `fetchOpcode`), i.e. at most one
+  instruction late — a few T of an 896..1792-T line, the same as the write
+  landing one instruction earlier. The DRAM-model path (ZCLK 14) keeps its exact
+  per-access tick.
+- **`check_trdos` on TS-Conf** calls the (flash) `TsConf::trdosTrap` only at its
+  two edges (PC #3Dxx with DOS off, PC >= #4000 with DOS on) — it was a flash call
+  on every JP/CALL/RET/JR of a TS program.
+- **`addressOnBusIR(n)`** replaces the 42 `addressOnBus(getPairIR().word, n)` sites:
+  the IR pair is built only off the fast path (it was an out-of-line call per
+  INC rr / LD SP,HL / ... on TS-Conf, where the address is ignored).
+- **Tried and NOT taken**: inlining the fast READ path into the handlers (−3.6%
+  for +4 KB SRAM on every board) and the whole core at `-O2` (−3% for +4.6 KB).
+  Code generation is not the bottleneck; the global-state traffic and the calls
+  are. The next real lever is structural: a second, TS-only copy of the core with
+  the accessors inlined, living in the `.tsovl` window so it costs nothing on other
+  machines (heap on a TS-Conf session is the price — measure it first).
+- **What the bench cannot see, and what decides 28 MHz on hardware**: the guest's
+  PSRAM pages. TMNT at 14 MHz spent ~8 ms of a 22 ms frame in XIP line fills;
+  CPU-bound code at 28 MHz doubles its share of them. The first hardware run should
+  be a `PERF_TRACE` build at 28 MHz on a CPU-bound title (fishbone, a demo that never
+  HALTs, WC/NedoOS): `[PERF] 60f: cpu= xip=` and, with `PERF_HIST`, `z80: ns/instr`
+  and `pages:` — that splits interpreter time from PSRAM time before round 2.
+- Hw check owed (nothing above has run on a board): TS-Conf titles at 14 MHz
+  (fishbone, TMNT, Bomberman, Ninja Gaiden — the 14 MHz path got every change but
+  the DRAM-model removal), the same at 28 via the CPU cap, an ATM/Evo whole-line
+  title and a Pentagon 16col screen (they share the fast path), a NeoGS ZX-DMA demo
+  (TheLink: the fast path switches off mid-slice), and Ctrl+Alt+D on an ATM machine
+  (the renamed `g_atm_ro`).
+
 ## Z80 DMA attribute multicolour (MB-02+/DATA-GEAR): NaPICu (2026-09-14; owner on `DVp2-napicu-dma2`: "работает" — letters and title both clean)
 
 NaPICu (K3L, 2001; `napicu-demo.tap`, a three-stage packed image — `tools/z80dma_sim/`
@@ -7902,6 +8008,168 @@ console's 4 KB ring is the price of the console (the boot burst is ~3.6 KB of li
 115200) and stays. Not levers: the HDMI audio blob (ISR-read, SRAM only), `conv_color`
 (PIO palette), aligning the window bases (the base tail dlmalloc cannot use would just
 become window slack).
+
+### ZX pages 0-4 and 6 live in butter PSRAM, their 96 KB is the framebuffer; pages 5/7 stay in SRAM (2026-10-13, plan item A; hw-measured)
+
+**Third revision, same day: pages 4/6 are donated too** (`pages46`, tag 0x50), only
+`pages57` stays SRAM. `-DCOL16_TRACE=ON` (CMake, `src/app/Col16Trace.h`, one `[C16]`
+pair of lines per 60 frames: fetch/read/write per ZX page 0-7 + ROM, #7FFD D3 flips,
+window-3 re-pagings) settled it: TheLink's dragon double-buffers — D3 flips every frame,
+~1460 WRITES a frame into EACH of 4/5/6/7, zero reads of 4/6/7 by the CPU, its code in
+page 5 (~7900 fetches a frame); BALLQ (16c game) the same shape at a fifth of the load.
+So "keep the two pages that follow the screen" is impossible (the pair changes every
+frame) and the static split is the answer: dragon 16.1 ms with 4/6 in butter vs 15.2
+with all of 4-7 in SRAM (+0.9 ms, 48.8 FPS; PERF build `debug/DVp2-zx57-perf-1.0.9`,
+plain `DVp2-zx57-1.0.9`). Owner 2026-10-13: "на данный момент в порядке", testing goes
+on. ATM EGA checked the same day: Golden Axe under NedoOS (ATM-Turbo 3, BIOS 1.07.13EC,
+osatm3sd_pico-speccy.trd) runs at 50 FPS with IDL ~10000 us — pages 1/3 in butter cost it
+nothing visible. Still owed: heap figure at 576p + NeoGS. The text below is the 0-3-only state.
+
+
+**Revised the same day — read this first.** All eight pages in butter cost TheLink's
+16col dragon (P1024, 7 MHz) 6 ms a frame: cpu 20.9 ms / 41 FPS against 14.9 with the
+pages in SRAM. The Pentagon 16col screen is four planes in pages 4/5 or 6/7 and the demo
+redraws it every frame through the XIP cache. Now only `pages0123` is donated
+(`donateZxPagesToFb`), 4-7 stay static SRAM: dragon 15.2 ms / 48.8 FPS. The FB takes
+182 rows (576p) / 204 rows (480p) from the strip and the rest from the heap (~38 KB at
+576p, ~11.5 KB at 480p). Pages 5/7 are every ZX machine's screen too, which is the
+general reason. The text below describes the all-eight cut; its measurements stand.
+The NeoGS-low-RAM-in-SRAM idea further down was REVERTED: 15.2 ms in SRAM vs 14.9 in
+butter on the same scene, for 72 KB of heap. Test ELF `debug/DVp2-zx47final-1.0.9.elf`
+(+ `-perf-`). **Hw-confirmed 2026-10-13 (owner: "работает").**
+
+The 576p + NeoGS + VDAC2 session fitted by ~7 KB (`~/.claude/plans/tsconf-sram-analysis.md`,
+the 520 KB pie), and the fixed `.ram_128k` strip (ZX pages 0-7 in SRAM on every boot) was
+the one structural lever. **Owner's rule: "128K in SRAM only makes sense on boards without
+PSRAM."** So on a butter board `ESPectrum::setup` now re-binds ALL eight pages to butter
+PSRAM like page 8 and up, and the 128 KB behind them carries the framebuffer: 103 680 B at
+360x288 fits the strip whole (182 + 91 + 15 rows out of the three static arrays), so the
+heap pays NOTHING for the FB. Boards without butter (MURM1 SPI, no chip, Debug > PSRAM
+off) keep the static SRAM pages, byte for byte.
+
+- **Measured BEFORE it became the rule, all eight pages in PSRAM, 576p + NeoGS + VDAC2,
+  PERF build with UART** (`logs/devttyACM0_2026_10_13.14.41.18.488.txt`): fishbone cpu
+  18.5 ms / 1.01M XIP miss/s / c1 16.9 / 48.8-48.9 FPS against 18.2 / 0.98M / 16.3 with
+  pages 0/2/5 in SRAM; TMNT 48.5-49.8; demo 200, RobFgift, kolbasa, nygift, wavering,
+  borntro12, ts_frac2, carousel, night_town all 48.4-49.1. Inside the noise. The
+  `[PERF] pages:` histograms had said why it could work: fishbone's CPU traffic is 100 %
+  pages 2/0/5 and TMNT's 90 % — small, sequential working sets the XIP cache holds.
+  `setup: COMPLETE freeHeap` on that PERF build: **83 632** (the plain HEAD cold boot of
+  the same session: 3 616). Owner: "точно не хуже по скорости и +100 КБ".
+- **Two halves that must agree, one source of truth.** `donateZxPagesToFb()`
+  (ESPectrum.cpp, right before the second `reserveFrameBuffer()`) registers the three
+  static arrays via `VIDEO::fbDonate(p, bytes, tag)` with the page bits as tag
+  (pages0123 = 0x0F, pages46 = 0x50, pages57 = 0xA0); `ensureMainFB` fills as many
+  whole rows of the CURRENT stride from each donor as it holds and takes only a
+  remainder off the heap; `VIDEO::fbDonorsUsed()` returns the OR of the tags the live
+  map took, and MEMORY SETUP re-binds exactly those pages (`assign_ram(i, butterOnly)` —
+  the heap branch of assign_ram would otherwise buy a page a NEW 16 KB of SRAM and
+  undo the trade). At 240 rows the third donor is not reached, so pages 5/7 stay in
+  SRAM there. A refused trade (butter budget short of `wanted + 2` pages — a
+  degraded TS-Conf or a Murmuzavr count past the chip — or a page layout that is not
+  MemESP.cpp's) keeps every page in SRAM and logs why.
+- **Re-bound pages are LOCKED out of the LRU pool**, and the binding ORDER is
+  0,1,2,3,4,6,5,7 so pages 5/7 (and 4/6) stay adjacent in butter as the static arrays
+  were: ZipExtract's tightest-board fallback borrows `ram[5]` as a 32 KB inflate
+  dictionary. The pool hazard is pre-existing and worth knowing: a pooled butter
+  page's eviction write-back goes to its page_idx offset, not its butter_idx one.
+- **The chunk map is general now**: `FbChunk {p, row0, rows, ext}` pieces of UNEQUAL
+  height (a donor is as tall as its bytes allow, a heap remainder is one block or 2..8
+  equal pieces — `mainFBHeapRows`), `mainRowPtr` is a linear scan over <= 12 pieces
+  (boot-only: the self-check and the pointer-array fill), `mainFBFree` frees only
+  `!ext` pieces. `nchunks == 0` is still the single heap block, so a boot without
+  donors is byte-for-byte what it was (the pre-Config `reserveFrameBuffer(false)` has
+  no donors; the second call rebuilds at the same size when donors are pending).
+- **What else the strip could carry**: at 576p ~27 KB of it is unused (pages57 minus
+  15 rows), at 480p ~51 KB (pages57 + the tail of pages46) — SRAM nobody can reach
+  today. Candidates: the TSC1 core1 ring block, the FT812 glue, the Helix arena, a
+  HeapRegions entry (the `.dmaovl` shape, but BELOW the heap base — check `hr_sbrk`'s
+  ordering first).
+- **Found on the way, fixed, hw-confirmed (fishbone + NeoGS 46 -> 48 at 576p)**: an
+  IDLE-THROTTLED NeoGS still took `GS::pump` slices between every batch of core1's
+  render lines — `ts_render_core1_prio()` gave the renderer priority only at a backlog
+  > 32, and a HALT-synced title (fishbone: 289 INT windows a frame) never queues that
+  many. core0 `wait` 0.6 -> 1.7 ms. `GS::idleThrottled` (set by pump() itself) +
+  `ts_render_core1_busy()`: while the card is unobservable, ANY queued line goes
+  first (main.cpp render_core). Boot, uploaded card code and a playing card keep the
+  old rule. Diagnosed from `[PERF] 60f`/`ts:` A/B logs — the page histogram had
+  already cleared the pages, which is what stopped a wrong fix.
+- Cost: +164 B `.bss` on every board (chunk table + donors) + 4 B for the GS flag.
+  Log lines: `VIDEO: main FB 101KB: 288 rows in 3 donated SRAM block(s) + 0 rows (0KB)
+  of heap in 0 chunk(s)`, `setup: ZX pages 0 1 2 3 4 5 6 7 -> butter, their SRAM holds
+  framebuffer rows`, `pageBudget ... (pages=258)` on TS-Conf; a refusal logs `ZX pages
+  stay in SRAM: ...`.
+- **Trap met on the way, worth keeping**: three A/B rounds compared builds that were
+  all HEAD-equivalent because VDAC2 had been switched off between runs (the first cut
+  was keyed on it) — read `pages=` / `main FB` out of each log BEFORE comparing FPS.
+- **Found by the re-test, unrelated to the pages (hw 2026-10-13, Pentagon + NeoGS +
+  Gigascreen, 576p): turning Z80 DMA ON from the menu SIGBUSed at the FIRST
+  instruction of `Z80DMA::writePort` — PC inside the `.dmaovl` window, a garbage
+  literal pool, LR = `CPU::loop` calling `Z80DMA::handleDMA()`.** The menu's live
+  SET_DMA writes `Config::dma_mode` and `reconcileSubsystems` runs `DmaSubsys::apply()`,
+  which only allocated the attribute shadow; the ONLY `CodeOverlay::claimForDma()` call
+  was in the budget gate's `setFeature`, so the overlay code was never loaded on that
+  path and CPU::loop's per-slice `handleDMA()` jumped into heap bytes on the first
+  frame after the menu closed. It had passed before only when SRAM still held the
+  window from an earlier boot with DMA on. `DmaSubsys::apply()` now claims first and
+  zeroes `Config::dma_mode` on a refusal (window touched, or OOM). Rule: a feature
+  whose code lives in an overlay window must claim it in EVERY enable path, and the
+  gate `CPU::loop` / `Ports` test (`Config::dma_mode`) must never be true before the
+  claim succeeded. **Second entry the same evening: `MB02::init()` wrote `dma_mode = 1`
+  outright** ("MB-02+ requires Z80-DMA on port #0B") — SIGBUS in `Z80DMA::processWR6`
+  right after enabling MB-02+ from the menu; it claims first now. Those were the only
+  two writers (grep `dma_mode = 1`); a boot with `dma_mode` persisted non-zero loads the
+  window in `CodeOverlay::apply`. The NeoGS ZX-DMA (`g_ngs_zxdma`, `.ngsovl`) is NOT the
+  same hazard: General Sound is reboot-class, so its window is only ever loaded at boot.
+- **Same session: `[MACH <tag>]` log line** (`ESPectrum::logMachineState`, from
+  `ESPectrum::reset` and `MachineSwitch::commit`): arch/romSet/romInUse + pagingLock /
+  notMore128 / newSRAM / page0ram / bankLatch / videoLatch / romLatch / MEM_PG_CNT + the
+  arch flags + trdos + multiplicator. Added because "Pentagon 1024 is not detected (NEO8)
+  until the machine has been switched a few times" — a sequence-dependent state the
+  `[reset] arch=` line could not show; the next report of that shape is read from it.
+- **REVERTED (no gain, see the top of this section) — Same session: NeoGS low RAM (64 KB + the 8 KB blank page) goes to SRAM when the heap
+  can spare it** (`GS::init`, `HOT_SRAM` behind a 56 KB spare, else butter as before;
+  the `GS::init: work/rings on heap/...` line says which). The GS-Z80 runs its firmware
+  from page 0 under NOROM and keeps its stack and mixer variables in the fixed 0x4000
+  window — ~3.4M XIP fetches/s through the one cache the ZX pages now share. Owner's
+  report: TheLink (Pentagon 1024 at 7 MHz + NeoGS + ZX-DMA) slowed once the ZX pages
+  moved to butter. NOT hw-tested; the Pentagon boot in the 14.53 log had `largest=71684`
+  at VIDEO::Init, i.e. the 73 728 B block may not fit on every boot — if the line says
+  `butter`, that is why, and the next lever is a 64 KB-only placement (blank page apart).
+- Test ELFs `debug/DVp2-zxpsram4-1.0.9.elf` (+ `.uf2`, `-perf-`) = pages/FB + gsprio + both DMA claims + `[MACH]` + NeoGS low RAM in SRAM.
+  **Owner is re-testing every machine on it.** What the measurement above does NOT
+  cover: 48K/128K/Pentagon at 3.5 MHz (the beam renderer reads page 5/7 per column
+  from PSRAM now), Profi DS80 / GMX / ATM whole-line modes, Timex hi-res, a Pentagon
+  16col title (`col16RenderLine` reads pages 4-7 — pointer-backed, so it works, speed
+  unmeasured), snapshot load/save, .pss, MB-02 / DivMMC page-0 windows, ZipExtract's
+  page-5/7 fallback on a tight board, 640x480 (pages 5/7 stay in SRAM there — a
+  different layout from 576p), and a Murmuzavr count past the chip (must refuse).
+- **Two things the re-test found, both fixed in `zxpsram6` (NOT hw-tested), neither
+  caused by the move:**
+  1. **"Pentagon 1024 + Gluk sees only 128K" = `MemESP::notMore128` was never cleared
+     by a reset.** `#EFF7` D2 ("behave as a 128K": the `#7FFD` D6/D7 page bits ignored,
+     D5 a real lock) is written by Pentagon::eff7Paging and read everywhere, and
+     `ESPectrum::reset` cleared newSRAM/page0ram/pagingLock but not it — a real RES
+     clears the whole register. Mr Gluk's service ROM writes `#EFF7` for its CMOS bit
+     (D2 along with it), so one Gluk session poisoned every later reset AND machine
+     switch; the `[MACH]` line showed `notMore128=1` carried from a 48K/128K session
+     into the P1024 switch, and the lock then kept eff7Paging (`!pagingLock` gate)
+     from ever clearing it, which is why "switch a few times and it works" (one P1024
+     session with the lock down happened to write D2=0). `reset` now zeroes
+     `notMore128` and `Ports::portEFF7`. **The `[MACH reset]` line moved to the END
+     of `reset(uint8_t)`** — it used to sit right after `[reset] arch=`, i.e. BEFORE
+     the memory block, and described the state the reset was about to clear.
+  2. **TheLink's dragon at 41.8 FPS / IDL -3.3 ms (UART console on) was the `[TSF]`
+     log line**: `tsFastMemRecalc` is called on every NeoGS ZX-DMA window open/close
+     and logged every transition — the dragon streams tens of DMA blocks a frame, so
+     hundreds of `Debug::log` (vsnprintf + an IRQ-off ring push each) per frame, the
+     ring overflowing and the lines interleaving into garbage. Now the first 8
+     transitions print as before (they say WHY the path is off) and after that one
+     summary line a second with the toggle count. A log line on a per-frame hot path
+     needs a budget or a rate — the GMX-trace lesson, again. The ZX pages' move may
+     still cost the effect something (`col16RenderLine` reads pages 4-7 from PSRAM
+     now, ~25 KB a frame): the `-perf-` build's `[PERF] 60f: cpu= xip=` on the dragon
+     scene is what separates the two, and is still owed.
 
 ### .bss batch 1: the "static so it stays off the stack" locals (2026-09-14; hw: owner ran the menu pages, "works, no problems")
 
@@ -11292,6 +11560,79 @@ exactly two AT commands, `CWMODE` and `CWJAP`, and then silence.
   device seeing AT commands" is answered there.
 - The manual `Sync time (SNTP)` action is untouched: it is user-invoked.
 
+### The guest NIC on CYW43 = an ESP-AT emulator over lwIP (2026-10-12; MRF hw-confirmed)
+
+On Transport = On-chip WiFi there is no ESP and no UART, and every guest network
+program speaks ESP-AT itself, so the NIC used to be greyed there. Now `ZiFi::init()`
+(NIC on + transport 2) allocates the usual rings and starts `AtEmu` instead of a
+UART: the guest windows (`#xxEF` 16550/ZIFI-API, ZX-UNO `#FC3B/#FD3B`) and FIFOs are
+untouched, only the far end changed. Plan + command inventory:
+`~/.claude/plans/zifi-at-emulator-cyw43.md`.
+
+- **`src/net/AtEmuCore.{h,cpp}` is the protocol and depends on nothing** (sockets
+  through `AtTransport`). ESP8266 NONOS AT 1.7 framing, because the guests are
+  byte-scanners: MRF's `checkOkErr` (`OK\r` / `ERROR` / `FAIL` anywhere), its
+  `getPacket` (`+IPD,` -> length to `:`, `...OSED\r` ends the stream), NedoOS
+  `esp-com.c` `recvHead` (first `,` then length — so mux 0 has NO id after
+  `+IPD,`) and its `espReBoot`, which waits for `WIFI GOT IP` after `AT+RST`.
+  Done: AT, ATE0/1, RST/RESTORE (banner + `ready` after 300 ms), GMR, CWMODE*,
+  CWJAP* (owner's rule: the guest never moves the host WiFi — up = "connected"
+  whatever SSID, down = FAIL), CWQAP (OK, nothing dropped), CIFSR, CIPSTATUS,
+  CIPMUX 0/1 (5 links), CIPDINFO, CIPSERVER=0, CIPRECVMODE=0, CIPMODE=0, CIPSTO,
+  UART*, CIPSNTPCFG/CIPSNTPTIME? (from our RTC), CIPSTART TCP, CIPSEND (`> `,
+  `Recv N bytes`, `SEND OK`, ≤2048), CIPCLOSE[=id|5]; `busy p...` while a connect
+  or the RST banner is pending. Not yet: UDP, SSL, CIPSERVER=1, CIPRECVMODE=1,
+  CWLAP (all answer ERROR).
+- **An announced `+IPD` goes out whole before any queued text** (own header buffer),
+  and a link's `CLOSED` waits until its data is drained — MRF ends the page on it.
+  A CIPCLOSE mid-`+IPD` pads the promised bytes with zeros so the guest's parser
+  stays in step.
+- **Host test `tools/atemu_test.cpp`** plays the guest with C++ copies of MRF's and
+  esp-com's parsers, output drained in random slices (recipe in its header).
+  Four mutations (mux-0 header with id, CLOSED before drain, text inside +IPD data,
+  ATE0 ignored) each fail it. **Re-run after any change to AtEmuCore.**
+- **`src/net/AtEmu.cpp` = lwIP glue** (own 5 links, never the host's WifiSock
+  slots). Guest window = **2×MSS**, set right after `tcp_connect()` (which itself
+  sets TCP_WND; the SYN goes out with 5840 but the server sends after our ACK,
+  which carries 2920); `tcp_recved` only for what the guest took, and only while
+  all guest links together hold < 6 KB. DNS async with a generation tag.
+- **Paced at the NIC baud in guest time**: once a frame `credit += ΔT × baud/10 /
+  (3.5 MHz << multiplicator)`, capped at 2 KB; that is the rate guest drivers saw
+  from a real ESP (the wire was capped at 230400 by `ZIFI_NIC_MAX_BAUD`). Network →
+  Baud is enabled on transport 2 for this and changing it does NOT re-init (would
+  drop the guest's links). RX ring 2 KB there (data waits in pbufs).
+- **TX backpressure**: the ring is drained once a frame, so a full TX ring reads as
+  a busy transmitter (16550 LSR THRE = 0 — MRF's zxwifi `write` waits on it; ZX-UNO
+  bit 6 already did), and the port write paths call `AtEmu::drainTx()` once the
+  ring passes 128 bytes.
+- **Cost**: non-W boards unchanged in SRAM (DVp2 `.data`/`.bss` byte-identical to
+  HEAD; flash −8 B from the removed `p_espSerial` menu predicate). DVp2w: +160 B
+  static (the `atEmu` tests in the RAM-resident ZiFi handlers), +5.9 KB flash, heap
+  only while the NIC runs: `Ctx` (~1.5 KB) + 2 KB RX ring + 0.8 KB TX ring + up to
+  ~3.3 KB of pbufs per active link.
+- Hardware Info: `ZiFi NIC : On (AT emu, mux N, K links)`. AT traffic is logged
+  (`ZiFi AT< ...`) only in `-DZIFI_TRACE=ON` builds.
+- Test ELFs `debug/{DVp2w,PCp2w}-atemu-1.0.9.elf` (+ .uf2). **Hw 2026-10-12, owner:
+  MRF works — browsed and downloaded an SCL through it; the zxwifi and EVO UART driver
+  builds (16550 window `#F8EF..#FFEF`) and the real UN-64 / UNO UART build (ZX-UNO
+  `#FC3B/#FD3B`) all work** — every guest window the emulator serves is confirmed. The AYWiFi56 build
+  does NOT, and that is not this emulator: it is the ZX128 RS232 bit-banged through
+  AY register 14 at 57600 baud, which nothing in the firmware emulates (it would not
+  reach a real ESP either) — a separate feature, see the plan file. ATM-64 does not
+  work either, for the same kind of reason: it talks to the ATM Turbo 2+ COM port
+  behind the KEYBOARD CONTROLLER (`IN (#55FE)` = command mode, then the command in
+  the high address byte: #C3 baud, #C2 RX count, #02 read, #42 status, #03 write),
+  which is not emulated. Builds in MRF.TRD: ZW-64/ZW-64-SC/GZ-80 = zxwifi 16550,
+  EVO-64 = 16550, UN-64 = ZX-UNO, AY-64/AY-80/AY-64-SC = AY bit-bang, ATM-64 = ATM
+  keyboard-controller COM. **Beware UN-64 in distributed MRF.TRDs**: the MRF Makefile's
+  `godzilla` target builds the AY56 driver (`-DAY56`) under `BINNAME "UN-64.C"`, so a
+  TRD built with it has an UN-64 that is really AYWiFi56 (banner `[AYWiFi56]`) — the
+  owner's copy is one. The real ZX-UNO build says `[UNO UART]`; the MRF.TRD in
+  `debug/NedoOS/src.r2698/mrabbit-fusion/data/` has it. **Still owed**: NedoOS
+  time2/gopher/girc,
+  a long CIPSEND, the host FTP server while a guest link is open, NIC off/on and a
+  transport switch with links open, `[ZiFi] AT emulator up` in the boot log.
+
 ### UART TX/RX pins — runtime, per-board (`src/BoardPins.*`)
 - **No compile-time pin define** anymore (old `-DZIFI_TX_PIN` removed). `ZiFi::init()` reads `Config::zifi_tx_pin`/`zifi_rx_pin` and resolves via `BoardPins::resolveZifiPins()` + `uartInstanceForTx()` (authoritative RP2350 pinmux from `rp2350[ab]_interface_pins.json` — the old `(pin/4)%2` heuristic was WRONG for GPIO 8/10/24/26). UART instance/funcsel chosen at runtime; `g_uart`/`g_uart_irq` statics.
 - Config sentinels: `0xFE` = board default, `0xFF` = OFF (no UART, FIFO-only), else explicit TX (RX = odd partner). Stored in NVS (`zifi_tx_pin`/`zifi_rx_pin`).
@@ -11747,7 +12088,7 @@ vDOS) uses to serve mounted TRD/SCL images, and what `TRDUMP.WMF` and the
 `TsConf::fddPortIo` (called first thing by both port paths, behind a one-test
 `(addr & 0x1F) == 0x1F` filter) is `zports.v` line for line:
 
-```
+```raw
 fddvrt = fddvirt[3:0];  open_vg = fddvirt[7];  virt_vg = fddvrt[drive_sel_raw]
 vg_wen   = (dos || open_vg) && !vdos && !virt_vg          // controller selected
 vg_wrDS  = iowr && vgsys_port && (dos || open_vg)         // drive latch, NOT gated
@@ -13979,7 +14320,19 @@ Fuse's `rzx.c` / `z80.c` for the playback semantics.
     `DEC C / JR NZ` delay at #3E01 off by 18). Keeping the line up after the ack in the
     simulator reproduces the board's log. **Three rounds of guessing (ROM version, Gluk set,
     esxDOS) came before the log and none was the cause — ask for the trace first.**
-  - **Owner's rule: playback runs on the CURRENT settings; nothing is switched or disabled.**
+  - **esxDOS is the one exception (owner, 2026-10-12, NOT hw-tested):** DivMMC is taken
+    off the bus for the replay (`esxSuspend` in startPlayback before any snapshot load,
+    `esxResume` from `release()` = every stop/failure path; `Config::esxdos` and the card's
+    buffers untouched). No archive recording was made with one and its automap traps ROM
+    entry points (dungeonraiders desynced at frame 15 with it on).
+  - **Some recordings are simply inconsistent**: dungeonraiders.rzx (Spectaculator, 128K)
+    desyncs at frame 336 in our firmware, in `tools/rzx_replay_sim.c` AND in SkoolKit's
+    `rzxplay.py` alike ("Port readings exhausted for frame 336") — an IN 2-34 fetches
+    before a boundary is logged in the NEXT frame, a ~30-fetch per-frame offset no INT
+    length / ROM / opcode-count rule explains. Run SkoolKit (`pip download skoolkit`,
+    `rzxplay.main(['--no-screen','--fps','0',file])`) as the second opinion before
+    chasing a desync.
+  - **Owner's rule: playback runs on the CURRENT settings; nothing else is switched or disabled.**
     A first cut pinned TR-DOS 5.04T, forced `R_PENT` and took esxDOS off the bus
     (`Config::rzxRoms`, `cardsOff`) — all REMOVED: another recording may need another ROM.
     Instead a desync (an IN with no recorded byte, or 16 frames leaving recorded INs unread —
@@ -15049,3 +15402,79 @@ speccy4ever.speccy.org/_KA.htm (`curl -sk -A Mozilla`).
   and Symbol Shift at reset; Caps Shift at reset → service (Kramis / Reset Service
   0.2d); a 1 MB memory test on KAY1024 and 2 MB on the Phoenix (UMT); turbo with Alt+F2 on and a program writing
   1FFD D2; Reset Service's Gluk clock detect with CMOS + NVRAM on and off.
+
+## DVp2w — `PICO_DV_W`: the W module in a Pico DV base (2026-10-11, NOT hw-tested)
+
+`-DPICO_DV_W=ON` → `DVp2w-speccy-<display>-<ver>`, the third carrier for the
+Waveshare RP2350B-Plus-W module (the others: `m1p2w`, `m2p2w`). Same pattern as
+`MURM_W`/`MURM2_W`: the option turns `PICO_DV` on in `cmake/board.cmake` (before
+the default-board guard) and raises `PICOSPECCY_WIFI`, so every `#if PICO_DV` arm
+keeps working unchanged — SD on `pio1` (`SDCARD_PIO`), keyboard GP14/15, the
+dedicated ZiFi header on GP0/1, display base 6, `linkVGA01 == 0x1F`, the 8 KB
+TinyUSB CDC buffers, and `dbgUartNote()`'s "off: WAV input". The W board header
+(`picospeccy_rp2350b_w.h`) is shared with the Murmulator W boards and supplies
+16 MB flash, the CYW43439 on GPIO36-39 and PSRAM pads on GPIO47 — the pin the
+Pico DV base already uses for butter PSRAM.
+
+- **Only the module's own moves are new**: audio/LATCH/PWM 26/27/28 → 40/41/42,
+  LED 25 → 23, `CLK_AY_PIN2` 29 → 255. The PICO_DV pin arm now takes those from
+  `${W_HDR26/27/28}`, `${W_LED_PIN}`, `${W_AY_CLK2}`, which are the identity on
+  the plain board — SD, PSRAM, keyboard, display, MIDI/WAV and ZiFi keep their
+  numbers, because the module is Pico-compatible for GPIO0..GPIO22.
+- **PIO blocks**: pio2 = HDMI (or the radio + I2S while VGA is live), pio0 = VGA
+  (or radio + I2S under HDMI), pio1 = PS/2 (7 instructions) + the carrier's PIO
+  SD (4) = 11/32. `BoardPins::auxPio()` needed **no change**: its `PIO_VGA=pio0`
+  / `HDMI → pio2` assumption is exactly PICO_DV's, and `graphics_init()` brings
+  up only one of the two, so the other block really is free. I2S follows the
+  module's pins — `I2S_PIO=pio0` in `cmake/wifi.cmake` (same line as MURM_W) plus
+  pwm_audio's runtime `auxPio()` whenever an I2S pin is ≥ 32.
+- `BoardPins.cpp`'s ZiFi UART list is a CARRIER property here, so the plain
+  `PICO_DV` arm covers DVp2w: GP0/1 and GP20/21 are both still header positions
+  on the module, and its radio pins (36-39) are not offered on this board.
+- Measured against DVp2 (MinSizeRel): **+288.6 KB flash, +3788 B static SRAM**
+  (CYW43 blob + lwIP + WifiNet/WifiSock); `check-release.sh` projects 44 216 B of
+  free heap at `loop()` entry, between the two Murmulator W boards. The plain
+  `PICO_DV` arm and `MURM_W`/`MURM2_W` (all three images) were rebuilt after the
+  shared CMake changes and are unchanged.
+- **`check-release.sh`'s five non-W rows had stale ELF globs** (`m1-`, `m2-`,
+  `PC-`, `DV-`, `z0-` — the pre-"no chip suffix" tags), so MURM/MURM2/PICO_PC/
+  PICO_DV/ZERO2 always reported NOT BUILT. Fixed to `m1p2`/`m2p2`/`PCp2`/`DVp2`/
+  `z0p2` in the same change; the three W rows were already right.
+- **Hw check owed** (nothing has run): a picture over HDMI and over VGA, sound
+  (the module also moves I2S onto the radio's `auxPio` block), the LED on GP23,
+  Network → Transport defaulting to the on-chip CYW43, a WiFi join + SNTP, and
+  the SD card (pio1 now carries PS/2 + SD; I2S left that block).
+
+## PCp2w — `PICO_PC_W`: the W module in an Olimex PICO-PC (2026-10-12, NOT hw-tested)
+
+`-DPICO_PC_W=ON` → `PCp2w-speccy-VGA-HDMI[-HSTX]-<ver>`, the DVp2w shape again: the
+option turns `PICO_PC` on (cmake/board.cmake) and raises `PICOSPECCY_WIFI`; tag
+`PCp2w`, butter PSRAM on GPIO47 (the module's pads, not the Pico 2's GP8). The
+PICO_PC pin arm now takes GP26/27/28 (PWM R/L, beeper/595 latch, MIDI TX — this
+carrier has no I2S, its "unsupported" mark of three equal pins is kept at 40),
+GP29 (AY clock -> 255) and the LED (-> 23) from the `W_*` variables, identity on
+the plain board (checked: plain PICO_PC defines unchanged). MIDI TX lands on
+GPIO40 = UART1 funcsel 2. Keyboard, NESPAD (GP5/9/20/21), SD, ZiFi pairs and the
+display (GPIO 12-19) do not move, so nothing PIO moves either: pio1 keyboard+pad
+at base 0, the radio alone on `auxPio()`.
+
+**HSTX works as on PICO_PC** — `display.cmake`/`memory-layout.cmake` test
+`PICO_PC`, which the W option sets, and AUTO picks TMDS; `build_all.*` builds it
+twice (`HSTX_TARGETS`). MURM2_W already proved CYW43 beside the TMDS expander:
+the expander claims no PIO, VGA_HSTX neither, RAW only pio2's address converter,
+so `auxPio()` (pio0 under HDMI, pio2 under VGA) is free in all cases. Both images
+link (RAM 161 KB, SCRATCH_X 4064-4068 B); test ELFs in `debug/PCp2w-*`.
+**First hw run (2026-10-12):** boots to `loop()`, radio up (pio0 base 16), HDMI
+running — a MONITOR shows the picture; the owner's HDMI CAPTURE CARD does not lock
+(PIO and HSTX alike). Pads are already 12 mA / fast slew, so there is no firmware
+lever; suspected margin on the module's LDO 3V3, the m1p2w 378 MHz story again.
+Found on the way: `nespad_begin` took `auxPio()` on EVERY W board, so a pad wired
+below GP32 (PCp2w GP5/9/20/21, MURM_W GP14-16 with PWM audio) sat in the radio's
+block at base 0 and cyw43 had no block to re-base. It now takes the aux block only
+when its pins reach GPIO32+ (MURM2_W), pio1 otherwise; PCp2w log: `NESPAD: pio1`.
+`-DDBG_UART_DEFAULT_ON=ON` (cmake/trace.cmake) builds a diagnostic image whose
+UART console is on from `main()` entry even on a COLD boot with no SD card (the
+plain path starts it only from Config::load or a warm-reboot tag).
+Same day, owner: **WiFi works** (on-chip CYW43 join). The Olimex PICO-PC has no
+VGA connector, so the VGA half is not applicable on this carrier.
+**Still owed**: sound (PWM 41/42), MIDI (40), LED (23), NES pad (no pad to hand).

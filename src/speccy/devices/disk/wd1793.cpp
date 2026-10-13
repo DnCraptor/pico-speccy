@@ -4145,6 +4145,24 @@ IRAM_ATTR uint8_t rvmwdDiskStep(rvmWD1793 *wd, uint32_t control) {
 
 }
 
+// Before a snapshot: whatever the controller still holds in its track buffer goes to
+// the image now, and every open image is synced, so the .pss and the disk it refers to
+// describe the same moment. The track stays loaded — this is a write-back, not an
+// eviction — so the guest carries on exactly where it was.
+void rvmWD1793Flush(rvmWD1793 *wd) {
+    if (wd->diskDirty && wd->diskLoadedCyl >= 0 && wd->diskTrackBuf) {
+        const int lu = (wd->diskLoadedUnit >= 0) ? wd->diskLoadedUnit : wd->diskS;
+        rvmwdDisk *disk = wd->disk[lu];
+        if (disk && disk->Diskfile) {
+            if (disk->IsUDIFile)      udiFlushTrack(wd);
+            else if (disk->IsFDIFile) fdiFlushTrack(wd);
+            else if (disk->IsMBDFile) mbdFlushTrack(wd);
+        }
+    }
+    for (int i = 0; i < 4; i++)
+        if (wd->disk[i] && wd->disk[i]->Diskfile) f_sync(wd->disk[i]->Diskfile);
+}
+
 void wdDiskEject(rvmWD1793 *wd, unsigned char UnitNum) {
 
   if(wd->disk[UnitNum] != NULL) {

@@ -29,6 +29,7 @@
 #include "UiStage.h"
 #include "OSDMain.h"
 #include "app/Config.h"
+#include "speccy/video/Video.h"
 #include "speccy/devices/storage/RTC.h"
 #include "app/ESPectrum.h"
 #include <pico/stdlib.h>
@@ -335,6 +336,72 @@ static void drawLeftRow(int visRow) {
              !en ? C_DISABLED : (sel ? C_WHITE : C_TEXT_DIM));
 }
 
+// ── Video > Palette preview ───────────────────────────────────────────────────
+// Two bands of 8 swatches (normal / BRIGHT) under the palette options, showing the
+// preset under the cursor before it is picked. The colours live in 16 hardware
+// slots the menu borrows: 168..183 sit between the UI block (152..167) and the HDMI
+// data islands (184+) and are only G3R3B2 ramp entries in a standard ZX screen,
+// which the full-screen menu hides anyway. Since the framebuffer holds slot
+// indices, moving the cursor re-programs the slots and the swatches change colour
+// without being redrawn. The next applyPalette() takes the slots back — on leaving
+// the row, on closing the menu (gfxEnd), or a commit (paletteGen catches that).
+static constexpr uint8_t PV_BASE = 168;
+static constexpr int     PV_ROWS = 4;     // 2 rows per band, 2 bands
+static int16_t s_pv_shown = -1;
+static uint8_t s_pv_gen;
+
+static bool palPreviewNode(const Node* n) {
+    return n && !Sf.ds80 && n->kind == K_RADIO && n->setting == SET_PALETTE;
+}
+
+static int palPreviewWant() {
+    if (curLevel().dyn) return -1;
+    const Node* n = curNode();
+    if (!palPreviewNode(n)) return -1;
+    uint8_t cnt; const Option* os = nodeOptions(*n, cnt);
+    if (S.focus == FOCUS_RIGHT && S.rsel < cnt) return os[S.rsel].value;
+    return nodeValue(*n);
+}
+
+static void palPreviewSync() {
+    const int want = palPreviewWant();
+    if (want < 0) { palPreviewEnd(); return; }
+    if (want != s_pv_shown || s_pv_gen != VIDEO::paletteGen) {
+        VIDEO::palettePreview((uint8_t)want, PV_BASE);
+        s_pv_shown = (int16_t)want;
+        s_pv_gen   = VIDEO::paletteGen;
+    }
+}
+
+void palPreviewEnd(bool reinstallUi) {
+    if (s_pv_shown < 0) return;
+    s_pv_shown = -1;
+    VIDEO::applyPalette();               // rewrites 0..239, the UI block included
+    if (reinstallUi) gfxInstallPalette();
+}
+
+// One row of the swatch block; false = not a preview row.
+static bool drawPalPreviewRow(const Node* n, int idx, int y) {
+    if (!palPreviewNode(n)) return false;
+    const int k = idx - (S.rcount + 1);   // one blank row under the options
+    if (k < 0 || k >= PV_ROWS) return false;
+    const int band = k >> 1, sub = k & 1;
+    const int x0 = LY.rx + LY.pad;
+    const int sw = (LY.rw - 2 * LY.pad) / 8;
+    const int ty = y + (sub ? 0 : 2);
+    const int by = y + LY.row_h - (sub ? 2 : 0);
+    if (sw < 4 || by <= ty) return true;
+    for (int i = 0; i < 8; i++) {
+        const int x = x0 + i * sw, w = sw - 2;
+        fillSlot(x, ty, w, by - ty, (uint8_t)(PV_BASE + band * 8 + i));
+        vline(x, ty, by - ty, C_SEP);
+        vline(x + w - 1, ty, by - ty, C_SEP);
+        if (!sub) hline(x, ty, w, C_SEP);
+        else      hline(x, by - 1, w, C_SEP);
+    }
+    return true;
+}
+
 static void drawRightRow(int visRow) {
     if (visRow < 0 || visRow >= LY.body_rows) return;
     const int y = rowY(visRow);
@@ -354,6 +421,7 @@ static void drawRightRow(int visRow) {
     const bool sel  = pick && idx == S.rsel && idx < S.rcount;
     fill(LY.rx, y, LY.rw, LY.row_h,
          sel ? (S.focus == FOCUS_RIGHT ? C_SEL_BG : C_SEL_BAND) : C_PANEL);
+    if (idx >= S.rcount && drawPalPreviewRow(n, idx, y)) return;
     if (!n || idx >= S.rcount) return;
 
     switch (n->kind) {
@@ -440,6 +508,7 @@ static void drawFooter() {
 // ── flush ──────────────────────────────────────────────────────────────────────
 
 void flushDirty() {
+    palPreviewSync();   // before any row is drawn: the swatches read these slots
     // The pending indication lives in the header band as well as the footer counter,
     // but the edit sites only raise D_FOOT (nothing there marks D_HEADER — it used to
     // change only on a clock tick). Latch it here so the band can never go stale —

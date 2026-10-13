@@ -186,6 +186,8 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
             arch == A_PROFI || arch == A_SCORP || arch == A_TSCONF || arch == A_ATM || isP3 || isByte)) {
             Config::mb02 = 0;
             MB02::init();
+            Debug::log("[MACH switch] MB-02+ disabled: not available on %s (its SRAM took the top %d pages of the strip)",
+                       archToStr(arch), MB02_NUM_PAGES);
             OSD::osdCenteredMsg("MB-02+ disabled", LEVEL_WARN, 2000);
         }
         // Byte has no SCLD; on Profi/Karabas port #FF belongs to the FDC SYS
@@ -409,6 +411,7 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
     }
 
     Debug::led_blink();
+    ESPectrum::logMachineState("switch");   // the state the switch starts from (reset logs the result)
     ESPectrum::reset();
     return true;
 }

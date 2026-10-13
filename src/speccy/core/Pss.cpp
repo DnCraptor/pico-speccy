@@ -3,6 +3,7 @@
 #include "Pss.h"
 #include "PssIo.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 
@@ -25,12 +26,15 @@
 #include "speccy/devices/sound/AySound.h"
 #include "speccy/devices/tape/Tape.h"
 #include "speccy/devices/disk/DiskSlots.h"
+#include "speccy/devices/storage/IDE.h"
+#include "app/SnapPack.h"
 #include "speccy/machines/Pentagon.h"
 #include "speccy/machines/Scorpion.h"
 #include "speccy/machines/Profi/Profi.h"
 #include "speccy/machines/Atm.h"
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/devices/gs/GS.h"
+#include "speccy/devices/gs/NgsSd.h"
 #include "speccy/machines/EvoBase.h"
 #include "speccy/machines/Timex.h"
 #include "speccy/machines/Alf.h"
@@ -123,8 +127,43 @@ static void writeAy(W& w, const AySound& c) {
     for (uint8_t i = 0; i < 16; i++) w.u8(c.reg(i));
 }
 
+// PSBD v1: u8 ver, u8 unit (0 Beta, 1 MB-02), u8 drive, u8 side, u8 track, u8 sector,
+// u8 data, u8 status (low byte), u8 sys (b0 HLT/test, b1 MFM), then 4 x u8 head
+// cylinder (#FF = no disk in that drive).
+// v2 appends: u8 status high byte (the Set* flags that decide which Type I bits a
+// status read shows — v1 lost them), u8 command, u16 motor frames left (the Scorpion
+// READY model), u8 flags (b0 a command was in flight, b1 INTRQ up, b2 head loaded).
+static const uint8_t PSBD_VER = 2;
+static void writeFdc(W& w, uint8_t unit, const rvmWD1793& fd) {
+    w.begin("PSBD");
+    w.u8(PSBD_VER); w.u8(unit);
+    w.u8(fd.diskS); w.u8(fd.side); w.u8(fd.track); w.u8(fd.sector); w.u8(fd.data);
+    w.u8((uint8_t)fd.status);
+    w.u8(((fd.control & kRVMWD177XTest) ? 1 : 0) | ((fd.control & kRVMWD177XDDEN) ? 2 : 0));
+    for (int i = 0; i < 4; i++) w.u8(fd.disk[i] ? (uint8_t)fd.disk[i]->t : 0xFF);
+    w.u8((uint8_t)(fd.status >> 8));
+    w.u8(fd.command);
+    w.u16(fd.motor_frames);
+    const bool inflight = fd.state != kRVMWD177XNone || (fd.status & kRVMWD177XStatusBusy);
+    w.u8((inflight ? 1 : 0) | ((fd.control & kRVMWD177XINTRQ) ? 2 : 0) | ((fd.control & kRVMWD177XHLD) ? 4 : 0));
+    w.end();
+}
+
+static void writeMedia(W& w);   // PSMD, below with the rest of the media code
+
+static void flushMedia() {
+    rvmWD1793Flush(&ESPectrum::fdd);
+    if (Config::mb02) rvmWD1793Flush(&ESPectrum::mb02_fdd);
+    if (Config::isPlus3()) Plus3Fdc::flush();
+    if (IDE::scheme != IDE::OFF) IDE::flush();
+    if (DivMMC::enabled) DivMMC::flush();
+}
+
 bool save(const string& path, const string& name) {
     if (!supported() || !FileUtils::fsMount) return false;
+    // The images first: a track the WD1793 still holds, a +3 sector write, an IDE
+    // sector — on the card before the snapshot that refers to them.
+    flushMedia();
     const string tmp = path + ".tmp";
     FIL* f = fopen2(tmp.c_str(), FA_WRITE | FA_CREATE_ALWAYS);
     if (!f) return false;
@@ -194,6 +233,37 @@ bool save(const string& path, const string& name) {
         w.u8(VIDEO::timex_port_ff); w.u8(Config::isTc2068() ? Timex::hsr : 0);
         w.u8(ESPectrum::multiplicator);
         w.end();
+    }
+
+    // PSBD — the WD1793's registers and every drive's physical head position.
+    // TR-DOS positions the head by a SEEK RELATIVE TO THE TRACK REGISTER (ROM
+    // #3E63: IN A,(#3F) / SEEK), so after a load the register and the head must
+    // agree again — the machine reset leaves TR = #FF, and a game that calls
+    // #3D13 without its own RESTORE (UFO2 PHF) read the wrong tracks.
+    writeFdc(w, 0, ESPectrum::fdd);
+    if (Config::mb02) writeFdc(w, 1, ESPectrum::mb02_fdd);
+    if (Config::isPlus3()) {   // PSUP — the uPD765, the same idea for the +3
+        uint8_t b[UPD_SNAP_MAX];
+        const uint32_t n = Plus3Fdc::snapSave(b);
+        w.begin("PSUP"); w.raw(b, n); w.end();
+    }
+    if (Tape::tapeFileType != TAPE_FTYPE_EMPTY) {   // PSTP — where the tape is
+        uint8_t b[Tape::SNAP_MAX];
+        const uint32_t n = Tape::snapSave(b);
+        w.begin("PSTP"); w.raw(b, n); w.end();
+    }
+    writeMedia(w);   // PSMD — what every mounted image looked like
+    if (IDE::scheme != IDE::OFF && IDE::present()) {   // PSID — the ATA register file
+        uint8_t* b = (uint8_t*)tryMalloc(IDE::SNAP_MAX);
+        if (b) { const uint32_t n = IDE::snapSave(b); w.begin("PSID"); w.raw(b, n); w.end(); free(b); }
+    }
+    if (DivMMC::enabled || DivMMC::zc_enabled) {      // PSSD — the SD card's SPI machine
+        uint8_t* b = (uint8_t*)tryMalloc(DivMMC::SNAP_CARD_MAX);
+        if (b) {
+            const uint32_t n = DivMMC::snapCardSave(b);
+            if (n) { w.begin("PSSD"); w.raw(b, n); w.end(); }
+            free(b);
+        }
     }
 
     w.begin("AY\0\0"); w.u8(0); writeAy(w, chip0); w.end();
@@ -304,6 +374,69 @@ static void readAy(R& r, AyState& a) {
     a.have = true;
     a.sel = r.u8();
     r.raw(a.regs, 16);
+}
+
+// Puts a WD1793 back as PSBD recorded it. The reset before the load has already
+// idled the state machine; registers, head positions, the motor and INTRQ come back.
+// A command that was IN FLIGHT cannot resume (its position in the track stream is
+// not recorded), so it is ended the way the guest can cope with: a Type I lands where
+// it was going (RESTORE on 0, SEEK on the data register) and reports success; a Type
+// II/III ends with LOST DATA, which TR-DOS answers with a retry. Either way INTRQ is
+// raised, as at the end of any command — the guest's #FF poll sees it complete.
+static void applyFdc(rvmWD1793& fd, const uint8_t* b, bool v2) {   // b = PSBD after ver/unit
+    if (b[0] < 4) fd.diskS = b[0];
+    fd.side = b[1]; fd.track = b[2]; fd.sector = b[3]; fd.data = b[4];
+    uint16_t status = b[5];
+    status |= v2 ? (uint16_t)(b[11] << 8)
+                 : (uint16_t)(kRVMWD177XStatusSetIndex | kRVMWD177XStatusSetTrack0 | kRVMWD177XStatusSetWP);
+    fd.control = (fd.control & ~(kRVMWD177XTest | kRVMWD177XDDEN | kRVMWD177XINTRQ |
+                                 kRVMWD177XHLD | kRVMWD177XDRQ | kRVMWD177XWriting))
+               | ((b[6] & 1) ? kRVMWD177XTest : 0) | ((b[6] & 2) ? kRVMWD177XDDEN : 0);
+    for (int i = 0; i < 4; i++) {
+        rvmwdDisk* d = fd.disk[i];
+        if (!d || b[7 + i] == 0xFF) continue;
+        d->t = b[7 + i] < d->tracks ? b[7 + i] : (d->tracks ? d->tracks - 1 : 0);
+        d->s = d->t ? 0 : kRVMwdDiskOutTrack0;
+    }
+    if (v2) {
+        fd.command = b[12];
+        fd.motor_frames = (uint16_t)(b[13] | (b[14] << 8));
+        const uint8_t fl = b[15];
+        if (fl & 4) fd.control |= kRVMWD177XHLD;
+        if (fl & 2) fd.control |= kRVMWD177XINTRQ;
+        if (fl & 1) {
+            rvmwdDisk* d = fd.disk[fd.diskS];
+            if (!(fd.command & kRVMWD177XTypeI)) {          // Type I: finish the move
+                const uint8_t op = fd.command >> 4;
+                int target = -1;
+                if (op == 0) target = 0;                     // RESTORE
+                else if (op == 1) target = fd.data;          // SEEK
+                if (target >= 0) {
+                    fd.track = (uint8_t)target;
+                    if (d) {
+                        d->t = target < (int)d->tracks ? target : (d->tracks ? d->tracks - 1 : 0);
+                        d->s = d->t ? 0 : kRVMwdDiskOutTrack0;
+                    }
+                }
+                status = kRVMWD177XStatusSetIndex | kRVMWD177XStatusSetTrack0 | kRVMWD177XStatusSetWP;
+                if (fd.control & kRVMWD177XHLD) status |= kRVMWD177XStatusSetHead;
+            } else {
+                status = kRVMWD177XStatusLostData;           // Type II / III: abandoned
+            }
+            fd.control |= kRVMWD177XINTRQ;
+            fd.motor_frames = WD_MOTOR_FRAMES;
+        }
+    }
+    fd.status = status & ~(kRVMWD177XStatusBusy | 0x02);   // nothing in flight any more
+    fd.state = kRVMWD177XNone;
+    fd.stepState = kRVMWD177XStepIdle;
+    rvmWD1793UpdateFastmode(&fd);
+}
+
+// A file from before PSBD: the reset left TR = #FF while the head stayed put, and
+// TR-DOS seeks relative to TR — make them agree, so a SEEK lands where it aims.
+static void syncFdcTrack(rvmWD1793& fd) {
+    if (fd.disk[fd.diskS]) fd.track = (uint8_t)fd.disk[fd.diskS]->t;
 }
 
 static void applyAy(AySound& c, int chipNo, const AyState& a) {
@@ -547,24 +680,160 @@ static bool fileExists(const string& p) {
     return !p.empty() && f_stat(p.c_str(), &fi) == FR_OK;
 }
 
+// ── mounted media: fingerprints (PSMD) and the problems a load reports ─────────
+// Every medium a snapshot refers to by name: its CFG key, the label the user knows it
+// by, and the path the RUNNING machine has in that slot (empty = nothing / the
+// interface is off, which is exactly when a missing file does not matter).
+struct MediaSlot { string key, label, path; };
+
+static void liveMedia(vector<MediaSlot>& out) {
+    out.clear();
+    char k[16];
+    for (uint8_t i = 0; i < 4; i++) {
+        snprintf(k, sizeof(k), "drive%u.file", i);
+        const rvmwdDisk* d = ESPectrum::fdd.disk[i];
+        out.push_back({ k, string(1, (char)('A' + i)) + ":", d ? d->fname : "" });
+    }
+    for (uint8_t i = 0; i < 4; i++) {
+        snprintf(k, sizeof(k), "mb02d%u.file", i);
+        const rvmwdDisk* d = Config::mb02 ? ESPectrum::mb02_fdd.disk[i] : nullptr;
+        out.push_back({ k, string("MB-02 ") + (char)('A' + i) + ":", d ? d->fname : "" });
+    }
+    for (uint8_t i = 0; i < 2; i++) {
+        snprintf(k, sizeof(k), "p3d%u.file", i);
+        out.push_back({ k, string("+3 ") + (char)('A' + i) + ":",
+                        Config::isPlus3() && Plus3Fdc::mounted(i) ? Plus3Fdc::fname(i) : "" });
+    }
+    out.push_back({ "tape_file", "Tape:", Tape::tapeFileType != TAPE_FTYPE_EMPTY ? Config::tape_file : "" });
+    for (uint8_t i = 0; i < 2; i++) {
+        snprintf(k, sizeof(k), "ide_img%u", i);
+        out.push_back({ k, string("IDE ") + (char)('0' + i) + ":",
+                        IDE::scheme != IDE::OFF ? Config::ide_image[i] : "" });
+    }
+    out.push_back({ "esxdos_hdf", "esxDOS:",   Config::esxdos ? Config::esxdos_hdf_image[0] : "" });
+    out.push_back({ "esxdos_hd1", "esxDOS 1:", Config::esxdos ? Config::esxdos_hdf_image[1] : "" });
+    out.push_back({ "dckcart", "DOCK:", Config::isTc2068() ? Config::dckCartPath : "" });
+    out.push_back({ "alfcart", "ALF:",  Z80Ops::isALF ? Config::alfCartPath : "" });
+    for (MediaSlot& m : out) if (m.path == "none") m.path.clear();
+}
+
+static string baseName(const string& p) {
+    const size_t sl = p.find_last_of('/');
+    return sl == string::npos ? p : p.substr(sl + 1);
+}
+
+// PSMD v1: u8 ver, u8 count, then per medium: u8 key length, key, u16 path length,
+// path, u32 size, u16 FAT date, u16 FAT time. A load compares them with the file the
+// slot then holds and says so when the image changed after the snapshot — the RAM
+// (a TR-DOS catalogue cache, a game's own state) and the disk would disagree.
+static void writeMedia(W& w) {
+    vector<MediaSlot> ms;
+    liveMedia(ms);
+    vector<std::pair<const MediaSlot*, FILINFO*>> got;
+    FILINFO* fi = (FILINFO*)tryMalloc(sizeof(FILINFO));
+    if (!fi) return;
+    uint8_t n = 0;
+    for (const MediaSlot& m : ms) if (!m.path.empty() && f_stat(m.path.c_str(), fi) == FR_OK) n++;
+    if (!n) { free(fi); return; }
+    w.begin("PSMD"); w.u8(1); w.u8(n);
+    for (const MediaSlot& m : ms) {
+        if (m.path.empty() || f_stat(m.path.c_str(), fi) != FR_OK) continue;
+        w.u8((uint8_t)m.key.size()); w.raw(m.key.data(), (UINT)m.key.size());
+        w.u16((uint16_t)m.path.size()); w.raw(m.path.data(), (UINT)m.path.size());
+        w.u32((uint32_t)fi->fsize); w.u16(fi->fdate); w.u16(fi->ftime);
+    }
+    w.end();
+    free(fi);
+}
+
+namespace {
+struct MediaPrint { string key, path; uint32_t size; uint16_t fdate, ftime; };
+}
+
+static void readMedia(R& r, uint32_t sz, vector<MediaPrint>& out) {
+    if (sz < 2 || r.u8() < 1) return;
+    uint8_t n = r.u8();
+    while (n-- && r.ok) {
+        MediaPrint m;
+        const uint8_t kl = r.u8();
+        if (!r.ok || kl > 32) return;
+        m.key.resize(kl); r.raw(&m.key[0], kl);
+        const uint16_t pl = r.u16();
+        if (!r.ok || pl > 512) return;
+        m.path.resize(pl); if (pl) r.raw(&m.path[0], pl);
+        m.size = r.u32(); m.fdate = r.u16(); m.ftime = r.u16();
+        if (r.ok) out.push_back(m);
+    }
+}
+
+// After a load: one line per medium the snapshot names that the machine does not now
+// hold as it was — not found, not mounted, or changed since the snapshot.
+static void mediaReport(const vector<string>& lines, const vector<MediaPrint>& prints,
+                        vector<string>& problems) {
+    vector<MediaSlot> ms;
+    liveMedia(ms);
+    FILINFO* fi = (FILINFO*)tryMalloc(sizeof(FILINFO));
+    if (!fi) return;
+    for (const MediaSlot& m : ms) {
+        string want;
+        if (!cfgValue(lines, m.key.c_str(), want) || want.empty() || want == "none") continue;
+        // Only slots whose interface the loaded machine has (path is empty when off).
+        const bool ifaceOn = m.key.compare(0, 5, "drive") == 0 ? Config::betadisk
+                           : m.key.compare(0, 4, "mb02") == 0  ? Config::mb02 != 0
+                           : m.key.compare(0, 3, "p3d") == 0   ? Config::isPlus3()
+                           : m.key.compare(0, 3, "ide") == 0   ? IDE::scheme != IDE::OFF
+                           : m.key.compare(0, 6, "esxdos") == 0 ? Config::esxdos != 0
+                           : m.key == "dckcart" ? Config::isTc2068()
+                           : m.key == "alfcart" ? Z80Ops::isALF : true;
+        if (!ifaceOn) continue;
+        if (f_stat(want.c_str(), fi) != FR_OK) { problems.push_back(m.label + " " + baseName(want) + " - not found"); continue; }
+        if (m.path != want) { problems.push_back(m.label + " " + baseName(want) + " - not mounted"); continue; }
+        for (const MediaPrint& p : prints)
+            if (p.key == m.key && p.path == want) {
+                if (p.size != (uint32_t)fi->fsize || p.fdate != fi->fdate || p.ftime != fi->ftime)
+                    problems.push_back(m.label + " " + baseName(want) + " - changed since");
+                break;
+            }
+    }
+    free(fi);
+}
+
 // Beta / +3 disks and the tape: the slot was saved with them, so they come back.
 static void applyLiveMedia(const vector<string>& lines) {
     string v;
+    char key[16];
     for (uint8_t i = 0; i < 4; i++) {
-        char key[16]; snprintf(key, sizeof(key), "drive%u.file", i);
+        // Write protect first: a mount seeds the drive from it.
+        snprintf(key, sizeof(key), "drive%u.wp", i);
+        if (cfgValue(lines, key, v)) Config::driveWP[i] = v == "true";
+        snprintf(key, sizeof(key), "drive%u.file", i);
+        if (cfgValue(lines, key, v)) {
+            const string cur = ESPectrum::fdd.disk[i] ? ESPectrum::fdd.disk[i]->fname : "";
+            if (v != cur) {
+                DiskSlots::slotEject(IFACE_BETA, i);
+                if (fileExists(v)) DiskSlots::slotMount(IFACE_BETA, i, v);
+            }
+        }
+        if (ESPectrum::fdd.disk[i]) ESPectrum::fdd.disk[i]->writeprotect = Config::driveWP[i];
+    }
+    for (uint8_t i = 0; i < 4; i++) {   // MB-02 disks come with the reboot; their WP is live
+        snprintf(key, sizeof(key), "mb02d%u.wp", i);
         if (!cfgValue(lines, key, v)) continue;
-        const string cur = ESPectrum::fdd.disk[i] ? ESPectrum::fdd.disk[i]->fname : "";
-        if (v == cur) continue;
-        DiskSlots::slotEject(IFACE_BETA, i);
-        if (fileExists(v)) DiskSlots::slotMount(IFACE_BETA, i, v);
+        Config::mb02WP[i] = v == "true";
+        if (ESPectrum::mb02_fdd.disk[i]) ESPectrum::mb02_fdd.disk[i]->writeprotect = Config::mb02WP[i];
+    }
+    for (uint8_t i = 0; i < 2; i++) {
+        snprintf(key, sizeof(key), "p3d%u.wp", i);
+        if (cfgValue(lines, key, v)) Config::p3WP[i] = v == "true";
     }
     if (Config::isPlus3()) {
         for (uint8_t i = 0; i < 2; i++) {
-            char key[16]; snprintf(key, sizeof(key), "p3d%u.file", i);
-            if (!cfgValue(lines, key, v)) continue;
-            if (v == Plus3Fdc::fname(i)) continue;
-            DiskSlots::slotEject(IFACE_PLUS3, i);
-            if (fileExists(v)) DiskSlots::slotMount(IFACE_PLUS3, i, v);
+            snprintf(key, sizeof(key), "p3d%u.file", i);
+            if (cfgValue(lines, key, v) && v != Plus3Fdc::fname(i)) {
+                DiskSlots::slotEject(IFACE_PLUS3, i);
+                if (fileExists(v)) DiskSlots::slotMount(IFACE_PLUS3, i, v);
+            }
+            Plus3Fdc::setWriteProtect(i, Config::p3WP[i]);
         }
     }
     if (cfgValue(lines, "tape_file", v) && v != Config::tape_file) {
@@ -741,6 +1010,21 @@ bool load(const string& path) {
     bool haveDmmc = false; uint8_t dmmcCtl = 0; bool dmmcPaged = false;
     bool haveAlf = false; uint8_t alfSel = 0, alfBit = 0;
     JoyProf::Profile joyOffer; bool joyMissing = false;
+    uint8_t bd[2][16] = {}; bool haveBd[2] = {}, bdV2[2] = {};
+    uint8_t up[UPD_SNAP_MAX] = {}; uint32_t upSize = 0;
+    uint8_t tp[Tape::SNAP_MAX] = {}; uint32_t tpSize = 0;
+    vector<MediaPrint> prints;
+    // Device records too big for the stack: kept on the heap until applied.
+    struct Blob {
+        uint8_t* p = nullptr; uint32_t n = 0;
+        ~Blob() { free(p); }
+        void take(R& r, uint32_t sz, uint32_t max) {
+            if (p || !sz) return;
+            n = sz < max ? sz : max;
+            p = (uint8_t*)tryMalloc(n);
+            if (p) r.raw(p, n); else n = 0;
+        }
+    } ide, sdc, ngs;
 
     while (r.ok && r.next(id, sz, at)) {
         if (idIs(id, "Z80R") && sz >= sizeof(z)) { r.raw(z, sizeof(z)); haveZ80 = true; }
@@ -755,6 +1039,23 @@ bool load(const string& path) {
         else if (idIs(id, "SCLD") && sz >= 2) { r.raw(scld, 2); haveScld = true; }
         else if (idIs(id, "PLTT") && sz >= 66) { r.raw(pltt, sz < sizeof(pltt) ? sz : sizeof(pltt)); havePltt = true; }
         else if (idIs(id, "COVX") && sz >= 1)  { covx = r.u8(); haveCovx = true; }
+        else if (idIs(id, "PSBD") && sz >= 13) {
+            const uint8_t ver = r.u8();
+            if (ver >= 1) {
+                const uint8_t unit = r.u8();
+                if (unit < 2) {
+                    const bool v2 = ver >= 2 && sz >= 19;
+                    r.raw(bd[unit], v2 ? 16 : 11);
+                    haveBd[unit] = r.ok; bdV2[unit] = v2;
+                }
+            }
+        }
+        else if (idIs(id, "PSUP") && sz >= 1)  { upSize = sz < sizeof(up) ? sz : sizeof(up); r.raw(up, upSize); }
+        else if (idIs(id, "PSTP") && sz >= 1)  { tpSize = sz < sizeof(tp) ? sz : sizeof(tp); r.raw(tp, tpSize); }
+        else if (idIs(id, "PSMD"))             readMedia(r, sz, prints);
+        else if (idIs(id, "PSID"))             ide.take(r, sz, IDE::SNAP_MAX);
+        else if (idIs(id, "PSSD"))             sdc.take(r, sz, DivMMC::SNAP_CARD_MAX);
+        else if (idIs(id, "PSNS"))             ngs.take(r, sz, NgsSd::SNAP_MAX);
         else if (idIs(id, "JOY "))             { joyMissing = applyJoy(r, sz, joyOffer); }
         else if (idIs(id, "PSPG") && sz >= 3)  { r.u16(); fileSparse = r.u8() != 0; }
         else if (idIs(id, "PSPF") && sz >= 3) {
@@ -801,7 +1102,7 @@ bool load(const string& path) {
         if (f_lseek(f, at + sz) != FR_OK) r.ok = false;
     }
     fclose2(f);
-    GS::snapLoadEnd();
+    GS::snapLoadEnd(ngs.p, ngs.n);
     if (!haveZ80 || !havePT || ptSize < 16 || (!fileSparse && loadedPages != np)) {
         loadFail("PSS: damaged file (missing state)");
         return false;
@@ -849,6 +1150,10 @@ bool load(const string& path) {
 
     // DivMMC last of the memory map: it overrides page 0 while mapped.
     if (haveDmmc) DivMMC::snapRestore(dmmcCtl, dmmcPaged);
+    // The storage interfaces: a transfer in progress resumes where it was. A record
+    // for another image is refused and the interface keeps its reset state.
+    if (ide.n) IDE::snapLoad(ide.p, ide.n);
+    if (sdc.n) DivMMC::snapCardLoad(sdc.p, sdc.n);
 
     // Timex SCLD (DEC first: its bit 7 decides what the HSR window shows).
     if (haveScld && (Config::isTimex() || Config::timex_video)) {
@@ -860,6 +1165,13 @@ bool load(const string& path) {
         VIDEO::timexHiresRequest(VIDEO::timex_mode == 6);
         if (Config::isTc2068()) { Timex::decWrite(dec); Timex::writeHsr(scld[0]); }
     }
+
+    // Disk controllers: registers and head positions (after applyLiveMedia + reset).
+    if (haveBd[0]) applyFdc(ESPectrum::fdd, bd[0], bdV2[0]); else syncFdcTrack(ESPectrum::fdd);
+    if (Config::mb02) {
+        if (haveBd[1]) applyFdc(ESPectrum::mb02_fdd, bd[1], bdV2[1]); else syncFdcTrack(ESPectrum::mb02_fdd);
+    }
+    if (upSize && Config::isPlus3()) Plus3Fdc::snapLoad(up, upSize);
 
     // Border, #FE.
     VIDEO::borderColor = border & 7;
@@ -903,6 +1215,21 @@ bool load(const string& path) {
     Z80::setPendingEI((z[34] & 1) != 0);
     Z80::setHalted((z[34] & 2) != 0);
     Z80::setMemPtr(w16(35));
+
+    // The tape last: its position is counted from CPU::tstates, now final.
+    vector<string> problems;
+    if (tpSize && !Tape::snapLoad(tp, tpSize) && Tape::tapeFileType != TAPE_FTYPE_EMPTY)
+        problems.push_back("Tape: " + baseName(Config::tape_file) + " - position lost (file changed)");
+    mediaReport(lines, prints, problems);
+    if (!problems.empty()) {
+        string msg;
+        for (const string& p : problems) {
+            Debug::log("[PSS] media: %s", p.c_str());
+            if (bootResume) OSD::bootNotice(p.c_str());
+            else { if (!msg.empty()) msg += '\n'; msg += p; }
+        }
+        if (!msg.empty()) OSD::osdCenteredMsg(msg, LEVEL_WARN, 3500);
+    }
 
     Debug::log("[PSS] loaded %s: %s/%s, %d pages", path.c_str(), sa.c_str(), sr.c_str(), loadedPages);
     if (joyMissing && !bootResume) offerJoySave(joyOffer);

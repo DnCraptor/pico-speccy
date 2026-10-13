@@ -115,6 +115,7 @@ __attribute__((noinline)) static void nextPortFFOverride(uint8_t v) {
 #define PROFI_PORT_TRACE 0
 #endif
 
+#include "app/Col16Trace.h"
 #ifndef MC7FFD_TRACE
 #define MC7FFD_TRACE 0
 #endif
@@ -1887,19 +1888,23 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     // so on Profi we match them exactly — the classic partial &0x05FF decode
     // aliased e.g. #0ADF onto the buttons port, which is exactly the address
     // ROMain's Karabas-RTC presence probe reads (reg 0x0A in A → IN A,(#DF)),
-    // and a non-0xFF answer there fakes an RTC. Other archs keep the
-    // traditional partial decode (Pentagon-style Kempston mice rely on it).
+    // and a non-0xFF answer there fakes an RTC.
+    // Elsewhere the high byte follows the ORIGINAL Kempston interface (k1.spdns.de,
+    // "decodes address lines A5, A8, A9 and A10"): X = A10..A8 011, Y = 111, buttons =
+    // A9=1 A8=0 with A10 free. The low byte stays the full #DF — the original looks at
+    // A5 alone, which here would steal Kempston joystick / Beta reads.
     if (!(PROFI && (portDFFD & 0x20)) && NextReg::portOn(NextReg::PE_MOUSE)) {
-      uint16_t mdec = PROFI ? (uint16_t)address : (address & 0x05ff);
-      if (mdec == (PROFI ? 0xFBDF : 0x01df)) {
+      const bool lowDF = (address & 0xff) == 0xdf;
+      const uint16_t hi = address & 0x0700;
+      if (PROFI ? address == 0xFBDF : (lowDF && hi == 0x0300)) {
         LED::touchR(LED::KEMPMOUSE);
         return (uint8_t)ESPectrum::mouseX;
       }
-      if (mdec == (PROFI ? 0xFFDF : 0x05df)) {
+      if (PROFI ? address == 0xFFDF : (lowDF && hi == 0x0700)) {
         LED::touchR(LED::KEMPMOUSE);
         return (uint8_t)ESPectrum::mouseY;
       }
-      if (mdec == (PROFI ? 0xFADF : 0x00df)) {
+      if (PROFI ? address == 0xFADF : (lowDF && (hi & 0x0300) == 0x0200)) {
         LED::touchR(LED::KEMPMOUSE);
         // No mouse ever attached → keep the bus-float 0xFF so presence
         // detection (buttons==0xFF) still reads "absent".
@@ -2035,10 +2040,12 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
             }
           }
           if (MemESP::bankLatch != page) {
+            C16_BANK();
             MemESP::bankLatch = page;
             MemESP::plug16(3, MemESP::ram[page].sync(3), page & 0x01);
           }
           if (MemESP::videoLatch != bitRead(data, 3)) {
+        C16_FLIP();
             MemESP::videoLatch = bitRead(data, 3);
             if (PROFI && (portDFFD & 0x80)) {
               VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[6].direct() : MemESP::ram[4].direct();
@@ -4152,6 +4159,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
         if (profi_page < profi_pages) page = profi_page;
       }
       if (MemESP::bankLatch != page) {
+        C16_BANK();
         MemESP::bankLatch = page;
         MemESP::ramContended[6] = MemESP::ramContended[7] =
             (Z80Ops::isPentagon || PROFI || Z80Ops::isScorpion) ? false : (page & 0x01 ? true : false);
@@ -4203,6 +4211,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
       }
       if (!ESPectrum::trdos) MemESP::recoverPage0();
       if (MemESP::videoLatch != bitRead(data, 3)) {
+        C16_FLIP();
         MemESP::videoLatch = bitRead(data, 3);
         if (PROFI && (portDFFD & 0x80)) {
           VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[6].direct() : MemESP::ram[4].direct();

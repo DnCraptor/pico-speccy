@@ -46,6 +46,12 @@ bool          mounted(uint8_t unit);
 const std::string& fname(uint8_t unit);
 void          setWriteProtect(uint8_t unit, bool wp);
 
+// .pss (PSUP): the controller's registers and the head positions (Upd765's record).
+uint32_t snapSave(uint8_t* out);                       // out: UPD_SNAP_MAX bytes
+bool     snapLoad(const uint8_t* in, uint32_t n);
+// Push every pending write of a mounted image to the card (before a snapshot).
+void     flush();
+
 // Write a blank, formatted +3 disk image (40 tracks, 9 x 512, ~190 KB single-sided).
 bool createBlank(const std::string& path, bool doubleSided);
 

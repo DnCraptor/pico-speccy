@@ -68,6 +68,15 @@ public:
     static uint8_t* snapBank(uint8_t b, bool write);
     static uint8_t  snapControl() { return (uint8_t)((conmem ? 0x80 : 0) | (mapram ? 0x40 : 0) | (bank & 0x3F)); }
     static void     snapRestore(uint8_t control, bool automapped);
+    // .pss (PSSD block): the SD/MMC card's SPI protocol machine (DivMMC / DivSD /
+    // Z-Controller), the sector buffer it serves from, and the divIDE taskfile with a
+    // transfer in progress — so a snapshot taken mid-sector resumes at the same byte.
+    // snapCardLoad refuses (false) a record from another mode or another image size.
+    // flush(): a pending sector write to the image and f_sync, before a snapshot.
+    static constexpr uint32_t SNAP_CARD_MAX = 96 + 512 + 512;
+    static uint32_t snapCardSave(uint8_t* out);
+    static bool     snapCardLoad(const uint8_t* in, uint32_t n);
+    static void     flush();
     static inline void markHiDirty() { if (hi_slot >= 0) slot_dirty[hi_slot] = true; }
     static inline void markLoDirty() { if (lo_slot >= 0) slot_dirty[lo_slot] = true; }
 

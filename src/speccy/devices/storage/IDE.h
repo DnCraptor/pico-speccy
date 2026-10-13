@@ -93,6 +93,21 @@ public:
     static uint16_t read_data16();
     static void     write_data16(uint16_t v);
 
+    // f_sync both images (every sector write already syncs; this is the belt for a
+    // snapshot taken right after one).
+    static void flush();
+
+    // .pss (PSID block): the ATA register file, the transfer in progress with its
+    // sector buffer, the 16-bit latches, the ATAPI command state, and the geometry
+    // (Profi CP/M rewrites it from the disk's own header). Every ATA operation here is
+    // synchronous, so this is the WHOLE device: a snapshot taken between the 1st and
+    // the 512th byte of a sector resumes at the 2nd... 513th. snapLoad applies only to
+    // a drive that holds an image of the same size as at save time; with no match the
+    // device stays as the load's reset left it (and false is returned).
+    static constexpr uint32_t SNAP_MAX = 96 + 2048;
+    static uint32_t snapSave(uint8_t* out);
+    static bool     snapLoad(const uint8_t* in, uint32_t n);
+
 private:
     static bool open_image(int slot, const char* path);
     static uint32_t lba();

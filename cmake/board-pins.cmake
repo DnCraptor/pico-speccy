@@ -1,9 +1,9 @@
 # Per-board GPIO map: every pin the firmware drives, as compile definitions.
 # The RP2350B-Plus-W overrides come first, the carrier arms read them.
 
-# ── RP2350B-Plus-W pin overrides (MURM_W / MURM2_W) ──────────────────────────
+# ── RP2350B-Plus-W pin overrides (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) ──
 # The module's 40-pin header is Pico-compatible for GPIO0..GPIO22, so keyboard,
-# SD, display, MIDI/WAV and (on MURM2) audio all keep their numbers. Three things
+# SD, display, MIDI/WAV and audio all keep their numbers. Three things
 # move, and the carrier arms below take them from these variables:
 #
 #   * the three positions a Pico exposes as GP26/27/28 carry GPIO40/41/42 here.
@@ -161,19 +161,19 @@ ELSEIF(PICO_PC)
         LOAD_WAV_PIO=5 # UXT1-10
 
         CLK_AY_PIN1=21 # not in use
-        LATCH_595_PIN=26
-        CLK_595_PIN=27
-        DATA_595_PIN=28
-        CLK_AY_PIN2=29
+        LATCH_595_PIN=${W_HDR26}
+        CLK_595_PIN=${W_HDR27}
+        DATA_595_PIN=${W_HDR28}
+        CLK_AY_PIN2=${W_AY_CLK2}
 
-        I2S_DATA_PIO=26 # not implemented
-        I2S_BCK_PIO=26  # I2S_BCK_PIO == I2S_LCK_PIO == I2S_DATA_PIO - unsupported mark
-        I2S_LCK_PIO=26
+        I2S_DATA_PIO=${W_HDR26} # not implemented
+        I2S_BCK_PIO=${W_HDR26}  # I2S_BCK_PIO == I2S_LCK_PIO == I2S_DATA_PIO - unsupported mark
+        I2S_LCK_PIO=${W_HDR26}
 
-        BEEPER_PIN=26 # not implemented
-        PWM_PIN0=27 # R
-        PWM_PIN1=28 # L
-        MIDI_TX_PIN=26
+        BEEPER_PIN=${W_HDR26} # not implemented
+        PWM_PIN0=${W_HDR27} # R
+        PWM_PIN1=${W_HDR28} # L
+        MIDI_TX_PIN=${W_HDR26}
 
         # SDCARD
         SDCARD_PIN_SPI0_MISO=4
@@ -204,7 +204,7 @@ ELSEIF(PICO_PC)
         HDMI_BASE_PIN=12
 
         DEFAULT_THROTTLING=0
-        PICO_DEFAULT_LED_PIN=25
+        PICO_DEFAULT_LED_PIN=${W_LED_PIN}
     )
 ELSEIF(PICO_DV)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -225,18 +225,18 @@ ELSEIF(PICO_DV)
         DBG_UART_TX_PIN=20
 
         CLK_AY_PIN1=21 # not in use
-        LATCH_595_PIN=26
-        CLK_595_PIN=27
-        DATA_595_PIN=28
-        CLK_AY_PIN2=29
+        LATCH_595_PIN=${W_HDR26}
+        CLK_595_PIN=${W_HDR27}
+        DATA_595_PIN=${W_HDR28}
+        CLK_AY_PIN2=${W_AY_CLK2}
 
-        I2S_DATA_PIO=26 #
-        I2S_BCK_PIO=27 #
-        I2S_LCK_PIO=28
+        I2S_DATA_PIO=${W_HDR26} #
+        I2S_BCK_PIO=${W_HDR27} #
+        I2S_LCK_PIO=${W_HDR28}
 
-        PWM_PIN0=26 # R
-        PWM_PIN1=27 # L
-        BEEPER_PIN=28 # not implemented
+        PWM_PIN0=${W_HDR26} # R
+        PWM_PIN1=${W_HDR27} # L
+        BEEPER_PIN=${W_HDR28} # not implemented
         MIDI_TX_PIN=20
 
         # SDCARD
@@ -246,6 +246,8 @@ ELSEIF(PICO_DV)
         SDCARD_PIN_SPI0_MOSI=18
         SDCARD_PIN_SPI0_CS=22
 
+        # The PIO SPI driver, on the bare Pico DV — and the reason the radio's
+        # block is pio0/pio2 and never this one. The module moves nothing here.
         SDCARD_PIO=pio1
         SDCARD_PIO_SM=0
 
@@ -271,7 +273,7 @@ ELSEIF(PICO_DV)
         HDMI_BASE_PIN=6
 
         DEFAULT_THROTTLING=0
-        PICO_DEFAULT_LED_PIN=25
+        PICO_DEFAULT_LED_PIN=${W_LED_PIN}
 )
 ELSEIF(ZERO2)
     target_compile_definitions(${PROJECT_NAME} PRIVATE

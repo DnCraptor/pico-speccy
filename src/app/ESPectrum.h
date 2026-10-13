@@ -120,6 +120,9 @@ public:
     // differ. Raised by a raster change, the V-Sync setting and the first frame.
     static bool nextRefreshCheckPending;
     static void nextRefreshCheck();
+    // `[MACH <tag>]` log line: arch/romset + every paging latch and arch flag — the
+    // state a live machine switch carries over (ESPectrum.cpp, 2026-10-13).
+    static void logMachineState(const char* tag);
     // A PROGRAM LOAD (snapshot, .spg, disk launch) restarts the Spectrum side
     // only. A real machine loading a program does not touch its NeoGS, and the
     // emulated card's reboot is not free: every .spg load was rebooting it and

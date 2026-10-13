@@ -409,7 +409,12 @@ public:
     const char* groupName(int i) const override { return i == 0 ? "AY" : nullptr; }
     void levels(uint8_t* out) override;
     uint32_t posMs() const override { return (uint32_t)((uint64_t)outFrames_ * 1000 / RATE); }
-    uint32_t lenMs() const override { return tickMax_ > 0 ? (uint32_t)tickMax_ * 20 : 0; }
+    uint32_t lenMs() const override {
+        if (tickMax_ <= 0) return 0;
+        const uint32_t ms = (uint32_t)((uint64_t)tickMax_ * frameLen_ * 1000 / RATE);
+        const int lt = loopTick_ >= 0 && loopTick_ < tickMax_ ? loopTick_ : 0;
+        return loopedLenMs(ms, (uint32_t)((uint64_t)(tickMax_ - lt) * frameLen_ * 1000 / RATE));
+    }
 
     // Loads + prepares a module image of `sz` bytes already in `file`.
     bool prepare(const uint8_t* file, uint32_t sz);
@@ -2515,7 +2520,15 @@ bool BulbaDecoder::prepare(const uint8_t* file, uint32_t sz) {
 }
 
 bool BulbaDecoder::frame() {
-    if (tick_ >= tickMax_) return false;          // CheckLoopAndStop, looping off
+    if (tick_ >= tickMax_) {                      // CheckLoopAndStop: one loop pass
+#ifdef PP_BULBA_HOST
+        return false;                             // the host oracle dump plays once
+#else
+        if (!loopPassed() || loopTick_ < 0 || loopTick_ >= tickMax_) return false;
+        tick_ = loopTick_;                        // the tracker data wraps by itself
+        if (fmt_ == F_VTX) vtxPos_ = (uint32_t)loopTick_;
+#endif
+    }
     envSet_ = false;
     switch (fmt_) {
         case F_PSC: framePSC(); break;
@@ -2646,7 +2659,7 @@ int BulbaDecoder::render(int16_t* lr, int n) {
     while (o < n) {
         if (left_ == 0) {
             if (ended_) break;
-            if (posMs() >= MAX_MS || !frame()) { ended_ = true; break; }
+            if ((posMs() >= MAX_MS && !loopsDone()) || !frame()) { ended_ = true; break; }
             for (int r = 0; r < 13; r++) {
                 ay_->selectRegister((uint8_t)r);
                 ay_->setRegisterData(R.idx[r]);

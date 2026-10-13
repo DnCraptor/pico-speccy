@@ -76,7 +76,7 @@ if !errorlevel! equ 0 (
 )
 
 :: All available targets (RP2350 only — RP2040 boards were dropped)
-set "ALL_TARGETS=MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W"
+set "ALL_TARGETS=MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W"
 set "TFT_TARGETS=MURM MURM2"
 set "TFT_ST_TARGETS="
 set "SOFTTV_TARGETS=MURM MURM2"
@@ -86,7 +86,7 @@ set "PIOUSB_TARGETS=ZERO2"
 :: Display on GPIO 12-19 (the RP2350 HSTX pins): also ship an HSTX image
 :: (-DHDMI_HSTX=TMDS). Their plain VGA_HDMI image is pinned to PIO (-DHDMI_HSTX=OFF),
 :: or CMake's AUTO would make it HSTX too and the two images would be the same.
-set "HSTX_TARGETS=PICO_PC MURM2 MURM2_W"
+set "HSTX_TARGETS=PICO_PC MURM2 MURM2_W PICO_PC_W"
 
 if "%POSARGS%"=="" (
     set "TARGETS=%ALL_TARGETS%"
@@ -257,7 +257,7 @@ goto :eof
 echo Usage: %~nx0 [--clean] [-j JOBS_PER_BUILD] [-p MAX_PARALLEL] [TARGETS...]
 echo.
 echo Env vars: BUILD_TYPE, MAX_PARALLEL, JOBS_PER_BUILD, CMAKE_GENERATOR
-echo Targets:  MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W (default: all)
+echo Targets:  MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W (default: all)
 exit /b 0
 
 :::::::::::::::::::::::::::::::::::::::::::::::::::::

@@ -45,11 +45,6 @@ uint32_t nespad_state2 = 0;  // Joystick 2
 extern "C" PIO board_aux_pio(void);   // main.cpp -> BoardPins::auxPio()
 #endif
 bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin,uint8_t latPin) {
-#if PICOSPECCY_WIFI
-    // W boards: the block is the one the display is not using (pio0 on HDMI, pio2
-    // on VGA); NESPAD_PIO is only the compile-time default for the HDMI case.
-    pio = board_aux_pio();
-#endif
   // An RP2350 PIO block reaches 32 CONSECUTIVE GPIOs starting at its gpio_base
   // (0 or 16), so a pad wired above GPIO31 (MURM2_W: data on 40/41) needs the
   // window moved up. The SDK REFUSES a re-base once any program is loaded in the
@@ -62,6 +57,16 @@ bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin,uint8_t latP
   if (latPin      > maxPin) maxPin = latPin;
   if (dataPin + 1 > maxPin) maxPin = dataPin + 1;
   const uint wantBase = (maxPin >= 32) ? 16u : 0u;
+#if PICOSPECCY_WIFI
+  // W boards: a pad wired ABOVE GPIO31 (MURM2_W, data on 40/41) needs the radio's
+  // base-16 block, i.e. the one the display is not using (pio0 on HDMI, pio2 on
+  // VGA); NESPAD_PIO is only the compile-time default for the HDMI case. A pad
+  // below GPIO32 (MURM_W GP14-16, PICO_PC_W GP5/9/20/21) stays on pio1 beside the
+  // keyboard: taking the aux block at base 0 left the radio no block it could
+  // re-base to 16, and cyw43 then had nowhere to go (PCp2w, hw 2026-10-12).
+  if (wantBase == 16u) pio = board_aux_pio();
+  else                 pio = pio1;
+#endif
   if (pio_get_gpio_base(pio) != wantBase) {
     int brc = pio_set_gpio_base(pio, wantBase);
     if (brc != PICO_OK) {

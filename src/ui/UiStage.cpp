@@ -79,6 +79,7 @@ NM_BOOL_ACCESS(rzxLoop,   rzx_loop)
 NM_BOOL_ACCESS(sdLed,     sdLedBlink)
 NM_BOOL_ACCESS(rtc,       rtc_enabled)
 NM_INT_ACCESS (mouseSens, mouse_sens)
+NM_BOOL_ACCESS(mouseSwap, mouse_swap)
 NM_BOOL_ACCESS(p3Fast,    p3_fastdisk)
 NM_BOOL_ACCESS(p3Slock,   p3_speedlock)
 NM_BOOL_ACCESS(psramOn,   psram_enabled)
@@ -98,6 +99,8 @@ NM_BOOL_ACCESS(flashload, flashload)
 NM_BOOL_ACCESS(tapeRG,    tape_timing_rg)
 NM_BOOL_ACCESS(tapeAuto,  tape_autostart)
 NM_INT_ACCESS (tapeWear,  tape_wear)
+NM_INT_ACCESS (plLoops,  player_loops)
+NM_INT_ACCESS (plFade,   player_fade)
 NM_BOOL_ACCESS(cursorJoy, CursorAsJoy)
 NM_BOOL_ACCESS(joy2cursor, joy2cursor)
 NM_BOOL_ACCESS(rightSpace, rightSpace)
@@ -623,6 +626,11 @@ static bool hook_zifiBaud(int32_t, int32_t) {
     Config::saveWifiConfig();
     // Re-handshake the link at the new rate whenever it is up (NIC or WiFi), and
     // re-associate if the switch dropped the association — the classic pickBaud body.
+#if PICOSPECCY_WIFI
+    // On the on-chip radio the rate is only the AT emulator's pace, read live —
+    // re-initialising would drop the guest's open connections for nothing.
+    if (Config::zifi_transport == 2) return true;
+#endif
     if (ZiFi::linkUp()) { ZiFi::deinit(); ZiFi::init(); }
     if (Config::wifi_enabled && !ZiFiAT::connected && !Config::wifi_ssid.empty()) {
         uiBusy(MSG_WIFI_CONNECTING);    // re-association takes seconds — say so

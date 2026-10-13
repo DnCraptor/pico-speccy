@@ -1,4 +1,4 @@
-// lwIP configuration for the on-chip CYW43 radio (MURM_W / MURM2_W).
+// lwIP configuration for the on-chip CYW43 radio (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W).
 //
 // Poll-mode, NO_SYS stack (pico_cyw43_arch_lwip_poll): every callback runs inside
 // cyw43_arch_poll(), which WifiNet::poll() / WifiSock's waits call from core0 —

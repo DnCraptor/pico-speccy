@@ -14,6 +14,10 @@
 // PSEF (ATM / ZX-Evo, Evo font RAM), PSTS + PSTC + PSTF (TS-Conf registers, CRAM,
 // SFILE), PSGS + PSGP / PSGF (General Sound / NeoGS card and its RAM), PSAL (ALF:
 // the ROM-bank select incl. the cart bit, #FE D3; its hidden cart SRAM is PSCH).
+// Storage: PSBD (WD1793, one per controller), PSUP (+3 uPD765), PSTP (tape position),
+// PSID (IDE/ATA register file + sector in flight), PSSD (DivMMC / Z-Controller SD SPI
+// machine), PSNS (NeoGS SD interface), PSMD (size + date of every mounted image, so a
+// load can say which media is missing or changed).
 //
 // Covers 48K-family (incl. Byte, Didaktik, Timex), 128K / +2 / +3 / +3e / +3div,
 // Pentagon 128/512/1024 incl. Murmuzavr, the Scorpion family, Profi / Karabas,

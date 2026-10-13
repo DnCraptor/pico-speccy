@@ -11,7 +11,13 @@ endif()
 if(MURM2_W)
     set(MURM2 ON)
 endif()
-if(MURM_W OR MURM2_W)
+if(PICO_DV_W)
+    set(PICO_DV ON)
+endif()
+if(PICO_PC_W)
+    set(PICO_PC ON)
+endif()
+if(MURM_W OR MURM2_W OR PICO_DV_W OR PICO_PC_W)
     set(PICOSPECCY_WIFI ON)
     # The radio is only reachable from a PIO block at gpio_base 16 (its pins are
     # above GPIO31), pio1 is pinned to base 0 by the keyboard, so it needs the block
@@ -23,9 +29,9 @@ if(MURM_W OR MURM2_W)
     # a WiFi board with a silently dead radio.
     if(SOFTTV OR TV OR TFT OR ILI9341 OR ST7789)
         message(FATAL_ERROR
-            "MURM_W/MURM2_W are built VGA_HDMI only for now: the SOFTTV/TV/TFT "
-            "drivers have not been paired with the CYW43's PIO block. "
-            "Build these boards with -DVGA_HDMI=ON (the default).")
+            "MURM_W/MURM2_W/PICO_DV_W/PICO_PC_W are built VGA_HDMI only for now: the "
+            "SOFTTV/TV/TFT drivers have not been paired with the CYW43's PIO "
+            "block. Build these boards with -DVGA_HDMI=ON (the default).")
     endif()
 endif()
 
@@ -78,6 +84,15 @@ IF(MURM2_W)
 ELSEIF(MURM_W)
     set(BOARD_TAG "m1p2w")
     set (BUTTER_PSRAM_GPIO 47)
+# Before the plain PICO_DV arm on purpose: PICO_DV_W turns PICO_DV on, so the
+# carrier arm would otherwise claim the tag. (The non-W board header is not a
+# risk here — that is picked by PICOSPECCY_WIFI, further up.)
+ELSEIF(PICO_DV_W)
+    set(BOARD_TAG "DVp2w")
+    set (BUTTER_PSRAM_GPIO 47)      # the one pin PICO_DV and the module agree on
+ELSEIF(PICO_PC_W)                   # before PICO_PC, same reason
+    set(BOARD_TAG "PCp2w")
+    set (BUTTER_PSRAM_GPIO 47)      # module pads, not the Pico 2 carrier's GP8
 ELSEIF(MURM2)
     set(BOARD_TAG "m2p2")
     set (BUTTER_PSRAM_GPIO 8)

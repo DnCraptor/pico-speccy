@@ -285,6 +285,7 @@ static const char* gs_trace_kind_name(uint8_t k) {
 
 bool     GS::enabled       = false;
 bool     GS::neogs         = false;
+volatile bool GS::idleThrottled = false;
 uint32_t GS::gs_ram_size   = 0;
 volatile uint8_t  GS::reg_command   = 0;
 volatile uint8_t  GS::reg_data_zx   = 0;
@@ -2205,6 +2206,9 @@ bool GS::init(uint32_t ram_size_bytes) {
             s_gs_work_ram = s_gs_ram + GS_WORK_RAM_OFF;
         } else {
             size_t wsz = s_ngs ? (NGS_LOW_RAM_SIZE + 0x2000) : GS_WORK_RAM_SIZE;
+            // Butter, not SRAM: a 72 KB SRAM placement for NeoGS was tried (2026-10-13)
+            // and bought nothing measurable — TheLink's dragon 14.9 ms/frame with the low
+            // RAM in butter vs 15.2 in SRAM — while costing 72 KB of heap.
             if (!s_workRamBuf.alloc(wsz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM)) return gs_init_failed();
             if (s_ngs) {
                 s_ngs_low_ram = s_workRamBuf.data();
@@ -2845,6 +2849,7 @@ void __not_in_flash_func(GS::pump)() {
                        && (uint32_t)(now - s_out_change_us) > GS_IDLE_US;
         if (idle != s_idle_throttled) {
             s_idle_throttled = idle;
+            GS::idleThrottled = idle;
             if (idle) s_idle_entries++;
         }
         if (idle) {
@@ -4004,8 +4009,11 @@ uint16_t gs_dbg_gs_pc(void) { return (uint16_t)Z80_PC(s_cpu); }
 // card-physical numbering — PSGP {off u32, 16 KB} or PSGF {off u32, byte} for a
 // uniform one. The card is frozen under the run lock for the whole save / load,
 // so core1 never runs on half a state. Not saved: the MP3 decoder's stream (the
-// player feeds it again), the SD-card SPI state machine (NgsSd), the output rings.
+// player feeds it again) and the output rings. The SD-card SPI state machine (NgsSd)
+// goes in its own PSNS block.
 #include "speccy/core/PssIo.h"
+#include "app/TryAlloc.h"
+#include <stdlib.h>
 
 static constexpr uint8_t  GS_SNAP_VER = 1;
 static constexpr uint32_t GS_SNAP_CHUNK = 0x4000;
@@ -4096,6 +4104,14 @@ bool GS::snapSave(Pss::W& w) {
     snapPutFifo(w, s_cmd_fifo,  GS_CMD_FIFO_MASK,  s_cmd_fifo_r,  s_cmd_fifo_w);
     snapPutFifo(w, s_g2h_buf,   GS_G2H_MASK,       s_g2h_r,       s_g2h_w);
     w.end();
+    if (s_ngs) {   // PSNS: the card's SD interface, mid-sector if it was streaming
+        uint8_t* sd = (uint8_t*)tryMalloc(NgsSd::SNAP_MAX);
+        if (sd) {
+            const uint32_t n = NgsSd::snapSave(sd);
+            w.begin("PSNS"); w.raw(sd, n); w.end();
+            free(sd);
+        }
+    }
 
     // RAM, 16 KB at a time. SPI PSRAM is read twice through a small bounce (once
     // for the uniform test, once to write), so no 16 KB buffer is needed.
@@ -4239,7 +4255,7 @@ void GS::snapLoadPage(Pss::R& r, const char id[4], uint32_t size) {
     }
 }
 
-void GS::snapLoadEnd() {
+void GS::snapLoadEnd(const uint8_t* sd, uint32_t sdLen) {
     if (!enabled) return;
     if (s_snap_ok) {
         // Everything the registers imply.
@@ -4251,6 +4267,7 @@ void GS::snapLoadEnd() {
             ngs_rebuild_map();
             ngs_zxdma_gate();
             NgsSd::reset();
+            if (sd && sdLen) NgsSd::snapLoad(sd, sdLen);
             NgsMp3::reset();
         } else {
             setClock();

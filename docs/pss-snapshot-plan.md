@@ -602,3 +602,48 @@ Now `archSupported` includes `A_ALF`, so every arch saves `.pss`.
   reboot-class key, so a different cart reboots into the right one first. If the user
   answers "No", the state runs with the current cart (no cart = open bus, as on hardware).
 - Export: none (`machOf` has no ALF), as the table says.
+
+## Storage state (2026-10-13, NOT hw-tested)
+
+Before this a `.pss` restored the disks only as file names (CFG) plus the WD1793 registers
+(PSBD v1). Now every storage interface saves where it was, and a load says what does not
+match. All records are packed by the device module itself (`src/app/SnapPack.h`, LE), so
+Pss.cpp only frames them.
+
+- **Save flushes first** (`flushMedia`): WD1793 dirty tracks (UDI/FDI/MB-02) + `f_sync`,
+  the +3 DSK, the IDE images, the DivMMC card — the image on the card is what the RAM in
+  the snapshot expects.
+- **PSBD v2** (16 bytes): v1 + status high byte, command, `motor_frames`, flags (in-flight,
+  INTRQ, HLD). **v1 lost the status high byte** (the `Set*` flags: index, track 0, WP,
+  head), so a v1 file now gets defaults. A command in flight is finished on load: Type I
+  lands on its target track, Type II/III ends as Lost Data with INTRQ, i.e. the guest
+  retries — the same thing a real drive does after an interrupted transfer.
+- **PSUP** (`updSnapSave`, 42 bytes, Upd765.cpp): registers, phase, result bytes, head
+  positions; a pending seek is completed, an EXE phase ends as an overrun result.
+  `tools/upd765_test.cpp` `testSnapshot` covers mid-seek / mid-read / a damaged record.
+- **PSTP** (`Tape::snapSave`, <= 192 bytes): file type + size + block count must match the
+  mounted tape, else "position lost (file changed)". Stopped tape = block number; playing
+  = the whole pulse state machine (phase, bit, TZX loops/calls, PZX tables) + file offset
+  and the elapsed T-states, re-based on `CPU::global_tstates` after load. CSW and GDB
+  blocks are not resumable mid-block: they restart the block. Applied LAST, after the CPU.
+- **PSID** (`IDE::snapSave`): the ATA/ATAPI register file and the sector/packet buffer when
+  a transfer is in progress. Refused unless the same scheme has the same drives of the
+  same size.
+- **PSSD** (`DivMMC::snapCardSave`): the SD SPI machine (command frame, R1/token/CRC/busy
+  slots, CMD18 continuation, sector buffer) for DivMMC/esxDOS and the Z-Controller, plus
+  the divIDE taskfile. Refused for another mode or image size.
+- **PSNS** (`NgsSd::snapSave`, written by `GS::snapSave` beside PSGS): the NeoGS card's SD
+  interface; `service()` completes a pending core0 mailbox request first, so none is ever
+  saved. Applied inside `GS::snapLoadEnd` after `NgsSd::reset()`.
+- **PSMD**: key, path, size, FAT date/time of every mounted image (drives A-D, MB-02, +3,
+  tape, IDE, esxDOS HDFs, DOCK and ALF carts). After the load the report lists
+  "not found" / "not mounted" / "changed since" — a box, or boot notices on a resume.
+- **Write-protect** of every drive is a live CFG key now (`drive*.wp`, `mb02d*.wp`,
+  `p3d*.wp`), applied before the mount.
+- Not covered: WAV/MP3 tapes (only reported as not mounted — LoadRemembered does not
+  re-open them), MB-02's own state beyond its WD1793, SMUC/CMOS chips (their files on the
+  card are the battery), DOCK RAM chunks.
+- **Hw check owed**: a TRD loading through TR-DOS saved mid-load and resumed; a TAP/TZX
+  saved mid-block (Fast load off) resumes and loads; the +3 loader mid-read; an IDE copy in
+  progress (Profi CP/M, +3e); esxDOS mid-file; NeoGS NPL MP3 mid-track; a renamed image
+  -> the report box.

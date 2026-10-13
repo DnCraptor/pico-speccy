@@ -972,12 +972,19 @@ static inline void __not_in_flash_func(hdmi_x3_put)(uint slot, uint odd, hdmi_wo
     volatile hdmi_word_t *w = &hdmi_x3_page[slot * 4 + (odd & 1)];
     w[0] = a; w[1] = b; w[2] = c;
 }
-// A colour slot: the 2-px pair (w0, w1) of page A as [w0 w1 w0 w1].
+// A colour slot: the 2-px pair (w0, w1) of page A as [w0 w1 w0 w1] — both halves
+// are one colour there. In a packed-pair mode (DS80/ATM/GMX/TS TEXT/Timex hi-res)
+// they are two DIFFERENT pixels, and that pattern shows L R L / R L R: every glyph
+// doubled. [w0 w0 w1 w1] stretches the pair to L L R (even byte) / L R R (odd), i.e.
+// two source pixels -> three output pixels; over two bytes it is still 3 x w0 +
+// 3 x w1, so the pair's DC balance holds.
+static bool hdmi_x3_pairs = false;
 static void __not_in_flash_func(hdmi_x3_mirror)(uint slot) {
     if (!hdmi_x3_page) return;
     const hdmi_word_t w0 = hdmi_pa(slot, 0), w1 = hdmi_pa(slot, 1);
     volatile hdmi_word_t *w = &hdmi_x3_page[slot * 4];
-    w[0] = w0; w[1] = w1; w[2] = w0; w[3] = w1;
+    if (hdmi_x3_pairs) { w[0] = w0; w[1] = w0; w[2] = w1; w[3] = w1; }
+    else               { w[0] = w0; w[1] = w1; w[2] = w0; w[3] = w1; }
 }
 // The Data Island of set `set` (line bytes 0..14): hsync control, 8 preamble, 2
 // guard, 32 data, 2 trailing guard = 45 characters, read out of page A where
@@ -2503,6 +2510,38 @@ static inline void hdmi_emit_slot(uint8_t i, uint32_t c) {
                     hdmi_crt_tap(c, hdmi_crt_tap1));
     hdmi_write_pair(HDMI_PAGE_B, i, hdmi_crt_tap(c, hdmi_crt_tap2),
                     hdmi_crt_tap(c, hdmi_crt_tap3));
+#if !HDMI_EXPANDER
+    if (hdmi_x3_on) hdmi_x3_mirror(i);
+#endif
+}
+
+// The x3 modes (1280x720 / 1440x576 / 1024x768 x3 on the PIO path) scan out of their
+// own palette page, a mirror of page A. Every writer that fills page A directly —
+// the DS80/GMX/ATM/TS-TEXT/Timex pair tables and their restore — must re-mirror,
+// or those modes keep showing the previous table (only the plain ZX palette, which
+// goes through hdmi_emit_slot, used to reach them).
+static void hdmi_x3_resync(bool pairs) {
+    (void)pairs;
+#if !HDMI_EXPANDER
+    hdmi_x3_pairs = pairs;
+    if (!hdmi_x3_on) return;
+    // 250..254 are not colour slots for graphics_set_palette, but the pair table
+    // does use them, and x3 has no static content there (only 245..249).
+    for (int i = 0; i < 256; i++)
+        if (hdmi_palette_slot_writable((uint8_t)i) || (i >= 250 && i <= 254)) hdmi_x3_mirror((uint)i);
+#endif
+}
+
+// Whether graphics mode `mode` scans out through the x3 palette page, whose slots
+// 245..249 are line structure (edge byte, video preamble/guard): a packed-pair
+// table must not hand them out (Video.cpp init_profi_pair_lookup).
+bool hdmi_mode_uses_x3(int mode) {
+#if HDMI_EXPANDER
+    (void)mode;
+    return false;
+#else
+    return graphics_get_video_mode(mode).x3 != 0;
+#endif
 }
 
 void graphics_set_palette(uint8_t i, uint32_t color888) {
@@ -2523,9 +2562,6 @@ void graphics_set_palette(uint8_t i, uint32_t color888) {
     // palette entries at runtime from the emulation path (applyUlaPlusPalette) —
     // a walk-only design would silently un-grille every entry the guest touches.
     hdmi_emit_slot(i, color888 & 0x00ffffff);
-#if !HDMI_EXPANDER
-    if (hdmi_x3_on) hdmi_x3_mirror(i);
-#endif
 };
 
 static void hdmi_rebuild_page_b(void) {
@@ -2740,6 +2776,7 @@ void hdmi_set_profi_ds80_mode(bool active,
 
 #endif // !HDMI_EXPANDER
 
+        hdmi_x3_resync(true);
         __dmb(); // ensure all conv_color writes are visible to core1 before flag is set
         profi_ds80_active = true;
     } else {
@@ -2762,6 +2799,7 @@ void hdmi_set_profi_ds80_mode(bool active,
             }
         }
         hdmi_rebuild_page_b();      // page A restored above; B is re-derived
+        hdmi_x3_resync(false);
         profi_ds80_active = false;
         // Release the ~5 KB snapshot while DS80 is off (re-taken on next enable).
         free(conv_color_std_snapshot);
@@ -2801,8 +2839,9 @@ void graphics_init_hdmi() {
     dma_chan_pal_conv = dma_claim_unused_channel(true);
 #endif
     // (The command expander build claims no PIO at all: the line ISR writes pixel
-    // words itself. BoardPins::auxPio() still assumes HDMI owns pio2 — untrue here,
-    // harmless on PCp2, which has no W-board peripheral asking it.)
+    // words itself. BoardPins::auxPio() still assumes HDMI owns pio2 — untrue here
+    // and harmless: under HDMI it answers pio0, which the W boards' radio (MURM2_W,
+    // PCp2w) then has to itself; pio2 simply stays empty.)
 
     // Palette is initialized centrally by Video.cpp Init()
     hdmi_init();

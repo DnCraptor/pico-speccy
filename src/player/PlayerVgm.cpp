@@ -104,7 +104,6 @@ private:
     uint8_t* d_ = nullptr;         // file image (butter PSRAM)
     uint32_t n_ = 0;
     uint32_t pos_ = 0, dataStart_ = 0, loopPos_ = 0;
-    int      loopsLeft_ = 1;
     bool     ended_ = false;
     uint64_t acc_ = 0;             // 32.32 output-sample accumulator
     uint32_t pending_ = 0;         // output samples owed before the next command
@@ -259,9 +258,10 @@ bool VgmDecoder::open(const char* path) {
     const uint32_t loopRel = hdr(0x1C);
     loopPos_ = loopRel ? 0x1C + loopRel : 0;
     if (loopPos_ < dataStart_ || loopPos_ >= n_) loopPos_ = 0;
-    loopsLeft_ = loopPos_ ? 1 : 0;
+    // Loop count / fade: Decoder::loopPassed() at every end-of-data (0x66).
     const uint32_t total = hdr(0x18), loopS = hdr(0x20);
-    lenMs_ = (uint32_t)(((uint64_t)total + (loopPos_ ? loopS : 0)) * 1000 / 44100);
+    const uint32_t totalMs = (uint32_t)((uint64_t)total * 1000 / 44100);
+    lenMs_ = loopPos_ ? loopedLenMs(totalMs, (uint32_t)((uint64_t)loopS * 1000 / 44100)) : totalMs;
 
     b_ = (Bufs*)tryMalloc(sizeof(Bufs));
     if (!b_) b_ = (Bufs*)Buffer::palloc(sizeof(Bufs), Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
@@ -417,8 +417,9 @@ bool VgmDecoder::step() {
     if (pos_ >= n_) return false;
     const uint8_t c = d_[pos_];
     if (c == 0x66) {
-        if (loopsLeft_ > 0 && loopPos_) { loopsLeft_--; pos_ = loopPos_; return true; }
-        return false;
+        if (!loopPos_ || !loopPassed()) return false;
+        pos_ = loopPos_;
+        return true;
     }
     if (c == 0x67) {                                   // data block: 67 66 tt ssssssss
         if (pos_ + 7 > n_) return false;

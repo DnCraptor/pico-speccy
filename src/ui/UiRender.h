@@ -57,6 +57,10 @@ void markDirty(uint8_t bits);
 void markLeftRow(int visRow);
 void markRightRow(int visRow);
 void flushDirty();
+// Video > Palette preview swatches (rows under the options). End = give the 16
+// borrowed palette slots back (VIDEO::applyPalette); reinstallUi re-installs the
+// UI block afterwards, which a still-open menu needs and gfxEnd does not.
+void palPreviewEnd(bool reinstallUi = true);
 
 void drawFrameOnce();       // static chrome: background, panes, separator
 

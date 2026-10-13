@@ -105,6 +105,16 @@ public:
     // a link's ring (stale +IPD frames of a previous connection).
     static bool rxAvailable();
 
+#if PICOSPECCY_WIFI
+    // On-chip-WiFi boards only: the NIC served by the AT emulator (src/net/AtEmu)
+    // instead of an ESP on a UART. These are its ends of the two FIFOs.
+    static bool     atEmu;                   // the emulator is the far end now
+    static int      txPopByte();             // guest TX ring -> emulator, -1 = empty
+    static uint16_t rxRoom();                // free bytes in the guest RX ring
+    static void     rxPushBytes(const uint8_t* p, uint16_t n);
+    static uint32_t nicBaud();               // configured NIC rate, NIC-safe clamp
+#endif
+
 private:
     // RX ring: IRQ landing zone. Its SIZE follows what the link is doing, because
     // only one of its three jobs needs depth (rxWantSize() in ZiFi.cpp):

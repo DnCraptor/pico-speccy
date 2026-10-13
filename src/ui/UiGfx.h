@@ -97,6 +97,9 @@ void hline(int x, int y, int w, UiColor c);
 void vline(int x, int y, int h, UiColor c);
 void fill(int x, int y, int w, int h, UiColor c);
 void frame(int x, int y, int w, int h, UiColor c);
+// Fill with a raw hardware palette slot instead of a UI colour. Standard
+// (non-DS80) surface only — a pair-slot framebuffer has no free slots to show.
+void fillSlot(int x, int y, int w, int h, uint8_t slot);
 
 // Transparent glyph run. Returns the advance in logical pixels.
 int  text(int x, int y, const char* s, UiColor ink);

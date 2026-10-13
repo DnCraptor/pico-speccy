@@ -99,6 +99,9 @@
 #define TXT_AUD_SOUNDRIVE   "SounDrive"
 #define TXT_AUD_SAA         "SAA1099"
 #define TXT_AUD_BOOST       "Volume boost"
+#define TXT_AUD_PLAYER      "Pico-Zx-Player"
+#define TXT_PL_LOOPS        "Loop count"
+#define TXT_PL_FADE         "Fade time"
 #define TXT_VID_DMA         "DMA"
 #define TXT_VID_MODE        "Mode"
 #define TXT_VID_BORDER      "Render border"
@@ -193,7 +196,9 @@
 // files (swap, .idx) are deliberately not indicated. Not an on-screen indicator.
 #define TXT_HW_SDLED        "Board LED on SD access"
 #define TXT_HW_RTC          "CMOS + NVRAM"
-#define TXT_HW_MOUSE_SENS   "Mouse sensitivity"
+#define TXT_HW_MOUSE        "Mouse"
+#define TXT_HW_MOUSE_SENS   "Sensitivity"
+#define TXT_HW_MOUSE_SWAP   "Swap buttons"
 #define TXT_HW_OVERCLOCK    "Overclock"
 
 // ── Joystick ───────────────────────────────────────────────────────────────────

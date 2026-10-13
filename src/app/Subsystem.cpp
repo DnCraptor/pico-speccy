@@ -667,8 +667,24 @@ bool DmaSubsys::apply() {
     if (wanted == enabled) return true;
 
     if (wanted) {
+        // The transfer engine's code lives in the `.dmaovl` overlay window, which
+        // the heap owns on a session that came up with DMA off. The menu's live
+        // SET_DMA writes Config::dma_mode BEFORE this apply, and CPU::loop calls
+        // Z80DMA::handleDMA() on every slice while it is non-zero — so the window
+        // must be resident before the guest runs again, or the first slice jumps
+        // into whatever the heap left there (hw 2026-10-13: SIGBUS at the first
+        // instruction of Z80DMA::writePort, PC inside the window, a garbage
+        // literal pool; the only claim used to be the budget gate's). A refused
+        // claim leaves the feature OFF, Config included.
+        if (!CodeOverlay::claimForDma()) {
+            Debug::log("DmaSubsys: overlay window unavailable this session - DMA stays off");
+            Config::dma_mode = 0;
+            wanted = false;
+            return false;
+        }
         if (!Z80DMA::ensureAttrShadow()) {
             Debug::log("DmaSubsys: OOM, free=%u", (unsigned)getFreeHeap());
+            Config::dma_mode = 0;
             wanted = false;
             return false;
         }
