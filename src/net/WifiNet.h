@@ -34,6 +34,15 @@ bool ready();
 // (Config::zifi_transport == 2). ZiFiAT/ZiFiSock dispatch on this.
 bool selected();
 
+// Bring the radio's bus up (power-on + firmware download) if it is not yet. Tried
+// ONCE per session: a failed bring-up leaks a PIO SM/program and two DMA channels
+// in the SDK, so after the first failure this answers false without touching the
+// hardware again. Every call that would power the radio goes through it.
+bool busUp();
+// The radio was tried and did not answer (wrong W image for this module, or a
+// dead radio). Stays true for the session.
+bool radioDead();
+
 // Service the driver + lwIP. Cheap when idle. Called once per emulated frame
 // from ESPectrum::loop and inside every blocking wait of WifiNet/WifiSock.
 void poll();

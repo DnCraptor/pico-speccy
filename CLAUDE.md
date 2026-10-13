@@ -14966,3 +14966,18 @@ so). `debug/*p2w-*.elf` files from before 2026-10-12 are Waveshare builds.
   Plus 2 W is B → GPIO47).
 - Hw check owed (owner has a Pico Plus 2 W): boot + picture, `WiFi: cyw43_arch_init
   pins REG_ON=23 DATA=24 CLK=29 CS=25` and a join, sound on GP26-28, PSRAM 8 MB found.
+- **"No picture on m1p2w" (review, 2026-10-13): the PUBLISHED v1.0.9 `m1p2w` is the
+  Waveshare (`*_WS`) image** — radio on GPIO36-39, LED on GP23, audio on 40-42. On a
+  Pimoroni Pico Plus 2 W it is the wrong firmware; the new `*_W` image is the one for
+  that module. Two robustness fixes came out of reading the bring-up path (NOT
+  hw-tested, `debug/m1p2w-radiofix-1.0.9.uf2` / `m1p2ws-radiofix-`): (1) the boot
+  radio-LED blink (WS boards only — it powers the radio up, ~0.35 s + firmware load)
+  ran BEFORE `vga_start_semaphore`, i.e. with the screen dark; it now runs after video
+  starts. (2) **The SDK leaks on a failed CYW43 bring-up**: `cyw43_ll_bus_init` never
+  undoes `cyw43_spi_init`, so each retry claimed a fresh PIO SM + program + 2 DMA
+  channels (the `assert(!bus_data)` is compiled out) — twelve retries from the blink
+  alone. `WifiNet::busUp()` tries the bus ONCE per session (`cyw43_poll` != NULL =
+  up), `radioDead()` latches the failure; connect/scan/autoBegin/ledSet go through it,
+  the log names the pins, and a WS boot shows "WiFi radio not found: wrong W image?".
+  PIO budget of the m1p2w image measured from the ELF: pio2 HDMI 18/20 + radio 6,
+  pio0 SPI PSRAM 18/20 (+ VGA 1), pio1 PS/2 7 + pad 7 + I2S 8 — no block overflows.

@@ -13,6 +13,7 @@
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
+#include "hardware/timer.h"
 #include "lwip/netif.h"
 #include "lwip/dns.h"
 #include "lwip/udp.h"
@@ -59,6 +60,8 @@ extern "C" void picospeccy_lwip_free(void* p) {
 namespace {
 
 bool s_ready = false;
+// The radio's bus failed to come up once this session: never try again (busUp()).
+bool s_dead  = false;
 
 }  // namespace
 
@@ -327,6 +330,36 @@ int sntpStep(int tz, std::string* out_str, int& tries, uint32_t& send_deadline) 
 
 bool selected() { return Config::zifi_transport == 2; }
 
+// The bus (power-on + ~230 KB firmware download) comes up lazily, inside the first
+// cyw43 call that needs it. A FAILED bring-up is not undone by the SDK:
+// cyw43_ll_bus_init() leaves the PIO state machine, its program and the two DMA
+// channels cyw43_spi_init() claimed, and the next call claims a fresh set (the
+// assert(!bus_data) that would catch it is compiled out). A radio that does not
+// answer — e.g. a *_WS (Waveshare, radio on GPIO36-39) image on a Pimoroni Pico
+// Plus 2 W (radio on GP23-25/29), which is exactly what the v1.0.9 "m1p2w" was —
+// then lost a set on every LED blink and every WiFi action, ~0.35 s each. So the
+// bring-up is tried ONCE per session, and every entry point that would trigger it
+// goes through here.
+bool busUp() {
+    if (!s_ready || s_dead) return false;
+    if (cyw43_poll) return true;                 // already up
+    const uint32_t t0 = time_us_32();
+    const int rc = cyw43_gpio_set(&cyw43_state, CYW43_WL_GPIO_LED_PIN, false);
+    if (rc == 0 && cyw43_poll) {
+        Debug::log("WiFi: radio bus up in %u ms", (unsigned)((time_us_32() - t0) / 1000u));
+        return true;
+    }
+    s_dead = true;
+    Debug::log("WiFi: radio does not answer (rc=%d, REG_ON=%u DATA=%u CLK=%u CS=%u) - "
+               "wrong W image for this module? Radio off for this session",
+               rc, (unsigned)CYW43_PIN_WL_REG_ON, (unsigned)CYW43_PIN_WL_DATA_OUT,
+               (unsigned)CYW43_PIN_WL_CLOCK, (unsigned)CYW43_PIN_WL_CS);
+    logPioDmaClaims("dead");
+    return false;
+}
+
+bool radioDead() { return s_dead; }
+
 void poll() {
     if (s_ready) cyw43_arch_poll();
 }
@@ -345,7 +378,8 @@ bool ipString(char* out, size_t cap) {
 }
 
 int connect(const char* ssid_, const char* pass, uint32_t timeout_ms) {
-    if (!s_ready) { wlog("WiFi: radio not up"); return PICO_ERROR_GENERIC; }
+    if (!busUp()) { wlog(s_dead ? "WiFi: radio does not answer (wrong firmware image for this module?)"
+                                : "WiFi: radio not up"); return PICO_ERROR_GENERIC; }
     autoCancel();               // the user is driving the radio now
     snprintf(s_ssid, sizeof(s_ssid), "%s", ssid_ ? ssid_ : "");
     cyw43_arch_enable_sta_mode();
@@ -366,7 +400,7 @@ int connect(const char* ssid_, const char* pass, uint32_t timeout_ms) {
 }
 
 void disconnect() {
-    if (!s_ready) return;
+    if (!s_ready || !cyw43_poll) return;   // never up: nothing to leave (and no bring-up)
     autoCancel();               // or the boot FSM re-joins behind the user's back
     cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
     wlog("WiFi: disconnected");
@@ -387,7 +421,8 @@ int scanCb(void* env_, const cyw43_ev_scan_result_t* r) {
 }  // namespace
 
 int scan(std::string* out, int maxn, uint32_t timeout_ms) {
-    if (!s_ready) return 0;
+    if (!busUp()) { wlog(s_dead ? "WiFi: radio does not answer (wrong firmware image for this module?)"
+                                : "WiFi: radio not up"); return 0; }
     autoCancel();               // a scan cannot share the radio with a join
     ScanEnv env{ out, 0, maxn };
     cyw43_arch_enable_sta_mode();
@@ -417,7 +452,7 @@ bool sntpSync(int tz, std::string& out_str) {
 }
 
 void autoBegin(const char* ssid_, const char* pass, int tz, bool sntp) {
-    if (!s_ready) { a_state = A_FAIL; return; }
+    if (!busUp()) { a_state = A_FAIL; return; }
     snprintf(s_ssid, sizeof(s_ssid), "%s", ssid_ ? ssid_ : "");
     snprintf(a_pass, sizeof(a_pass), "%s", pass ? pass : "");
     a_tz = tz; a_join_tries = 0; a_sntp_tries = 0; a_sntp = sntp;
@@ -466,7 +501,7 @@ void autoPoll() {
 bool ready() { return s_ready; }
 
 void ledSet(bool on) {
-    if (!s_ready) return;
+    if (!busUp()) return;
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on);
 }
 

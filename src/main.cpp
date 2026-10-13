@@ -2222,6 +2222,16 @@ int main() {
         Debug::log2SD("main: WifiNet::init -> %d (SELECT_VGA=%d linkVGA01=%02X)",
                       (int)wok, (int)SELECT_VGA, (unsigned)linkVGA01);
     }
+#endif
+    Debug::log2SD("main: releasing vga_start_semaphore");
+    sem_release(&vga_start_semaphore);
+#if PICOSPECCY_WIFI
+    // The radio-LED blink powers the radio up (cyw43 brings its bus up lazily, in
+    // the first call that needs it: ~0.35 s of power sequencing plus the firmware
+    // download). It used to run BEFORE vga_start_semaphore, i.e. with core1 parked
+    // and the screen dark — so a radio that did not answer (a *_WS image on a
+    // module whose radio is elsewhere) held the picture back for every one of the
+    // twelve retries. Video is running now; WifiNet::busUp() tries the bus once.
     #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
     // LED1 lives on the radio module's own GPIO0, so it only blinks once the bus
     // is really up — a one-glance "the radio answered" indicator that needs no
@@ -2234,10 +2244,10 @@ int main() {
         WifiNet::ledSet(false);
         sleep_ms(33);
     }
+    // Shown on the first emulator frame (flushBootNotices).
+    if (WifiNet::radioDead()) osd_boot_notice("WiFi radio not found: wrong W image?");
     #endif
 #endif
-    Debug::log2SD("main: releasing vga_start_semaphore");
-    sem_release(&vga_start_semaphore);
     { extern size_t getFreeHeap(void); Debug::log("main: entering ESPectrum::loop(), freeHeap=%u", (unsigned)getFreeHeap()); }
     Debug::log2SD("main: entering ESPectrum::loop()");
     ESPectrum::loop();
