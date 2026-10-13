@@ -83,6 +83,11 @@ option(TSCONF_DRAM_MODEL "TS-Conf: model DRAM contention (CPU/video vs DMA) and 
 # initial value of the runtime flag ts_c1_enabled, which tsC1PlacementPoll()
 # already drives (core0 sync while a NeoGS is playing, core1 queue otherwise).
 # The queue is started lazily and only on TS-Conf, so there was nothing to gate.
+# Which ZX page blocks leave SRAM for butter PSRAM on butter boards, their SRAM going
+# to the framebuffer (ESPectrum.cpp donateZxPagesToFb). Block-granular: 0x0F = pages
+# 0-3, 0x50 = pages 4/6. 0x5F = the 2026-10-13 default; 0x50 keeps 0-3 (the usual
+# game code/data pages) in SRAM; 0x00 = the pre-v1.0.10 layout (FB on the heap).
+set(ZX_PSRAM_PAGES "0x5F" CACHE STRING "ZX pages moved to butter PSRAM, block mask (0x0F pages 0-3, 0x50 pages 4/6)")
 option(WD1793_IN_RAM "WD1793: keep the FDC step/read/write/_do code in SRAM (~6.8 KB). OFF since 2026-09-30: flash is fast enough now that the Z80 core is in SRAM" OFF)
 option(DIVMMC_HOT_IN_RAM "DivMMC/DivSD: keep the SD SPI read path (port 0xEB, mmc_read) in SRAM (~0.9 KB; every IN (EB) otherwise fetches flash code through the XIP cache the Next's butter RAM keeps busy)" ON)
 option(TSCONF_HOT_IN_RAM "TS-Conf: keep the #nnAF port / DMA / INT-source code in SRAM (~4 KB; ~0.8 ms/frame on port-heavy titles)" ON)

@@ -111,6 +111,7 @@ endif()
 # light enough for the 720x576 video-mode gate (FB grow 26.9 KB + 10 KB margin).
 set(TS_INT_RING_N "512" CACHE STRING "PERF_TRACE: TS-Conf INT-accept ring entries (power of two)")
 target_compile_definitions(${PROJECT_NAME} PRIVATE TS_INT_RING_N=${TS_INT_RING_N})
+target_compile_definitions(${PROJECT_NAME} PRIVATE ZX_PSRAM_PAGES=${ZX_PSRAM_PAGES})
 if(WD1793_IN_RAM)
     target_compile_definitions(${PROJECT_NAME} PRIVATE WD1793_IN_RAM=1)
 else()

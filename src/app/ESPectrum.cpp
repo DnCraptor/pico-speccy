@@ -712,6 +712,9 @@ static void assign_ram(int i, bool butterOnly = false) {
 // Two halves that must agree: the donation (here, before reserveFrameBuffer()) and
 // the re-binding (MEMORY SETUP below). Only pages whose donor the FB map actually
 // took leave SRAM — VIDEO::fbDonorsUsed() is the one source of that fact.
+#ifndef ZX_PSRAM_PAGES
+#define ZX_PSRAM_PAGES 0x5F
+#endif
 static uint32_t s_fbPages = 0;   // bit i = ZX page i's SRAM belongs to the framebuffer
 static void donateZxPagesToFb() {
   if (!butter_psram_size()) return;
@@ -741,8 +744,11 @@ static void donateZxPagesToFb() {
     Debug::log2SD("setup: ZX pages stay in SRAM: unexpected page layout");
     return;
   }
-  VIDEO::fbDonate(p0, 4u * MEM_PG_SZ, 0x0Fu);
-  VIDEO::fbDonate(p4, 2u * MEM_PG_SZ, 0x50u);   // pages 4/6; pages57 is NOT donated (see above)
+  // ZX_PSRAM_PAGES (CMake): which blocks go — an A/B switch for the guest-RAM-in-XIP
+  // cost (2026-10-13 FPS regression report at 576p). A block left out keeps its pages
+  // in SRAM and the framebuffer takes those rows from the heap instead.
+  if ((ZX_PSRAM_PAGES & 0x0F) == 0x0F) VIDEO::fbDonate(p0, 4u * MEM_PG_SZ, 0x0Fu);
+  if ((ZX_PSRAM_PAGES & 0x50) == 0x50) VIDEO::fbDonate(p4, 2u * MEM_PG_SZ, 0x50u);   // pages 4/6; pages57 is NOT donated (see above)
 }
 
 // One line with everything a machine-switch bug hides in: the paging latches that
