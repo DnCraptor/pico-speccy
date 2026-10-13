@@ -285,6 +285,7 @@ static const char* gs_trace_kind_name(uint8_t k) {
 
 bool     GS::enabled       = false;
 bool     GS::neogs         = false;
+volatile bool GS::idleThrottled = false;
 uint32_t GS::gs_ram_size   = 0;
 volatile uint8_t  GS::reg_command   = 0;
 volatile uint8_t  GS::reg_data_zx   = 0;
@@ -2205,6 +2206,9 @@ bool GS::init(uint32_t ram_size_bytes) {
             s_gs_work_ram = s_gs_ram + GS_WORK_RAM_OFF;
         } else {
             size_t wsz = s_ngs ? (NGS_LOW_RAM_SIZE + 0x2000) : GS_WORK_RAM_SIZE;
+            // Butter, not SRAM: a 72 KB SRAM placement for NeoGS was tried (2026-10-13)
+            // and bought nothing measurable — TheLink's dragon 14.9 ms/frame with the low
+            // RAM in butter vs 15.2 in SRAM — while costing 72 KB of heap.
             if (!s_workRamBuf.alloc(wsz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM)) return gs_init_failed();
             if (s_ngs) {
                 s_ngs_low_ram = s_workRamBuf.data();
@@ -2845,6 +2849,7 @@ void __not_in_flash_func(GS::pump)() {
                        && (uint32_t)(now - s_out_change_us) > GS_IDLE_US;
         if (idle != s_idle_throttled) {
             s_idle_throttled = idle;
+            GS::idleThrottled = idle;
             if (idle) s_idle_entries++;
         }
         if (idle) {

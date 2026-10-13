@@ -7485,6 +7485,153 @@ console's 4 KB ring is the price of the console (the boot burst is ~3.6 KB of li
 (PIO palette), aligning the window bases (the base tail dlmalloc cannot use would just
 become window slack).
 
+### ZX pages 0-3 live in butter PSRAM, their 64 KB is the framebuffer; pages 4-7 stay in SRAM (2026-10-13, plan item A; hw-measured)
+
+**Revised the same day — read this first.** All eight pages in butter cost TheLink's
+16col dragon (P1024, 7 MHz) 6 ms a frame: cpu 20.9 ms / 41 FPS against 14.9 with the
+pages in SRAM. The Pentagon 16col screen is four planes in pages 4/5 or 6/7 and the demo
+redraws it every frame through the XIP cache. Now only `pages0123` is donated
+(`donateZxPagesToFb`), 4-7 stay static SRAM: dragon 15.2 ms / 48.8 FPS. The FB takes
+182 rows (576p) / 204 rows (480p) from the strip and the rest from the heap (~38 KB at
+576p, ~11.5 KB at 480p). Pages 5/7 are every ZX machine's screen too, which is the
+general reason. The text below describes the all-eight cut; its measurements stand.
+The NeoGS-low-RAM-in-SRAM idea further down was REVERTED: 15.2 ms in SRAM vs 14.9 in
+butter on the same scene, for 72 KB of heap. Test ELF `debug/DVp2-zx47final-1.0.9.elf`
+(+ `-perf-`). **Hw-confirmed 2026-10-13 (owner: "работает").**
+
+The 576p + NeoGS + VDAC2 session fitted by ~7 KB (`~/.claude/plans/tsconf-sram-analysis.md`,
+the 520 KB pie), and the fixed `.ram_128k` strip (ZX pages 0-7 in SRAM on every boot) was
+the one structural lever. **Owner's rule: "128K in SRAM only makes sense on boards without
+PSRAM."** So on a butter board `ESPectrum::setup` now re-binds ALL eight pages to butter
+PSRAM like page 8 and up, and the 128 KB behind them carries the framebuffer: 103 680 B at
+360x288 fits the strip whole (182 + 91 + 15 rows out of the three static arrays), so the
+heap pays NOTHING for the FB. Boards without butter (MURM1 SPI, no chip, Debug > PSRAM
+off) keep the static SRAM pages, byte for byte.
+
+- **Measured BEFORE it became the rule, all eight pages in PSRAM, 576p + NeoGS + VDAC2,
+  PERF build with UART** (`logs/devttyACM0_2026_10_13.14.41.18.488.txt`): fishbone cpu
+  18.5 ms / 1.01M XIP miss/s / c1 16.9 / 48.8-48.9 FPS against 18.2 / 0.98M / 16.3 with
+  pages 0/2/5 in SRAM; TMNT 48.5-49.8; demo 200, RobFgift, kolbasa, nygift, wavering,
+  borntro12, ts_frac2, carousel, night_town all 48.4-49.1. Inside the noise. The
+  `[PERF] pages:` histograms had said why it could work: fishbone's CPU traffic is 100 %
+  pages 2/0/5 and TMNT's 90 % — small, sequential working sets the XIP cache holds.
+  `setup: COMPLETE freeHeap` on that PERF build: **83 632** (the plain HEAD cold boot of
+  the same session: 3 616). Owner: "точно не хуже по скорости и +100 КБ".
+- **Two halves that must agree, one source of truth.** `donateZxPagesToFb()`
+  (ESPectrum.cpp, right before the second `reserveFrameBuffer()`) registers the three
+  static arrays via `VIDEO::fbDonate(p, bytes, tag)` with the page bits as tag
+  (pages0123 = 0x0F, pages46 = 0x50, pages57 = 0xA0); `ensureMainFB` fills as many
+  whole rows of the CURRENT stride from each donor as it holds and takes only a
+  remainder off the heap; `VIDEO::fbDonorsUsed()` returns the OR of the tags the live
+  map took, and MEMORY SETUP re-binds exactly those pages (`assign_ram(i, butterOnly)` —
+  the heap branch of assign_ram would otherwise buy a page a NEW 16 KB of SRAM and
+  undo the trade). At 240 rows the third donor is not reached, so pages 5/7 stay in
+  SRAM there. A refused trade (butter budget short of `wanted + 2` pages — a
+  degraded TS-Conf or a Murmuzavr count past the chip — or a page layout that is not
+  MemESP.cpp's) keeps every page in SRAM and logs why.
+- **Re-bound pages are LOCKED out of the LRU pool**, and the binding ORDER is
+  0,1,2,3,4,6,5,7 so pages 5/7 (and 4/6) stay adjacent in butter as the static arrays
+  were: ZipExtract's tightest-board fallback borrows `ram[5]` as a 32 KB inflate
+  dictionary. The pool hazard is pre-existing and worth knowing: a pooled butter
+  page's eviction write-back goes to its page_idx offset, not its butter_idx one.
+- **The chunk map is general now**: `FbChunk {p, row0, rows, ext}` pieces of UNEQUAL
+  height (a donor is as tall as its bytes allow, a heap remainder is one block or 2..8
+  equal pieces — `mainFBHeapRows`), `mainRowPtr` is a linear scan over <= 12 pieces
+  (boot-only: the self-check and the pointer-array fill), `mainFBFree` frees only
+  `!ext` pieces. `nchunks == 0` is still the single heap block, so a boot without
+  donors is byte-for-byte what it was (the pre-Config `reserveFrameBuffer(false)` has
+  no donors; the second call rebuilds at the same size when donors are pending).
+- **What else the strip could carry**: at 576p ~27 KB of it is unused (pages57 minus
+  15 rows), at 480p ~51 KB (pages57 + the tail of pages46) — SRAM nobody can reach
+  today. Candidates: the TSC1 core1 ring block, the FT812 glue, the Helix arena, a
+  HeapRegions entry (the `.dmaovl` shape, but BELOW the heap base — check `hr_sbrk`'s
+  ordering first).
+- **Found on the way, fixed, hw-confirmed (fishbone + NeoGS 46 -> 48 at 576p)**: an
+  IDLE-THROTTLED NeoGS still took `GS::pump` slices between every batch of core1's
+  render lines — `ts_render_core1_prio()` gave the renderer priority only at a backlog
+  > 32, and a HALT-synced title (fishbone: 289 INT windows a frame) never queues that
+  many. core0 `wait` 0.6 -> 1.7 ms. `GS::idleThrottled` (set by pump() itself) +
+  `ts_render_core1_busy()`: while the card is unobservable, ANY queued line goes
+  first (main.cpp render_core). Boot, uploaded card code and a playing card keep the
+  old rule. Diagnosed from `[PERF] 60f`/`ts:` A/B logs — the page histogram had
+  already cleared the pages, which is what stopped a wrong fix.
+- Cost: +164 B `.bss` on every board (chunk table + donors) + 4 B for the GS flag.
+  Log lines: `VIDEO: main FB 101KB: 288 rows in 3 donated SRAM block(s) + 0 rows (0KB)
+  of heap in 0 chunk(s)`, `setup: ZX pages 0 1 2 3 4 5 6 7 -> butter, their SRAM holds
+  framebuffer rows`, `pageBudget ... (pages=258)` on TS-Conf; a refusal logs `ZX pages
+  stay in SRAM: ...`.
+- **Trap met on the way, worth keeping**: three A/B rounds compared builds that were
+  all HEAD-equivalent because VDAC2 had been switched off between runs (the first cut
+  was keyed on it) — read `pages=` / `main FB` out of each log BEFORE comparing FPS.
+- **Found by the re-test, unrelated to the pages (hw 2026-10-13, Pentagon + NeoGS +
+  Gigascreen, 576p): turning Z80 DMA ON from the menu SIGBUSed at the FIRST
+  instruction of `Z80DMA::writePort` — PC inside the `.dmaovl` window, a garbage
+  literal pool, LR = `CPU::loop` calling `Z80DMA::handleDMA()`.** The menu's live
+  SET_DMA writes `Config::dma_mode` and `reconcileSubsystems` runs `DmaSubsys::apply()`,
+  which only allocated the attribute shadow; the ONLY `CodeOverlay::claimForDma()` call
+  was in the budget gate's `setFeature`, so the overlay code was never loaded on that
+  path and CPU::loop's per-slice `handleDMA()` jumped into heap bytes on the first
+  frame after the menu closed. It had passed before only when SRAM still held the
+  window from an earlier boot with DMA on. `DmaSubsys::apply()` now claims first and
+  zeroes `Config::dma_mode` on a refusal (window touched, or OOM). Rule: a feature
+  whose code lives in an overlay window must claim it in EVERY enable path, and the
+  gate `CPU::loop` / `Ports` test (`Config::dma_mode`) must never be true before the
+  claim succeeded. **Second entry the same evening: `MB02::init()` wrote `dma_mode = 1`
+  outright** ("MB-02+ requires Z80-DMA on port #0B") — SIGBUS in `Z80DMA::processWR6`
+  right after enabling MB-02+ from the menu; it claims first now. Those were the only
+  two writers (grep `dma_mode = 1`); a boot with `dma_mode` persisted non-zero loads the
+  window in `CodeOverlay::apply`. The NeoGS ZX-DMA (`g_ngs_zxdma`, `.ngsovl`) is NOT the
+  same hazard: General Sound is reboot-class, so its window is only ever loaded at boot.
+- **Same session: `[MACH <tag>]` log line** (`ESPectrum::logMachineState`, from
+  `ESPectrum::reset` and `MachineSwitch::commit`): arch/romSet/romInUse + pagingLock /
+  notMore128 / newSRAM / page0ram / bankLatch / videoLatch / romLatch / MEM_PG_CNT + the
+  arch flags + trdos + multiplicator. Added because "Pentagon 1024 is not detected (NEO8)
+  until the machine has been switched a few times" — a sequence-dependent state the
+  `[reset] arch=` line could not show; the next report of that shape is read from it.
+- **REVERTED (no gain, see the top of this section) — Same session: NeoGS low RAM (64 KB + the 8 KB blank page) goes to SRAM when the heap
+  can spare it** (`GS::init`, `HOT_SRAM` behind a 56 KB spare, else butter as before;
+  the `GS::init: work/rings on heap/...` line says which). The GS-Z80 runs its firmware
+  from page 0 under NOROM and keeps its stack and mixer variables in the fixed 0x4000
+  window — ~3.4M XIP fetches/s through the one cache the ZX pages now share. Owner's
+  report: TheLink (Pentagon 1024 at 7 MHz + NeoGS + ZX-DMA) slowed once the ZX pages
+  moved to butter. NOT hw-tested; the Pentagon boot in the 14.53 log had `largest=71684`
+  at VIDEO::Init, i.e. the 73 728 B block may not fit on every boot — if the line says
+  `butter`, that is why, and the next lever is a 64 KB-only placement (blank page apart).
+- Test ELFs `debug/DVp2-zxpsram4-1.0.9.elf` (+ `.uf2`, `-perf-`) = pages/FB + gsprio + both DMA claims + `[MACH]` + NeoGS low RAM in SRAM.
+  **Owner is re-testing every machine on it.** What the measurement above does NOT
+  cover: 48K/128K/Pentagon at 3.5 MHz (the beam renderer reads page 5/7 per column
+  from PSRAM now), Profi DS80 / GMX / ATM whole-line modes, Timex hi-res, a Pentagon
+  16col title (`col16RenderLine` reads pages 4-7 — pointer-backed, so it works, speed
+  unmeasured), snapshot load/save, .pss, MB-02 / DivMMC page-0 windows, ZipExtract's
+  page-5/7 fallback on a tight board, 640x480 (pages 5/7 stay in SRAM there — a
+  different layout from 576p), and a Murmuzavr count past the chip (must refuse).
+- **Two things the re-test found, both fixed in `zxpsram6` (NOT hw-tested), neither
+  caused by the move:**
+  1. **"Pentagon 1024 + Gluk sees only 128K" = `MemESP::notMore128` was never cleared
+     by a reset.** `#EFF7` D2 ("behave as a 128K": the `#7FFD` D6/D7 page bits ignored,
+     D5 a real lock) is written by Pentagon::eff7Paging and read everywhere, and
+     `ESPectrum::reset` cleared newSRAM/page0ram/pagingLock but not it — a real RES
+     clears the whole register. Mr Gluk's service ROM writes `#EFF7` for its CMOS bit
+     (D2 along with it), so one Gluk session poisoned every later reset AND machine
+     switch; the `[MACH]` line showed `notMore128=1` carried from a 48K/128K session
+     into the P1024 switch, and the lock then kept eff7Paging (`!pagingLock` gate)
+     from ever clearing it, which is why "switch a few times and it works" (one P1024
+     session with the lock down happened to write D2=0). `reset` now zeroes
+     `notMore128` and `Ports::portEFF7`. **The `[MACH reset]` line moved to the END
+     of `reset(uint8_t)`** — it used to sit right after `[reset] arch=`, i.e. BEFORE
+     the memory block, and described the state the reset was about to clear.
+  2. **TheLink's dragon at 41.8 FPS / IDL -3.3 ms (UART console on) was the `[TSF]`
+     log line**: `tsFastMemRecalc` is called on every NeoGS ZX-DMA window open/close
+     and logged every transition — the dragon streams tens of DMA blocks a frame, so
+     hundreds of `Debug::log` (vsnprintf + an IRQ-off ring push each) per frame, the
+     ring overflowing and the lines interleaving into garbage. Now the first 8
+     transitions print as before (they say WHY the path is off) and after that one
+     summary line a second with the toggle count. A log line on a per-frame hot path
+     needs a budget or a rate — the GMX-trace lesson, again. The ZX pages' move may
+     still cost the effect something (`col16RenderLine` reads pages 4-7 from PSRAM
+     now, ~25 KB a frame): the `-perf-` build's `[PERF] 60f: cpu= xip=` on the dragon
+     scene is what separates the two, and is still owed.
+
 ### .bss batch 1: the "static so it stays off the stack" locals (2026-09-14; hw: owner ran the menu pages, "works, no problems")
 
 `.bss` 68 144 -> **57 060 B (-11 084)** on DVp2, `.data` unchanged, every board. The

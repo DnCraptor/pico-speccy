@@ -1092,6 +1092,14 @@ extern "C" void TS_RENDER_HOT ts_render_core1_pump() { VIDEO::tsRenderCore1Pump(
 extern "C" bool TS_RENDER_HOT ts_render_core1_prio() {
     return ts_c1_ring && (ts_c1_core0_waiting || (ts_c1_w - ts_c1_r) > 32);
 }
+// Any line queued at all. The stricter rule for an idle-throttled GS (main.cpp):
+// a HALT-synced title posts a few lines per interrupt window (fishbone: 289
+// windows a frame), so the backlog never reaches 32 and the >32 rule above let
+// an unobservable card take a pump slice between every batch — core0 then waited
+// for those lines (hw 2026-10-13, 576p: `wait` 0.6 -> 1.7 ms, 48.8 -> 46 FPS).
+extern "C" bool TS_RENDER_HOT ts_render_core1_busy() {
+    return ts_c1_ring && ts_c1_w != ts_c1_r;
+}
 // (ts_render_queue_on_c() is gone: GS::pump reads g_ts_c1_live directly. It
 // gates the NeoGS turbo-boot — 8x GS time per wall second on core1 while the
 // renderer needs ~75% of it is what made every demo open at 42 FPS for the ~6 s
@@ -3909,9 +3917,30 @@ static int fbCalcLines(int count) {
 #if FB_FORCE_CHUNKS && (FB_FORCE_CHUNKS < MAIN_CHUNKS_MIN || FB_FORCE_CHUNKS > MAIN_CHUNKS_MAX)
 #error "FB_FORCE_CHUNKS must be 0 or between MAIN_CHUNKS_MIN and MAIN_CHUNKS_MAX"
 #endif
-static uint8_t *sharedFB_mainChunk[MAIN_CHUNKS_MAX] = { nullptr };
-static int      sharedFB_main_nchunks = 0;   // 0 = single block
-static int      sharedFB_main_chunk_rows = 0;
+// Donated SRAM (2026-10-13, plan item A): on a butter-PSRAM board ESPectrum::setup
+// hands the framebuffer the 128 KB `.ram_128k` strip behind ZX pages 0-7 (the pages
+// are re-bound to butter PSRAM — measured within the noise at 14 MHz, see
+// donateZxPagesToFb) as three donors, one per static array: pages0123 (64 KB),
+// pages46, pages57 (32 KB each). A donor is a whole number of rows of the CURRENT
+// stride — 182 / 91 / 91 rows at 360, 204 / 102 / 102 at 320 — so the whole 288-row
+// FB fits the strip and 0 rows come off the heap; at 240 rows the third donor is
+// not reached and its pages stay in SRAM. Registered BEFORE reserveFrameBuffer();
+// the live map reports back which donors it took (fbDonorsUsed), and ONLY those
+// pages leave SRAM — the two decisions must not drift apart, or a page and the
+// framebuffer would share one block.
+#define FB_EXT_MAX 4
+struct FbDonor { uint8_t* p; size_t bytes; uint32_t tag; };
+static FbDonor  sharedFB_donor[FB_EXT_MAX];
+static int      sharedFB_ndonors = 0;
+static uint32_t sharedFB_donor_used = 0;     // OR of the tags the live map uses
+
+// The chunk map: every piece is a whole number of rows and pieces need not be equal
+// (a donor is as tall as its bytes allow, the heap remainder is one block or 2..8
+// equal pieces). nchunks == 0 is the plain single heap block in sharedFB_main —
+// byte-for-byte the path every board took before donors existed.
+struct FbChunk { uint8_t* p; uint16_t row0; uint16_t rows; bool ext; };
+static FbChunk  sharedFB_chunk[FB_EXT_MAX + MAIN_CHUNKS_MAX];
+static int      sharedFB_nchunks = 0;        // 0 = single block
 
 static uint8_t *sharedFB_main = nullptr;  // sized for current mode
 static uint8_t *sharedFB_prev = nullptr;  // sized for current mode (Gigascreen only)
@@ -3967,11 +3996,26 @@ extern size_t getFreeHeap(void);                // OSDMain.cpp (also declared be
 
 // Row `row` of the main FB, whichever way it is backed. Chunking is invisible
 // above the pointer arrays this fills.
+// Boot-time only (the self-check and the pointer-array fill), so the linear scan
+// over at most 12 chunks costs nothing anyone measures.
 static inline uint8_t* mainRowPtr(int row, int stride) {
-    if (!sharedFB_main_nchunks) return sharedFB_main + (size_t)row * stride;
-    const int c = row / sharedFB_main_chunk_rows;
-    return sharedFB_mainChunk[c]
-         + (size_t)(row - c * sharedFB_main_chunk_rows) * stride;
+    if (!sharedFB_nchunks) return sharedFB_main + (size_t)row * stride;
+    for (int c = 0; c < sharedFB_nchunks; c++) {
+        const FbChunk& k = sharedFB_chunk[c];
+        if (row < k.row0 + k.rows)
+            return k.p + (size_t)(row - k.row0) * stride;
+    }
+    const FbChunk& last = sharedFB_chunk[sharedFB_nchunks - 1];   // unreachable for row < lines
+    return last.p + (size_t)(last.rows - 1) * stride;
+}
+
+void VIDEO::fbDonate(uint8_t* p, size_t bytes, uint32_t tag) {
+    if (!p || sharedFB_ndonors >= FB_EXT_MAX) return;
+    sharedFB_donor[sharedFB_ndonors++] = { p, bytes, tag };
+}
+
+uint32_t VIDEO::fbDonorsUsed() {
+    return sharedFB_main ? sharedFB_donor_used : 0;
 }
 
 // Prove the chunk map before anything renders through it: every row must be
@@ -4009,72 +4053,114 @@ mainFBSelfCheck(int lines, int stride) {
 }
 
 static void mainFBFree() {
-    if (sharedFB_main_nchunks) {
-        for (int c = 0; c < sharedFB_main_nchunks; c++) {
-            free(sharedFB_mainChunk[c]);
-            sharedFB_mainChunk[c] = nullptr;
+    if (sharedFB_nchunks) {
+        for (int c = 0; c < sharedFB_nchunks; c++) {
+            if (!sharedFB_chunk[c].ext) free(sharedFB_chunk[c].p);   // donors are not ours
+            sharedFB_chunk[c].p = nullptr;
         }
     } else {
         free(sharedFB_main);
     }
     sharedFB_main = nullptr;
     sharedFB_main_size = 0;
-    sharedFB_main_nchunks = 0;
-    sharedFB_main_chunk_rows = 0;
+    sharedFB_nchunks = 0;
+    sharedFB_donor_used = 0;
 }
 
-static bool ensureMainFB(int lines, int stride) {
-    size_t want = fbMainBytes(lines, stride);
-    if (sharedFB_main && sharedFB_main_size == want) return true;
-    if (sharedFB_main) mainFBFree();
+// Fill `rest` rows starting at `row0` from the heap: one block when a hole that big
+// exists, else 2..8 equal whole-row pieces. Appends to sharedFB_chunk[] (from index
+// `nch`) and returns the new chunk count, or -1 with everything it took freed again.
+static int mainFBHeapRows(int nch, int row0, int rest, int stride) {
     // Probe before asking: pico_malloc PANICS on OOM instead of returning NULL, so
-    // the `!p` branch below never fires on this SDK and a too-small heap took the
-    // whole firmware down with "*** PANIC *** Out of memory" (hw 2026-08-13: 720x576
-    // + NeoGS + MIDI, 149 KB free but no contiguous 104 040 B block). With the probe
-    // the caller gets false and can fall back / report.
-    if (!FB_FORCE_CHUNKS && getLargestAllocatable() >= want) {
-        uint8_t *p = (uint8_t*)malloc(want);
+    // a `!p` test alone never fires on this SDK and a too-small heap took the whole
+    // firmware down with "*** PANIC *** Out of memory" (hw 2026-08-13: 720x576 +
+    // NeoGS + MIDI, 149 KB free but no contiguous 104 040 B block). With the probe
+    // the caller gets a failure and can fall back / report.
+    if (!FB_FORCE_CHUNKS && getLargestAllocatable() >= (size_t)rest * stride) {
+        uint8_t *p = (uint8_t*)malloc((size_t)rest * stride);
         if (p) {
-            memset(p, 0, want);
-            sharedFB_main = p;
-            sharedFB_main_size = want;
-            return true;
+            memset(p, 0, (size_t)rest * stride);
+            sharedFB_chunk[nch++] = { p, (uint16_t)row0, (uint16_t)rest, false };
+            return nch;
         }
     }
     // No hole that big: split across whole-row chunks, fewest first.
     for (int n = FB_FORCE_CHUNKS ? FB_FORCE_CHUNKS : MAIN_CHUNKS_MIN;
          n <= MAIN_CHUNKS_MAX; n *= 2) {
-        const int rows = (lines + n - 1) / n;
-        int got = 0;
+        const int rows = (rest + n - 1) / n;
+        int got = nch;
         bool ok = true;
         for (int c = 0; c < n; c++) {
             const int r0 = c * rows;
-            if (r0 >= lines) break;                      // fewer chunks than n suffice
-            const int rc = (r0 + rows <= lines) ? rows : (lines - r0);
+            if (r0 >= rest) break;                       // fewer chunks than n suffice
+            const int rc = (r0 + rows <= rest) ? rows : (rest - r0);
             const size_t bytes = (size_t)rc * stride;
             if (getLargestAllocatable() < bytes) { ok = false; break; }
             uint8_t *cp = (uint8_t*)malloc(bytes);
             if (!cp) { ok = false; break; }
             memset(cp, 0, bytes);
-            sharedFB_mainChunk[c] = cp;
-            got = c + 1;
+            sharedFB_chunk[got++] = { cp, (uint16_t)(row0 + r0), (uint16_t)rc, false };
         }
-        if (ok) {
-            sharedFB_main_nchunks    = got;
-            sharedFB_main_chunk_rows = rows;
-            sharedFB_main            = sharedFB_mainChunk[0];  // also the "exists" marker
-            sharedFB_main_size       = want;
-            // A broken map must not reach the renderer: fail the allocation instead,
-            // which the callers already handle (mode downgrade / legacy path).
-            if (!mainFBSelfCheck(lines, stride)) { mainFBFree(); return false; }
-            Debug::log("VIDEO: main FB %uKB in %d chunks x %d rows%s",
-                       (unsigned)(want >> 10), got, rows,
-                       FB_FORCE_CHUNKS ? " (FB_FORCE_CHUNKS)" : " (fragmented heap)");
-            return true;
-        }
-        for (int c = 0; c < got; c++) { free(sharedFB_mainChunk[c]); sharedFB_mainChunk[c] = nullptr; }
+        if (ok) return got;
+        for (int c = nch; c < got; c++) { free(sharedFB_chunk[c].p); sharedFB_chunk[c].p = nullptr; }
     }
-    return false;
+    return -1;
+}
+
+static bool ensureMainFB(int lines, int stride) {
+    size_t want = fbMainBytes(lines, stride);
+    // Donors registered since the block was built (the pre-Config claim in setup()
+    // has none) mean a rebuild even at the same size — that is the whole point.
+    const bool donorsPending = sharedFB_ndonors && !sharedFB_donor_used;
+    if (sharedFB_main && sharedFB_main_size == want && !donorsPending) return true;
+    if (sharedFB_main) mainFBFree();
+    if (!sharedFB_ndonors) {
+        // The plain path: ONE heap block (nchunks stays 0 — every board, every boot
+        // without donors is byte-for-byte what it always was), else the pieces.
+        if (!FB_FORCE_CHUNKS && getLargestAllocatable() >= want) {
+            uint8_t *p = (uint8_t*)malloc(want);
+            if (p) {
+                memset(p, 0, want);
+                sharedFB_main = p;
+                sharedFB_main_size = want;
+                return true;
+            }
+        }
+    }
+    int nch = 0, row = 0;
+    uint32_t used = 0;
+    for (int d = 0; d < sharedFB_ndonors && row < lines; d++) {
+        int rows = (int)(sharedFB_donor[d].bytes / (size_t)stride);
+        if (rows > lines - row) rows = lines - row;
+        if (rows <= 0) continue;
+        sharedFB_chunk[nch++] = { sharedFB_donor[d].p, (uint16_t)row, (uint16_t)rows, true };
+        used |= sharedFB_donor[d].tag;
+        row += rows;
+    }
+    const int heapRows = lines - row;
+    if (heapRows > 0) {
+        const int got = mainFBHeapRows(nch, row, heapRows, stride);
+        if (got < 0) return false;
+        nch = got;
+    }
+    sharedFB_nchunks    = nch;
+    sharedFB_main       = sharedFB_chunk[0].p;   // also the "exists" marker
+    sharedFB_main_size  = want;
+    sharedFB_donor_used = used;
+    // A broken map must not reach the renderer: fail the allocation instead,
+    // which the callers already handle (mode downgrade / legacy path).
+    if (!mainFBSelfCheck(lines, stride)) { mainFBFree(); return false; }
+    int extRows = 0, extN = 0;
+    for (int c = 0; c < nch; c++) if (sharedFB_chunk[c].ext) { extRows += sharedFB_chunk[c].rows; extN++; }
+    if (extN)
+        Debug::log("VIDEO: main FB %uKB: %d rows in %d donated SRAM block(s) + %d rows (%uKB) of heap in %d chunk(s)",
+                   (unsigned)(want >> 10), extRows, extN, heapRows,
+                   (unsigned)(((size_t)heapRows * stride) >> 10), nch - extN);
+    else
+        Debug::log("VIDEO: main FB %uKB in %d chunks x %d rows%s",
+                   (unsigned)(want >> 10), nch, sharedFB_chunk[0].rows,
+                   FB_FORCE_CHUNKS ? " (FB_FORCE_CHUNKS)" : " (fragmented heap)");
+    return true;
 }
 
 // Row `row` of the prev-FB, whichever way it is backed. The ONLY way the render
@@ -4771,7 +4857,7 @@ void VIDEO::reserveFrameBuffer(bool configKnown) {
     if (sharedFB_arr1 && ensureMainFB(lines, stride)) {
         Debug::log("VIDEO: FB reserved %ux%u (%u B) in %d block(s), freeHeap=%u largest=%u",
                    (unsigned)stride, (unsigned)lines, (unsigned)fbMainBytes(lines, stride),
-                   sharedFB_main_nchunks ? sharedFB_main_nchunks : 1,
+                   sharedFB_nchunks ? sharedFB_nchunks : 1,
                    (unsigned)getFreeHeap(), (unsigned)getLargestAllocatable());
         return;
     }
@@ -6432,9 +6518,29 @@ void VIDEO::tsFastMemRecalc() {
                        && !g_ngs_zxdma && !MemESP::divmmc_mapped) ? 1 : 0;
     if (v != g_ts_fastmem) {
         g_ts_fastmem = v;
-        Debug::log("[TSF] fast memory path %s (render=%u armed=%u ft=%u bp=%d/%d zxdma=%u divmmc=%u)", v ? "ON" : "off",
-                   ts_render_live, (unsigned)ts_fast_armed, (unsigned)ft_live, Config::numMemReadBP, Config::numMemWriteBP,
-                   (unsigned)g_ngs_zxdma, (unsigned)MemESP::divmmc_mapped);
+        // The NeoGS ZX-DMA window flips this on EVERY open/close, and a demo that
+        // streams through it (TheLink's dragon: tens of DMA blocks a frame) made
+        // this one line the dominant cost of the frame on a UART-console build —
+        // each Debug::log is a vsnprintf plus an IRQ-off ring push, hundreds of
+        // them a frame (hw 2026-10-13: 41.8 FPS / IDL -3.3 ms with the log
+        // interleaving itself into garbage; the ring was overflowing). The first
+        // transitions are printed as before — they say WHY the path is off — and
+        // after that one summary line a second carries the count.
+        static uint32_t s_tsf_lines = 0, s_tsf_toggles = 0, s_tsf_last_us = 0;
+        const uint32_t now = time_us_32();
+        ++s_tsf_toggles;
+        if (s_tsf_lines < 8) {
+            ++s_tsf_lines;
+            Debug::log("[TSF] fast memory path %s (render=%u armed=%u ft=%u bp=%d/%d zxdma=%u divmmc=%u)", v ? "ON" : "off",
+                       ts_render_live, (unsigned)ts_fast_armed, (unsigned)ft_live, Config::numMemReadBP, Config::numMemWriteBP,
+                       (unsigned)g_ngs_zxdma, (unsigned)MemESP::divmmc_mapped);
+            s_tsf_last_us = now;
+        } else if ((uint32_t)(now - s_tsf_last_us) >= 1000000u) {
+            Debug::log("[TSF] fast memory path %s - %u toggles (zxdma=%u divmmc=%u)", v ? "ON" : "off",
+                       (unsigned)s_tsf_toggles, (unsigned)g_ngs_zxdma, (unsigned)MemESP::divmmc_mapped);
+            s_tsf_toggles = 0;
+            s_tsf_last_us = now;
+        }
     }
 }
 

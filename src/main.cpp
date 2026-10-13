@@ -1048,6 +1048,7 @@ void repeat_me_for_input() {
 
 extern "C" void ts_render_core1_pump(void);
 extern "C" bool ts_render_core1_prio(void);   // render queue pre-empts GS::pump (Video.cpp)
+extern "C" bool ts_render_core1_busy(void);   // ...and ANY queued line does while the GS is idle-throttled
 extern "C" volatile bool g_ts_c1_live;       // TS-Conf lines on core1 right now (Video.cpp)
 extern "C" volatile bool g_ft_c1_live;       // TS-Conf VDAC2: the FT812 frame renderer is live (Video.cpp)
 extern "C" void ft812_render_core1_pump(void);
@@ -1115,7 +1116,19 @@ void __scratch_x("render") render_core() {
         // Sound = Off, so calling either there would be a jump into heap data.
         // This is the ONLY GS entry point outside src/speccy/devices/gs/ that was not already
         // behind GS::enabled / GS::neogs / g_ngs_zxdma.
-        if (GS::enabled && (!g_ts_c1_live || !ts_render_core1_prio() || GS::hostActive())) GS::pump();
+        // Idle-throttled card (GS::idleThrottled, set by pump() itself): nobody can
+        // observe it, so ANY queued line goes first — the >32 rule let it take a
+        // slice between every batch of a HALT-synced title's lines (fishbone,
+        // 289 windows a frame): core0 `wait` 0.6 -> 1.7 ms, 48.8 -> 46 FPS at 576p
+        // (hw 2026-10-13). hostActive() is false by construction while throttled.
+        if (GS::enabled) {
+            bool run = true;
+            if (g_ts_c1_live) {
+                if (GS::idleThrottled)            run = !ts_render_core1_busy();
+                else if (ts_render_core1_prio())  run = GS::hostActive();
+            }
+            if (run) GS::pump();
+        }
 #endif
         tight_loop_contents();
     }

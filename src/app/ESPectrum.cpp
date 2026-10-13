@@ -579,7 +579,14 @@ void ESPectrum::bootKeyboard() {
 //=======================================================================================
 extern int ram_pages, butter_pages, psram_pages, swap_pages;
 
-static void assign_ram(int i) {
+// `butterOnly`: the page is placed in butter PSRAM whatever the heap holds — for a
+// ZX page 0-7 whose SRAM was handed to the framebuffer (donateZxPagesToFb below),
+// where the heap branch would silently buy it a NEW 16 KB of SRAM and undo the
+// trade. Such a page is also LOCKED (never in the LRU pool): a pooled butter page
+// can be picked as the victim for a swap page's materialize (Murmuzavr past the
+// chip), and the eviction write-back of a butter page goes to its page_idx offset,
+// not its butter_idx one — a latent hazard for pages 8+ that pages 0-7 must not join.
+static void assign_ram(int i, bool butterOnly = false) {
   // Not the raw chip size: Buffer::pageBudget* holds back what GS, DivMMC and the
   // Buffer arena need above the pages. Without that a large Murmuzavr page count ate
   // the whole chip and everything that belongs in PSRAM landed on the heap instead
@@ -645,10 +652,10 @@ static void assign_ram(int i) {
   // gain on butter once the platform-independent costs were fixed (AY/SAA
   // silent paths, WD step path in SRAM, FDDStep fast exit, strcmp removal,
   // idle-window track loads) — the forced-SRAM pages only spent ~64 KB heap.
-  bool force_sram_locked = (Config::arch == A_PROFI)
+  bool force_sram_locked = !butterOnly && (Config::arch == A_PROFI)
                            && (i == 56 || i == 58)
                            && (butter_psram_size() == 0);
-  bool force_sram = (Config::arch == A_PROFI)
+  bool force_sram = !butterOnly && (Config::arch == A_PROFI)
                     && (i == 61 || i == 60)
                     && (butter_psram_size() == 0);
   if (force_sram_locked) {
@@ -657,13 +664,13 @@ static void assign_ram(int i) {
   } else if (force_sram) {
     MemESP::ram[i].assign_ram(new unsigned char[MEM_PG_SZ], i, false); // unlocked → in pool
     ++ram_pages;
-  } else if (getFreeHeap() >= MEM_PG_SZ + MEM_REMAIN) {
+  } else if (!butterOnly && getFreeHeap() >= MEM_PG_SZ + MEM_REMAIN) {
     MemESP::ram[i].assign_ram(new unsigned char[MEM_PG_SZ], i, false);
     ++ram_pages;
   } else {
     if (butter_remains >= MEM_PG_SZ) {
       MemESP::ram[i].assign_ram(
-          (uint8_t *)PSRAM_DATA + (butter_idx++) * MEM_PG_SZ, i, /*locked=*/butter_holds_all);
+          (uint8_t *)PSRAM_DATA + (butter_idx++) * MEM_PG_SZ, i, /*locked=*/butterOnly || butter_holds_all);
       butter_remains -= MEM_PG_SZ;
       ++butter_pages;
     } else if (spi_budget >= ((size_t)MEM_PG_SZ * (i + 1))) {
@@ -674,6 +681,84 @@ static void assign_ram(int i) {
       ++swap_pages;
     }
   }
+}
+
+// ZX pages 0-7 live in butter PSRAM on every board that has it, and the 128 KB
+// `.ram_128k` strip behind them carries the FRAMEBUFFER (2026-10-13, owner's
+// call: "128K in SRAM only makes sense on boards without PSRAM"). Measured before
+// it was made the rule — all eight pages in PSRAM, 576p + NeoGS + VDAC2, PERF build:
+// fishbone cpu 18.5 ms / 1.01M XIP miss/s / 48.9 FPS against 18.2 / 0.98M with pages
+// 0/2/5 in SRAM, TMNT 48.5-49.8, every other TS demo tried at 48.4-49.1 — i.e. inside
+// the noise, while the heap at `setup: COMPLETE` went from ~3.6 KB (cold) to 83 KB.
+// (The first cut, keyed on VDAC2 and donating pages 1/3/4/6 only, is superseded.)
+// The whole FB fits the strip (103 680 B at 360x288 against 131 072), so the heap
+// pays nothing for it; at 640x480 the FB takes 240 of the strip's rows and the
+// donors it does not reach keep their pages in SRAM (see fbDonorsUsed below).
+// Boards without butter PSRAM (MURM1 SPI, no chip, the Debug > PSRAM kill-switch)
+// keep the static SRAM pages and are byte-for-byte unchanged.
+// ONLY PAGES 0-3 ARE DONATED, 4-7 stay in SRAM (hw 2026-10-13): the Pentagon 16col
+// screen is four planes in pages 4/5 or 6/7, and a guest that redraws it every frame
+// pays for every write through the XIP cache — TheLink's dragon (P1024, 7 MHz, 16col)
+// ran cpu 20.9 ms / 41 FPS with all eight pages in butter, 14.9-15.2 ms / 48.8 with
+// 4-7 in SRAM, same as all eight there. Pages 5/7 are also every ZX machine's screen.
+// The FB takes 64 KB from the strip and the rest from the heap (576p ~38 KB, 480p
+// ~11.5 KB).
+// Two halves that must agree: the donation (here, before reserveFrameBuffer()) and
+// the re-binding (MEMORY SETUP below). Only pages whose donor the FB map actually
+// took leave SRAM — VIDEO::fbDonorsUsed() is the one source of that fact.
+static uint32_t s_fbPages = 0;   // bit i = ZX page i's SRAM belongs to the framebuffer
+static void donateZxPagesToFb() {
+  if (!butter_psram_size()) return;
+  // The strip takes pages 8..wanted+1 out of the butter budget (assign_ram); pages
+  // 0-7 come on top. A short budget would push the tail onto SD swap — the "degraded"
+  // TS-Conf, or a Murmuzavr count past the chip — which is worse than 128 KB of heap,
+  // so refuse instead and keep the SRAM pages.
+  const size_t wanted = Config::wantedPages(Config::arch);
+  const size_t need   = (wanted + 2) * (size_t)MEM_PG_SZ;
+  if (Buffer::pageBudgetButter() < need) {
+    Debug::log2SD("setup: ZX pages stay in SRAM: butter budget %uKB < %uKB for %u pages",
+                  (unsigned)(Buffer::pageBudgetButter() >> 10), (unsigned)(need >> 10),
+                  (unsigned)(wanted + 2));
+    return;
+  }
+  // The three static arrays behind the pages (MemESP.cpp): pages0123, pages46,
+  // pages57 — one donor each, so a 360-wide row that straddles a page boundary
+  // inside an array is not lost to a split. The tag is the page bits.
+  uint8_t* p0 = MemESP::ram[0].direct();
+  uint8_t* p4 = MemESP::ram[4].direct();
+  uint8_t* p5 = MemESP::ram[5].direct();
+  const bool c0123 = MemESP::ram[1].direct() == p0 + MEM_PG_SZ && MemESP::ram[2].direct() == p0 + 2 * MEM_PG_SZ
+                  && MemESP::ram[3].direct() == p0 + 3 * MEM_PG_SZ;
+  const bool c46 = MemESP::ram[6].direct() == p4 + MEM_PG_SZ;
+  const bool c57 = MemESP::ram[7].direct() == p5 + MEM_PG_SZ;
+  if (!c0123 || !c46 || !c57) {           // not the layout MemESP.cpp declares — leave it alone
+    Debug::log2SD("setup: ZX pages stay in SRAM: unexpected page layout");
+    return;
+  }
+  VIDEO::fbDonate(p0, 4u * MEM_PG_SZ, 0x0Fu);
+  // pages46 / pages57 are NOT donated: the screen pages stay in SRAM (see above).
+}
+
+// One line with everything a machine-switch bug hides in: the paging latches that
+// survive a LIVE MachineSwitch (no setup(), no re-laid strip) and the flags
+// CPU::reset derives from the arch. Added 2026-10-13 after "Pentagon 1024 is not
+// detected (by NEO8) until the machine has been switched a few times" — a
+// sequence-dependent state that the `[reset] arch=` line alone could not show.
+// Goes to the SD log too, so a report without a UART still carries it.
+void ESPectrum::logMachineState(const char* tag) {
+  char line[240];
+  snprintf(line, sizeof(line),
+           "[MACH %s] arch=%s romSet=%s romInUse=%u pagingLock=%u notMore128=%u newSRAM=%u page0ram=%u "
+           "bankLatch=%u videoLatch=%u romLatch=%u MEM_PG_CNT=%u mb02=%u dma=%u is48=%d is128=%d pent=%d is512=%d "
+           "is1024=%d trdos=%d mult=%u",
+           tag, archToStr(Config::arch), romsetToStr(Config::romSet), (unsigned)MemESP::romInUse,
+           (unsigned)MemESP::pagingLock, (unsigned)MemESP::notMore128, (unsigned)MemESP::newSRAM,
+           (unsigned)MemESP::page0ram, (unsigned)MemESP::bankLatch, (unsigned)MemESP::videoLatch,
+           (unsigned)MemESP::romLatch, (unsigned)MEM_PG_CNT, (unsigned)Config::mb02, (unsigned)Config::dma_mode,
+           (int)Z80Ops::is48, (int)Z80Ops::is128, (int)Z80Ops::isPentagon, (int)Z80Ops::is512,
+           (int)Z80Ops::is1024, (int)ESPectrum::trdos, (unsigned)ESPectrum::multiplicator);
+  Debug::log("%s", line);      // UART: log2SD alone never reaches a serial capture
+  Debug::log2SD("%s", line);
 }
 
 // Which output the board drives this boot: the config override (video_driver) or,
@@ -838,7 +923,15 @@ void ESPectrum::setup() {
   // they were entitled to — each of them has a PSRAM/SD-swap tier to fall back on,
   // the framebuffer does not.
   resolveVideoOutput();
+  donateZxPagesToFb();
   VIDEO::reserveFrameBuffer();
+  s_fbPages = VIDEO::fbDonorsUsed();
+  if (s_fbPages) {
+    char pg[24]; int n = 0;
+    for (int i = 0; i < 8; ++i) if (s_fbPages & (1u << i)) n += snprintf(pg + n, sizeof(pg) - n, "%d ", i);
+    Debug::log2SD("setup: ZX pages %s-> butter, their SRAM holds framebuffer rows, freeHeap=%u",
+                  pg, (unsigned)getFreeHeap());
+  }
   // core1's TS-Conf line-render block (job ring + TSU/SFILE snapshots, ~10.5 KB),
   // claimed HERE and not on first use. Same reason the framebuffer is claimed
   // early: it needs one contiguous SRAM block plus HOT_SRAM's 8 KB of spare, and
@@ -1083,14 +1176,27 @@ void ESPectrum::setup() {
     // counted in ram_pages — keep that behaviour.
     ram_pages += 4;
     ram_pages += 2;
+    // Pages whose SRAM the framebuffer took (donateZxPagesToFb): re-bind them to
+    // butter FIRST, before anything below can hand their old pointer around. From
+    // here on nothing may read the static array behind them as ZX RAM. The order
+    // keeps 5/7 (and 4/6) ADJACENT in butter, as the static arrays were: ZipExtract's
+    // tightest-board fallback borrows ram[5] as a 32 KB inflate dictionary.
+    static const uint8_t kOrder[8] = { 0, 1, 2, 3, 4, 6, 5, 7 };
+    for (int k = 0; k < 8; ++k) {
+      const int i = kOrder[k];
+      if (!(s_fbPages & (1u << i))) continue;
+      assign_ram(i, /*butterOnly=*/true);
+      --ram_pages;
+    }
     // Add pages 1,2,3 to the LRU pool using their existing static SRAM buffers.
     // Without this the pool is empty on SPI-PSRAM and SWAP-only boards (pages 8+
     // are assign_vram/PSRAM_SPI, never pooled), so _sync() can never find an
     // eviction victim → MB-02 SRAM sync(0) returns NULL → applyMapping() falls
-    // back to ROM → BS-DOS crashes on every page switch.
-    MemESP::ram[1].assign_ram(MemESP::ram[1].direct(), 1, false);
-    MemESP::ram[2].assign_ram(MemESP::ram[2].direct(), 2, false);
-    MemESP::ram[3].assign_ram(MemESP::ram[3].direct(), 3, false);
+    // back to ROM → BS-DOS crashes on every page switch. A page re-bound to
+    // butter above is already locked out of the pool.
+    if (!(s_fbPages & (1u << 1))) MemESP::ram[1].assign_ram(MemESP::ram[1].direct(), 1, false);
+    if (!(s_fbPages & (1u << 2))) MemESP::ram[2].assign_ram(MemESP::ram[2].direct(), 2, false);
+    if (!(s_fbPages & (1u << 3))) MemESP::ram[3].assign_ram(MemESP::ram[3].direct(), 3, false);
     Debug::log("setup: ext_ram: pages 0-7 done, freeHeap=%u", getFreeHeap());
     for (size_t i = 8; i < (MEM_PG_CNT + 2); ++i) {
       assign_ram(i);
@@ -1764,6 +1870,9 @@ void ESPectrum::reset(uint8_t romInUse) {
   ESPectrum::trdos = (Config::arch == A_PROFI && romInUse == 0);
 
   Debug::log("[reset] arch=%s romInUse=%d trdos=%d", archToStr(Config::arch), romInUse, (int)ESPectrum::trdos);
+  // The [MACH reset] line is printed at the END of this function — here it would
+  // show the state the reset is about to clear (hw 2026-10-13: "pagingLock=1
+  // notMore128=1" on a line that claimed to describe the reset machine).
 #if FDD_PORT_TRACE
   // g_fdcCmdCount gates the [WR→DIR]/[WR→RSTVEC]/[WR→CBIOS] write-count caps
   // in MemESP.h (only trace once real disk activity starts, skipping the
@@ -1790,6 +1899,16 @@ void ESPectrum::reset(uint8_t romInUse) {
   MemESP::videoLatch = 0;
   MemESP::romLatch = 0;
   MemESP::newSRAM = false;
+  // A reset clears #EFF7 on a Pentagon-1024SL, and D2 (notMore128 = "behave as a
+  // 128K": the #7FFD D6/D7 page bits ignored, D5 a real lock) lives in it — yet
+  // nothing here ever cleared it, so a session that had set it (Mr Gluk's
+  // service ROM writes #EFF7 for its CMOS bit, D2 included) handed it to every
+  // later reset AND every later machine switch: a Pentagon 1024 came up seeing
+  // 128K and the lock then kept Pentagon::eff7Paging from ever clearing it
+  // (hw 2026-10-13, P1024 + Gluk: "видно только 128"; the [MACH] line showed
+  // notMore128=1 carried across machines). The register image follows it.
+  MemESP::notMore128 = 0;
+  Ports::portEFF7 = 0;
   // Reset clears #EFF7, so a guest-held CPU-speed override (EFF7 D4 on
   // Pentagon-1024SL, #028B on Profi) dies with it — back to the user's pick.
   if (ESPectrum::multiplicator != ESPectrum::multUser) {
@@ -2058,6 +2177,9 @@ void ESPectrum::reset(uint8_t romInUse) {
   LastRun::mute(true);   // re-mounting is not starting it
   Tape::LoadRemembered();
   LastRun::mute(false);
+
+  // Last: the one line that describes the machine the guest is about to run on.
+  ESPectrum::logMachineState("reset");
 }
 
 //=======================================================================================

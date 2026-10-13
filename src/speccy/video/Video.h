@@ -204,6 +204,15 @@ public:
   // compiled default there, so the failure branch must not downgrade or announce it.
   static void reserveFrameBuffer(bool configKnown = true);
 
+  // Donated SRAM for the main framebuffer (plan item A, 2026-10-13): register a
+  // block BEFORE reserveFrameBuffer(); the allocator fills as many whole rows from
+  // it as it holds and takes only the remainder off the heap. `tag` is the caller's
+  // own id (ESPectrum::setup uses the ZX page bits) — fbDonorsUsed() returns the OR
+  // of the tags the live map actually took, which is what the caller must act on:
+  // a donor the map did not use stays the caller's memory.
+  static void     fbDonate(uint8_t* p, size_t bytes, uint32_t tag);
+  static uint32_t fbDonorsUsed();
+
   // Heap bytes a VM_* video mode costs: return value = main FB (one block where the
   // heap has a hole that big, otherwise 2-8 whole-row chunks — so this is a TOTAL,
   // which is what the caller's gate wants),

@@ -112,6 +112,9 @@ public:
     static void loop();
     static void reset();
     static void reset(uint8_t romInUse);
+    // `[MACH <tag>]` log line: arch/romset + every paging latch and arch flag — the
+    // state a live machine switch carries over (ESPectrum.cpp, 2026-10-13).
+    static void logMachineState(const char* tag);
     // A PROGRAM LOAD (snapshot, .spg, disk launch) restarts the Spectrum side
     // only. A real machine loading a program does not touch its NeoGS, and the
     // emulated card's reboot is not free: every .spg load was rebooting it and
