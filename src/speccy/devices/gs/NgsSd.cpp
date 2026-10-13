@@ -1,4 +1,5 @@
 #include "NgsSd.h"
+#include "app/SnapPack.h"
 #include "app/Debug.h"
 #include "ui/LEDIndicators.h"
 
@@ -690,3 +691,62 @@ void NgsSd::getStats(Stats& out) {
     out.seq_break   = s_dbg_seq_break;
 }
 
+
+// ── .pss (PSNS) ────────────────────────────────────────────────────────────────
+// v1: u8 ver, u8 flags (b0 CS, b1 idle, b2 read zeros, b3 CMD18, b4 CMD25, b5 write
+// busy, b6 sector data follows, b7 the read's host transfer failed), u8 last MISO,
+// cmd[6], u8 cmd index, u8 resp len / pos, resp[24], i16 read index, u32 read sector,
+// i16 write index, u32 write sector, then 512 data bytes when b6.
+static constexpr uint8_t NGS_SD_SNAP_VER = 1;
+
+uint32_t NgsSd::snapSave(uint8_t* out) {
+    service();                                    // no mailbox request in the record
+    const uint8_t* data = nullptr;
+    bool rdFail = false;
+    if (s_rd_idx > 0 && s_rd_idx <= 514 && s_rd_buf) data = s_rd_buf;
+    else if (s_rd_idx == 0 && !s_rd_zero) {
+        if (s_req_ok) data = cache_has(s_rd_sector) ? cache_line(s_rd_sector) : s_secbuf;
+        else rdFail = true;
+    }
+    if (s_wr_idx > 0) data = s_secbuf;
+    if (s_rd_zero && s_rd_idx > 0) data = nullptr;
+    SnapOut o(out);
+    o.u8(NGS_SD_SNAP_VER);
+    o.u8((uint8_t)((s_cs_active ? 1 : 0) | (s_idle ? 2 : 0) | (s_rd_zero ? 4 : 0) | (s_rd_multi ? 8 : 0) |
+                   (s_wr_multi ? 16 : 0) | (s_wr_busy ? 32 : 0) | (data ? 64 : 0) | (rdFail ? 128 : 0)));
+    o.u8(s_rx);
+    o.raw(s_cmd, 6); o.u8((uint8_t)s_cmd_idx);
+    o.u8((uint8_t)s_resp_len); o.u8((uint8_t)s_resp_pos); o.raw(s_resp, 24);
+    o.u16((uint16_t)(int16_t)s_rd_idx); o.u32(s_rd_sector);
+    o.u16((uint16_t)(int16_t)s_wr_idx); o.u32(s_wr_sector);
+    if (data) o.raw(data, 512);
+    return o.n;
+}
+
+void NgsSd::snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return;
+    const uint8_t fl = s.u8();
+    const uint8_t rx = s.u8();
+    uint8_t cmd[6]; s.raw(cmd, 6);
+    const uint8_t ci = s.u8(), rl = s.u8(), rp = s.u8();
+    uint8_t resp[24]; s.raw(resp, 24);
+    const int16_t ri = (int16_t)s.u16(); const uint32_t rsec = s.u32();
+    const int16_t wi = (int16_t)s.u16(); const uint32_t wsec = s.u32();
+    if (fl & 64) s.raw(s_secbuf, 512);
+    if (!s.ok || ci > 5 || rl > 24 || rp > rl || ri > 514 || wi > 514) return;
+    s_cs_active = fl & 1; s_idle = (fl & 2) != 0;
+    s_rd_zero = (fl & 4) != 0; s_rd_multi = (fl & 8) != 0;
+    s_wr_multi = (fl & 16) != 0; s_wr_busy = (fl & 32) != 0;
+    s_rx = rx;
+    memcpy(s_cmd, cmd, 6); s_cmd_idx = ci;
+    memcpy(s_resp, resp, 24); s_resp_len = rl; s_resp_pos = rp;
+    s_rd_idx = ri; s_rd_sector = rsec;
+    s_wr_idx = wi; s_wr_sector = wsec;
+    s_req_op = REQ_NONE;
+    s_req_ok = !(fl & 128);
+    cache_flush();
+    // A read in its data phase (or whose data had arrived) serves from s_secbuf now.
+    s_rd_buf = s_rd_zero ? s_zero_sector : s_secbuf;
+    if (s_rd_idx > 0 && !s_rd_zero && !(fl & 64)) s_rd_idx = -1;   // data missing: drop it
+}

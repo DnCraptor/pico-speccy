@@ -1,4 +1,5 @@
 #include "DivMMC.h"
+#include "app/SnapPack.h"
 #include "app/Buffer.h"
 
 
@@ -1873,3 +1874,90 @@ uint8_t DivMMC::zc_read_data() {
     return mmc_read();
 }
 
+
+// ── .pss (PSSD) ────────────────────────────────────────────────────────────────
+// v1: u8 ver, u8 mode (b0 SDHC, b1 DivSD raw, b2 divIDE, b3 Z-Controller),
+// u32 image size, u8 Z-Controller config, then the SD machine: u8 last command,
+// u32 command index, params[6], u8 R1, u8 flags (b0 CS, b1 CMD18 continuation, b2
+// continuation pending, b3 CMD25 active, b4 CMD25 R1 due), u32 read / write index,
+// i8 CSD / CID / OCR index, u32 CMD25 index, i8 data-response step, u32 read /
+// write address, u32 buffered sector, u8 sector data follows + 512; then divIDE:
+// 8 registers, u16 data index (#FFFF none), u8 write, u8 data follows + 512.
+static constexpr uint8_t DIVMMC_SNAP_VER = 1;
+
+void DivMMC::flush() {
+    if (mmc_sector_buf) flushWriteBuffer();
+    if (mmc_file) for (int d = 0; d < 2; d++) if (mmc_file_open[d]) f_sync(&mmc_file[d]);
+}
+
+static inline uint8_t snapMode() {
+    return (uint8_t)((DivMMC::sdhc_mode ? 1 : 0) | (DivMMC::divsd_mode ? 2 : 0) |
+                     (DivMMC::divide_mode ? 4 : 0) | (DivMMC::zc_enabled ? 8 : 0));
+}
+
+uint32_t DivMMC::snapCardSave(uint8_t* out) {
+    SnapOut o(out);
+    o.u8(DIVMMC_SNAP_VER);
+    o.u8(snapMode());
+    o.u32(mmc_file_size[0]);
+    o.u8(zc_config);
+    o.u8(mmc_last_command); o.u32((uint32_t)mmc_index_command); o.raw(mmc_params, 6); o.u8(mmc_r1);
+    o.u8((uint8_t)((mmc_cs_active ? 1 : 0) | (mmc_read_cont ? 2 : 0) | (mmc_cont_pending ? 4 : 0) |
+                   (mmc_wr25_active ? 8 : 0) | (mmc_wr25_r1 ? 16 : 0)));
+    o.u32((uint32_t)mmc_read_index); o.u32((uint32_t)mmc_write_index);
+    o.u8((uint8_t)(int8_t)mmc_csd_index); o.u8((uint8_t)(int8_t)mmc_cid_index); o.u8((uint8_t)(int8_t)mmc_ocr_index);
+    o.u32((uint32_t)mmc_wr25_idx); o.u8((uint8_t)(int8_t)mmc_wr_resp);
+    o.u32(mmc_read_address); o.u32(mmc_write_address); o.u32(mmc_sector_buf_addr);
+    const bool sec = mmc_sector_buf && mmc_sector_buf_addr != 0xFFFFFFFF;
+    o.u8(sec ? 1 : 0);
+    if (sec) o.raw(mmc_sector_buf, 512);
+    o.u8(ide_feature); o.u8(ide_sector_count); o.u8(ide_sector); o.u8(ide_cylinder_lo);
+    o.u8(ide_cylinder_hi); o.u8(ide_head); o.u8(ide_status); o.u8(ide_error);
+    const bool ib = ide_buffer && ide_data_index >= 0;
+    o.u16(ib ? (uint16_t)ide_data_index : 0xFFFF);
+    o.u8(ide_data_write ? 1 : 0);
+    o.u8(ib ? 1 : 0);
+    if (ib) o.raw(ide_buffer, 512);
+    return o.n;
+}
+
+bool DivMMC::snapCardLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return false;
+    const uint8_t mode = s.u8();
+    const uint32_t fsz = s.u32();
+    if (mode != snapMode() || (!divsd_mode && !zc_enabled && fsz != mmc_file_size[0])) return false;
+    const uint8_t zcc = s.u8();
+    const uint8_t lc = s.u8(); const uint32_t ic = s.u32();
+    uint8_t par[6]; s.raw(par, 6);
+    const uint8_t r1 = s.u8(), fl = s.u8();
+    const uint32_t ri = s.u32(), wi = s.u32();
+    const int8_t csd = (int8_t)s.u8(), cid = (int8_t)s.u8(), ocr = (int8_t)s.u8();
+    const uint32_t w25 = s.u32(); const int8_t wr = (int8_t)s.u8();
+    const uint32_t ra = s.u32(), wa = s.u32(), ba = s.u32();
+    const bool sec = s.u8() != 0;
+    if (sec) { if (!mmc_sector_buf) return false; s.raw(mmc_sector_buf, 512); }
+    uint8_t ide[8]; s.raw(ide, 8);
+    const uint16_t idi = s.u16(); const bool idw = s.u8() != 0;
+    const bool ib = s.u8() != 0;
+    if (ib) { if (!ide_buffer) return false; s.raw(ide_buffer, 512); }
+    if (!s.ok || ic > 1024 || (int32_t)ri > 1024 || (int32_t)w25 > 1024) return false;
+    raDrop();
+    zc_config = zcc;
+    mmc_last_command = lc; mmc_index_command = (int)ic; memcpy(mmc_params, par, 6); mmc_r1 = r1;
+    mmc_cs_active = fl & 1; mmc_read_cont = (fl & 2) != 0; mmc_cont_pending = (fl & 4) != 0;
+    mmc_wr25_active = (fl & 8) != 0; mmc_wr25_r1 = (fl & 16) != 0;
+    mmc_read_index = (int)(int32_t)ri; mmc_write_index = (int)(int32_t)wi;
+    mmc_csd_index = csd; mmc_cid_index = cid; mmc_ocr_index = ocr;
+    mmc_wr25_idx = (int)(int32_t)w25; mmc_wr_resp = wr;
+    mmc_read_address = ra; mmc_write_address = wa;
+    mmc_sector_buf_addr = sec ? ba : 0xFFFFFFFF;
+    mmc_sector_dirty = false;
+    // The read-ahead stream is the host's business; a continuation reads on singly.
+    s_ra_on = false;
+    ide_feature = ide[0]; ide_sector_count = ide[1]; ide_sector = ide[2]; ide_cylinder_lo = ide[3];
+    ide_cylinder_hi = ide[4]; ide_head = ide[5]; ide_status = ide[6]; ide_error = ide[7];
+    ide_data_index = (ib && idi < 512) ? idi : -1;
+    ide_data_write = idw;
+    return true;
+}

@@ -149,7 +149,8 @@ public:
     static void snapLoadBegin();
     static void snapLoadState(Pss::R& r, uint32_t size);
     static void snapLoadPage(Pss::R& r, const char id[4], uint32_t size);
-    static void snapLoadEnd();
+    // `sd`: the PSNS block (NeoGS SD interface), applied before the card resumes.
+    static void snapLoadEnd(const uint8_t* sd = nullptr, uint32_t sdLen = 0);
 
     static int16_t getSampleLeft();
     static int16_t getSampleRight();

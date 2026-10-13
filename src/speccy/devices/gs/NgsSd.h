@@ -35,6 +35,16 @@ bool    cardPresent();            // SSTAT B_SDDET (1 = card in slot)
 // Core0: execute a pending sector request; cheap no-op when idle.
 void service();
 
+// .pss (PSNS block, written by GS::snapSave): the SPI protocol machine — CS, the
+// command frame being assembled, a queued response, a read or write in its data
+// phase with its 512 bytes — so a snapshot taken while the NeoGS firmware streams
+// a sector resumes at the same byte. Core0 only, with the card frozen (inside the
+// GS snapshot's begin/end reset). snapSave completes a pending host transfer first
+// (service()), so no mailbox request is ever recorded; snapLoad runs after reset().
+constexpr uint32_t SNAP_MAX = 600;
+uint32_t snapSave(uint8_t* out);
+void     snapLoad(const uint8_t* in, uint32_t n);
+
 // Diagnostics for the 1 Hz NGS health line (GS::pollPerf).
 struct Stats {
     uint32_t xfers;      // SPI byte exchanges
