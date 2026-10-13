@@ -6094,6 +6094,41 @@ void OSD::BoardInfo() {
 // SRAM cost of the features currently enabled via the Subsystem budget manager. Data
 // sources: linker symbols (firmware/static/heap extents), getFreeHeap/getLargestAllocatable,
 // butter_psram_size/psram_size + page counters, Buffer::poolStat() and Subsystems::feature*.
+// RAM the running machine can actually address, in KB — Memory Info's
+// "Machine RAM" row puts it beside the page strip, which is sized for the
+// biggest machine of its class (Config::wantedPages).
+static uint32_t guestRamKB() {
+    switch (Config::arch) {
+    case A_48K:   return 48;
+    case A_128K:
+    case A_ALF:   return 128;
+    case A_PENT:
+    case A_P512:
+    case A_P1024: {
+        // Murmuzavr: the #AFF7 planes reach the whole strip.
+        if (MEM_PG_CNT > 64) return MEM_PG_CNT * 16;
+        return Config::arch == A_PENT ? 128 : Config::arch == A_P512 ? 512 : 1024;
+    }
+    case A_PROFI:
+    case A_KARABAS: return 1024;
+    case A_SCORP: {
+        RomsetIdx r = Config::romSetScorp;
+        if (isScorpGmxRomset(r) || r == R_PHOENIX) return 2048;
+        if (r == R_KAY256) return 256;
+        if (r == R_KAY1024 || r == R_KAY2010 || r == R_SCORP_1024 || r == R_SCORP_PROF ||
+            isScorpEvoRomset(r))
+            return 1024;
+        return 256;
+    }
+    case A_TSCONF: return 4096;
+    case A_ATM: {
+        RomsetIdx r = Config::romSetAtm;
+        return (isAtm3Romset(r) || isEvoBaseRomset(r)) ? 4096 : 1024;
+    }
+    default: return (uint32_t)MEM_PG_CNT * 16;
+    }
+}
+
 void OSD::MemoryInfo() {
     extern char __flash_binary_start, __flash_binary_end;  // pico-sdk linker symbols
     extern char end, __HeapLimit;                          // heap arena [end, ceiling)
@@ -6163,8 +6198,11 @@ void OSD::MemoryInfo() {
             if (b) pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d KB\n",
                                    name, (int)((b + KB - 1) / KB));
         };
-        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d KB (%d pg)\n",
-                        "Machine RAM", (int)(emu / KB), butter_pages);
+        // The strip is sized for the biggest machine of its class (64 pages = 1 MB
+        // by default, so P128 <-> P1024 / Scorpion / ATM switch without a reboot),
+        // while the running machine reaches only part of it — say both.
+        pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d of %d KB\n",
+                        "Machine RAM", (int)guestRamKB(), (int)(emu / KB));
         row("Machine ROMs", roms);
         row("DivMMC banks", divm);
         row("General Sound", gs);
