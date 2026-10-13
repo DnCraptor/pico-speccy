@@ -70,7 +70,7 @@ if (Get-Command ccache -ErrorAction SilentlyContinue) {
 }
 
 # RP2350 only — the RP2040 targets (MURM_P1/MURM2_P1/ZERO) were dropped.
-$AllTargets    = @("MURM", "MURM2", "PICO_PC", "PICO_DV", "ZERO2", "MURM_W", "MURM2_W", "PICO_DV_W", "PICO_PC_W")
+$AllTargets    = @("MURM", "MURM2", "PICO_PC", "PICO_DV", "ZERO2", "MURM_W", "MURM2_W", "PICO_DV_W", "PICO_PC_W", "MURM_WS", "MURM2_WS", "PICO_DV_WS", "PICO_PC_WS")
 $TftTargets    = @("MURM", "MURM2")
 $TftStTargets  = @()
 $SofttvTargets = @("MURM", "MURM2")
@@ -80,7 +80,7 @@ $PiousbTargets = @("ZERO2")
 # Display on GPIO 12-19 (the RP2350 HSTX pins): also ship an HSTX image
 # (-DHDMI_HSTX=TMDS). Their plain VGA_HDMI image is pinned to PIO (-DHDMI_HSTX=OFF),
 # or CMake's AUTO would make it HSTX too and the two images would be the same.
-$HstxTargets   = @("PICO_PC", "MURM2", "MURM2_W", "PICO_PC_W")
+$HstxTargets   = @("PICO_PC", "MURM2", "MURM2_W", "PICO_PC_W", "MURM2_WS", "PICO_PC_WS")
 
 if (-not $Targets -or $Targets.Count -eq 0) { $Targets = $AllTargets }
 

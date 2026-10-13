@@ -42,8 +42,8 @@ void i2s_init(i2s_config_t *i2s_config) {
     if (is_i2s_enabled) {
         // Derive the pad function from the block we were actually given — this
         // used to be a hardcoded GPIO_FUNC_PIO1 with a TODO beside it, which
-        // silently routed the pads to pio1 no matter what .pio said. MURM_W and
-        // PICO_DV_W run I2S on pio0 (their audio sits on GPIO40/41/42, above
+        // silently routed the pads to pio1 no matter what .pio said. MURM_WS and
+        // PICO_DV_WS run I2S on pio0 (their audio sits on GPIO40/41/42, above
         // pio1's gpio_base 0 window), so the wrong constant there would be three
         // dead pins.
         uint8_t func = GPIO_FUNC_PIO1;

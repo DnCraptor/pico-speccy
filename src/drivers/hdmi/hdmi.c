@@ -2813,7 +2813,7 @@ void graphics_init_hdmi() {
 #endif
     // (The command expander build claims no PIO at all: the line ISR writes pixel
     // words itself. BoardPins::auxPio() still assumes HDMI owns pio2 — untrue here
-    // and harmless: under HDMI it answers pio0, which the W boards' radio (MURM2_W,
+    // and harmless: under HDMI it answers pio0, which the W boards' radio (MURM2_WS,
     // PCp2w) then has to itself; pio2 simply stays empty.)
 
     // Palette is initialized centrally by Video.cpp Init()

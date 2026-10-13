@@ -59,7 +59,7 @@ ELSE()
         IF(NOT (PICO_PC OR MURM2))
             message(FATAL_ERROR
                 "HDMI_HSTX needs the display on GPIO 12-19 (HDMI_BASE_PIN=12): "
-                "that is PICO_PC, PICO_PC_W, MURM2 and MURM2_W only")
+                "that is PICO_PC and MURM2 (and their W/WS variants) only")
         ENDIF()
         target_compile_definitions(${PROJECT_NAME} PRIVATE HDMI_HSTX=${HDMI_HSTX_ON})
         # The VGA half of the same board moves with it.  It is not a second

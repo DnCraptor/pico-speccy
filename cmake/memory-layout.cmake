@@ -71,7 +71,7 @@ option(AY_STEREO_SLOT "AY: share one SRAM slot between the four stereo mixers in
 # heap on every other one). Measured on PICO_DV/MinSizeRel 2026-09-10:
 #   .tsovl  23 520 B (13 460 loaded + 10 060 .tsovl_bss) on 2026-09-19, and it
 #           is now the SAME on every variant — VGA-HDMI, SOFTTV, TFT_ST7789,
-#           ZERO2-PIOUSB and MURM_W all measure byte for byte identical, because
+#           ZERO2-PIOUSB and MURM_WS all measure byte for byte identical, because
 #           the 2026-09-13 renderer split moved the display-dependent halves to
 #           flash. It was NOT always so (14 724 B on PICO_DV against 16 900 on a
 #           SOFTTV build in 2026-09-10, which cost one broken build_all run), so

@@ -49,7 +49,7 @@ extern "C" void picospeccy_lwip_free(void* p) {
 }
 
 // ── RM2 host pins ────────────────────────────────────────────────────────────
-// Fixed by the board header (src/drivers/board/boards/picospeccy_rp2350b_w.h), read off the
+// Fixed by the board header (src/drivers/board/boards/picospeccy_rp2350b_ws.h), read off the
 // Waveshare schematic: WL_ON=36, WL_D=37, WL_CS=38, WL_CLK=39. They are static
 // (CYW43_PIN_WL_DYNAMIC 0) like every SDK W board, so the SDK's PIO SPI driver
 // reads them as constants and there is no runtime table to get wrong. All four
@@ -91,23 +91,29 @@ bool init() {
     // the call site for the two hardware failures that fixed this order.
     logPioDmaClaims("pre");
 
-    // Pin pio0 to gpio_base 16 OURSELVES before asking the SDK for a block. Its
-    // pio_claim_free_sm_and_add_program_for_gpio_range() walks pio2 -> pio1 -> pio0
-    // and, on a second pass, re-bases ANY block whose four state machines are all
-    // free — on hardware (2026-09-06) that was pio2, and hdmi_init() then found its
-    // block at base 16 with the display on GPIO6-13: radio up, screen dead. With
-    // pio0 already at 16 the FIRST pass finds it compatible (pio1/pio2 at base 0
-    // are not), so the pick is deterministic whatever else has or has not run.
-    // I2S (MURM_W, PICO_DV_W) / NESPAD (MURM2_W) may have set the same base already; the
-    // SDK refuses a re-base once a program is loaded, which is fine if it is 16.
-    // "pio0" above is the HDMI case; with VGA live it is pio2 (VGA owns pio0 at
-    // base 0 and HDMI is not started) — BoardPins::auxPio() is the one decision.
+    // Pin the radio's block to the gpio_base its pins need OURSELVES before asking the
+    // SDK for one. Its pio_claim_free_sm_and_add_program_for_gpio_range() walks
+    // pio2 -> pio1 -> pio0 and, on a second pass, re-bases ANY block whose four
+    // state machines are all free — on hardware (2026-09-06, Waveshare module) that
+    // was pio2, and hdmi_init() then found its block at base 16 with the display on
+    // GPIO6-13: radio up, screen dead. With the aux block already at 16 the FIRST
+    // pass finds it compatible (pio1/pio2 at base 0 are not), so the pick is
+    // deterministic whatever else has or has not run. I2S (MURM_WS, PICO_DV_WS) /
+    // NESPAD (MURM2_WS) may have set the same base already; the SDK refuses a re-base
+    // once a program is loaded, which is fine if it is 16. "pio0" above is the HDMI
+    // case; with VGA live it is pio2 (VGA owns pio0 at base 0 and HDMI is not
+    // started) — BoardPins::auxPio() is the one decision.
+    // Stock Pico 2 W / Pico Plus 2 W (*_W): the radio is on GP23-25/29, base 0 — the
+    // default every block already has, so nothing is re-based and the SDK takes any
+    // block with room.
+    const uint radioMax = CYW43_PIN_WL_CLOCK > CYW43_PIN_WL_CS ? CYW43_PIN_WL_CLOCK : CYW43_PIN_WL_CS;
+    const uint radioBase = (radioMax >= 32u) ? 16u : 0u;
     PIO aux = BoardPins::auxPio();
-    if (pio_get_gpio_base(aux) != 16) {
-        int brc = pio_set_gpio_base(aux, 16);
+    if (radioBase != 0u && pio_get_gpio_base(aux) != radioBase) {
+        int brc = pio_set_gpio_base(aux, radioBase);
         if (brc != PICO_OK)
-            Debug::log("WiFi: pio%u gpio_base 16 refused rc=%d (base=%u, programs already loaded?)",
-                       (unsigned)PIO_NUM(aux), brc, (unsigned)pio_get_gpio_base(aux));
+            Debug::log("WiFi: pio%u gpio_base %u refused rc=%d (base=%u, programs already loaded?)",
+                       (unsigned)PIO_NUM(aux), radioBase, brc, (unsigned)pio_get_gpio_base(aux));
     }
 
     // The SDK's default divider (CYW43_PIO_CLOCK_DIV_INT 2) assumes a 150 MHz Pico

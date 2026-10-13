@@ -15,12 +15,14 @@ Board supported:
  - Waveshare "RP2350-PiZero" + use PCM5122 for best sound;
  - Pimoroni "Pico DV Demo Base" + Raspberry "Pi Pico 2" or compatible;
  - Olimex "RP2040-PICO-PC" carrier board + Raspberry "Pi Pico 2" or compatible;
- - "Murmulator 1.x" or "Murmulator 2.0" + Waveshare "RP2350B-Plus-W" — the same two
-   carriers with a module that has WiFi/Bluetooth (Raspberry Pi Radio Module 2),
-   16 MB of flash and PSRAM pads on GPIO47;
- - Pimoroni "Pico DV Demo Base" + Waveshare "RP2350B-Plus-W" (DVp2w) — the same
-   module on the Pico DV carrier: WiFi on board, audio on GPIO40/41/42, LED on
-   GPIO23.
+ - "Murmulator 1.x", "Murmulator 2.0", Pimoroni "Pico DV Demo Base" or Olimex
+   "RP2040-PICO-PC" + Pimoroni "Pico Plus 2 W" (m1p2w / m2p2w / DVp2w / PCp2w) — the
+   same carriers with on-board WiFi (CYW43439), 16 MB flash and 8 MB PSRAM (a plain
+   Raspberry "Pi Pico 2 W" has the same pins but only 4 MB of flash, which these
+   images do not fit);
+ - the same four carriers + Waveshare "RP2350B-Plus-W" (m1p2ws / m2p2ws / DVp2ws /
+   PCp2ws) — WiFi on board (Raspberry Pi Radio Module 2), 16 MB of flash and PSRAM
+   pads on GPIO47; audio on GPIO40/41/42, LED on GPIO23.
 
 Best performance for case Pimoroni "Pico Plus 2" is used.
 
@@ -100,7 +102,7 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - esxDOS support (DivMMC, DivIDE, DivSD); DivIDE mounts HDF, Fixed VHD and raw HDD/IMG images in both hd0/hd1 slots (dynamic/differencing VHD is not supported) — [esxdos.org](https://esxdos.org/index.html).
 - Z-Controller emulation: raw SD card access via ports #57/#77, mutually exclusive with esxDOS and MB-02+ (RP2350 only).
 - FDD activity LED indicator and mechanical head click/seek sound emulation (optional, toggled via Betadisk menu).
-- ZiFi WiFi network interface via an ESP-01S module (stock Espressif AT firmware — no reflash) or, on the Waveshare RP2350B-Plus-W (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W), the module's on-chip CYW43439 radio (Network → Transport → On-chip WiFi, lwIP on the RP2350): network access for ZX-Spectrum software (e.g. the MRF terminal) through the ZIFI-API FIFO, the 16550 UART window and the ZX-Uno UART window (#FC3B/#FD3B, as used by BridgeZX and the Karabas-Pro net tools), plus an MC146818 RTC (Pentagon "Mr Gluk" TimeKeeper) with SNTP time sync over WiFi; WiFi connect and time sync show the live ESP AT dialog in a scrollable log. The NIC also works with WiFi switched off, as a plain 115200 8N1 serial port the guest owns end to end (an Arduino or any other device on the 16550 window), and Network → Sync at boot turns the boot-time SNTP exchange off so nothing but the join is ever sent on that line (RP2350 only).
+- ZiFi WiFi network interface via an ESP-01S module (stock Espressif AT firmware — no reflash) or, on a W module (Pimoroni Pico Plus 2 W: MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W; Waveshare RP2350B-Plus-W: the *_WS builds), the module's on-chip CYW43439 radio (Network → Transport → On-chip WiFi, lwIP on the RP2350): network access for ZX-Spectrum software (e.g. the MRF terminal) through the ZIFI-API FIFO, the 16550 UART window and the ZX-Uno UART window (#FC3B/#FD3B, as used by BridgeZX and the Karabas-Pro net tools), plus an MC146818 RTC (Pentagon "Mr Gluk" TimeKeeper) with SNTP time sync over WiFi; WiFi connect and time sync show the live ESP AT dialog in a scrollable log. The NIC also works with WiFi switched off, as a plain 115200 8N1 serial port the guest owns end to end (an Arduino or any other device on the 16550 window), and Network → Sync at boot turns the boot-time SNTP exchange off so nothing but the join is ever sent on that line (RP2350 only).
 - Unified F5 file browser with a location chooser (RP2350, when WiFi is configured): **Local (SD)**, **Remote (FTP/SFTP)**, **Web Archives** and **Add Remote** — all rendered in the same "Open File" window. **Enter** quick-starts a file (downloads to RAM and runs/mounts), **F5** saves it to a chosen SD folder; `..`/Backspace go up a level, Esc closes. Per-source listing cache (with manual F2 refresh) and remembered cursor/last location.
 - Network file transfer (FTP / SFTP / SSH client): saved connections with optional alias and start path (passwords optionally stored, masked entry; TAB reveals); browse / download / upload / copy (recursive) / delete; SSH/SFTP crypto (curve25519, AES-CTR, HMAC-SHA256) runs on the RP2350 via mbedTLS; SFTP host-key trust-on-first-use; selectable ESP-01S UART baud up to 921600. See the [Network wiki page](https://github.com/drewpo28/pico-speccy/wiki/EN-Network).
 - Web Archives: browse and download ZX disk/tape images, ALF cartridges and VGM music packs from online catalogs (Virtual TR-DOS, Spectrum Computing, ZX-Art, ALF, VGMRips) over HTTPS straight to SD or RAM; downloaded .vgz tracks are unpacked to .vgm in place, ready for the VGM player plugin. Serverless GitHub-Pages catalog, on-device TLS, Cyrillic titles rendered (RP2350 only).
@@ -263,7 +265,7 @@ GND          ──────────── GND (e.g. pin 6)
 
 ## Network (ZiFi / ESP-01S)
 
-On RP2350 boards, an **ESP-01S** (ESP8266) module on the UART adds networking. It runs the **stock Espressif AT firmware** — no reflashing needed. On the Waveshare RP2350B-Plus-W (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W builds) the module's own **CYW43439** radio can be used instead — pick **On-chip WiFi (CYW43)** under Network → Transport; the TCP/IP stack then runs on the RP2350 and no ESP module is required. Configured under the OSD **Network** menu:
+On RP2350 boards, an **ESP-01S** (ESP8266) module on the UART adds networking. It runs the **stock Espressif AT firmware** — no reflashing needed. On a W module — Pimoroni Pico Plus 2 W (`*p2w` builds) or Waveshare RP2350B-Plus-W (`*p2ws` builds) — the module's own **CYW43439** radio can be used instead — pick **On-chip WiFi (CYW43)** under Network → Transport; the TCP/IP stack then runs on the RP2350 and no ESP module is required. Configured under the OSD **Network** menu:
 
 - **ZiFi NIC** — network interface for ZX-Spectrum software (port `#EF`, 16550-UART window); works with the **MRF** terminal/drivers (<https://zxart.ee/eng/software/prikladnoe-po/mrf/tabs:releases/>).
 - **WiFi** — scan / connect / autoconnect, with the live ESP AT dialog shown in a scrollable log pane; **SNTP** time sync into the RTC (same live log).
@@ -314,10 +316,11 @@ Your filesystem tree must be look like:
 | `-DPICO_PC=ON` | Build for Olimex RP2040-PICO-PC carrier board |
 | `-DPICO_DV=ON` | Build for Pimoroni Pico DV Demo Base |
 | `-DZERO2=ON` | Build for Waveshare RP2350-PiZero |
-| `-DMURM_W=ON` | Build for Murmulator 1.x + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi). Same carrier as `-DMURM=ON`; the module moves audio to GPIO40/41/42, the LED to GPIO23 and PSRAM to GPIO47, and the carrier's PIO SPI PSRAM is dropped so the radio fits on pio0. |
-| `-DMURM2_W=ON` | Build for Murmulator 2.0 + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi). Same carrier as `-DMURM2=ON`; audio is unchanged, the gamepad data pins move to GPIO40/41, the LED to GPIO23 and PSRAM to GPIO47. |
-| `-DPICO_DV_W=ON` | Build for Pimoroni Pico DV Demo Base + Waveshare RP2350B-Plus-W (DVp2w, on-chip CYW43439 WiFi). Same carrier as `-DPICO_DV=ON`; the module moves audio to GPIO40/41/42 and the LED to GPIO23, and brings the radio up on the PIO block the display is not using (pio0 under HDMI, pio2 under VGA). 16 MB flash, PSRAM pads on GPIO47 — the pin the base already uses for butter PSRAM. |
-| `-DPICO_PC_W=ON` | Build for Olimex PICO-PC + Waveshare RP2350B-Plus-W (PCp2w, on-chip CYW43439 WiFi). Same carrier as `-DPICO_PC=ON`, including the HSTX back-end (`-DHDMI_HSTX`); the module moves the PWM audio / beeper / MIDI TX to GPIO40/41/42 and the LED to GPIO23, PSRAM pads on GPIO47, 16 MB flash. |
+| `-DMURM_W=ON` / `-DMURM2_W=ON` / `-DPICO_DV_W=ON` / `-DPICO_PC_W=ON` | Build for the same carrier + Pimoroni Pico Plus 2 W (m1p2w / m2p2w / DVp2w / PCp2w, on-chip CYW43439 WiFi on GP23/24/25/29, 16 MB flash, 8 MB PSRAM on GPIO47). Every carrier pin stays where it is on the plain board; the LED is on the radio and the GP29 AY clock output is dropped. A 4 MB Raspberry Pi Pico 2 W has the same pins but these images do not fit its flash. |
+| `-DMURM_WS=ON` | Build for Murmulator 1.x + Waveshare RP2350B-Plus-W (m1p2ws, on-chip CYW43439 WiFi). Same carrier as `-DMURM=ON`; the module moves audio to GPIO40/41/42, the LED to GPIO23 and PSRAM to GPIO47, and the carrier's PIO SPI PSRAM is dropped so the radio fits on pio0. |
+| `-DMURM2_WS=ON` | Build for Murmulator 2.0 + Waveshare RP2350B-Plus-W (m2p2ws). Same carrier as `-DMURM2=ON`; audio is unchanged, the gamepad data pins move to GPIO40/41, the LED to GPIO23 and PSRAM to GPIO47. |
+| `-DPICO_DV_WS=ON` | Build for Pimoroni Pico DV Demo Base + Waveshare RP2350B-Plus-W (DVp2ws). Same carrier as `-DPICO_DV=ON`; the module moves audio to GPIO40/41/42 and the LED to GPIO23, and brings the radio up on the PIO block the display is not using (pio0 under HDMI, pio2 under VGA). 16 MB flash, PSRAM pads on GPIO47. |
+| `-DPICO_PC_WS=ON` | Build for Olimex PICO-PC + Waveshare RP2350B-Plus-W (PCp2ws). Same carrier as `-DPICO_PC=ON`, including the HSTX back-end (`-DHDMI_HSTX`); the module moves the PWM audio / beeper / MIDI TX to GPIO40/41/42 and the LED to GPIO23, PSRAM pads on GPIO47, 16 MB flash. |
 | `-DZERO2_PIO_USB=ON` | ZERO2: USB host on the second Type-C port (J2, PIO-USB on GP28/GP29). **Default OFF** — the bit-banged host costs ~18 KB of SRAM (RAM-resident code + endpoint pool), so it ships as a separate `z0p2-speccy-VGA-HDMI-PIOUSB-*.uf2` image instead. |
 | `-DVGA_HDMI=ON` | VGA/HDMI output (default) |
 | `-DSOFTTV=ON` | Software composite TV output |

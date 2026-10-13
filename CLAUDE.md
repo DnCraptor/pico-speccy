@@ -5656,7 +5656,7 @@ lives in `Debug::uart*` (Debug.cpp), `BoardPins::dbgUart*` and
 
 ## HDMI on HSTX (GPIO 12-19 boards): raw serializer (hw-confirmed PCp2 2026-09-17) and the command expander (2026-09-22, NOT hw-tested)
 
-The RP2350's HSTX exists only on GPIO 12-19, so only PICO_PC, MURM2 and MURM2_W can
+The RP2350's HSTX exists only on GPIO 12-19, so only PICO_PC, MURM2 and MURM2_WS can
 use it (`HDMI_BASE_PIN == 12`). `HDMI_HSTX` (CMake cache, `AUTO/OFF/RAW/TMDS`, `ON` =
 RAW) picks the back-end; AUTO = **TMDS on PICO_PC, RAW on MURM2** (owner's call: B on
 PCp2 only until it is on hardware). Names: `-HSTX` / `+HSTX` for TMDS, `-HSTX-RAW` /
@@ -6334,7 +6334,7 @@ resistor ladder and the monitor's input integrate them, so every pixel carries i
 own level, there is no Bayer block to beat against 1-pixel detail, and the 16 flat
 ZX colours stop needing the solid / `vgaGridSnap` fork. `VGA_HSTX=1` rides on
 `HDMI_HSTX` in CMakeLists (same eight pins, same board rule: PICO_PC, MURM2,
-MURM2_W).
+MURM2_WS).
 
 **The blocker that had to move first, and it was the MODE TABLE, not the code.**
 `CLOCKS_CLK_HSTX_DIV_INT` is a TWO-BIT field with no FRAC (verified in the SDK
@@ -7149,7 +7149,7 @@ remains before the HARD floor stops the build:
 | DVp2 VGA-HDMI | 2502492 | 1691648 | 2060288 | 389120 |
 | m1p2 / m2p2 / PCp2 / z0p2 VGA-HDMI | 2506588 | 1687552 | 2056192 | 385024 |
 | z0p2 VGA-HDMI-PIOUSB | 2522972 | **1671168** | 2039808 | 368640 |
-| m1p2w / m2p2w (16 MB) | 2789212 | **13987840** | 14356480 | 12685312 |
+| m1p2ws / m2p2ws (16 MB) | 2789212 | **13987840** | 14356480 | 12685312 |
 
 Three things that table says:
 
@@ -11065,13 +11065,13 @@ untouched, only the far end changed. Plan + command inventory:
   bit 6 already did), and the port write paths call `AtEmu::drainTx()` once the
   ring passes 128 bytes.
 - **Cost**: non-W boards unchanged in SRAM (DVp2 `.data`/`.bss` byte-identical to
-  HEAD; flash −8 B from the removed `p_espSerial` menu predicate). DVp2w: +160 B
+  HEAD; flash −8 B from the removed `p_espSerial` menu predicate). DVp2ws: +160 B
   static (the `atEmu` tests in the RAM-resident ZiFi handlers), +5.9 KB flash, heap
   only while the NIC runs: `Ctx` (~1.5 KB) + 2 KB RX ring + 0.8 KB TX ring + up to
   ~3.3 KB of pbufs per active link.
 - Hardware Info: `ZiFi NIC : On (AT emu, mux N, K links)`. AT traffic is logged
   (`ZiFi AT< ...`) only in `-DZIFI_TRACE=ON` builds.
-- Test ELFs `debug/{DVp2w,PCp2w}-atemu-1.0.9.elf` (+ .uf2). **Hw 2026-10-12, owner:
+- Test ELFs `debug/{DVp2w,PCp2ws}-atemu-1.0.9.elf` (+ .uf2). **Hw 2026-10-12, owner:
   MRF works — browsed and downloaded an SCL through it; the zxwifi and EVO UART driver
   builds (16550 window `#F8EF..#FFEF`) and the real UN-64 / UNO UART build (ZX-UNO
   `#FC3B/#FD3B`) all work** — every guest window the emulator serves is confirmed. The AYWiFi56 build
@@ -11668,7 +11668,7 @@ wire cs1_n = dma_req ? 1'b1 : z80_cs1_n;
   against 4556 already in use and was living on the renderer term's spare, so the
   IDE arms merely pushed the TOTAL over; raise the term whose code grew, not the
   sum. **(b) The per-display-variant spread is GONE**: VGA-HDMI, SOFTTV,
-  TFT_ST7789, ZERO2-PIOUSB and MURM_W all measure byte for byte identical since
+  TFT_ST7789, ZERO2-PIOUSB and MURM_WS all measure byte for byte identical since
   the 2026-09-13 renderer split moved the display-dependent halves to flash (it
   was 14 724 vs 16 900 B in 2026-09-10, which cost a broken build_all run) — so
   the "cover the worst variant" rule still stands, it just currently costs
@@ -13978,21 +13978,21 @@ OUT). Now masks `data & 0x07`.
   - Loader at 0x5E00, screen at 0x4000, main code at 0x6200
   - Main code starts with `CALL 0x817E` (IM 2 setup); exercises the ULA via port `0x01FE`
 
-## MURM_W / MURM2_W — Waveshare RP2350B-Plus-W (2026-09-06; m1p2w hw-confirmed: picture, I2S sound, 8 MB QSPI PSRAM, CYW43 WiFi + FTP server)
+## MURM_WS / MURM2_WS — Waveshare RP2350B-Plus-W (2026-09-06; m1p2ws hw-confirmed: picture, I2S sound, 8 MB QSPI PSRAM, CYW43 WiFi + FTP server)
 
 Two board targets = the Murmulator 1.x / 2.0 carriers with the Waveshare
 RP2350B-Plus-W module (RP2350B, Raspberry Pi Radio Module 2 = CYW43439, 16 MB
-flash, PSRAM pads on GPIO47). `MURM_W` turns `MURM` on and `MURM2_W` turns `MURM2`
+flash, PSRAM pads on GPIO47). `MURM_WS` turns `MURM` on and `MURM2_WS` turns `MURM2`
 on, so every carrier pin arm and `#if MURM2` keeps working; `PICOSPECCY_WIFI` is
 the one "this image has a radio" switch (`src/WifiNet.{h,cpp}`, called last of the
 PIO users from `main()`). **Either video output works**: the radio's pins are above
 GPIO31, so it needs a PIO block at gpio_base 16, pio1 is the keyboard at base 0, and
 the block that qualifies is the one the DISPLAY is not using — pio0 under HDMI (HDMI
 owns pio2), pio2 under VGA (VGA owns pio0). `BoardPins::auxPio()` is that single
-decision; the radio, MURM_W's I2S (GPIO40-42) and MURM2_W's NESPAD (data 40/41) all
+decision; the radio, MURM_WS's I2S (GPIO40-42) and MURM2_WS's NESPAD (data 40/41) all
 take their block from it at init (the compile-time `I2S_PIO`/`NESPAD_PIO` are only
 the HDMI-case defaults). The first cut forced HDMI (`SELECT_VGA=false` in
-`resolveVideoOutput`) — the owner pointed out MURM_W is a VGA_HDMI board like any
+`resolveVideoOutput`) — the owner pointed out MURM_WS is a VGA_HDMI board like any
 Murmulator; lifted 2026-09-06, VGA path NOT hw-tested. CMake still refuses
 SOFTTV/TV/TFT for the W boards (unpaired, not impossible).
 
@@ -14003,7 +14003,7 @@ SOFTTV/TV/TFT for the W boards (unpaired, not impossible).
   the radio's own WL_GPIO0, GPIO46 = VSYS_SENSE, GPIO47 = PSRAM_CS, VBUS_DET goes
   to RM2 GPIO2. The first cut had CS/CLK swapped (a derivation, 38=CLK 39=CS).
   They live as **static** `CYW43_DEFAULT_PIN_WL_*` in
-  `src/drivers/board/boards/picospeccy_rp2350b_w.h` with `CYW43_PIN_WL_DYNAMIC 0`, exactly like
+  `src/drivers/board/boards/picospeccy_rp2350b_ws.h` with `CYW43_PIN_WL_DYNAMIC 0`, exactly like
   `pico2_w.h` — the runtime `cyw43_set_pins_wl()` table was dropped.
   **`CYW43_PIN_WL_DYNAMIC 1` WITHOUT the `CYW43_DEFAULT_PIN_WL_*` defines does not
   compile** (SDK 2.3.0 `cyw43_bus_pio_spi.c` seeds its RAM table from them), which
@@ -14035,7 +14035,7 @@ SOFTTV/TV/TFT for the W boards (unpaired, not impossible).
      (CMake) + `cyw43_set_pio_clkdiv_int_frac8(ceil(clk_sys/75 MHz), 0)` in
      WifiNet::init (6 @378, 7 @504), which must run AFTER the `Config::cpu_mhz`
      switch — the new call site is.
-  **hw 2026-09-06, after the fix: m1p2w boots with a picture** (Hardware Info:
+  **hw 2026-09-06, after the fix: m1p2ws boots with a picture** (Hardware Info:
   RP2350B @252 MHz, VREG 1.50 V, 16 MB flash, **`+PSRAM on GP47: 8 MB (QSPI)`** —
   the tester's module HAS a chip soldered and the butter path found it unchanged,
   66 pages `s8:b58`, audio **i2s (auto)** — so I2S on pio0 @base 16 coexists with
@@ -14046,7 +14046,7 @@ SOFTTV/TV/TFT for the W boards (unpaired, not impossible).
   path are all hw-confirmed at once.
   The `WiFi[pre]`/`[post]` claim dump (`pio2 sm=####`/`gpio_base=0` for HDMI,
   `pio0 ... gpio_base=16` for the radio) is the check; it goes to the UART only.
-- **No sound on MURM_W (hw 2026-09-06, same tester; FIXED, sound back in Auto
+- **No sound on MURM_WS (hw 2026-09-06, same tester; FIXED, sound back in Auto
   with the mask fix below — the board was I2S-jumpered, so the probe was right):**
   Hardware Info said
   `Audio mode: i2s [0Ah] (auto)`. Two independent things, both in play:
@@ -14235,7 +14235,7 @@ set pinned at 25.2 MHz across 252/1.0, 378/1.5 and 504/2.0.
   (h_total 1200 at 37.8 MHz: refresh and ISR budget intact, but +50% DMA on the
   top-priority channel and a timing no CEA/DMT sink knows).
 
-### On-chip network transport = lwIP under the ZiFi facades (2026-09-06; hw-confirmed on m1p2w: WiFi join + FTP server work)
+### On-chip network transport = lwIP under the ZiFi facades (2026-09-06; hw-confirmed on m1p2ws: WiFi join + FTP server work)
 
 Network → **Transport** gained "On-chip WiFi (CYW43)" (`Config::zifi_transport == 2`,
 the DEFAULT on W builds; non-W builds fold a stray 2 back to 0 in `Config::load`).
@@ -14290,22 +14290,22 @@ Nothing above the two network facades knows which radio it is on:
   `butter_psram_size()`. Chip: **APS6404L-3SQR-SN** (8 MB, 3.3 V, SOP-8, the Pico
   Plus 2 part — the probe wants KGD 0x5D; pin 1 CS, 2 SO/SD1, 3 SD2, 4 GND, 5
   SI/SD0, 6 SCLK, 7 SD3, 8 VDD, matching the footprint). The MURM1-arm
-  `init_psram()` still runs on MURM_W but its body is `#ifdef PSRAM` (not defined
+  `init_psram()` still runs on MURM_WS but its body is `#ifdef PSRAM` (not defined
   there), so `psram_size()` stays 0 and nothing touches the 255 pins.
-- **MURM_W drops the carrier's PIO SPI PSRAM**, and the module ships with NO PSRAM
-  soldered — so a stock MURM_W is a no-PSRAM board (pages to SD swap, no GS /
+- **MURM_WS drops the carrier's PIO SPI PSRAM**, and the module ships with NO PSRAM
+  soldered — so a stock MURM_WS is a no-PSRAM board (pages to SD swap, no GS /
   Gigascreen). The stated reason is pio0 instruction budget: CYW43 (5-7) + I2S (9,
   17 for CS4334) + SPI PSRAM (18-20) > 32. But I2S is only loaded for a DAC board;
   with PWM audio, CYW43 + SPI PSRAM (25-27) fits. Candidate follow-up: keep the
-  APS6404 on MURM_W and make I2S and SPI PSRAM mutually exclusive there instead.
-- **MURM2_W: NES pad dead + WiFi missing — one cause, PIO gpio_base order
+  APS6404 on MURM_WS and make I2S and SPI PSRAM mutually exclusive there instead.
+- **MURM2_WS: NES pad dead + WiFi missing — one cause, PIO gpio_base order
   (hw-confirmed 2026-09-26, owner: "работает оба").** The SDK REFUSES
   `pio_set_gpio_base` once any program is loaded in the block, and
   `nespad_begin()` re-based AFTER `pio_add_program`: refused silently, then
   `pio_sm_init` failed BAD_ALIGNMENT (data on GPIO40/41) and the pad never ran —
   while `main.cpp` set `nespad_active = true` regardless and the `sm < 0` guard on a
   `uint8_t` could never fire. Second half: `init_sound()` put I2S into
-  `BoardPins::auxPio()` on EVERY W board, but MURM2_W's I2S is on GP9-11 (base 0),
+  `BoardPins::auxPio()` on EVERY W board, but MURM2_WS's I2S is on GP9-11 (base 0),
   so an I2S-detected board loaded a base-0 program into the radio's block. With
   HDMI on PIO (pio2 taken) that left the radio no base-16 block at all ->
   `cyw43_arch_init` failed -> no networks. Fixes: re-base BEFORE add_program (and
@@ -14862,16 +14862,16 @@ speccy4ever.speccy.org/_KA.htm (`curl -sk -A Mozilla`).
   0.2d); a 1 MB memory test on KAY1024 and 2 MB on the Phoenix (UMT); turbo with Alt+F2 on and a program writing
   1FFD D2; Reset Service's Gluk clock detect with CMOS + NVRAM on and off.
 
-## DVp2w — `PICO_DV_W`: the W module in a Pico DV base (2026-10-11, NOT hw-tested)
+## DVp2ws — `PICO_DV_WS`: the W module in a Pico DV base (2026-10-11, NOT hw-tested)
 
-`-DPICO_DV_W=ON` → `DVp2w-speccy-<display>-<ver>`, the third carrier for the
-Waveshare RP2350B-Plus-W module (the others: `m1p2w`, `m2p2w`). Same pattern as
-`MURM_W`/`MURM2_W`: the option turns `PICO_DV` on in `cmake/board.cmake` (before
+`-DPICO_DV_WS=ON` → `DVp2ws-speccy-<display>-<ver>`, the third carrier for the
+Waveshare RP2350B-Plus-W module (the others: `m1p2ws`, `m2p2ws`). Same pattern as
+`MURM_WS`/`MURM2_WS`: the option turns `PICO_DV` on in `cmake/board.cmake` (before
 the default-board guard) and raises `PICOSPECCY_WIFI`, so every `#if PICO_DV` arm
 keeps working unchanged — SD on `pio1` (`SDCARD_PIO`), keyboard GP14/15, the
 dedicated ZiFi header on GP0/1, display base 6, `linkVGA01 == 0x1F`, the 8 KB
 TinyUSB CDC buffers, and `dbgUartNote()`'s "off: WAV input". The W board header
-(`picospeccy_rp2350b_w.h`) is shared with the Murmulator W boards and supplies
+(`picospeccy_rp2350b_ws.h`) is shared with the Murmulator W boards and supplies
 16 MB flash, the CYW43439 on GPIO36-39 and PSRAM pads on GPIO47 — the pin the
 Pico DV base already uses for butter PSRAM.
 
@@ -14885,15 +14885,15 @@ Pico DV base already uses for butter PSRAM.
   SD (4) = 11/32. `BoardPins::auxPio()` needed **no change**: its `PIO_VGA=pio0`
   / `HDMI → pio2` assumption is exactly PICO_DV's, and `graphics_init()` brings
   up only one of the two, so the other block really is free. I2S follows the
-  module's pins — `I2S_PIO=pio0` in `cmake/wifi.cmake` (same line as MURM_W) plus
+  module's pins — `I2S_PIO=pio0` in `cmake/wifi.cmake` (same line as MURM_WS) plus
   pwm_audio's runtime `auxPio()` whenever an I2S pin is ≥ 32.
 - `BoardPins.cpp`'s ZiFi UART list is a CARRIER property here, so the plain
-  `PICO_DV` arm covers DVp2w: GP0/1 and GP20/21 are both still header positions
+  `PICO_DV` arm covers DVp2ws: GP0/1 and GP20/21 are both still header positions
   on the module, and its radio pins (36-39) are not offered on this board.
 - Measured against DVp2 (MinSizeRel): **+288.6 KB flash, +3788 B static SRAM**
   (CYW43 blob + lwIP + WifiNet/WifiSock); `check-release.sh` projects 44 216 B of
   free heap at `loop()` entry, between the two Murmulator W boards. The plain
-  `PICO_DV` arm and `MURM_W`/`MURM2_W` (all three images) were rebuilt after the
+  `PICO_DV` arm and `MURM_WS`/`MURM2_WS` (all three images) were rebuilt after the
   shared CMake changes and are unchanged.
 - **`check-release.sh`'s five non-W rows had stale ELF globs** (`m1-`, `m2-`,
   `PC-`, `DV-`, `z0-` — the pre-"no chip suffix" tags), so MURM/MURM2/PICO_PC/
@@ -14904,11 +14904,11 @@ Pico DV base already uses for butter PSRAM.
   Network → Transport defaulting to the on-chip CYW43, a WiFi join + SNTP, and
   the SD card (pio1 now carries PS/2 + SD; I2S left that block).
 
-## PCp2w — `PICO_PC_W`: the W module in an Olimex PICO-PC (2026-10-12, NOT hw-tested)
+## PCp2ws — `PICO_PC_WS`: the W module in an Olimex PICO-PC (2026-10-12, NOT hw-tested)
 
-`-DPICO_PC_W=ON` → `PCp2w-speccy-VGA-HDMI[-HSTX]-<ver>`, the DVp2w shape again: the
+`-DPICO_PC_WS=ON` → `PCp2ws-speccy-VGA-HDMI[-HSTX]-<ver>`, the DVp2ws shape again: the
 option turns `PICO_PC` on (cmake/board.cmake) and raises `PICOSPECCY_WIFI`; tag
-`PCp2w`, butter PSRAM on GPIO47 (the module's pads, not the Pico 2's GP8). The
+`PCp2ws`, butter PSRAM on GPIO47 (the module's pads, not the Pico 2's GP8). The
 PICO_PC pin arm now takes GP26/27/28 (PWM R/L, beeper/595 latch, MIDI TX — this
 carrier has no I2S, its "unsupported" mark of three equal pins is kept at 40),
 GP29 (AY clock -> 255) and the LED (-> 23) from the `W_*` variables, identity on
@@ -14919,21 +14919,50 @@ at base 0, the radio alone on `auxPio()`.
 
 **HSTX works as on PICO_PC** — `display.cmake`/`memory-layout.cmake` test
 `PICO_PC`, which the W option sets, and AUTO picks TMDS; `build_all.*` builds it
-twice (`HSTX_TARGETS`). MURM2_W already proved CYW43 beside the TMDS expander:
+twice (`HSTX_TARGETS`). MURM2_WS already proved CYW43 beside the TMDS expander:
 the expander claims no PIO, VGA_HSTX neither, RAW only pio2's address converter,
 so `auxPio()` (pio0 under HDMI, pio2 under VGA) is free in all cases. Both images
 link (RAM 161 KB, SCRATCH_X 4064-4068 B); test ELFs in `debug/PCp2w-*`.
 **First hw run (2026-10-12):** boots to `loop()`, radio up (pio0 base 16), HDMI
 running — a MONITOR shows the picture; the owner's HDMI CAPTURE CARD does not lock
 (PIO and HSTX alike). Pads are already 12 mA / fast slew, so there is no firmware
-lever; suspected margin on the module's LDO 3V3, the m1p2w 378 MHz story again.
+lever; suspected margin on the module's LDO 3V3, the m1p2ws 378 MHz story again.
 Found on the way: `nespad_begin` took `auxPio()` on EVERY W board, so a pad wired
-below GP32 (PCp2w GP5/9/20/21, MURM_W GP14-16 with PWM audio) sat in the radio's
+below GP32 (PCp2ws GP5/9/20/21, MURM_WS GP14-16 with PWM audio) sat in the radio's
 block at base 0 and cyw43 had no block to re-base. It now takes the aux block only
-when its pins reach GPIO32+ (MURM2_W), pio1 otherwise; PCp2w log: `NESPAD: pio1`.
+when its pins reach GPIO32+ (MURM2_WS), pio1 otherwise; PCp2ws log: `NESPAD: pio1`.
 `-DDBG_UART_DEFAULT_ON=ON` (cmake/trace.cmake) builds a diagnostic image whose
 UART console is on from `main()` entry even on a COLD boot with no SD card (the
 plain path starts it only from Config::load or a warm-reboot tag).
 Same day, owner: **WiFi works** (on-chip CYW43 join). The Olimex PICO-PC has no
 VGA connector, so the VGA half is not applicable on this carrier.
 **Still owed**: sound (PWM 41/42), MIDI (40), LED (23), NES pad (no pad to hand).
+
+## `*p2w` = Pimoroni Pico Plus 2 W (stock W layout); Waveshare moved to `*p2ws` (2026-10-12, NOT hw-tested)
+
+`-DMURM_W/MURM2_W/PICO_DV_W/PICO_PC_W=ON` → `m1p2w`/`m2p2w`/`DVp2w`/`PCp2w` now mean
+the **stock Pico 2 W layout on a Pimoroni Pico Plus 2 W** (RP2350B, 16 MB flash,
+8 MB PSRAM on GPIO47, CYW43439 on GP23 WL_REG_ON / GP24 WL_DATA / GP25 WL_CS /
+GP29 WL_CLK, LED on the radio's WL_GPIO0). Everything above that says `*_WS` /
+`*p2ws` is the Waveshare RP2350B-Plus-W (renamed the same day; m1p2w/m2p2w were
+published under the old names in 1.0.8/1.0.9 — the 1.0.10 Change History must say
+so). `debug/*p2w-*.elf` files from before 2026-10-12 are Waveshare builds.
+
+- **Board header** `src/drivers/board/boards/picospeccy_rp2350_w.h` (pins from the
+  SDK's pimoroni_pico_plus2_w_rp2350.h == pico2_w.h); the Waveshare one is now
+  `picospeccy_rp2350b_ws.h`. CMake: `PICOSPECCY_WIFI` = any W module,
+  `PICOSPECCY_WIFI_WS` = the Waveshare layout (also a 0/1 compile define).
+- **Pins**: every carrier pin stays as on the plain board (GP26/27/28 audio, GP25 LED
+  → 255, GP29 AY clock → 255 via `W_*` in cmake/board-pins.cmake); no carrier uses
+  GP23/24. MURM2_W's ZiFi list drops `{22,23}` (GP23 = WL_REG_ON). MURM_W KEEPS the
+  carrier's PIO SPI PSRAM (only MURM_WS dropped it for pio0 room). No I2S/NESPAD PIO
+  moves — the `I2S_PIO=pio0` / `NESPAD_PIO=pio0` defines are `*_WS` only.
+- **PIO**: radio pins < 32, so `WifiNet::init` does NOT re-base the aux block to 16
+  (`radioBase` from `CYW43_PIN_WL_CLOCK/CS`); the SDK takes any block with room.
+- **Flash: 16 MB, so a plain 4 MB Raspberry Pi Pico 2 W is NOT supported** by these
+  images: at 4 MB the stock DVp2w was ~94 KB short of the linker's hard GM.DLS floor
+  (`__psramrom_start` 0x1027F000). A Pico 2 W build would need a slimmer firmware.
+- `BUTTER_PSRAM_GPIO` = the carrier's plain value (probed only on an RP2350A; the
+  Plus 2 W is B → GPIO47).
+- Hw check owed (owner has a Pico Plus 2 W): boot + picture, `WiFi: cyw43_arch_init
+  pins REG_ON=23 DATA=24 CLK=29 CS=25` and a join, sound on GP26-28, PSRAM 8 MB found.

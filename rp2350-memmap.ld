@@ -402,7 +402,7 @@ SECTIONS
      *     2026-09-06 (TS-BIOS) and 32 KB on 2026-09-19 (ProfROM GMX v5.44), each time
      *     AFTER a variant had already overflowed — and each time the slack between the
      *     firmware end and the base (4-12 KB) was simply lost.
-     *   - on a 16 MB board (MURM_W) a fixed 1.59 MB was absurd. The bank now takes the
+     *   - on a 16 MB board (MURM_WS) a fixed 1.59 MB was absurd. The bank now takes the
      *     whole tail with no board branch (the old GMX_IN_FLASH ternary and its
      *     __gmx_rom_in_flash defsym are gone).
      * The cost: the base moves with code size, so a bank already programmed into flash

@@ -56,6 +56,10 @@ BOARDS=(
     "MURM2_W|build-MURM2_W/bin/MinSizeRel/m2p2w-speccy-VGA-HDMI-*.elf|532480|RP2350"
     "PICO_DV_W|build-PICO_DV_W/bin/MinSizeRel/DVp2w-speccy-VGA-HDMI-*.elf|532480|RP2350"
     "PICO_PC_W|build-PICO_PC_W/bin/MinSizeRel/PCp2w-speccy-VGA-HDMI-*.elf|532480|RP2350"
+    "MURM_WS|build-MURM_WS/bin/MinSizeRel/m1p2ws-speccy-VGA-HDMI-*.elf|532480|RP2350"
+    "MURM2_WS|build-MURM2_WS/bin/MinSizeRel/m2p2ws-speccy-VGA-HDMI-*.elf|532480|RP2350"
+    "PICO_DV_WS|build-PICO_DV_WS/bin/MinSizeRel/DVp2ws-speccy-VGA-HDMI-*.elf|532480|RP2350"
+    "PICO_PC_WS|build-PICO_PC_WS/bin/MinSizeRel/PCp2ws-speccy-VGA-HDMI-*.elf|532480|RP2350"
 )
 
 # --- Fixed boot-time heap mallocs, default config ---

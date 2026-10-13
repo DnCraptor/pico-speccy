@@ -16,10 +16,11 @@
 
 namespace BoardPins {
 
-// W boards (RP2350B-Plus-W): the PIO block that is NOT driving the display, i.e.
+// W boards: the PIO block that is NOT driving the display, i.e. the radio's block
+// (stock *_W layout: at gpio_base 0, radio on GP23-25/29). On the Waveshare *_WS boards it is
 // the one free to sit at gpio_base 16 for everything that lives above GPIO31 —
-// the CYW43 radio (36-39), MURM_W's and PICO_DV_W's I2S audio (40/41/42),
-// MURM2_W's NESPAD data pair (40/41). pio0 while HDMI is the output (HDMI owns
+// the CYW43 radio (36-39), MURM_WS's and PICO_DV_WS's I2S audio (40/41/42),
+// MURM2_WS's NESPAD data pair (40/41). pio0 while HDMI is the output (HDMI owns
 // pio2 at base 0), pio2 while VGA is (VGA owns pio0 at base 0); pio1 is the
 // keyboard either way. Valid only after resolveVideoOutput() has decided
 // SELECT_VGA (ESPectrum::setup, right after Config::load); on non-W boards it

@@ -1,11 +1,12 @@
 # Per-board GPIO map: every pin the firmware drives, as compile definitions.
 # The RP2350B-Plus-W overrides come first, the carrier arms read them.
 
-# ── RP2350B-Plus-W pin overrides (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) ──
-# The module's 40-pin header is Pico-compatible for GPIO0..GPIO22, so keyboard,
-# SD, display, MIDI/WAV and audio all keep their numbers. Three things
-# move, and the carrier arms below take them from these variables:
+# ── W module pin overrides (cmake/options.cmake: *_W stock, *_WS Waveshare) ──
+# Both modules' 40-pin headers are Pico-compatible for GPIO0..GPIO22, so keyboard,
+# SD, display, MIDI/WAV and the carrier PSRAM keep their numbers. The carrier arms
+# below take the rest from these variables.
 #
+# Waveshare RP2350B-Plus-W (*_WS):
 #   * the three positions a Pico exposes as GP26/27/28 carry GPIO40/41/42 here.
 #     That is MURM1's whole audio block, and MURM2's NESPAD data pair.
 #   * the user LED is GPIO23 (LED2), not GPIO25.
@@ -13,19 +14,25 @@
 #     reached the carrier anyway; here GPIO29 is a bottom pad and GPIO36-39 are
 #     the radio's WL_ON/WL_D/WL_CS/WL_CLK (schematic), so the AY clock output is dropped
 #     rather than pointed at a pin we do not own.
+#   GPIO24-35 and 43-45 exist on bottom pads that a Murmulator socket cannot reach.
 #
-# GPIO24-35 and 43-45 exist on bottom pads that a Murmulator socket cannot reach.
-if(PICOSPECCY_WIFI)
+# Stock Pico 2 W / Pimoroni Pico Plus 2 W (*_W): GP26/27/28 stay put; GP23/24/25/29
+# are the radio's (WL_REG_ON/WL_DATA/WL_CS/WL_CLK), so the LED (on the radio) and
+# the AY clock (GP29 = WL_CLK) go to 255. No carrier uses GP23/24.
+if(PICOSPECCY_WIFI_WS)
     set(W_HDR26 40)                 # what the Pico header position of GP26 carries
     set(W_HDR27 41)                 # ... GP27
     set(W_HDR28 42)                 # ... GP28
     set(W_LED_PIN 23)               # LED2
-    # GP29 is not a header pin on any Pico, so this AY clock output never reached
-    # a Murmulator carrier in the first place; on the W module GPIO29 is a bottom
-    # pad and GPIO36-39 are the radio's (WL_ON/WL_D/WL_CS/WL_CLK), so there is no pin to
-    # point it at. 255 = absent, the same sentinel PSRAM_PIN_* and ZERO2's LED use;
+    # 255 = absent, the same sentinel PSRAM_PIN_* and ZERO2's LED use;
     # PinSerialData_595.c skips it exactly like a pin ZiFi has claimed.
     set(W_AY_CLK2 255)
+elseif(PICOSPECCY_WIFI)
+    set(W_HDR26 26)
+    set(W_HDR27 27)
+    set(W_HDR28 28)
+    set(W_LED_PIN 255)              # LED is the radio's WL_GPIO0
+    set(W_AY_CLK2 255)              # GP29 = WL_CLK: must never be driven by us
 else()
     set(W_HDR26 26)
     set(W_HDR27 27)
@@ -34,7 +41,7 @@ else()
     set(W_AY_CLK2 29)
 endif()
 
-# MURM_W only: the carrier's own PIO SPI PSRAM comes off. pio0 is the only block
+# MURM_WS only: the carrier's own PIO SPI PSRAM comes off. pio0 is the only block
 # that can reach both the radio (GPIO36-39) and MURM1's relocated audio
 # (GPIO40/41/42) — RP2350 PIO sees 32 consecutive GPIOs from gpio_base, and pio1
 # (keyboard GP0/1, NESPAD GP14-16) and pio2 (HDMI GP6-13) are pinned to base 0.
@@ -43,7 +50,7 @@ endif()
 # module carries QSPI PSRAM pads on GPIO47 (memory-mapped butter PSRAM, which is
 # strictly faster than the PIO SPI part), dropping the carrier chip is the right
 # half of the trade; it also frees 3 DMA channels and GP18-21.
-if(MURM_W)
+if(MURM_WS)
     set(M1_PSRAM_DEFS
         PSRAM_SPINLOCK=255
         PSRAM_ASYNC=255
@@ -392,7 +399,7 @@ ELSE()
 
         # PSRAM_MUTEX=1
         # The carrier's PIO SPI PSRAM on GP18-21 — present on MURM, dropped on
-        # MURM_W to keep pio0 inside 32 instructions (see M1_PSRAM_DEFS above).
+        # MURM_WS to keep pio0 inside 32 instructions (see M1_PSRAM_DEFS above).
         # PSRAM_MAX_SCK_MHZ, when it is set: at 126 MHz (default) sys_clk=378 gives
         # clkdiv=1.5 — a fractional divider that makes SCK jitter and corrupts this
         # board's APS6404 8 MB chip (~930 KB/1 MB bad at boot, size probe flaps

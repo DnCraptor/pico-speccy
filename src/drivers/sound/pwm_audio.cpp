@@ -246,7 +246,7 @@ esp_err_t __not_in_flash_func(pwm_audio_write)(
 
 //------------------------------------------------------------
 // Which PIO block I2S runs on. pio1 everywhere by default (beside the PS/2
-// keyboard and NESPAD); MURM_W moves it to pio0 because that board's audio lands
+// keyboard and NESPAD); MURM_WS moves it to pio0 because that board's audio lands
 // on GPIO40/41/42 and pio1 is pinned to gpio_base 0 by the keyboard on GP0/1 and
 // NESPAD on GP14-16. audio.c sets the base from the pins.
 #ifndef I2S_PIO
@@ -366,9 +366,9 @@ void init_sound() {
                    PWM_PIN0, PWM_PIN1);
     } else {
 #if PICOSPECCY_WIFI
-        // Only where the I2S pins sit above GPIO31 (MURM_W and PICO_DV_W:
+        // Only where the I2S pins sit above GPIO31 (MURM_WS and PICO_DV_WS:
         // 40/41/42) does I2S need the radio's base-16 block (BoardPins::auxPio,
-        // decided by the live video output). MURM2_W keeps I2S on GP9/10/11,
+        // decided by the live video output). MURM2_WS keeps I2S on GP9/10/11,
         // which a base-16 block cannot reach: putting it there anyway loaded a
         // base-0 program into the radio's block, and the NES pad (data on 40/41)
         // could then never move that block to base 16 (hw report 2026-09-26).

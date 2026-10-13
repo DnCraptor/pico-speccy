@@ -2038,7 +2038,7 @@ int main() {
         }
     }
 #endif
-    // NOTE: the on-chip radio (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) is NOT brought up
+    // NOTE: the on-chip radio (the *_W / *_WS boards) is NOT brought up
     // here — see the WifiNet::init() call after multicore_launch_core1() below,
     // and why.
     #if defined(PICO_DEFAULT_LED_PIN) && PICO_DEFAULT_LED_PIN != 255
@@ -2196,7 +2196,7 @@ int main() {
     Debug::log2SD("main: applyPalette done");
 #endif
 #if PICOSPECCY_WIFI
-    // On-chip radio (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W) — brought up HERE and nowhere
+    // On-chip radio (the *_W / *_WS boards) — brought up HERE and nowhere
     // earlier, for two reasons that both bit on hardware (2026-09-06: LED
     // blinked, no picture):
     //
