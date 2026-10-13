@@ -2195,6 +2195,10 @@ static const char* const kSnapAskKeys[] = {
 static const char* const kSnapLiveKeys[] = {
     "drive0.file", "drive1.file", "drive2.file", "drive3.file",
     "p3d0.file", "p3d1.file", "tape_file",
+    // Write protect travels with the disk it protects (a snapshot of a game that saves
+    // to its disk must not come back unable to — nor able to, if it was protected).
+    "drive0.wp", "drive1.wp", "drive2.wp", "drive3.wp",
+    "mb02d0.wp", "mb02d1.wp", "mb02d2.wp", "mb02d3.wp", "p3d0.wp", "p3d1.wp",
 };
 
 // What the user calls each of them (the menu's names), for the load question.

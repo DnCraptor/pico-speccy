@@ -245,6 +245,16 @@ public:
     static string pzxBlockReadData(int Blocknum);
     static bool pzxFlashCont;         // FlashLoad partial -> real-mode continuation pending
 
+    // .pss (PSTP block): where the tape is and whether it plays. A TAP/TZX/PZX
+    // that was playing a plain-pulse phase resumes mid-block, at the pulse; a CSW
+    // or GDB phase (their state lives in an inflated file / heap tables) restarts
+    // its block from the pilot. snapLoad expects the same tape already mounted
+    // (by the snapshot's tape_file) and answers false when it is not the same
+    // file (type, size or block count differ) — the position is then left alone.
+    static constexpr uint32_t SNAP_MAX = 192;
+    static uint32_t snapSave(uint8_t* out);
+    static bool     snapLoad(const uint8_t* in, uint32_t n);
+
 private:
 
     static void (*GetBlock)();

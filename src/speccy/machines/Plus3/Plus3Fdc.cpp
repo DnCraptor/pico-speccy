@@ -309,6 +309,16 @@ void setWriteProtect(uint8_t unit, bool wp) {
     if (s_slot && s_slot[unit].fp) s_slot[unit].img.wrprot = wp || (s_slot[unit].img.io.wr == nullptr);
 }
 
+// ── .pss ───────────────────────────────────────────────────────────────────────
+uint32_t snapSave(uint8_t* out) { return updSnapSave(&fdc, out); }
+bool     snapLoad(const uint8_t* in, uint32_t n) { return updSnapLoad(&fdc, nowT(), in, n); }
+
+void flush() {
+    if (!s_slot) return;
+    for (int i = 0; i < 2; i++)
+        if (s_slot[i].fp) { dskSync(&s_slot[i].img); f_sync(s_slot[i].fp); }
+}
+
 // ── blank image ────────────────────────────────────────────────────────────────
 bool createBlank(const std::string& path, bool doubleSided) {
     const uint8_t sides = doubleSided ? 2 : 1;

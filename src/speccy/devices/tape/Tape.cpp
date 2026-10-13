@@ -55,6 +55,7 @@ using namespace std;
 #include "speccy/z80/z80.h"
 #include "app/Debug.h"
 #include "TapeWear.h"
+#include "app/SnapPack.h"
 #include "speccy/core/Rzx.h"
 #include "drivers/sound/pwm_audio.h"
 
@@ -1314,6 +1315,132 @@ void Tape::Stop() {
     if (VIDEO::OSD) {
         VIDEO::OSD = 2;
     }
+}
+
+// ── .pss (PSTP) ────────────────────────────────────────────────────────────────
+// v1: u8 ver, u8 file type, u32 file size, u16 blocks, u16 current block,
+// u8 status (1 = playing), u8 resumable, and when resumable the whole pulse
+// machine: file position, T-states since tapeStart (u64), phase / bit state,
+// the block's timing values, TZX loop and CALL state, the PZX symbol state.
+static constexpr uint8_t TAPE_SNAP_VER = 1;
+
+static bool tapePhaseResumable(uint8_t ph) {
+    return ph != TAPE_PHASE_CSW && ph != TAPE_PHASE_GDB_PILOTSYNC && ph != TAPE_PHASE_GDB_DATA &&
+           ph != TAPE_PHASE_TAIL_GDB && ph != TAPE_PHASE_PAUSE_GDB;
+}
+
+uint32_t Tape::snapSave(uint8_t* out) {
+    SnapOut o(out);
+    const bool playing = tapeStatus == TAPE_LOADING;
+    const bool fmtOk = tapeFileType == TAPE_FTYPE_TAP || tapeFileType == TAPE_FTYPE_TZX ||
+                       tapeFileType == TAPE_FTYPE_PZX;
+    const bool resumable = playing && fmtOk && tapePhaseResumable(tapePhase) &&
+                           !SymDefTable && !cswBlock.obj.fs && !pzxFlashCont && tape.obj.fs;
+    o.u8(TAPE_SNAP_VER);
+    o.u8((uint8_t)tapeFileType);
+    o.u32((uint32_t)tapeFileSize);
+    o.u16((uint16_t)tapeNumBlocks);
+    o.u16((uint16_t)tapeCurBlock);
+    o.u8(playing ? 1 : 0);
+    o.u8(resumable ? 1 : 0);
+    if (!resumable) return o.n;
+    const uint64_t now = CPU::global_tstates + CPU::tstates;
+    o.u32((uint32_t)f_tell(&tape));
+    o.u64(now - tapeStart);   // Read() works modulo 2^64 as well
+    o.u8(tapePhase); o.u8(tapeEarBit); o.u8(tapeCurByte); o.u8(tapeBitMask);
+    o.u8(tapeLastByteUsedBits); o.u8(tapeEndBitMask);
+    o.u16(tapeHdrPulses); o.u32(tapeNext); o.u32(tapeBlockLen); o.u32(tapebufByteCount);
+    o.u32(tapePlayOffset); o.u32(tapeBlkPauseLen);
+    o.u16(tapeSyncLen); o.u16(tapeSync1Len); o.u16(tapeSync2Len);
+    o.u16(tapeBit0PulseLen); o.u16(tapeBit1PulseLen);
+    o.u16(tapeBit0PulseLen2); o.u16(tapeBit1PulseLen2);
+    o.u16(tapeHdrLong); o.u16(tapeHdrShort);
+    o.u16(nLoops); o.u16(loopStart); o.u32(loop_tapeBlockLen); o.u32(loop_tapebufByteCount);
+    o.u8(loop_first ? 1 : 0); o.u16(callSeq); o.u32((uint32_t)callBlock);
+    o.u16(pzxPulseRep); o.u32(pzxPulseDur); o.u32(pzxPulseBlockEnd);
+    for (int i = 0; i < PZX_MAX_PULSES; i++) o.u16(pzxS0[i]);
+    for (int i = 0; i < PZX_MAX_PULSES; i++) o.u16(pzxS1[i]);
+    o.u8(pzxP0); o.u8(pzxP1); o.u8(pzxCurSymPulse);
+    o.u32(pzxBitCount); o.u16(pzxTailLen); o.u32(pzxDataBlockEnd);
+    return o.n;
+}
+
+bool Tape::snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return false;
+    const uint8_t  type   = s.u8();
+    const uint32_t size   = s.u32();
+    const uint16_t blocks = s.u16();
+    const uint16_t cur    = s.u16();
+    const bool playing    = s.u8() != 0;
+    const bool resumable  = s.u8() != 0;
+    if (!s.ok) return false;
+    if (type == TAPE_FTYPE_EMPTY) return true;   // there was no tape: nothing to place
+    if (type != tapeFileType || size != (uint32_t)tapeFileSize || blocks != (uint16_t)tapeNumBlocks)
+        return false;
+
+    // Quietly out of whatever this session's tape was doing (Stop() would toast).
+    tapeStatus = TAPE_STOPPED;
+    tapePhase = TAPE_PHASE_STOPPED;
+    tapeEarBit = 0;
+    tapeAutoPlay = false;
+    pzxFlashCont = false;
+    FreeSymDefTable();
+    if (cswBlock.obj.fs) f_close(&cswBlock);
+    tapeCurBlock = cur < tapeNumBlocks ? cur : 0;
+    if (!playing) return true;
+    if (!resumable) { Play(); return true; }
+
+    const uint32_t pos = s.u32();
+    const uint64_t elapsed = s.u64();
+    const uint8_t phase = s.u8();
+    const uint8_t ear = s.u8(), curByte = s.u8(), bitMask = s.u8(), lastBits = s.u8(), endMask = s.u8();
+    const uint16_t hdrPulses = s.u16();
+    const uint32_t next = s.u32(), blockLen = s.u32(), bbc = s.u32(), playOff = s.u32(), pause = s.u32();
+    uint16_t t[9];
+    for (int i = 0; i < 9; i++) t[i] = s.u16();
+    const uint16_t loops = s.u16(), lstart = s.u16();
+    const uint32_t lbl = s.u32(), lbbc = s.u32();
+    const bool lfirst = s.u8() != 0;
+    const uint16_t cseq = s.u16();
+    const uint32_t cblk = s.u32();
+    const uint16_t prep = s.u16();
+    const uint32_t pdur = s.u32(), pbend = s.u32();
+    uint16_t s0[PZX_MAX_PULSES], s1[PZX_MAX_PULSES];
+    for (int i = 0; i < PZX_MAX_PULSES; i++) s0[i] = s.u16();
+    for (int i = 0; i < PZX_MAX_PULSES; i++) s1[i] = s.u16();
+    const uint8_t p0 = s.u8(), p1 = s.u8(), csp = s.u8();
+    const uint32_t pbits = s.u32();
+    const uint16_t ptail = s.u16();
+    const uint32_t pdend = s.u32();
+    if (!s.ok || pos > size || !tapePhaseResumable(phase) || p0 > PZX_MAX_PULSES || p1 > PZX_MAX_PULSES ||
+        f_lseek(&tape, pos) != FR_OK) {
+        Play();   // the block from its pilot is still better than nothing
+        return true;
+    }
+    tapePhase = phase; tapeEarBit = ear; tapeCurByte = curByte; tapeBitMask = bitMask;
+    tapeLastByteUsedBits = lastBits; tapeEndBitMask = endMask;
+    tapeHdrPulses = hdrPulses; tapeNext = next; tapeBlockLen = blockLen; tapebufByteCount = bbc;
+    tapePlayOffset = playOff; tapeBlkPauseLen = pause;
+    tapeSyncLen = t[0]; tapeSync1Len = t[1]; tapeSync2Len = t[2];
+    tapeBit0PulseLen = t[3]; tapeBit1PulseLen = t[4];
+    tapeBit0PulseLen2 = t[5]; tapeBit1PulseLen2 = t[6];
+    tapeHdrLong = t[7]; tapeHdrShort = t[8];
+    nLoops = loops; loopStart = lstart; loop_tapeBlockLen = lbl; loop_tapebufByteCount = lbbc;
+    loop_first = lfirst; callSeq = cseq; callBlock = (int)cblk;
+    pzxPulseRep = prep; pzxPulseDur = pdur; pzxPulseBlockEnd = pbend;
+    memcpy(pzxS0, s0, sizeof(s0)); memcpy(pzxS1, s1, sizeof(s1));
+    pzxP0 = p0; pzxP1 = p1; pzxCurSymPulse = csp;
+    pzxBitCount = pbits; pzxTailLen = ptail; pzxDataBlockEnd = pdend;
+    GetBlock = tapeFileType == TAPE_FTYPE_TZX ? &TZX_GetBlock
+             : tapeFileType == TAPE_FTYPE_PZX ? &PZX_GetBlock : &TAP_GetBlock;
+    GDBEnd = false;
+    tapeStatus = TAPE_LOADING;
+    const uint64_t now = CPU::global_tstates + CPU::tstates;
+    tapeStart = now - elapsed;   // may wrap: Read() takes now - tapeStart
+    wearReset();
+    if (VIDEO::OSD) VIDEO::OSD = 1;
+    return true;
 }
 
 IRAM_ATTR void Tape::Read() {

@@ -123,3 +123,15 @@ bool    updBusy      (const Upd765* f);
 // the uPD765 twin of rvmWD1793StepStateName(). Defined in the .cpp because the
 // command table it reads lives there.
 const char* updStateName(const Upd765* f);
+
+// .pss (PSUP block): the chip's registers, the phase and every drive's head position
+// and rotational position — the part a load cannot re-derive, since a machine reset
+// puts every head on cylinder 0 while the guest still remembers where it left them.
+// Normalised on save so the record never depends on a running timer: a seek still in
+// flight is completed (as if its time had passed), and a transfer in its execution
+// phase is ended as an OVERRUN, i.e. the result a real chip gives when the host stops
+// servicing it — +3DOS answers that with a retry. The drives' images and the user's
+// settings (write protect, speedlock, fast mode) stay the board's.
+#define UPD_SNAP_MAX 48
+uint32_t updSnapSave(const Upd765* f, uint8_t* out);
+bool     updSnapLoad(Upd765* f, uint64_t nowT, const uint8_t* in, uint32_t n);

@@ -772,3 +772,93 @@ void updWriteData(Upd765* f, uint64_t nowT, uint8_t data) {
     f->cycle = 0;
     cmdResult(f);
 }
+
+// ── .pss snapshot ──────────────────────────────────────────────────────────────
+// v1: ver, motor, MSR, command register, dataReg[9], cycle, command index, phase,
+// ST0-3, SENSE INTERRUPT pair, intrq, MT MF SK DEL HD US, per-unit seek state and NCN,
+// SRT (T-states/cylinder), non-DMA, then PCN / rotational position / weak-copy index
+// of both drives. Normalised as the header says: no seek or transfer in flight.
+static const uint8_t UPD_SNAP_VER = 1;
+
+uint32_t updSnapSave(const Upd765* f, uint8_t* out) {
+    uint8_t ms = f->mainStatus, phase = (uint8_t)f->phase, cycle = f->cycle, intrq = f->intrq;
+    uint8_t st0 = f->st0, st1 = f->st1;
+    uint8_t seekSt[2] = { f->seekSt[0], f->seekSt[1] };
+    uint8_t pcn[2] = { f->drive[0].pcn, f->drive[1].pcn };
+    uint8_t rot[2] = { f->drive[0].rot, f->drive[1].rot };
+    for (uint8_t i = 0; i < 2; i++) {
+        if (seekSt[i] != 1 && seekSt[i] != 2) continue;      // updTick's completion, now
+        const UpdDrive* d = &f->drive[i];
+        if (!d->present || !d->img || !f->motor) seekSt[i] = 6;
+        else { pcn[i] = seekSt[i] == 2 ? 0 : f->ncn[i]; rot[i] = 0; seekSt[i] = 4; }
+        ms &= (uint8_t)~(1u << i);
+        intrq = 2;
+    }
+    if (f->phase == UPD_PH_EXE) {                           // cmdResult() with an overrun
+        st0 |= ST0_INT_ABNORM;
+        st1 |= ST1_OVERRUN;
+        cycle = kCmd[f->cmdIdx].resLen;
+        ms = (uint8_t)((ms & ~UPD_MS_EXM) | UPD_MS_RQM);
+        if (cycle) { phase = UPD_PH_RES; intrq = 1; ms |= UPD_MS_DIO; }
+        else { phase = UPD_PH_CMD; ms &= (uint8_t)~(UPD_MS_DIO | UPD_MS_CB); }
+    }
+    uint32_t n = 0;
+    out[n++] = UPD_SNAP_VER;
+    out[n++] = f->motor ? 1 : 0;
+    out[n++] = ms;
+    out[n++] = f->cmdReg;
+    for (int i = 0; i < 9; i++) out[n++] = f->dataReg[i];
+    out[n++] = cycle;
+    out[n++] = f->cmdIdx;
+    out[n++] = phase;
+    out[n++] = st0; out[n++] = st1; out[n++] = f->st2; out[n++] = f->st3;
+    out[n++] = f->senseInt[0]; out[n++] = f->senseInt[1];
+    out[n++] = intrq;
+    out[n++] = f->mt; out[n++] = f->mf; out[n++] = f->sk;
+    out[n++] = f->del; out[n++] = f->hd; out[n++] = f->us;
+    out[n++] = seekSt[0]; out[n++] = seekSt[1];
+    out[n++] = f->ncn[0]; out[n++] = f->ncn[1];
+    out[n++] = (uint8_t)f->srtT; out[n++] = (uint8_t)(f->srtT >> 8);
+    out[n++] = f->nonDma;
+    for (int i = 0; i < 2; i++) { out[n++] = pcn[i]; out[n++] = rot[i]; out[n++] = f->drive[i].weakSeq; }
+    return n;
+}
+
+bool updSnapLoad(Upd765* f, uint64_t nowT, const uint8_t* in, uint32_t n) {
+    if (n < 42 || in[0] < 1) return false;
+    const uint8_t cmdIdx = in[14], phase = in[15];
+    if (cmdIdx > kCmdInvalid || phase > UPD_PH_RES) return false;
+    uint32_t k = 1;
+    f->motor = in[k++] != 0;
+    f->mainStatus = in[k++];
+    f->cmdReg = in[k++];
+    for (int i = 0; i < 9; i++) f->dataReg[i] = in[k++];
+    f->cycle = in[k++];
+    f->cmdIdx = in[k++];
+    f->phase = (UpdPhase)in[k++];
+    f->st0 = in[k++]; f->st1 = in[k++]; f->st2 = in[k++]; f->st3 = in[k++];
+    f->senseInt[0] = in[k++]; f->senseInt[1] = in[k++];
+    f->intrq = in[k++];
+    f->mt = in[k++]; f->mf = in[k++]; f->sk = in[k++];
+    f->del = in[k++]; f->hd = in[k++]; f->us = in[k++];
+    f->seekSt[0] = in[k++]; f->seekSt[1] = in[k++];
+    f->ncn[0] = in[k++]; f->ncn[1] = in[k++];
+    f->srtT = (uint16_t)(in[k] | (in[k + 1] << 8)); k += 2;
+    f->nonDma = in[k++];
+    for (int i = 0; i < 2; i++) {
+        f->drive[i].pcn = in[k++]; f->drive[i].rot = in[k++]; f->drive[i].weakSeq = in[k++];
+        if (f->seekSt[i] == 1 || f->seekSt[i] == 2) f->seekSt[i] = 4;   // never mid-seek
+    }
+    // A result phase that would read past its own table is a damaged record: drop to
+    // an idle command phase rather than hand the guest bytes from nowhere.
+    if (f->phase == UPD_PH_EXE ||
+        (f->phase == UPD_PH_RES && (f->cycle == 0 || f->cycle > kCmd[f->cmdIdx].resLen))) {
+        f->phase = UPD_PH_CMD; f->cycle = 0;
+        f->mainStatus = UPD_MS_RQM;
+    }
+    f->mainStatus &= (uint8_t)~(UPD_MS_EXM | 0x0F);
+    f->sec = -1;
+    f->timeoutArmed = false;
+    f->nowT = f->nextByteT = nowT;
+    return true;
+}

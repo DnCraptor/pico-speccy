@@ -4004,8 +4004,11 @@ uint16_t gs_dbg_gs_pc(void) { return (uint16_t)Z80_PC(s_cpu); }
 // card-physical numbering — PSGP {off u32, 16 KB} or PSGF {off u32, byte} for a
 // uniform one. The card is frozen under the run lock for the whole save / load,
 // so core1 never runs on half a state. Not saved: the MP3 decoder's stream (the
-// player feeds it again), the SD-card SPI state machine (NgsSd), the output rings.
+// player feeds it again) and the output rings. The SD-card SPI state machine (NgsSd)
+// goes in its own PSNS block.
 #include "speccy/core/PssIo.h"
+#include "app/TryAlloc.h"
+#include <stdlib.h>
 
 static constexpr uint8_t  GS_SNAP_VER = 1;
 static constexpr uint32_t GS_SNAP_CHUNK = 0x4000;
@@ -4096,6 +4099,14 @@ bool GS::snapSave(Pss::W& w) {
     snapPutFifo(w, s_cmd_fifo,  GS_CMD_FIFO_MASK,  s_cmd_fifo_r,  s_cmd_fifo_w);
     snapPutFifo(w, s_g2h_buf,   GS_G2H_MASK,       s_g2h_r,       s_g2h_w);
     w.end();
+    if (s_ngs) {   // PSNS: the card's SD interface, mid-sector if it was streaming
+        uint8_t* sd = (uint8_t*)tryMalloc(NgsSd::SNAP_MAX);
+        if (sd) {
+            const uint32_t n = NgsSd::snapSave(sd);
+            w.begin("PSNS"); w.raw(sd, n); w.end();
+            free(sd);
+        }
+    }
 
     // RAM, 16 KB at a time. SPI PSRAM is read twice through a small bounce (once
     // for the uniform test, once to write), so no 16 KB buffer is needed.
@@ -4239,7 +4250,7 @@ void GS::snapLoadPage(Pss::R& r, const char id[4], uint32_t size) {
     }
 }
 
-void GS::snapLoadEnd() {
+void GS::snapLoadEnd(const uint8_t* sd, uint32_t sdLen) {
     if (!enabled) return;
     if (s_snap_ok) {
         // Everything the registers imply.
@@ -4251,6 +4262,7 @@ void GS::snapLoadEnd() {
             ngs_rebuild_map();
             ngs_zxdma_gate();
             NgsSd::reset();
+            if (sd && sdLen) NgsSd::snapLoad(sd, sdLen);
             NgsMp3::reset();
         } else {
             setClock();

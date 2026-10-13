@@ -1,4 +1,5 @@
 #include "IDE.h"
+#include "app/SnapPack.h"
 
 
 #include <cstdlib>
@@ -1425,3 +1426,85 @@ void IDE::write_data16(uint16_t v) {
     write8(0, (uint8_t)(v >> 8));
 }
 
+
+// ── .pss (PSID) ────────────────────────────────────────────────────────────────
+// v1: u8 ver, u8 scheme, u8 open mask, u32 size x2, u16 C/H/S x2, the nine
+// registers, u8 signature-valid mask, u16 data index (#FFFF = none), u8 flags (b0
+// write, b1 discard), u8 latch read / write, ATAPI: u8 phase, cdb[12], u8 cdb index,
+// u16 transfer length / index, u32 LBA, u32 blocks, u8 sense key / ASC / ASCQ, then
+// u16 buffer length + the buffer (only while a transfer is in progress).
+static constexpr uint8_t IDE_SNAP_VER = 1;
+
+void IDE::flush() {
+    if (!file) return;
+    for (int d = 0; d < 2; d++) if (file_open[d]) f_sync(&file[d]);
+}
+
+uint32_t IDE::snapSave(uint8_t* out) {
+    SnapOut o(out);
+    o.u8(IDE_SNAP_VER);
+    o.u8(scheme);
+    o.u8((file_open[0] ? 1 : 0) | (file_open[1] ? 2 : 0));
+    for (int d = 0; d < 2; d++) o.u32(size_bytes[d]);
+    for (int d = 0; d < 2; d++) { o.u16(cylinders[d]); o.u16(heads[d]); o.u16(sectors[d]); }
+    o.u8(reg_feature); o.u8(reg_sector_count); o.u8(reg_sector); o.u8(reg_cyl_lo);
+    o.u8(reg_cyl_hi); o.u8(reg_head); o.u8(reg_status); o.u8(reg_error); o.u8(reg_control);
+    o.u8((sig_valid[0] ? 1 : 0) | (sig_valid[1] ? 2 : 0));
+    o.u16(data_index < 0 ? 0xFFFF : (uint16_t)data_index);
+    o.u8((data_write ? 1 : 0) | (data_discard ? 2 : 0));
+    o.u8(latch_read); o.u8(latch_write);
+    o.u8((uint8_t)atapi_phase); o.raw(cdb, 12); o.u8((uint8_t)cdb_index);
+    o.u16((uint16_t)xfer_len); o.u16((uint16_t)xfer_index);
+    o.u32(atapi_lba); o.u32(atapi_blocks);
+    o.u8(sense_key); o.u8(sense_asc); o.u8(sense_ascq);
+    uint16_t blen = 0;
+    if (buffer) blen = atapi_phase != 0 ? ATAPI_BLOCK : (data_index >= 0 ? 512 : 0);
+    o.u16(blen);
+    if (blen) o.raw(buffer, blen);
+    return o.n;
+}
+
+bool IDE::snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return false;
+    const uint8_t sch = s.u8();
+    const uint8_t openMask = s.u8();
+    uint32_t sz[2]; uint16_t geo[2][3];
+    for (int d = 0; d < 2; d++) sz[d] = s.u32();
+    for (int d = 0; d < 2; d++) for (int k = 0; k < 3; k++) geo[d][k] = s.u16();
+    uint8_t regs[9]; s.raw(regs, 9);
+    const uint8_t sig = s.u8();
+    const uint16_t di = s.u16();
+    const uint8_t fl = s.u8();
+    const uint8_t lr = s.u8(), lw = s.u8();
+    const uint8_t aph = s.u8();
+    uint8_t c[12]; s.raw(c, 12);
+    const uint8_t ci = s.u8();
+    const uint16_t xl = s.u16(), xi = s.u16();
+    const uint32_t alba = s.u32(), ablk = s.u32();
+    const uint8_t sk = s.u8(), sa = s.u8(), sq = s.u8();
+    const uint16_t blen = s.u16();
+    if (!s.ok || sch != scheme || scheme == OFF || !buffer || blen > ATAPI_BLOCK) return false;
+    // The same disks: every drive that had an image has one now, of the same size.
+    for (int d = 0; d < 2; d++) {
+        const bool had = (openMask >> d) & 1;
+        if (had != file_open[d] || (had && sz[d] != size_bytes[d])) return false;
+    }
+    if (blen) { s.raw(buffer, blen); if (!s.ok) return false; }
+    for (int d = 0; d < 2; d++)
+        if (file_open[d] && geo[d][0] && geo[d][1] && geo[d][2]) {
+            cylinders[d] = geo[d][0]; heads[d] = geo[d][1]; sectors[d] = geo[d][2];
+        }
+    reg_feature = regs[0]; reg_sector_count = regs[1]; reg_sector = regs[2];
+    reg_cyl_lo = regs[3]; reg_cyl_hi = regs[4]; reg_head = regs[5];
+    reg_status = regs[6]; reg_error = regs[7]; reg_control = regs[8];
+    sig_valid[0] = sig & 1; sig_valid[1] = (sig & 2) != 0;
+    data_index = (di == 0xFFFF || di >= 512 || !blen) ? -1 : di;
+    data_write = fl & 1; data_discard = (fl & 2) != 0;
+    latch_read = lr; latch_write = lw;
+    atapi_phase = blen == ATAPI_BLOCK ? aph : (aph == 1 ? 1 : 0);
+    memcpy(cdb, c, 12); cdb_index = ci < 12 ? ci : 0;
+    xfer_len = xl; xfer_index = xi; atapi_lba = alba; atapi_blocks = ablk;
+    sense_key = sk; sense_asc = sa; sense_ascq = sq;
+    return true;
+}

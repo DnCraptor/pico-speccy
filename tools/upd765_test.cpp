@@ -743,6 +743,65 @@ static void testNotReady() {
     ck(!h.wedged, "no wedge");
 }
 
+// .pss: a snapshot taken mid-seek / mid-read restores into a fresh controller that
+// answers the guest the way the saved one would have — the head where the seek was
+// going, a pending SENSE INTERRUPT, and an interrupted read ended as an overrun.
+static void testSnapshot() {
+    group = "snapshot";
+    MemFile f = mkStd(40, 1, 9, 2, 0xE5);
+    uint8_t rec[UPD_SNAP_MAX];
+
+    {   // a seek still running when the snapshot is taken
+        Host h; bootFdc(h);
+        DskImage img; mount(h, img, f, 0);
+        h.cmd({ 0x0F, 0x00, 0x11 });
+        ckEq(h.status() & 0x01, 0x01, "seek is running at save time");
+        const uint32_t n = updSnapSave(&h.f, rec);
+        ck(n <= UPD_SNAP_MAX, "record fits UPD_SNAP_MAX");
+
+        Host g; bootFdc(g);
+        DskImage img2; mount(g, img2, f, 0);
+        ck(updSnapLoad(&g.f, g.t, rec, n), "load accepts the record");
+        ckEq(g.f.drive[0].pcn, 0x11, "the head is where the seek was going");
+        ckEq(g.status() & 0x01, 0, "nothing is seeking after the load");
+        g.cmd({ 0x08 });
+        auto r = g.results();
+        ckEq((long)r.size(), 2, "the seek's SENSE INTERRUPT is pending");
+        if (r.size() == 2) { ckEq(r[0], 0x20, "ST0 seek end"); ckEq(r[1], 0x11, "PCN"); }
+        ck(!g.wedged, "no wedge");
+    }
+    {   // a read in its execution phase
+        Host h; bootFdc(h);
+        DskImage img; mount(h, img, f, 0);
+        h.cmd({ 0x46, 0x00, 0x00, 0x00, 0xC1, 0x02, 0xC9, 0x2A, 0xFF });
+        h.read(100);
+        ck((h.status() & UPD_MS_EXM) != 0, "read is in the execution phase at save time");
+        const uint32_t n = updSnapSave(&h.f, rec);
+
+        Host g; bootFdc(g);
+        DskImage img2; mount(g, img2, f, 0);
+        ck(updSnapLoad(&g.f, g.t, rec, n), "load accepts the record");
+        ckEq(g.status() & UPD_MS_EXM, 0, "no execution phase after the load");
+        auto r = g.results();
+        ckEq((long)r.size(), 7, "the interrupted read reports its result");
+        if (r.size() == 7) {
+            ckEq(r[0] & 0xC0, 0x40, "ST0 abnormal termination");
+            ckEq(r[1] & 0x10, 0x10, "ST1 overrun");
+        }
+        ck(!g.wedged, "no wedge");
+    }
+    {   // a damaged record is refused and leaves the controller usable
+        Host g; bootFdc(g);
+        uint8_t bad[UPD_SNAP_MAX] = { 1 };
+        bad[14] = 0xEE;   // command index out of range
+        ck(!updSnapLoad(&g.f, g.t, bad, 42), "out-of-range command index refused");
+        ck(!updSnapLoad(&g.f, g.t, rec, 10), "short record refused");
+        g.cmd({ 0x08 });
+        auto r = g.results();
+        ckEq((long)r.size(), 1, "still answers SENSE INTERRUPT as INVALID");
+    }
+}
+
 int main() {
     printf("Upd765\n");
     testBasics();
@@ -757,6 +816,7 @@ int main() {
     testScanAndDiag();
     testPacingAndTimeout();
     testNotReady();
+    testSnapshot();
     if (failures) { printf("\n%d FAILURE(S)\n", failures); return 1; }
     printf("  all checks passed\n");
     return 0;
