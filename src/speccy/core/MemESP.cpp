@@ -957,6 +957,163 @@ bool MemESP::buildNextRam() {
     return true;
 }
 
+// ===== Next hot-page pool =====
+// NEXT_HOT_FRAMES (CMake, default 8 = "4 x 16K") frames of 8K SRAM from the heap,
+// taken at the first Next frame. Policy, once per frame from VIDEO::EndFrame:
+//   * a candidate is a RAM page the CPU has mapped (mmu[0..7]) whose home is in
+//     butter PSRAM, and it must have been mapped at the PREVIOUS tick too — a game
+//     that pages a slot many times a frame must not turn every frame into copies;
+//   * slots go PC's first, then SP's, then the rest;
+//   * at most NEXT_HOT_PROMOS promotions a frame (8K copy each, ~0.2-0.4 ms);
+//   * a full pool evicts the frame least recently seen mapped, never one mapped
+//     now or at the last two ticks; eviction always writes the 8K back (no dirty
+//     tracking — every guest write goes straight through the pointer);
+//   * a frame given up is QUARANTINED for two ticks: core1 (and core0's c0Help)
+//     resolve nextPgPtr at render time, so a line in flight may still be reading
+//     the frame under its old page for a moment.
+// Every promotion/eviction swaps the page's base pointer in ramCurrent, wrOverlay
+// and l2RdPtr (all hold 8K page bases: the MMU, the +3 all-RAM overlay, the
+// Layer 2 windows, the TBBLUE config window), so nothing has to re-run the MMU.
+#ifndef NEXT_HOT_FRAMES
+#define NEXT_HOT_FRAMES 8
+#endif
+#define NEXT_HOT_PROMOS 2
+uint8_t* MemESP::nextHotIdx = nullptr;
+uint8_t* MemESP::nextHotFrame[MemESP::NEXT_HOT_MAX] = {};
+static uint8_t  s_hotN = 0;                       // frames in the pool
+static uint8_t  s_hotPage[MemESP::NEXT_HOT_MAX];  // page held, 0xFF = free
+static uint32_t s_hotLast[MemESP::NEXT_HOT_MAX];  // tick the page was last seen mapped
+static uint32_t s_hotFree[MemESP::NEXT_HOT_MAX];  // tick from which a free frame is reusable
+static uint8_t  s_hotPrev[8];                     // mmu[] at the previous tick
+static uint32_t s_hotTick = 0;
+static bool     s_hotTried = false;
+static uint32_t s_hotPromos = 0, s_hotEvicts = 0, s_hotLogTick = 0;
+
+static void nextHotSwap(uint8_t* from, uint8_t* to) {
+    for (int s = 0; s < 8; s++) {
+        if (MemESP::ramCurrent[s] == from) MemESP::ramCurrent[s] = to;
+        if (MemESP::wrOverlay[s] == from)  MemESP::wrOverlay[s] = to;
+        if (MemESP::l2RdPtr[s] == from)    MemESP::l2RdPtr[s] = to;
+    }
+}
+
+static void nextHotEvict(int f) {
+    const uint8_t pg = s_hotPage[f];
+    uint8_t* home = MemESP::nextHomePtr(pg);
+    uint8_t* fr = MemESP::nextHotFrame[f];
+    memcpy(home, fr, 0x2000);           // through the cached butter alias: coherent
+    MemESP::nextHotIdx[pg] = 0xFF;
+    nextHotSwap(fr, home);
+    s_hotPage[f] = 0xFF;
+    s_hotFree[f] = s_hotTick + 2;       // quarantine (see above)
+    s_hotEvicts++;
+}
+
+static bool nextHotAlloc() {
+    s_hotTried = true;
+    if (NEXT_HOT_FRAMES <= 0) return false;
+    uint8_t* idx = (uint8_t*)tryMalloc(MemESP::NEXT_PAGES);
+    if (!idx) return false;
+    memset(idx, 0xFF, MemESP::NEXT_PAGES);
+    const int want = NEXT_HOT_FRAMES > MemESP::NEXT_HOT_MAX ? MemESP::NEXT_HOT_MAX : NEXT_HOT_FRAMES;
+    int n = 0;
+    // Each frame its own block (a fragmented heap still yields 8K pieces), and
+    // never the last 16K: the Next allocates more later (NEXTVID, c0Help scratch).
+    while (n < want && getLargestAllocatable() >= 0x2000 + 16384) {
+        uint8_t* p = (uint8_t*)tryMalloc(0x2000);
+        if (!p) break;
+        MemESP::nextHotFrame[n] = p;
+        s_hotPage[n] = 0xFF;
+        s_hotFree[n] = 0;
+        s_hotLast[n] = 0;
+        n++;
+    }
+    if (!n) { free(idx); return false; }
+    s_hotN = (uint8_t)n;
+    memset(s_hotPrev, 0xFF, sizeof(s_hotPrev));
+    MemESP::nextHotIdx = idx;
+    Debug::log("Next hot-page pool: %d x 8K SRAM frames", n);
+    return true;
+}
+
+void MemESP::nextHotTick() {
+    if (!nextRamReady) return;
+    if (!nextHotIdx) {
+        if (s_hotTried || !nextHotAlloc()) return;
+    }
+    if (nextBootRomActive || nextConfigMode) return;   // the TBBLUE boot owns slots 0/1
+    ++s_hotTick;
+    // Mark what is mapped now.
+    for (int f = 0; f < s_hotN; f++) {
+        const uint8_t pg = s_hotPage[f];
+        if (pg == 0xFF) continue;
+        for (int s = 0; s < 8; s++) if (mmu[s] == pg) { s_hotLast[f] = s_hotTick; break; }
+    }
+    uint8_t order[8];
+    int no = 0;
+    order[no++] = (uint8_t)(Z80::getRegPC() >> 13);
+    const uint8_t sps = (uint8_t)(Z80::getRegSP() >> 13);
+    if (sps != order[0]) order[no++] = sps;
+    for (int s = 2; s < 10; s++) {
+        const uint8_t sl = (uint8_t)(s & 7);
+        bool dup = false;
+        for (int k = 0; k < no; k++) if (order[k] == sl) dup = true;
+        if (!dup) order[no++] = sl;
+    }
+    int promos = 0;
+    for (int k = 0; k < no && promos < NEXT_HOT_PROMOS; k++) {
+        const uint8_t s = order[k];
+        const uint8_t pg = mmu[s];
+        if (pg >= NEXT_PAGES) continue;                     // ROM (0xFF) / open bus
+        if (nextHotIdx[pg] != 0xFF) continue;               // already hot
+        if (s_hotPrev[s] != pg) continue;                   // not stable yet
+        uint8_t* home = nextHomePtr(pg);
+        if (home < (uint8_t*)0x11000000 || home >= (uint8_t*)0x12000000) continue;   // not in butter: SRAM already
+        int f = -1;
+        for (int i = 0; i < s_hotN; i++)
+            if (s_hotPage[i] == 0xFF && s_hotFree[i] <= s_hotTick) { f = i; break; }
+        if (f < 0) {
+            bool quarantined = false;
+            for (int i = 0; i < s_hotN; i++) if (s_hotPage[i] == 0xFF) quarantined = true;
+            if (quarantined) break;           // a frame frees up in a tick or two
+            // Victim: the frame seen mapped longest ago, not in the last two ticks.
+            int v = -1;
+            for (int i = 0; i < s_hotN; i++) {
+                if (s_hotPage[i] == 0xFF) continue;
+                if (s_hotTick - s_hotLast[i] < 3) continue;
+                if (v < 0 || s_hotLast[i] < s_hotLast[v]) v = i;
+            }
+            if (v >= 0) nextHotEvict(v);    // quarantined: usable from a later tick
+            break;
+        }
+        uint8_t* fr = nextHotFrame[f];
+        memcpy(fr, home, 0x2000);
+        s_hotPage[f] = pg;
+        s_hotLast[f] = s_hotTick;
+        nextHotIdx[pg] = (uint8_t)f;
+        nextHotSwap(home, fr);
+        promos++;
+        s_hotPromos++;
+    }
+    memcpy(s_hotPrev, mmu, sizeof(s_hotPrev));
+    // One line every ~10 s while the pool is moving, so churn shows in the log.
+    if (s_hotTick - s_hotLogTick >= 500 && (s_hotPromos || s_hotEvicts)) {
+        int used = 0;
+        for (int i = 0; i < s_hotN; i++) if (s_hotPage[i] != 0xFF) used++;
+        Debug::log("Next hot pool: %d/%d frames, +%u promos, -%u evicts",
+                   used, (int)s_hotN, (unsigned)s_hotPromos, (unsigned)s_hotEvicts);
+        s_hotPromos = s_hotEvicts = 0;
+        s_hotLogTick = s_hotTick;
+    }
+}
+
+void MemESP::nextHotFlush() {
+    if (!nextHotIdx) return;
+    for (int f = 0; f < s_hotN; f++)
+        if (s_hotPage[f] != 0xFF) nextHotEvict(f);
+    memset(s_hotPrev, 0xFF, sizeof(s_hotPrev));
+}
+
 // Read a file into butter PSRAM through a small SRAM bounce: the SD driver
 // may DMA into the destination, which bypasses the XIP cache — a direct
 // f_read into the cached alias leaves stale cache lines and the Z80 then

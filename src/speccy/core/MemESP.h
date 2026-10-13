@@ -446,10 +446,29 @@ public:
     // exists at all" answer the callers used a null table entry for.
     static uint8_t* nextPg[16];
     static uint8_t* nextStrip;
-    __attribute__((always_inline)) static inline uint8_t* nextPgPtr(unsigned pg) {
-        if (!nextRamReady || pg >= NEXT_PAGES) return nullptr;
+    // Hot-page pool (Next only, NEXT_HOT_FRAMES 8K SRAM frames; MemESP.cpp): the
+    // pages the CPU keeps mapped are copied out of butter PSRAM into SRAM so the
+    // Z80 and the renderers stop paying XIP misses on them. nextHotIdx is null
+    // until the pool exists; entry 0xFF = the page lives at its home address.
+    // nextPgPtr is the ONE resolver every Next consumer uses, so the pool is
+    // invisible to them; pointers already handed out (ramCurrent, wrOverlay,
+    // l2RdPtr) are swapped by the pool itself on every promotion/eviction.
+    static constexpr int NEXT_HOT_MAX = 8;
+    static uint8_t* nextHotIdx;
+    static uint8_t* nextHotFrame[NEXT_HOT_MAX];
+    __attribute__((always_inline)) static inline uint8_t* nextHomePtr(unsigned pg) {
         return (pg < 16) ? nextPg[pg] : nextStrip + ((size_t)(pg - 16) << 13);
     }
+    __attribute__((always_inline)) static inline uint8_t* nextPgPtr(unsigned pg) {
+        if (!nextRamReady || pg >= NEXT_PAGES) return nullptr;
+        if (nextHotIdx) {
+            const uint8_t f = nextHotIdx[pg];
+            if (f != 0xFF) return nextHotFrame[f];
+        }
+        return nextHomePtr(pg);
+    }
+    static void nextHotTick();     // once per frame (VIDEO::EndFrame, Next branch)
+    static void nextHotFlush();    // write every frame back home and empty the pool
     // First byte after the RAM pages: the ROM/Multiface/Alt-ROM region.
     __attribute__((always_inline)) static inline uint8_t* nextRomRegion() {
         return nextStrip + ((size_t)(NEXT_PAGES - 16) << 13);

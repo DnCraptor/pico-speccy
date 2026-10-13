@@ -170,7 +170,9 @@ int start(const std::string& path, Format format) {
     NextReg::write(0x83, NextReg::reg[0x83] | 1);
     DivMMC::automap = DivMMC::conmem = false;
     DivMMC::applyMapping();
-    auto* ram = MemESP::ram[2].direct();
+    // Bank 2's first 8K through the Next resolver: the hot-page pool may hold
+    // page 4 in an SRAM frame, and ram[2] is only its butter home.
+    auto* ram = MemESP::nextPgPtr(4);
     launchCode = snx ? NexLaunchCode::snxCode : bas ? NexLaunchCode::basCode : NexLaunchCode::code;
     launchSize = snx ? sizeof(NexLaunchCode::snxCode) : bas ? sizeof(NexLaunchCode::basCode) : sizeof(NexLaunchCode::code);
     launchStop = snx ? NexLaunchCode::snxStop : bas ? NexLaunchCode::basStop : NexLaunchCode::stop;
@@ -281,7 +283,7 @@ void poll() {
 #endif
     }
     if (!pending) return;
-    if (!Z80Ops::isNext || memcmp(MemESP::ram[2].direct(),
+    if (!Z80Ops::isNext || memcmp(MemESP::nextPgPtr(4),
                                 launchCode, launchSize)) {
         // .nexload / LOAD has replaced bank 2 with the application: the
         // bootstrap's HALT can never run, so the poll hands over silently.

@@ -8754,6 +8754,7 @@ IRAM_ATTR void VIDEO::EndFrame() {
             if (timex_hires_live && !was) NEXTVID::rebuildPairMap();
         }
         NEXTVID::EndFrame();
+        MemESP::nextHotTick();   // hot-page pool: mapped butter pages -> SRAM frames
         if (Z80DMA::dma_attr_valid) Z80DMA::resetAttrShadow();   // DMA multicolour: per frame
         gigascreenModeGate();   // suspends Gigascreen (and frees its prev-FB) on the Next
         // Top-border banner (OSD::notify): this branch returns long before the

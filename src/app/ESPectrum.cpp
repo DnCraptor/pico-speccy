@@ -843,6 +843,7 @@ void ESPectrum::powerOnRamFill(int arch, int romset) {
   // checkerboard; NextZXOS is unaffected either way.
   const bool next = arch < 0 ? (Config::arch == A_NEXT) : (arch == A_NEXT);
   const bool dramPattern = !isKarabasRomset(rs) && !evo && !next;
+  MemESP::nextHotFlush();   // Next hot-page pool: frames back home before the fill
   size_t n = 0;
   for (size_t i = 0; i < MEM_PG_CNT; ++i) {
     if (MemESP::ram[i].memType() == mem_type_t::POINTER) {
@@ -1987,6 +1988,7 @@ void ESPectrum::reset() {
 
 void ESPectrum::reset(uint8_t romInUse) {
   NexLaunch::cancel();
+  MemESP::nextHotFlush();   // Next hot-page pool: write back, restart from what is mapped
 #if PERF_TRACE
   PerfFdc::reset();
 #endif
