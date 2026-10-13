@@ -2092,9 +2092,33 @@ void Tape::Save() {
     fclose2(fichero);
 }
 
+// The ROM trap found nothing it can fill from the file: the ROM is inside LD-BYTES
+// and will wait on the tape signal, so the tape has to RUN. Started only when it is
+// stopped — a tape already playing in real time is exactly what the ROM needs, and
+// Play() would restart the block under it. Play() seeks to tapeCurBlock itself.
+static void flashPlayFallback() {
+    if (Tape::tapeStatus != TAPE_LOADING) Tape::Play();
+}
+
 bool Tape::FlashLoad() {
     if (Z80Ops::isALF) { // unsupported now
         return false;
+    }
+
+    // The trap may fire while the tape is PLAYING in real time: a .pss saved mid-load
+    // with Fast load off and restored with it on, or Fast load switched on mid-load.
+    // The pulse machine advances tapeCurBlock only when a block's trailing pause ENDS
+    // (Read(), TAPE_PHASE_PAUSE), and the ROM re-enters LD-BYTES for the next block
+    // well inside that pause — so here tapeCurBlock still names the block the ROM has
+    // just read, and loading it again feeds a header to a data request (flag mismatch,
+    // the whole tape then runs one block out of step). The block is finished: start
+    // from the next one. Mid-block phases keep the current block — the ROM has missed
+    // its start, and the file still has all of it.
+    if (tapeStatus == TAPE_LOADING &&
+        (tapeFileType == TAPE_FTYPE_TAP || tapeFileType == TAPE_FTYPE_TZX) &&
+        (tapePhase == TAPE_PHASE_TAIL || tapePhase == TAPE_PHASE_PAUSE)) {
+        if (tapeCurBlock < tapeNumBlocks - 1) tapeCurBlock++;
+        else return false;          // that was the last block: nothing left to load
     }
 
     if (tapeFileType == TAPE_FTYPE_TZX) {
@@ -2102,6 +2126,7 @@ bool Tape::FlashLoad() {
         // Skip metadata/non-data blocks (archive info, text, group markers, pure tone,
         // pulse sequence, etc.) to find the next loadable block.
         FIL* tape = &Tape::tape;
+        const int savedBlock = tapeCurBlock;
         uint8_t foundId = 0;
         while (tapeCurBlock < tapeNumBlocks) {
             CalcTZXBlockPos(tapeCurBlock);
@@ -2109,7 +2134,13 @@ bool Tape::FlashLoad() {
             if (foundId == 0x10 || foundId == 0x14) break;
             tapeCurBlock++;
         }
-        if (tapeCurBlock >= tapeNumBlocks) return false;
+        if (tapeCurBlock >= tapeNumBlocks) {
+            // Nothing flash-loadable from here on (turbo, direct recording, raw
+            // pulses): the ROM is in LD-BYTES and only the real tape can feed it.
+            tapeCurBlock = savedBlock;
+            flashPlayFallback();
+            return false;
+        }
         // Re-seek to block start to read header cleanly
         CalcTZXBlockPos(tapeCurBlock);
         foundId = readByteFile(tape);
@@ -2227,8 +2258,11 @@ bool Tape::FlashLoad() {
             tapeCurBlock++;
         }
         if (tapeCurBlock >= tapeNumBlocks) {
+            // No DATA block left — a tape of raw PULS (DanD.pzx is one 588 KB PULS
+            // block): play it for real, or the ROM waits on a stopped tape for ever.
             tapeCurBlock = savedBlock;
             f_lseek(tape, savedPos);
+            flashPlayFallback();
             return false;
         }
         // Re-seek and read DATA block header
@@ -2245,6 +2279,7 @@ bool Tape::FlashLoad() {
         if (p0 != 2 || p1 != 2) {
             tapeCurBlock = savedBlock;
             f_lseek(tape, savedPos);
+            flashPlayFallback();
             return false;
         }
         // Read pulse sequences
@@ -2423,12 +2458,23 @@ bool Tape::FlashLoad() {
         }
     }
 
+    int nBytes = Z80::getRegDE();  // Lenght
+
+    // The block carries more than the ROM asked for: the rest is for a custom loader
+    // that goes on reading the SAME block in real time once the ROM has its share
+    // (Wizball: a 155-byte BASIC header over a 35384-byte block). Flash-loading would
+    // skip the tail and leave that loader polling a stopped tape. Play the block for
+    // real instead, like the PZX branch does — the ROM reads it from the pilot.
+    if (blockLen - 2 > nBytes) {
+        Play();
+        return false;
+    }
+
     // La paridad incluye el byte de flag
     Z80::setRegA(tapeFlag);
 
     int count = 0;
     int addr = Z80::getRegIX();    // Address start
-    int nBytes = Z80::getRegDE();  // Lenght
     int addr2 = addr & 0x3fff;
     uint8_t page = addr >> 14;
 
