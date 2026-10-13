@@ -7497,8 +7497,9 @@ So "keep the two pages that follow the screen" is impossible (the pair changes e
 frame) and the static split is the answer: dragon 16.1 ms with 4/6 in butter vs 15.2
 with all of 4-7 in SRAM (+0.9 ms, 48.8 FPS; PERF build `debug/DVp2-zx57-perf-1.0.9`,
 plain `DVp2-zx57-1.0.9`). Owner 2026-10-13: "на данный момент в порядке", testing goes
-on. Still owed: ATM EGA (pages 1/3 have been butter since the first cut, never
-measured), heap figure at 576p + NeoGS. The text below is the 0-3-only state.
+on. ATM EGA checked the same day: Golden Axe under NedoOS (ATM-Turbo 3, BIOS 1.07.13EC,
+osatm3sd_pico-speccy.trd) runs at 50 FPS with IDL ~10000 us — pages 1/3 in butter cost it
+nothing visible. Still owed: heap figure at 576p + NeoGS. The text below is the 0-3-only state.
 
 
 **Revised the same day — read this first.** All eight pages in butter cost TheLink's
