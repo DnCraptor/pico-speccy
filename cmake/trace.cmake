@@ -56,3 +56,6 @@ option(ZIFI_NET_VERBOSE "Per-packet trace of the ZiFi net client (+IPD/chanSend)
 # saved). For diagnostic images on boards where the menu cannot be reached, e.g.
 # no picture. The board's DBG_UART_TX_PIN is where the log comes out.
 option(DBG_UART_DEFAULT_ON "Debug UART console enabled by default" OFF)
+# Diagnostic: never bring the on-chip radio up (WifiNet::init returns false at
+# once). Bisects "the W image misbehaves, the plain one does not" (2026-10-13).
+option(WIFI_RADIO_OFF "W boards: skip the CYW43 bring-up entirely" OFF)

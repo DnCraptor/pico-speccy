@@ -88,6 +88,10 @@ void logPioDmaClaims(const char* when) {
 
 bool init() {
     if (s_ready) return true;
+#if defined(WIFI_RADIO_OFF) && WIFI_RADIO_OFF
+    Debug::log("WiFi: radio disabled in this build (WIFI_RADIO_OFF)");
+    return false;
+#endif
 
     // Called from main() AFTER core1 has finished graphics_init() (semaphore
     // handshake there) and after the Config::cpu_mhz switch — see the comment at
