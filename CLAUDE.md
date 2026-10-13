@@ -5219,6 +5219,96 @@ at 0x153E where Sinclair's says `1982 Sinclair Research Ltd`.
   poll on an unattached `#5F`).
 
 
+## Z80 core speed-up (ported from ccr-05d4d17f d2c05088 via drew-zx-next, 2026-10-13, NOT hw-tested)
+
+Taken WITHOUT that branch's TS-Conf "28 MHz (turbo)" CPU cap (owner, on drew-zx-next:
+the speed-ups serve 14 MHz too) — `tsconf_clk_cap` stays 0..2 and the DRAM wait
+model keeps `multiplicator >= 2`. The rest is the commit as it was: section
+anchors on Z80_JLS/CPU, `exec_nocheck_ts`, `MemGates.h`, `addressOnBusIR`, the TS
+`check_trdos` edge test, the line tick at the next M1, the `fetchOpcode` fast path,
+and `tools/z80bench`.
+
+Same port, from drew-zx-next's SRAM pass (0a29478e): the `video_mode` table is
+`static const` (flash; it was 4.4 KB of .data) with the run-time fields in
+`s_div`/`s_vtot` (graphics.c) and the VGA ISR reading a RAM copy of the active
+entry (`graphics_live_video_mode`); `_arm_addsubdf3` and `process_kbd_report` are
+in flash (the only RAM caller of the former is EndFrame's one f2d per frame).
+DVp2 VGA-HDMI MinSizeRel: .data 90 244 -> 81 692, .bss 49 632 -> 50 004,
+`__end__` 8180 B lower, flash unchanged. Test ELF `debug/DVp2-z80sram-1.0.9.elf`.
+
+**`tools/z80bench`** is how every number below was taken: the firmware's own
+`Z80_JLS.cpp.o` + `CPU.cpp.o` linked with generated stubs into a Cortex-M33 image
+(QEMU `mps2-an505`), running a CP/M .COM on the TS-Conf fast path, a TCG plugin
+counting executed ARM instructions. It also prints T-states, every register and a
+CRC of guest memory at the end — **every step below left them bit-identical**,
+and the full ZEXDOC passes on the result (4 parallel shards, `z80bench.sh zex`).
+Two workloads, because ZEXDOC is a CRC loop whatever test it runs: ZEXDOC for
+300 M T, and `mkmix.py`'s game-like loop (LDIR, (IX+d)/(IY+d), DD CB, CALL/PUSH,
+JR/DJNZ) for 30 M T. It counts INSTRUCTIONS, not cycles: no SRAM wait states, no
+butter-PSRAM line fills — compare two cores with it, then measure on hardware.
+Toolchain here: the xPack arm-none-eabi-gcc 14.2.1 (developer.arm.com is behind
+the proxy; github.com/xpack-dev-tools works) + pico-sdk 2.3.1 cloned with the
+mbedtls/cyw43/lwip submodules.
+
+| step | ZEXDOC ARM insns / T | mix | SRAM |
+|---|---|---|---|
+| base | 13.34 | 13.63 | — |
+| `Z80_JLS.cpp` + `CPU.cpp` at `-fno-data-sections -fsection-anchors` | 12.35 (−7.4%) | | −2048 B |
+| `Z80::exec_nocheck_ts` (fast-path inner loop, `optimize("O2")`) + `tsFastTick` always_inline | 10.99 (−11.0%) | | +320 B |
+| `MemGates.h`: the four gates in one word | 10.52 (−4.3%) | | |
+| `addressOnBusIR` + TS `check_trdos` edge test | 10.13 (−3.7%) | | |
+| no line test per guest access (tick at the next M1) | 9.60 (−5.3%) | 10.50 | |
+| `fetchOpcode` fast path (2nd byte of CB/DD/ED/FD) | 9.59 | 9.42 (−10.2%) | |
+| **total** | **−28%** | **−31%** | **−1.7 KB** |
+
+- **Section anchors were the cheapest win and the reason is general**: with
+  `-fdata-sections` every static of the core (regA, the flags, PC, opCode,
+  prefixOpcode, regR...) sat in its own section and cost its own literal-pool
+  load per access; anchored, they are one base register + offsets. The core got
+  SMALLER too. Any other hot TU with many file-scope statics would gain the same.
+- **`exec_nocheck_ts`** is the old fast branch of `exec_nocheck` as a loop of its
+  own: same order (slice test, +4 T and line tick, DRAM miss, fetch, R++, PC++,
+  dispatch), same prefix handling, returns when the slice ends or `g_ts_fastmem`
+  drops mid-slice (NeoGS ZX-DMA window, 16col off) so the generic loop continues
+  at the next instruction. A PC breakpoint keeps the generic loop. 53 -> 34 ARM
+  instructions of dispatch per Z80 instruction — the generic loop's register
+  pressure had made GCC re-load ~14 literals per iteration. `tsFastTick` was being
+  OUTLINED at `-Os` (a call per fetch) until it became `always_inline`.
+- **`MemGates.h`**: `g_ts_fastmem`, `g_ts_memcyc`, `g_tsconf_wr`, `g_atm_ro` are now
+  the four bytes of `g_memgates` (CPU.cpp), kept under their old names by macros,
+  so every owner is untouched. A read is fast when `(w & 0xFFFF) == 1`, a write when
+  `w == 1`: one load and one compare. `tools/memdump.gdb` reads
+  `g_memgates.b.atm_ro` now — a stale symbol there HANGS Ctrl+Alt+D.
+- **No line test per guest access on the fast path**: the whole-line renderer is
+  ticked at the next M1 (`exec_nocheck_ts` / `fetchOpcode`), i.e. at most one
+  instruction late — a few T of an 896..1792-T line, the same as the write
+  landing one instruction earlier. The DRAM-model path (ZCLK 14) keeps its exact
+  per-access tick.
+- **`check_trdos` on TS-Conf** calls the (flash) `TsConf::trdosTrap` only at its
+  two edges (PC #3Dxx with DOS off, PC >= #4000 with DOS on) — it was a flash call
+  on every JP/CALL/RET/JR of a TS program.
+- **`addressOnBusIR(n)`** replaces the 42 `addressOnBus(getPairIR().word, n)` sites:
+  the IR pair is built only off the fast path (it was an out-of-line call per
+  INC rr / LD SP,HL / ... on TS-Conf, where the address is ignored).
+- **Tried and NOT taken**: inlining the fast READ path into the handlers (−3.6%
+  for +4 KB SRAM on every board) and the whole core at `-O2` (−3% for +4.6 KB).
+  Code generation is not the bottleneck; the global-state traffic and the calls
+  are. The next real lever is structural: a second, TS-only copy of the core with
+  the accessors inlined, living in the `.tsovl` window so it costs nothing on other
+  machines (heap on a TS-Conf session is the price — measure it first).
+- **What the bench cannot see, and what decides 28 MHz on hardware**: the guest's
+  PSRAM pages. TMNT at 14 MHz spent ~8 ms of a 22 ms frame in XIP line fills;
+  CPU-bound code at 28 MHz doubles its share of them. The first hardware run should
+  be a `PERF_TRACE` build at 28 MHz on a CPU-bound title (fishbone, a demo that never
+  HALTs, WC/NedoOS): `[PERF] 60f: cpu= xip=` and, with `PERF_HIST`, `z80: ns/instr`
+  and `pages:` — that splits interpreter time from PSRAM time before round 2.
+- Hw check owed (nothing above has run on a board): TS-Conf titles at 14 MHz
+  (fishbone, TMNT, Bomberman, Ninja Gaiden — the 14 MHz path got every change but
+  the DRAM-model removal), the same at 28 via the CPU cap, an ATM/Evo whole-line
+  title and a Pentagon 16col screen (they share the fast path), a NeoGS ZX-DMA demo
+  (TheLink: the fast path switches off mid-slice), and Ctrl+Alt+D on an ATM machine
+  (the renamed `g_atm_ro`).
+
 ## Z80 DMA attribute multicolour (MB-02+/DATA-GEAR): NaPICu (2026-09-14; owner on `DVp2-napicu-dma2`: "работает" — letters and title both clean)
 
 NaPICu (K3L, 2001; `napicu-demo.tap`, a three-stage packed image — `tools/z80dma_sim/`

@@ -103,6 +103,9 @@ void draw_window(const char title[TEXTMODE_COLS + 1], uint32_t x, uint32_t y, ui
 void clrScr(uint8_t color);
 
 struct video_mode_t graphics_get_video_mode(int mode);
+// RAM copy of entry `mode` for the VGA line ISR (the table is in flash): rebuilt
+// when the index changes, field writes (pio_clk_div, v_total) kept in step.
+const struct video_mode_t* graphics_live_video_mode(int mode);
 // Re-derive every mode's pio_clk_div for the given sys_clk (the Overclock menu
 // moves it after boot).  Replaces the old graphics_set_pio_clk_div(): the divider
 // is now per mode, because not every mode wants the same TMDS clock.

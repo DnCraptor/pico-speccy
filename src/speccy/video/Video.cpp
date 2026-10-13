@@ -604,7 +604,6 @@ static uint64_t ts_frame_start_us = 0;
 #define TSPAL_MAPGEN()             ((void)0)
 #define TSPAL_PALGEN()             ((void)0)
 #endif
-uint8_t g_ts_fastmem = 0;
 bool     VIDEO::ts_tsu_live = false;
 bool     VIDEO::ts_pal256_live = false;
 bool     VIDEO::tsPalScanWanted = false;
@@ -813,26 +812,55 @@ static void tsC1WaitJob(uint32_t w1) {
 // frame's critical path (fishbone: c1 16.7 ms of a 20.48 ms frame, core0 waiting
 // 4.1 ms). Same lesson as "the framebuffer is claimed FIRST".
 // Idempotent; a failure leaves ts_c1_ring null and the renderer on core0.
+// On a VDAC2 boot the same block also carries the FT812 glue + band + render
+// scratch (ftGlueEnsure borrows it while the FT output is live — the line ring is
+// idle then, the whole-line renderer is off), so it is sized max(ring, FT) and
+// claimed here, while the heap is pristine. At 720x576 + NeoGS the FT state did not
+// fit the fragmented runtime heap at all (hw 2026-10-13), and PSRAM was too slow.
+static uint8_t* s_c1blk = nullptr;        // the block (ring layout, or borrowed by the FT output)
+static size_t   s_c1blkBytes = 0;
+static int      s_ftRows = 0;             // band rows the block holds for the FT output (0 = none)
+static bool     s_c1borrowed = false;     // the FT output owns the block right now
+static size_t   ftSramNeed(int rows);     // below, after FtGlue
+extern "C" size_t getLargestAllocatable(void);  // OSDMain.cpp
+static size_t tsC1RingBytes() {
+    return sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU + 512 * TS_C1_SFILE
+         + sizeof(uint32_t) * (TS_C1_TSU + TS_C1_SFILE);
+}
+static void tsC1RingCarve(uint8_t* blk) {
+    ts_c1_ring = (TsRenderJob*)blk;
+    ts_c1_tsu  = (TsuState*)(blk + sizeof(TsRenderJob) * TS_C1_RING);
+    ts_c1_sf   = (uint16_t*)(blk + sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU);
+    ts_c1_tsu_job = (uint32_t*)(blk + sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU
+                                    + 512 * TS_C1_SFILE);
+    ts_c1_sf_job  = ts_c1_tsu_job + TS_C1_TSU;
+    memset(ts_c1_tsu_job, 0, sizeof(uint32_t) * TS_C1_TSU);
+    memset(ts_c1_sf_job, 0, sizeof(uint32_t) * TS_C1_SFILE);
+    ts_c1_tsu_cur = ts_c1_sf_cur = 0; ts_c1_sf_gen = 0xFFFFFFFFu;
+    ts_c1_r = ts_c1_w = 0;
+}
 void VIDEO::tsC1RingAlloc() {
-    if (ts_c1_ring) return;
-    const size_t bytes = sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU + 512 * TS_C1_SFILE
-                       + sizeof(uint32_t) * (TS_C1_TSU + TS_C1_SFILE);
-    uint8_t* blk = (uint8_t*)Buffer::palloc(bytes, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
-    if (blk) {
-        ts_c1_ring = (TsRenderJob*)blk;
-        ts_c1_tsu  = (TsuState*)(blk + sizeof(TsRenderJob) * TS_C1_RING);
-        ts_c1_sf   = (uint16_t*)(blk + sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU);
-        ts_c1_tsu_job = (uint32_t*)(blk + sizeof(TsRenderJob) * TS_C1_RING + sizeof(TsuState) * TS_C1_TSU
-                                        + 512 * TS_C1_SFILE);
-        ts_c1_sf_job  = ts_c1_tsu_job + TS_C1_TSU;
-        memset(ts_c1_tsu_job, 0, sizeof(uint32_t) * TS_C1_TSU);
-        memset(ts_c1_sf_job, 0, sizeof(uint32_t) * TS_C1_SFILE);
-        ts_c1_tsu_cur = ts_c1_sf_cur = 0; ts_c1_sf_gen = 0xFFFFFFFFu;
+    if (ts_c1_ring || s_c1borrowed) return;
+    const size_t ring = tsC1RingBytes();
+    uint8_t* blk = nullptr;
+    size_t bytes = ring;
+    if (Config::arch == A_TSCONF && Config::tsconf_vdac2 && butter_psram_size()) {
+        // SRAM only (core1 reads the FT state per pixel): 8 rows of band, else 4.
+        for (int rows = 8; rows >= 4 && !blk; rows >>= 1) {
+            const size_t want = ftSramNeed(rows) > ring ? ftSramNeed(rows) : ring;
+            if (getLargestAllocatable() < want + 1024) continue;
+            blk = (uint8_t*)tryMalloc(want);
+            if (blk) { bytes = want; s_ftRows = rows; }
+        }
+        if (!blk) Debug::log("[FT812] no SRAM block for the VDAC2 output at boot - it will try the heap when it goes live");
     }
+    if (!blk) blk = (uint8_t*)Buffer::palloc(bytes, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
+    if (blk) { s_c1blk = blk; s_c1blkBytes = bytes; tsC1RingCarve(blk); }
     // The address names the tier: 0x2000xxxx = SRAM heap, 0x11xxxxxx = butter PSRAM.
-    Debug::log("[TSC1] core1 line renderer %s (%u-job ring + %u TSU states + %u SFILE slots, %u B @%08lX)",
+    Debug::log("[TSC1] core1 line renderer %s (%u-job ring + %u TSU states + %u SFILE slots, %u B @%08lX%s)",
                ts_c1_ring ? "ON" : "unavailable (no RAM)", (unsigned)TS_C1_RING, (unsigned)TS_C1_TSU,
-               (unsigned)TS_C1_SFILE, (unsigned)bytes, (unsigned long)(uintptr_t)blk);
+               (unsigned)TS_C1_SFILE, (unsigned)bytes, (unsigned long)(uintptr_t)blk,
+               s_ftRows ? ", shared with VDAC2" : "");
 }
 
 uint32_t VIDEO::tsTraceState() {
@@ -5415,6 +5443,7 @@ void VIDEO::InitPrevBuffer() {
 bool VIDEO::bl_live = false;
 bool VIDEO::ft_live = false;
 static void ftModeSwitch(bool on);      // VDAC2 glue, end of this file
+static bool ftGlueEnsure();
 static uint32_t* bl_stage_ptr = nullptr;
 static bool bl_line_done = false;
 // A line just completed inside this Draw call — scale it once its last columns
@@ -7319,9 +7348,19 @@ void VIDEO::tsVideoApplyPending() {
     // renderer owns every framebuffer row; the whole-line renderer stays off.
     {
         const bool wantFt = Ft812::enabled && (vc & 0x04);
-        if (wantFt != ft_live) {
-            if (wantFt) { if (ts_render_live) tsVideoForceOff(); ftModeSwitch(true); }
-            else ftModeSwitch(false);
+        // A refused output (no memory for the glue) is latched until the guest drops
+        // FT_EN: retrying every frame tore the TS mode down and rebuilt it each time
+        // (FB cleared per frame = a black screen, hw 2026-10-13).
+        static bool s_ftRefused = false;
+        if (!wantFt) s_ftRefused = false;
+        if (wantFt != ft_live && !(wantFt && s_ftRefused)) {
+            if (wantFt) {
+                // Whole-line renderer off FIRST: on a VDAC2 boot the glue borrows its
+                // core1 line-ring block. A refusal then costs one TS mode rebuild.
+                if (ts_render_live) tsVideoForceOff();
+                if (ftGlueEnsure()) ftModeSwitch(true);
+                else s_ftRefused = true;
+            } else ftModeSwitch(false);
         }
         if (ft_live) return;
     }
@@ -7411,7 +7450,7 @@ void VIDEO::tsVideoApplyPending() {
         }
         Debug::log("[TSU] tile-map prefetch ring %s (%u B @%08lX)", blk ? "ON" : "unavailable (no RAM) - reading the map at render time", (unsigned)bytes, (unsigned long)(uintptr_t)blk);
     }
-    if (wantRender && ts_c1_enabled && !ts_c1_ring) {
+    if (wantRender && ts_c1_enabled && !ts_c1_ring && !s_c1borrowed) {
         tsC1RingAlloc();
         ts_c1_r = ts_c1_w = 0;
         TsConf::wrGateRecalc(); tsC1LiveRecalc();
@@ -10093,20 +10132,55 @@ FtGlue* ftg = nullptr;
 }
 
 static void ftVideoSinkAttach();   // CMD_PLAYVIDEO direct path, below
+// The glue, the band buffer and the render scratch are core1's per-pixel state and
+// live in SRAM (PSRAM was tried 2026-10-13 and cost too much speed). On a VDAC2 boot
+// they are carved out of the core1 line-ring block claimed at boot (tsC1RingAlloc,
+// sized for both — the ring is idle while the FT output is live); otherwise, and if
+// that block is too small, from the heap. All of it is handed back when the output
+// goes off (ftGlueRelease), so F11 / leaving VDAC2 leaves no lasting heap cost.
+static constexpr size_t ftA8(size_t n) { return (n + 7) & ~(size_t)7; }
+// The FB width: vga.xres is still 0 when tsC1RingAlloc sizes the block at boot
+// (vga.init runs in VIDEO::Init), so take it from the reserved framebuffer's mode.
+// Using xres there sized the block with NO band, and the live output fell back to
+// the heap (hw 2026-10-13: "no heap for the glue (6672 B, largest 4076)").
+static int ftFbWidth() {
+    return VIDEO::vga.xres ? (int)VIDEO::vga.xres : fbModeStride(fbModeIndex());
+}
+static size_t ftSramNeed(int rows) {
+    return ftA8(sizeof(FtGlue)) + ftA8(Ft812::ft812RenderScratchBytes()) + (size_t)ftFbWidth() * rows * 4;
+}
+static bool s_ftShared = false;          // the glue sits in the borrowed ring block
+static void* s_ftMipBlk = nullptr;       // the PSRAM block behind ftg->mip
 static bool ftGlueEnsure() {
     if (ftg) return true;
-    FtGlue* g = (FtGlue*)tryMalloc(sizeof(FtGlue));
-    if (!g) { Debug::log("[FT812] no heap for the glue (%u B) - VDAC2 output stays off", (unsigned)sizeof(FtGlue)); return false; }
-    memset(g, 0, sizeof(FtGlue));
-    // The band: 8 rows of ARGB8888 (11.5 KB at 360 wide) in SRAM — halved until it fits.
     const int w = (int)VIDEO::vga.xres;
-    for (int rows = 8; rows >= 2; rows >>= 1) {
-        g->band = (uint32_t*)tryMalloc((size_t)w * rows * 4);
-        if (g->band) { g->bandRows = rows; break; }
+    FtGlue* g = nullptr; uint32_t* band = nullptr; void* walk = nullptr; int rows = 0;
+    if (s_c1blk && s_ftRows && s_c1blkBytes >= ftSramNeed(s_ftRows)) {
+        // Borrow the line ring: the whole-line renderer is off (tsVideoForceOff ran),
+        // wait out anything still queued, then the block is ours.
+        VIDEO::tsRenderDrain();
+        ts_c1_ring = nullptr; ts_c1_tsu = nullptr; ts_c1_sf = nullptr; ts_c1_tsu_job = nullptr; ts_c1_sf_job = nullptr;
+        ts_c1_r = ts_c1_w = 0;
+        s_c1borrowed = true;
+        tsC1LiveRecalc();
+        rows = s_ftRows;
+        g    = (FtGlue*)s_c1blk;
+        walk = s_c1blk + ftA8(sizeof(FtGlue));
+        band = (uint32_t*)(s_c1blk + ftA8(sizeof(FtGlue)) + ftA8(Ft812::ft812RenderScratchBytes()));
+        s_ftShared = true;
+    } else {
+        g = (FtGlue*)tryMalloc(sizeof(FtGlue));
+        if (!g) { Debug::log("[FT812] no heap for the glue (%u B, largest %u; boot block %u B, %d rows, need %u) - VDAC2 output stays off",
+                             (unsigned)sizeof(FtGlue), (unsigned)getLargestAllocatable(), (unsigned)s_c1blkBytes, s_ftRows,
+                             (unsigned)(s_ftRows ? ftSramNeed(s_ftRows) : 0)); return false; }
+        for (int r = 8; r >= 2 && !band; r >>= 1) { band = (uint32_t*)tryMalloc((size_t)w * r * 4); if (band) rows = r; }
+        if (!band) { Debug::log("[FT812] no heap for the band buffer - VDAC2 output stays off"); free(g); return false; }
+        walk = tryMalloc(Ft812::ft812RenderScratchBytes());
+        if (!walk) { Debug::log("[FT812] no heap for the render scratch (%u B) - VDAC2 output stays off", (unsigned)Ft812::ft812RenderScratchBytes()); free(band); free(g); return false; }
+        s_ftShared = false;
     }
-    if (!g->band) { Debug::log("[FT812] no heap for the band buffer - VDAC2 output stays off"); free(g); return false; }
-    g->walk = tryMalloc(Ft812::ft812RenderScratchBytes());
-    if (!g->walk) { Debug::log("[FT812] no heap for the render scratch (%u B) - VDAC2 output stays off", (unsigned)Ft812::ft812RenderScratchBytes()); free(g->band); free(g); return false; }
+    memset(g, 0, sizeof(FtGlue));
+    g->band = band; g->bandRows = rows; g->walk = walk;
     // The MJPEG player's stack (TJpgDec on core1, FT_VSTACK_BYTES) and its per-pixel
     // tables (4 KB) are the band buffer itself: a separate 8 KB did not fit beside
     // the adaptive palette at 576p + NeoGS (hw 2026-10-01: "no heap for the video
@@ -10128,12 +10202,13 @@ static bool ftGlueEnsure() {
         if ((uintptr_t)blk < 0x11000000u) { Buffer::pfree(blk); break; }      // landed on the heap: no cache
         g->mip = Ft812::ft812MipInit(blk, bytes);
         if (!g->mip) { Buffer::pfree(blk); break; }
+        s_ftMipBlk = blk;
         g->mipBytes = (uint32_t)bytes;
     }
     if (!g->mip) Debug::log("[FT812] no PSRAM for the bitmap cache - cells are blitted from their source");
     ftg = g;
     ftVideoSinkAttach();
-    Debug::log("[FT812] glue %u B + band %d rows x %d, bitmap cache %u KB", (unsigned)sizeof(FtGlue), g->bandRows, w, (unsigned)(g->mipBytes >> 10));
+    Debug::log("[FT812] glue %u B @%p (%s) + band %d rows x %d, bitmap cache %u KB", (unsigned)sizeof(FtGlue), (void*)g, s_ftShared ? "core1 ring block" : "heap", g->bandRows, w, (unsigned)(g->mipBytes >> 10));
     return true;
 }
 
@@ -10212,6 +10287,29 @@ void VIDEO::ftPaletteProgram() {
     Ft812::renderRequest();
 }
 
+// Everything ftGlueEnsure / ftAdaptEnsure took, handed back. core1 is out of the
+// pump (ftModeSwitch(false) waited for it). A video still playing keeps the glue
+// (its sink decodes into it); the next output-off releases it.
+static void ftGlueRelease() {
+    if (!ftg || Ft812::videoActive()) return;
+    FtGlue* g = ftg;
+    Ft812::videoSetSink(nullptr);
+    ftg = nullptr;
+    __dmb();
+    if (g->vback) Buffer::pfree(g->vback);
+    if (g->alut) free(g->alut);
+    if (g->ap) Buffer::pfree(g->ap);
+    if (s_ftMipBlk) { Buffer::pfree(s_ftMipBlk); s_ftMipBlk = nullptr; }
+    if (s_ftShared) {
+        tsC1RingCarve(s_c1blk);          // the line ring gets its block back
+        s_c1borrowed = false;
+        tsC1LiveRecalc();
+    } else {
+        free(g->walk); free(g->band); free(g);
+    }
+    s_ftShared = false;
+}
+
 static void ftModeSwitch(bool on) {
     if (on) {
         if (!ftGlueEnsure()) return;
@@ -10274,6 +10372,7 @@ static void ftModeSwitch(bool on) {
         VIDEO::brdnextframe = true;
         VIDEO::tsCramDirty = true;
         Debug::log("[FT812] VDAC2 output off (%lu frames rendered)", (unsigned long)(ftg ? ftg->frames : 0));
+        ftGlueRelease();
     }
 }
 

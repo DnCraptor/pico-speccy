@@ -454,9 +454,9 @@ void __time_critical_func() dma_handler_VGA() {
     static uint8_t* input_buffer = NULL;
     screen_line++;
 
-    struct video_mode_t mode = graphics_get_video_mode(get_video_mode());
-    int v_total = mode.vga_v_total ? mode.vga_v_total : mode.v_total;
-    int v_active = mode.vga_v_active ? mode.vga_v_active : mode.v_active;
+    const struct video_mode_t* const mp = graphics_live_video_mode(get_video_mode());
+    int v_total = mp->vga_v_total ? mp->vga_v_total : mp->v_total;
+    int v_active = mp->vga_v_active ? mp->vga_v_active : mp->v_active;
     vga_current_line = screen_line;          // beam position for vga_beam_row()
     vga_current_v_active = (uint32_t)v_active;
 

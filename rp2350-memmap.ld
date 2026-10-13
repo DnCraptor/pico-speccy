@@ -35,6 +35,10 @@ SECTIONS
         *libgcc.a:unwind-arm.o(.text* .rodata*)
         *libgcc.a:pr-support.o(.text* .rodata*)
         *libgcc.a:libunwind.o(.text* .rodata*)
+        /* Soft double add/sub (+ f2d/i2d/ui2d in the same object): no RAM-resident
+         * caller needs it per pixel or per instruction — VIDEO::EndFrame's one
+         * float->double per frame is the only RAM caller (2026-10-10, -888 B). */
+        *libgcc.a:_arm_addsubdf3.o(.text* .rodata*)
         /* The Z80 core's cold half (create/reset/NMI entry — Z80_COLD in
          * Z80_JLS.cpp) stays in flash whether or not Z80_CORE_IN_RAM puts the
          * rest of the object in SRAM: it is a named section, so the object-wide

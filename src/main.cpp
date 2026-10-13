@@ -805,7 +805,10 @@ static mod2key_t mod2key[] = {
     { KEYBOARD_MODIFIER_LEFTGUI,    fabgl::VirtualKey::VK_LGUI},
 };
 
-void __not_in_flash_func(process_kbd_report)(
+// Flash: called from the main loop only (TinyUSB host task, the 60 Hz PS/2
+// tick) — never from an interrupt or during a flash write. 1.5 KB of SRAM back
+// (2026-10-10).
+void process_kbd_report(
     hid_keyboard_report_t const *report,
     hid_keyboard_report_t const *prev_report
 ) {
