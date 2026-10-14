@@ -146,6 +146,7 @@ public:
     static uint8_t portFF;
     static bool    portFFIntDisable;
     static void writePortFF(uint8_t v);
+    static void timexHiresFramePoll();   // VIDEO::EndFrame, before the pair-driver switch
 };
 
 #if NEXT_TRACE

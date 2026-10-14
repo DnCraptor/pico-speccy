@@ -32,6 +32,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 extern "C" volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max;
 
 static void applyTimexMode(uint8_t v);   // port FF / NR 0x69 screen-mode bits (below)
+static bool s_hiresSeen = false;         // a Timex hi-res mode was set somewhere in this frame
 
 extern "C" const unsigned char gb_rom_tbblue_loader[];  // src/speccy/roms/next/
 
@@ -622,6 +623,8 @@ void NextReg::reset(bool hard) {
     portFF = 0;
     portFFIntDisable = false;
     applyTimexMode(0);   // leave Timex hi-res with the latch
+    s_hiresSeen = false;
+    VIDEO::timexHiresRequest(false);
     port7FFD = 0;
     portDFFD = 0;
     port1FFD = 0;
@@ -1030,6 +1033,11 @@ void NextReg::write(uint8_t r, uint8_t v) {
                      // as port 7FFD bit 3 (hw: NextZXOS drew its boot screen
                      // into bank 7 via this and we kept showing blank bank 5)
             applyTimexMode(v & 0x3F);
+            // bits 5:0 and port FF bits 5:0 are ONE latch too: IN (#FF) reads
+            // them back (MrKWatkins NReg0x69: the two write tests with Timex
+            // bits set read a stale portFF, hw 2026-10-15). Bit 6 of portFF is
+            // the INT-disable latch (NR 0x22 bit 2), not NR 0x69's shadow bit.
+            portFF = (uint8_t)((portFF & 0x40) | (v & 0x3F));
             // bit 7 and port 0x123B bit 1 are ONE latch (layer2_en)
             port123B = (uint8_t)((port123B & ~0x02) | ((v >> 6) & 0x02));
             uint8_t vl = (v >> 6) & 1;
@@ -1240,16 +1248,26 @@ void NextReg::writeLayer2Port(uint8_t v) {
 // nextreg 0x69, which is what NEXTVID reads for the screen-mode bits.
 // Screen-mode bits 5:0 (port FF and NR 0x69 are one latch): hand the Timex
 // mode to VIDEO's hi-res machinery, which switches the driver in vblank.
+// The packed-pair driver switch is per FRAME (vblank), the mode is per LINE
+// (the copper sets NR 0x69 per region — MrKWatkins NReg0x69 puts two hi-res
+// rows in the middle of a classic screen). So a write only records that a
+// hi-res mode was SEEN; timexHiresFramePoll (EndFrame, before the switch) asks
+// for the pair driver when any line of the frame used hi-res, and NEXTVID
+// renders each line by its own NR 0x69 bits (a classic line in a pair frame
+// comes out as solid pairs). The last write of the frame used to decide, so a
+// copper that switched hi-res on and off again never got the driver.
 static void applyTimexMode(uint8_t v) {
     NEXTVID::c1Drain();   // core1 reads the hi-res LUT live
-    const uint8_t pm = VIDEO::timex_mode, pi = VIDEO::timex_hires_ink;
+    const uint8_t pi = VIDEO::timex_hires_ink;
     VIDEO::timex_mode = v & 0x07;
     VIDEO::timex_hires_ink = (v >> 3) & 0x07;
     // zxula.vhd: mode bit 2 is hi-res (4-7), not just 6
-    if (((VIDEO::timex_mode & 4) != 0) != ((pm & 4) != 0))
-        VIDEO::timexHiresRequest((VIDEO::timex_mode & 4) != 0);
-    else if (VIDEO::timex_hires_ink != pi && VIDEO::timex_hires_live)
-        VIDEO::timexHiresColour();
+    if (VIDEO::timex_mode & 4) s_hiresSeen = true;
+    if (VIDEO::timex_hires_ink != pi && VIDEO::timex_hires_live) VIDEO::timexHiresColour();
+}
+void NextReg::timexHiresFramePoll() {
+    VIDEO::timexHiresRequest(s_hiresSeen || (VIDEO::timex_mode & 4) != 0);
+    s_hiresSeen = false;
 }
 
 void NextReg::writePortFF(uint8_t v) {

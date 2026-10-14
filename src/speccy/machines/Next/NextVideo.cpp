@@ -2566,6 +2566,22 @@ __attribute__((noinline)) static void nxHiresUlaRow(const NextLineState* ls, uin
         for (int k = 0; k < 4; k++) { const uint8_t q = (o >> (6 - 2 * k)) & 3; pp[4 + k] = pv[q]; hp[4 + k] = hv[q]; }
     }
 }
+// A hi-res line while the frame is NOT a pair frame (the first frame after
+// the switch, a driver that refused, SOFTTV/TFT): the classic 256-pixel
+// OR-merge — ink where either half is ink. Readable text, no pair slots.
+__attribute__((noinline)) static void nxHiresUlaRowMerge(const NextLineState* ls, uint16_t* p, int sy,
+                                                         uint16_t hrInk, uint16_t hrPap) {
+    const uint8_t m = ls->r69 & 7;
+    const uint8_t* lb = ls->grmem + ((m & 1) << 13) + VIDEO::offBmp[sy];
+    const uint8_t* rb = (m & 2) ? ls->grmem + 0x2000 + VIDEO::offBmp[sy]
+                                : ls->grmem + ((m & 1) << 13) + VIDEO::offAtt[sy];
+    for (int col = 0; col < 32; col++) {
+        const uint8_t e = lb[col], o = rb[col];
+        uint16_t* pp = p + col * 8;
+        for (int k = 0; k < 4; k++) pp[k]     = ((e >> (6 - 2 * k)) & 3) ? hrInk : hrPap;
+        for (int k = 0; k < 4; k++) pp[4 + k] = ((o >> (6 - 2 * k)) & 3) ? hrInk : hrPap;
+    }
+}
 
 // Returns false when the whole row (border included) is transparent; nxU is
 // then just filled transparent and the mixer may leave the ULA out.
@@ -2592,11 +2608,15 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
     // the ink in port FF 5:3 — and the border takes that paper colour too.
     // Ink / paper go through whatever palette the ULA uses (classic, ULANext,
     // ULA+) like any attribute.
-    const bool hr = LS->hires == 1 && !(LS->r69 & 0x40);
+    // Per LINE (the copper sets NR 0x69 per region): hrMode = this line is a
+    // hi-res one; hr = ... and the frame runs the packed-pair driver (the 512
+    // pixels are exact); otherwise the line takes the 256-pixel OR-merge.
+    const bool hrMode = (LS->r69 & 0x04) && !(LS->r69 & 0x40);
+    const bool hr = hrMode && LS->hires == 1;
     uint16_t hrInk = 0, hrPap = 0, hrBrd = 0;
-    if (hr) nxHiresInkPaper(LS, raw, mask, fallback, ulaNext, ulap, tr, hrInk, hrPap, hrBrd);
-    const uint16_t borderV = hr ? ((hrBrd & NX_TR) ? NX_TR : (uint16_t)(hrBrd | NX_BRD))
-                               : bc[LS->border & 7];
+    if (hrMode) nxHiresInkPaper(LS, raw, mask, fallback, ulaNext, ulap, tr, hrInk, hrPap, hrBrd);
+    const uint16_t borderV = hrMode ? ((hrBrd & NX_TR) ? NX_TR : (uint16_t)(hrBrd | NX_BRD))
+                                   : bc[LS->border & 7];
     const int y = row - paperTopRow;
 
     // A row that is transparent end to end (NXModPlayer: black screen, black
@@ -2604,8 +2624,8 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
     // a frame for nothing, hw 2026-10-11): classic ULA only, the check is the
     // attribute pass without the 256 stores.
     bool brdTr = (borderV & NX_TR) != 0;
-    if (LS->brd.n && !hr) for (int c = 0; c < 8; c++) brdTr = brdTr && (bc[c] & NX_TR);
-    if (brdTr && !hr && !ulaNext && !ulap && !(LS->r15 & 0x80) && !(LS->gigs && gigsPrev)) {
+    if (LS->brd.n && !hrMode) for (int c = 0; c < 8; c++) brdTr = brdTr && (bc[c] & NX_TR);
+    if (brdTr && !hrMode && !ulaNext && !ulap && !(LS->r15 & 0x80) && !(LS->gigs && gigsPrev)) {
         bool op = false;
         if (y >= 0 && y < 192 && !VIDEO::paper_off) {
             const int sy = LS->r27 ? (y + LS->r27) % 192 : y;
@@ -2626,7 +2646,7 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
         if (!op) { nxFillTr(u, xres); return false; }
     }
 
-    if (LS->brd.n && !hr) nxPaintBorderRuns(u, xres, bc, borderV);
+    if (LS->brd.n && !hrMode) nxPaintBorderRuns(u, xres, bc, borderV);
     else for (int x = 0; x < xres; x++) u[x] = borderV;
 
     if (y < 0 || y >= 192 || VIDEO::paper_off) return true;
@@ -2669,6 +2689,8 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
     // zxula.vhd: "limit timex modes to bank 5 as bank 7 only has 8k bram".
     if (hr) {
         nxHiresUlaRow(LS, p, sy, hrInk, hrPap, hiresRow);
+    } else if (hrMode) {
+        nxHiresUlaRowMerge(LS, p, sy, hrInk, hrPap);
     } else {
         // zxula.vhd vram_a: pixel = mode(0) & pixel address, attribute =
         // '1' & PIXEL address when mode(1) (hi-colour 8x1 attributes at
@@ -2745,7 +2767,7 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
             }
         }
     }
-    if (LS->r26 && LS->hires != 1) nxRotL(u + xPaperOff, LS->r26);
+    if (LS->r26 && !hrMode) nxRotL(u + xPaperOff, LS->r26);
     // ULA clip window (NR 0x1A, zxula.vhd 562): paper only, never the border
     const uint8_t* cw = LS->clip[2];
     if (y < cw[2] || y > cw[3]) { nxFillTr(u + xPaperOff, 256); return true; }

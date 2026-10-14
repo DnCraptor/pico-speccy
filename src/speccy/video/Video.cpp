@@ -8995,6 +8995,7 @@ IRAM_ATTR void VIDEO::EndFrame() {
         // 512 px and maps its other layers onto the 16 pair colours.
         // 640-wide frames (80-column tilemap) and the frame's 16 pair colours.
         // Before the Timex switch: a pending Timex hi-res takes the driver over.
+        NextReg::timexHiresFramePoll();   // hi-res seen on any line of this frame?
         NEXTVID::pairPoll();
         {
             const bool was = timex_hires_live;
