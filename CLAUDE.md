@@ -1,5 +1,7 @@
 # pico-speccy Project Memory
 
+**Build dirs (2026-10-14):** every side build dir lives in `build-all/` (build_all.* writes `build-all/<TARGET>[-<DISPLAY>]` and `build-all/logs`; ad-hoc twins go there too, e.g. `build-all/perf`); only the VS Code `build/` stays at the root. Older notes below that name `build-X/` mean `build-all/X/`.
+
 **Build files (split 2026-09-30):** `CMakeLists.txt` is the skeleton (SDK, target,
 link libs, PORT_VERSION — release scripts grep it there); the rest is `cmake/*.cmake`,
 each `include()`d at its old position: `options` (boards, displays, features), `trace` (every XXX_TRACE / debug option), `board`
@@ -13932,7 +13934,7 @@ Fuse's `rzx.c` / `z80.c` for the playback semantics.
     and a grep for a string the change added must hit; the `build:` stamp is also
     logged right after `dbg uart: console on ...` (it used to go out before the console
     existed on a cold boot), so a capture names its firmware; and a board's test build
-    goes in that board's own dir (`build-PICO_DV/` here), never in the shared `build/`.
+    goes in that board's own dir (`build-all/PICO_DV/` here), never in the shared `build/`.
     Also from the same hour: the UART ring is drained inside every modal now
     (`Debug::pumpUart()` in `netBackgroundTick`, slices in the classic
     `osdCenteredMsg` pause) — a log that stopped mid-line inside the zip picker / the

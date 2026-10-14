@@ -117,13 +117,14 @@ Write-Host "Clean first:      $Clean"
 Write-Host ""
 
 $OutputDir = Join-Path $ScriptDir "firmware"
-$LogDir    = Join-Path $ScriptDir "build-logs"
+$BuildRoot = Join-Path $ScriptDir "build-all"
+$LogDir    = Join-Path $BuildRoot "logs"
 if (-not (Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir | Out-Null }
 if (-not (Test-Path $LogDir))    { New-Item -ItemType Directory -Path $LogDir    | Out-Null }
 
 function Get-BuildDir($Target, $Display) {
-    if ($Display -eq "VGA_HDMI") { Join-Path $ScriptDir "build-$Target" }
-    else { Join-Path $ScriptDir "build-${Target}-${Display}" }
+    if ($Display -eq "VGA_HDMI") { Join-Path (Join-Path $ScriptDir "build-all") "$Target" }
+    else { Join-Path (Join-Path $ScriptDir "build-all") "${Target}-${Display}" }
 }
 
 # Optional clean
@@ -147,10 +148,10 @@ $Worker = {
     $Target  = $Pair.Target
     $Display = $Pair.Display
     if ($Display -eq "VGA_HDMI") {
-        $BuildDir = Join-Path $ScriptDir "build-$Target"
+        $BuildDir = Join-Path (Join-Path $ScriptDir "build-all") "$Target"
         $Label    = "$Target (VGA_HDMI)"
     } else {
-        $BuildDir = Join-Path $ScriptDir "build-${Target}-${Display}"
+        $BuildDir = Join-Path (Join-Path $ScriptDir "build-all") "${Target}-${Display}"
         $Label    = "$Target ($Display)"
     }
     $LogFile = Join-Path $LogDir "${Target}-${Display}.log"

@@ -21,7 +21,7 @@ yourself):
    released version).
 
 2. **Clean tree**: `git status --porcelain` must be empty (untracked files in
-   `build-logs/` or `firmware/` are acceptable — they are build outputs).
+   `build-all/logs/` or `firmware/` are acceptable — they are build outputs).
    Anything else uncommitted → stop and list it.
 
 3. **HEAD pushed**: HEAD must be an ancestor of the remote branch.

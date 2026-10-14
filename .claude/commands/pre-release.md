@@ -40,7 +40,7 @@ Steps:
    format `- **Added/Fixed/Improved <Name>** — ...`). If there are no
    meaningful commits, stop and tell the user there is nothing to release.
 
-2. **Write the notes** to `build-logs/release-notes-draft.md` — raw markdown
+2. **Write the notes** to `build-all/logs/release-notes-draft.md` — raw markdown
    WITHOUT the ```markdown code fence (the file goes verbatim into the GitHub
    release body). Start the file with this exact header, then the entries:
 
@@ -58,10 +58,10 @@ Steps:
    the moment it is created.
 
 4. **Run the release script** (only after confirmation):
-   - With a version argument: `./draft-release.sh $1 --prerelease --notes build-logs/release-notes-draft.md`
+   - With a version argument: `./draft-release.sh $1 --prerelease --notes build-all/logs/release-notes-draft.md`
      (this bumps PORT_VERSION, commits it, and the script pushes the branch
      so the tag can point at the bump commit).
-   - Without: `./draft-release.sh --prerelease --notes build-logs/release-notes-draft.md`.
+   - Without: `./draft-release.sh --prerelease --notes build-all/logs/release-notes-draft.md`.
    - The full build takes several minutes — use a 15-minute timeout or run in
      background and wait for completion.
    - If the working tree is dirty and a version bump was requested, the script

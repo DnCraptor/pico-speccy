@@ -120,8 +120,9 @@ echo Clean first:      %CLEAN%
 echo.
 
 set "OUTPUT_DIR=%SCRIPT_DIR%\firmware"
-set "LOG_DIR=%SCRIPT_DIR%\build-logs"
-set "STATE_DIR=%SCRIPT_DIR%\build-logs\.state"
+set "BUILD_ROOT=%SCRIPT_DIR%\build-all"
+set "LOG_DIR=%BUILD_ROOT%\logs"
+set "STATE_DIR=%LOG_DIR%\.state"
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 if not exist "%LOG_DIR%"    mkdir "%LOG_DIR%"
 if exist "%STATE_DIR%" rmdir /s /q "%STATE_DIR%"
@@ -271,10 +272,10 @@ set "W_DISPLAY=%~2"
 set "W_MARK=%STATE_DIR%\%W_TARGET%-%W_DISPLAY%"
 
 if "%W_DISPLAY%"=="VGA_HDMI" (
-    set "W_BUILD_DIR=%SCRIPT_DIR%\build-%W_TARGET%"
+    set "W_BUILD_DIR=%BUILD_ROOT%\%W_TARGET%"
     set "W_LABEL=%W_TARGET% (VGA_HDMI)"
 ) else (
-    set "W_BUILD_DIR=%SCRIPT_DIR%\build-%W_TARGET%-%W_DISPLAY%"
+    set "W_BUILD_DIR=%BUILD_ROOT%\%W_TARGET%-%W_DISPLAY%"
     set "W_LABEL=%W_TARGET% (%W_DISPLAY%)"
 )
 

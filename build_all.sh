@@ -165,15 +165,16 @@ echo "Clean first:      $CLEAN"
 echo ""
 
 OUTPUT_DIR="$SCRIPT_DIR/firmware"
-LOG_DIR="$SCRIPT_DIR/build-logs"
+BUILD_ROOT="$SCRIPT_DIR/build-all"
+LOG_DIR="$BUILD_ROOT/logs"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
 build_dir_for() {
     local target="$1" display="$2"
     if [ "$display" = "VGA_HDMI" ]; then
-        echo "$SCRIPT_DIR/build-${target}"
+        echo "$BUILD_ROOT/${target}"
     else
-        echo "$SCRIPT_DIR/build-${target}-${display}"
+        echo "$BUILD_ROOT/${target}-${display}"
     fi
 }
 
@@ -286,7 +287,7 @@ build_one() {
 # Run builds with bounded concurrency via xargs -P.
 # xargs spawns one subshell per pair, at most MAX_PARALLEL concurrently.
 export -f build_one build_dir_for
-export SCRIPT_DIR BUILD_TYPE CMAKE_GENERATOR CMAKE_MAKE_PROGRAM LOG_DIR JOBS_PER_BUILD
+export SCRIPT_DIR BUILD_ROOT BUILD_TYPE CMAKE_GENERATOR CMAKE_MAKE_PROGRAM LOG_DIR JOBS_PER_BUILD
 export CCACHE_ARGS_STR="${CCACHE_ARGS[*]}"
 # Re-export CCACHE_ARGS as a string and reconstruct in subshell (arrays don't export cleanly).
 build_one_wrapper() {

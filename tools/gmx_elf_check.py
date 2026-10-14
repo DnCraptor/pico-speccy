@@ -13,7 +13,7 @@ family would share most of its arrays and could take a RAW bank of the first as 
 BASE of one of its overlays, so a binding mistake would show up as one image being
 right and the other wrong.
 
-    python3 tools/gmx_elf_check.py build-ZERO2-PIOUSB/bin/MinSizeRel/z0p2-*.elf
+    python3 tools/gmx_elf_check.py build-all/ZERO2-PIOUSB/bin/MinSizeRel/z0p2-*.elf
 
 NB the Sinclair 128K bases are header-defined C++ arrays with INTERNAL linkage, so in
 `nm` output they carry a `_ZL<len><name>` prefix — that mangling is exactly what the
