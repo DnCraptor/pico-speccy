@@ -448,6 +448,7 @@ void VIDEO::profiPaletteWrite(uint8_t index, uint8_t profi_color) {
 #if defined(VGA_HDMI) && HDMI_HSTX < 2
 extern "C" bool hdmi_mode_uses_x3(int mode);
 #endif
+static uint32_t profi_pair_gen = 1;   // bumped whenever profi_pair_lookup is rebuilt
 static void init_profi_pair_lookup() {
     // safe[]: all slots except 240..244 (sync/scanline) and 255 (border) → 250 slots.
     // With HDMI audio the Data Island machinery owns 40 more indices (184..199 =
@@ -500,6 +501,7 @@ static void init_profi_pair_lookup() {
         }
     }
     // slot_idx == 250 here (210 with reserve_di)
+    profi_pair_gen++;   // derived tables (the ATM EGA byte LUT) rebuild on the next use
 }
 
 bool VIDEO::isProfiDS80() {
@@ -7292,6 +7294,40 @@ static inline uint32_t atmPack4(uint8_t d0, uint8_t d1, uint8_t d2, uint8_t d3) 
     return (uint32_t)d2 | ((uint32_t)d3 << 8) | ((uint32_t)d0 << 16) | ((uint32_t)d1 << 24);
 }
 
+// EGA byte -> its two lores pixels as solid pair slots (low byte = the even
+// pixel, high = the odd one), rebuilt whenever profi_pair_lookup is. Heap, and
+// only on a machine that shows EGA: 512 B nobody else needs.
+static uint16_t* s_atm_ega = nullptr;
+static uint32_t  s_atm_ega_gen = 0;
+static const uint16_t* atmEgaLut() {
+    if (!s_atm_ega) {
+        s_atm_ega = (uint16_t*)tryMalloc(256 * sizeof(uint16_t));
+        if (!s_atm_ega) return nullptr;
+        s_atm_ega_gen = 0;
+    }
+    if (s_atm_ega_gen != profi_pair_gen) {
+        for (int v = 0; v < 256; v++) {
+            const uint8_t e = (uint8_t)(((v & 0x40) >> 3) | (v & 0x07));
+            const uint8_t d = (uint8_t)(((v & 0x80) >> 4) | ((v >> 3) & 0x07));
+            s_atm_ega[v] = (uint16_t)(VIDEO::profi_pair_lookup[e][e] | (VIDEO::profi_pair_lookup[d][d] << 8));
+        }
+        s_atm_ega_gen = profi_pair_gen;
+    }
+    return s_atm_ega;
+}
+
+// One bitmap byte b in colours (fg, bg) as four pair slots in the fb's (k^2)
+// order: c4[] = the four (left, right) colour combinations of a bit pair.
+static inline __attribute__((always_inline)) uint32_t atmBits8(uint8_t b, uint8_t at) {
+    const uint8_t fg = (uint8_t)(((at & 0x40) >> 3) | (at & 0x07));
+    const uint8_t bg = (uint8_t)(((at & 0x80) >> 4) | ((at >> 3) & 0x07));
+    const uint8_t* rf = VIDEO::profi_pair_lookup[fg];
+    const uint8_t* rb = VIDEO::profi_pair_lookup[bg];
+    const uint8_t c4[4] = { rb[bg], rb[fg], rf[bg], rf[fg] };
+    return (uint32_t)c4[(b >> 2) & 3] | ((uint32_t)c4[b & 3] << 8)
+         | ((uint32_t)c4[b >> 6] << 16) | ((uint32_t)c4[(b >> 4) & 3] << 24);
+}
+
 void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
     const uint8_t pg = MemESP::videoLatch ? 7 : 5;
     const uint8_t* scr = MemESP::ram[pg].direct();
@@ -7299,41 +7335,53 @@ void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
     uint8_t* dst = fb_row + pad_l;
     if (!scr || !alt) { memset(dst, profi_pair_lookup[0][0], 320); return; }
     const Atm::VMode vm = Atm::videoMode();
+    uint32_t* out = (uint32_t*)dst;      // pad_l is 0 or 20: word aligned
     if (vm == Atm::VM_EGA) {
         // 320x200x16: each byte = two pixels, even = bits 6,2,1,0 / odd = 7,5,4,3
         // (bit 6 / bit 7 are the BRIGHT bit of the index). Column c's eight pixels
         // come from alt[o], scr[o], alt[o+#2000], scr[o+#2000]. One lores pixel = one
-        // solid pair byte.
+        // solid pair byte. Words in, words out: o = line*40 is 8-aligned, and the
+        // alt half sits in PSRAM since the ZX pages moved there, so four columns
+        // per load matters as much as the table.
         const uint32_t o = line * 40;
-        for (int c = 0; c < 40; c++) {
-            uint8_t px[8];
-            const uint8_t b[4] = { alt[o + c], scr[o + c], alt[0x2000 + o + c], scr[0x2000 + o + c] };
-            for (int k = 0; k < 4; k++) {
-                const uint8_t v = b[k];
-                const uint8_t e = (uint8_t)(((v & 0x40) >> 3) | (v & 0x07));
-                const uint8_t d = (uint8_t)(((v & 0x80) >> 4) | ((v >> 3) & 0x07));
-                px[k * 2]     = profi_pair_lookup[e][e];
-                px[k * 2 + 1] = profi_pair_lookup[d][d];
+        const uint16_t* lut = atmEgaLut();
+        if (lut) {
+            const uint32_t* a0 = (const uint32_t*)(alt + o);
+            const uint32_t* s0 = (const uint32_t*)(scr + o);
+            const uint32_t* a1 = (const uint32_t*)(alt + 0x2000 + o);
+            const uint32_t* s1 = (const uint32_t*)(scr + 0x2000 + o);
+            for (int q = 0; q < 10; q++) {
+                uint32_t wa0 = a0[q], ws0 = s0[q], wa1 = a1[q], ws1 = s1[q];
+                for (int k = 0; k < 4; k++) {
+                    out[0] = (uint32_t)lut[ws0 & 0xFF] | ((uint32_t)lut[wa0 & 0xFF] << 16);
+                    out[1] = (uint32_t)lut[ws1 & 0xFF] | ((uint32_t)lut[wa1 & 0xFF] << 16);
+                    out += 2;
+                    wa0 >>= 8; ws0 >>= 8; wa1 >>= 8; ws1 >>= 8;
+                }
             }
-            uint32_t* w = (uint32_t*)(dst + c * 8);
-            w[0] = atmPack4(px[0], px[1], px[2], px[3]);
-            w[1] = atmPack4(px[4], px[5], px[6], px[7]);
+        } else {
+            for (int c = 0; c < 40; c++) {
+                uint8_t px[8];
+                const uint8_t b[4] = { alt[o + c], scr[o + c], alt[0x2000 + o + c], scr[0x2000 + o + c] };
+                for (int k = 0; k < 4; k++) {
+                    const uint8_t v = b[k];
+                    const uint8_t e = (uint8_t)(((v & 0x40) >> 3) | (v & 0x07));
+                    const uint8_t d = (uint8_t)(((v & 0x80) >> 4) | ((v >> 3) & 0x07));
+                    px[k * 2]     = profi_pair_lookup[e][e];
+                    px[k * 2 + 1] = profi_pair_lookup[d][d];
+                }
+                out[c * 2]     = atmPack4(px[0], px[1], px[2], px[3]);
+                out[c * 2 + 1] = atmPack4(px[4], px[5], px[6], px[7]);
+            }
         }
     } else if (vm == Atm::VM_HIRES) {
         // 640x200: bitmap byte + attribute byte per 8 pixels; ink = attr 6,2..0, paper
         // = attr 7,5..3 (no FLASH). Byte j of the line: even j from +0, odd from +#2000.
         const uint32_t o = line * 40;
-        for (int j = 0; j < 80; j++) {
-            const uint32_t a = o + (uint32_t)(j >> 1) + ((j & 1) ? 0x2000u : 0u);
-            const uint8_t b  = scr[a];
-            const uint8_t at = alt[a];
-            const uint8_t fg = (uint8_t)(((at & 0x40) >> 3) | (at & 0x07));
-            const uint8_t bg = (uint8_t)(((at & 0x80) >> 4) | ((at >> 3) & 0x07));
-            *(uint32_t*)(dst + j * 4) = atmPack4(
-                profi_pair_lookup[(b & 0x80) ? fg : bg][(b & 0x40) ? fg : bg],
-                profi_pair_lookup[(b & 0x20) ? fg : bg][(b & 0x10) ? fg : bg],
-                profi_pair_lookup[(b & 0x08) ? fg : bg][(b & 0x04) ? fg : bg],
-                profi_pair_lookup[(b & 0x02) ? fg : bg][(b & 0x01) ? fg : bg]);
+        for (int x = 0; x < 40; x++) {
+            out[0] = atmBits8(scr[o + x], alt[o + x]);
+            out[1] = atmBits8(scr[0x2000 + o + x], alt[0x2000 + o + x]);
+            out += 2;
         }
     } else {
         // 80x25 text (ATM-Turbo 2+): 64-byte rows from #01C0; even columns take the
@@ -7343,7 +7391,7 @@ void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
         const uint32_t row = line >> 3, gl = line & 7;
         const uint32_t base = 0x01C0 + row * 64;
         // ZX-Evo: the character generator is a RAM (#BF D2), initialised from the ATM font.
-        const uint8_t* fnt = (Atm::evo && EvoBase::font) ? EvoBase::font : gb_rom_atm_font;
+        const uint8_t* fnt = ((Atm::evo && EvoBase::font) ? EvoBase::font : gb_rom_atm_font) + gl;
         // TEXT1 (ZX-Evo mode 7, video_addrgen.v addr_at with mode_a_txt_1page): the
         // page select of mode 6 (symbols 5 / attributes 1) becomes +#2000 inside RAM
         // page 8, and mode 6's +#2000 half-line interleave becomes +#1000.
@@ -7353,19 +7401,14 @@ void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
         const uint8_t* ts = one ? p8 : scr;              // symbols
         const uint8_t* ta = one ? p8 + 0x2000 : alt;     // attributes
         const uint32_t half = one ? 0x1000u : 0x2000u;   // second half of the line
-        for (int cx = 0; cx < 80; cx++) {
-            const uint32_t x = (uint32_t)cx >> 1;
-            uint8_t sym, at;
-            if (cx & 1) { sym = ts[half + base + x]; at = ta[base + x + 1]; }
-            else        { sym = ts[base + x];        at = ta[half + base + x]; }
-            const uint8_t b  = fnt[sym * 8 + gl];
-            const uint8_t fg = (uint8_t)(((at & 0x40) >> 3) | (at & 0x07));
-            const uint8_t bg = (uint8_t)(((at & 0x80) >> 4) | ((at >> 3) & 0x07));
-            *(uint32_t*)(dst + cx * 4) = atmPack4(
-                profi_pair_lookup[(b & 0x80) ? fg : bg][(b & 0x40) ? fg : bg],
-                profi_pair_lookup[(b & 0x20) ? fg : bg][(b & 0x10) ? fg : bg],
-                profi_pair_lookup[(b & 0x08) ? fg : bg][(b & 0x04) ? fg : bg],
-                profi_pair_lookup[(b & 0x02) ? fg : bg][(b & 0x01) ? fg : bg]);
+        const uint8_t* s0 = ts + base;          // even columns' symbols
+        const uint8_t* s1 = ts + half + base;   // odd columns' symbols
+        const uint8_t* t0 = ta + half + base;   // even columns' attributes
+        const uint8_t* t1 = ta + base + 1;      // odd columns' attributes
+        for (int x = 0; x < 40; x++) {
+            out[0] = atmBits8(fnt[s0[x] * 8], t0[x]);
+            out[1] = atmBits8(fnt[s1[x] * 8], t1[x]);
+            out += 2;
         }
     }
 }
@@ -7373,6 +7416,11 @@ void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
 // The ATM/Evo whole-line tick (EndFrame arms it, tsDrawTick dispatches here). One
 // content line per raster line from tStatesScreen; the top/bottom bands stay with
 // gmxBorderFrame at EndFrame, the side pads are painted per line as in MainScreen.
+#if PERF_TRACE
+// [PERF] atm: core0 time inside atmRenderLine — what a core1 line queue for the
+// ATM/Evo whole-line modes could take off core0 at most.
+volatile uint32_t atm_render_us = 0, atm_render_lines = 0;
+#endif
 void VIDEO::atmDrawTick() {
     do {
         const uint32_t line = ts_row_idx;
@@ -7388,7 +7436,14 @@ void VIDEO::atmDrawTick() {
             }
             curline = line;
             linedraw_cnt = frow;
+#if PERF_TRACE
+            const uint32_t pt0 = timer_hw->timerawl;
             atmRenderLine(line, fb_row, pad_l);
+            atm_render_us += timer_hw->timerawl - pt0;
+            atm_render_lines++;
+#else
+            atmRenderLine(line, fb_row, pad_l);
+#endif
         }
         ts_line_t += tStatesPerLine << ESPectrum::multiplicator;
         if (++ts_row_idx >= 200) {
@@ -8940,6 +8995,14 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
                 Debug::log("[PERF] aud: ticks=%u hold=%u flat=%u/60 hdmi: und=%u skip=%u dup=%u q=%u..%u",
                     (unsigned)ticks, (unsigned)hold, (unsigned)flat,
                     (unsigned)und, (unsigned)skip, (unsigned)dup, (unsigned)qmin, (unsigned)qmax);
+            }
+            if (Z80Ops::isAtm) {
+                extern volatile uint32_t atm_render_us, atm_render_lines;
+                Debug::log("[PERF] atm: render=%.2fms/fr lines=%u/fr (%.1fus/line) mode=%u evo=%d mult=%u",
+                           atm_render_us / 60000.0f, (unsigned)(atm_render_lines / 60),
+                           atm_render_lines ? (float)atm_render_us / (float)atm_render_lines : 0.0f,
+                           (unsigned)Atm::videoMode(), (int)Atm::evo, (unsigned)ESPectrum::multiplicator);
+                atm_render_us = atm_render_lines = 0;
             }
             // TS-Conf half on its own line: Debug::log truncates at 256 bytes.
             if (Z80Ops::isTsconf)
