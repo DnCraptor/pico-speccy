@@ -387,6 +387,7 @@ double ESPectrum::totalsecondsnodelay = 0;
 int64_t ESPectrum::target;
 int ESPectrum::sync_cnt = 0;
 volatile bool ESPectrum::v_sync = false;
+extern "C" volatile bool g_ts_c1_live;   // Video.cpp: TS-Conf core1 line queue live (guards the overlay call)
 int64_t ESPectrum::ts_start;
 int64_t ESPectrum::elapsed;
 int64_t ESPectrum::idle;
@@ -1563,14 +1564,15 @@ void ESPectrum::setup() {
         Debug::log2SD("setup: Z80DMA::reset");
         Z80DMA::reset();
     }
-    // Profi forces ~80 KB of SRAM pages and OOMs at VIDEO::Init if the NIC's heap
-    // rings (~12 KB) are also up — so never bring ZiFi up on Profi, regardless of a
-    // stale zifi_enabled. (The menu also turns the NIC off when switching to Profi.)
+    // Profi on a board WITHOUT butter PSRAM forces ~80 KB of SRAM pages and OOMs at
+    // VIDEO::Init if the NIC's rings are also up — so ZiFi stays down there. With
+    // butter PSRAM the pages live in PSRAM and the rings are 2-4 KB (2026-10-01), so
+    // Profi/Karabas keep the NIC (owner, 2026-10-14).
     // WiFi is deliberately NOT a condition: the NIC is the guest's serial port, and
     // with WiFi off it is a plain UART nobody but the guest writes to (see
     // Config::zifi_enabled). Requiring WiFi here was what made the ports read 0xFF
     // in that configuration.
-    ZiFi::enabled = Config::zifi_enabled && Config::arch != A_PROFI;
+    ZiFi::enabled = Config::zifi_enabled && !(Config::arch == A_PROFI && !butter_psram_size());
     if (ZiFi::enabled)
         ZiFi::init();
 
@@ -1806,6 +1808,10 @@ void ESPectrum::setup() {
   // measured from the mount would expire before the event it exists to
   // swallow (hw 2026-09-11: it announced itself on every boot and every F12).
   UsbMsc::armHotplug();
+
+  // Last SRAM decision of the boot: everything else has taken its share, so the
+  // Gigascreen prev-FB may now move from butter to the heap if there is room.
+  VIDEO::gigascreenPreferSram();
 
   Debug::log("setup: COMPLETE, freeHeap=%u", getFreeHeap());
 #if PERF_TRACE && PERF_HIST
@@ -4944,6 +4950,8 @@ void ESPectrum::loop() {
           // A TS-Conf palette change waiting for the beam to reach its row
           // (VIDEO::tsPalettePoll): the beam moves while we wait here.
           if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);
+          // TS-Conf: take queued lines off core1 while there is nothing else to do.
+          if (g_ts_c1_live) VIDEO::tsC1HelpOne();
           if (v_sync) {
             v_sync = false;
             break;
@@ -4964,6 +4972,7 @@ void ESPectrum::loop() {
             while ((int64_t)time_us_64() < e) {
               ZiFi::cdcPump();
               if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);
+              if (g_ts_c1_live) VIDEO::tsC1HelpOne();
             }
           } else
           if (GS::neogs) {
@@ -4972,13 +4981,18 @@ void ESPectrum::loop() {
             while ((int64_t)time_us_64() < e) {
               NgsSd::service();
               if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);
+              if (g_ts_c1_live) VIDEO::tsC1HelpOne();
             }
           } else
-          if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) {
+          if (Z80Ops::isTsconf && (VIDEO::tsPollWanted() || g_ts_c1_live)) {
             // Palette change waiting for the beam (tsPalettePoll): poll instead
-            // of sleeping through the rows it is waiting for.
+            // of sleeping through the rows it is waiting for. And render queued
+            // lines here instead of leaving them all to core1.
             int64_t e = (int64_t)time_us_64() + idle;
-            while ((int64_t)time_us_64() < e) VIDEO::tsPalettePoll(false);
+            while ((int64_t)time_us_64() < e) {
+              if (VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);
+              if (!g_ts_c1_live || !VIDEO::tsC1HelpOne()) tight_loop_contents();
+            }
           } else
           {
             delayMicroseconds(idle);

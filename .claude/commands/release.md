@@ -21,7 +21,7 @@ yourself):
    released version).
 
 2. **Clean tree**: `git status --porcelain` must be empty (untracked files in
-   `build-logs/` or `firmware/` are acceptable — they are build outputs).
+   `build-all/logs/` or `firmware/` are acceptable — they are build outputs).
    Anything else uncommitted → stop and list it.
 
 3. **HEAD pushed**: HEAD must be an ancestor of the remote branch.
@@ -29,9 +29,11 @@ yourself):
 4. **Draft exists and matches**: release `v<VERSION>` must exist, be a draft,
    and every asset name must end with `-<VERSION>.uf2`. Wrong version in
    assets → tell the user to re-run /draft-release. Expect one asset per
-   build_all.sh pair — currently **14**: seven boards × VGA-HDMI (m1p2, m2p2,
-   PCp2, DVp2, z0p2, m1p2w, m2p2w), MURM and MURM2 × (ILI9341, ST7789,
-   TV-SOFT), plus z0p2's PIOUSB variant. If the
+   build_all.sh pair — currently **26**: thirteen boards × VGA-HDMI (m1p2, m2p2,
+   PCp2, DVp2, z0p2, the stock-W m1p2w/m2p2w/DVp2w/PCp2w and the Waveshare
+   m1p2ws/m2p2ws/DVp2ws/PCp2ws), six HSTX images (PCp2, m2p2, m2p2w, PCp2w,
+   m2p2ws, PCp2ws), MURM and MURM2 × (ILI9341, ST7789, TV-SOFT), plus z0p2's
+   PIOUSB variant. If the
    count differs, mention it in the confirmation so the user decides.
 
 5. **Are you sure**: use AskUserQuestion with a summary (version, asset count,

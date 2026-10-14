@@ -84,7 +84,7 @@ static inline void audio_i2s_program_init(PIO pio, uint sm, uint offset, uint da
     pio_sm_init(pio, sm, offset, &sm_config);
 
     // 64-bit masks with ABSOLUTE GPIO bit positions: `1u << 40` is undefined on a
-    // 32-bit int, and MURM_W really does run I2S on GPIO40/41/42 — the 32-bit form
+    // 32-bit int, and MURM_WS really does run I2S on GPIO40/41/42 — the 32-bit form
     // left all three pins as inputs there (no BCK, no data: silence, hw 2026-09-06).
     // Same trap and same fix as nespad.cpp / hdmi.c; correct for low pins too.
     const uint64_t pin_mask = ((uint64_t)1 << data_pin) | ((uint64_t)3 << clock_pin_base);

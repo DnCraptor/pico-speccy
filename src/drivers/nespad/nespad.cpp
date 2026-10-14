@@ -30,7 +30,7 @@ static inline pio_sm_config nespad_program_get_default_config(uint offset) {
 }
 
 // Which PIO block the pad runs on. pio1 everywhere by default (beside the PS/2
-// keyboard and I2S); MURM2_W moves it to pio0 because that board's pad data pins
+// keyboard and I2S); MURM2_WS moves it to pio0 because that board's pad data pins
 // land on GPIO40/41 and pio1 is pinned to gpio_base 0 by the keyboard on GP2/3.
 #ifndef NESPAD_PIO
 #define NESPAD_PIO pio1
@@ -46,22 +46,22 @@ extern "C" PIO board_aux_pio(void);   // main.cpp -> BoardPins::auxPio()
 #endif
 bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin,uint8_t latPin) {
   // An RP2350 PIO block reaches 32 CONSECUTIVE GPIOs starting at its gpio_base
-  // (0 or 16), so a pad wired above GPIO31 (MURM2_W: data on 40/41) needs the
+  // (0 or 16), so a pad wired above GPIO31 (MURM2_WS: data on 40/41) needs the
   // window moved up. The SDK REFUSES a re-base once any program is loaded in the
   // block (pio_set_gpio_base -> PICO_ERROR_INVALID_STATE), so it has to happen
   // BEFORE pio_add_program. It used to come after it: the re-base was silently
   // refused, pio_sm_init then failed with BAD_ALIGNMENT and the pad was dead on
-  // MURM2_W (hw report 2026-09-26). A block already at the wrong base with
+  // MURM2_WS (hw report 2026-09-26). A block already at the wrong base with
   // someone else's program in it cannot host the pad at all — say so and stop.
   uint8_t maxPin = clkPin;
   if (latPin      > maxPin) maxPin = latPin;
   if (dataPin + 1 > maxPin) maxPin = dataPin + 1;
   const uint wantBase = (maxPin >= 32) ? 16u : 0u;
 #if PICOSPECCY_WIFI
-  // W boards: a pad wired ABOVE GPIO31 (MURM2_W, data on 40/41) needs the radio's
+  // W boards: a pad wired ABOVE GPIO31 (MURM2_WS, data on 40/41) needs the radio's
   // base-16 block, i.e. the one the display is not using (pio0 on HDMI, pio2 on
   // VGA); NESPAD_PIO is only the compile-time default for the HDMI case. A pad
-  // below GPIO32 (MURM_W GP14-16, PICO_PC_W GP5/9/20/21) stays on pio1 beside the
+  // below GPIO32 (MURM_WS GP14-16, PICO_PC_WS GP5/9/20/21) stays on pio1 beside the
   // keyboard: taking the aux block at base 0 left the radio no block it could
   // re-base to 16, and cyw43 then had nowhere to go (PCp2w, hw 2026-10-12).
   if (wantBase == 16u) pio = board_aux_pio();
@@ -97,7 +97,7 @@ bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin,uint8_t latP
     gpio_set_pulls(dataPin+1, true, false); // Pull data high, 0xFF if unplugged for Joystick2
 
     // 64-bit masks: `1 << 40` is undefined behaviour on a 32-bit int, and these
-    // pins really are above 31 on MURM2_W. hdmi.c hit the same trap on ZERO2 and
+    // pins really are above 31 on MURM2_WS. hdmi.c hit the same trap on ZERO2 and
     // its comment says so. The 64-bit variants take absolute GPIO bit positions
     // and are correct for low pins too, so there is one path, not two.
     const uint64_t outMask = ((uint64_t)1 << clkPin) | ((uint64_t)1 << latPin);

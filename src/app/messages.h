@@ -191,22 +191,23 @@ visit https://zxespectrum.speccy.org/contacto
 #define MSG_MIDI_BANK_TOOBIG "Bank too big to install"
 
 #define OSD_DBG_HELP_EN \
-    " [Space]      Step CPU\n"\
-    " [ALT+Space]  Step over CALL\n"\
-    " [Enter]      Go to address (view)\n"\
-    " [Esc]        Exit\n"\
-    " [ALT+F1]     Search memory\n"\
-    " [F3]         Search next\n"\
-    " [F1]         This Help\n"\
-    " [F2]         Show memory dump\n"\
-    " [ALT+F2]     Save dump to file\n"\
-    " [F5]         Toggle PC breakpoint\n"\
-    " [F7]         Add breakpoint (type)\n"\
-    " [ALT+F7]     Breakpoint list\n"\
-    " [Tab]        Code/Memory/Regs\n"\
-    " [F8]         Set PC to address\n"\
-    " [ALT+F9]     Show full screen\n"\
-    " [0]          Default position\n"\
+    " [Space]       Step CPU\n"\
+    " [ALT+Space]   Step over CALL\n"\
+    " [Shift+Enter] Run to cursor line\n"\
+    " [Enter]       Go to address (view)\n"\
+    " [Esc]         Exit\n"\
+    " [ALT+F1]      Search memory\n"\
+    " [F3]          Search next\n"\
+    " [F1]          This Help\n"\
+    " [F2]          Show memory dump\n"\
+    " [ALT+F2]      Save dump to file\n"\
+    " [F5]          Toggle PC breakpoint\n"\
+    " [F7]          Add breakpoint (type)\n"\
+    " [ALT+F7]      Breakpoint list\n"\
+    " [Tab]         Code/Memory/Regs\n"\
+    " [F8]          Set PC to address\n"\
+    " [ALT+F9]      Show full screen\n"\
+    " [0]           Default position\n"\
     " + PageUp/Down and cursor keys\n"
 
 

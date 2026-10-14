@@ -282,6 +282,8 @@ public:
   // Byte size the Gigascreen prev-FB needs in the *current* video mode (4-bit
   // packed). Used by the SRAM budget manager to cost the Gigascreen feature.
   static size_t gigascreenPrevFBBytes();
+  // End of setup(): Gigascreen's prev-FB prefers SRAM from now on (butter boards).
+  static void gigascreenPreferSram();
 
   // Largest SINGLE allocation the prev-FB needs. Smaller than gigascreenPrevFBBytes()
   // because the buffer is only ever addressed row by row (vga.prevFrameBuffer[]) and
@@ -364,6 +366,7 @@ public:
   static void atmPaletteFlush();         // EndFrame: palette -> hardware slots / pair table
   static void atmPaletteRestore();       // leaving the ATM: standard slots back
   static void atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l);
+  static void gmxRenderLine(uint32_t line, uint8_t* fb_row, int pad_l);   // Scorpion GMX 640x200 (flash)
   static void atmDrawTick();      // ATM/Evo whole-line modes on the fast memory path (flash)
   // Pentagon 16col (#EFF7 D0): the same shape — one content line per raster line
   // (Pentagon::col16RenderLine) at the END of its paper, the per-T border machine
@@ -397,7 +400,11 @@ public:
   static uint32_t tsCramToRgb(uint16_t cram);   // RGB555 cell → RGB888 through the real-PWM gamma
   static uint8_t  tsBorderSlot();        // Border register → fb byte for the live mode
   static void     tsRenderLine(uint32_t curline); // whole-line renderer (non-ZX modes / TSU); timed wrapper
-  static void     tsRenderExec(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq); // one line, core1 or core0
+  // One line, core1 or core0. tsl = the caller's 512-byte compose buffer (queue
+  // renderers: one per core) or nullptr = the synchronous path (s_tsline, and it
+  // publishes the render position itself).
+  static void     tsRenderExec(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq, uint8_t* tsl = nullptr);
+  static bool     tsC1HelpOne();         // core0: render one queued line if one is free (true = did)
   static void     tsRenderExecOvr(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq, const struct TsLineCtx& c); // the GFXOVR merge (flash)
   static void     tsRenderCore1Pump();   // core1 render loop: run queued lines
   static bool     snowAllowed();         // ULA snow exists on this machine (Render type)
@@ -593,6 +600,13 @@ public:
                                        || vm == Config::VM_720x576_169
                                        || vm == Config::VM_1440x576_X3; }
   static bool isFullBorderMode() { return isFullBorder240() || isFullBorder288(); }
+  // Video > Screen position: rows of TOP border in the 288-row window (48/60/64 on a
+  // Pentagon-raster machine per Config::screen_top, 48 elsewhere; 24 outside the
+  // 288-row modes). The paper is always 192 rows below it.
+  static int  screenTopRows();
+  // Re-derive the window from Config::screen_top on a running machine (menu commit,
+  // between frames). No-op outside the standard 288-row geometry.
+  static void screenTopApply();
   // A big HDMI mode that shows only part of the framebuffer is on screen (1024x768 x4:
   // the centre 256x192; 800x600 x3: the centre 264x200). Returns that window.
   static bool bigWindow(int& fbx, int& w, int& oy, int& h);

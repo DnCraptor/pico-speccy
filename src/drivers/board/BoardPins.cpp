@@ -34,8 +34,8 @@ int uartInstanceForTx(uint8_t tx) {
 // ── Per-board ZiFi UART TX/RX candidate pairs (index 0 = default) ─────────────
 // Hard conflicts (display, SD, QSPI/SPI-PSRAM, LED, KBD, core audio) are excluded;
 // reassignable peripherals are offered with a note describing what they displace.
-#if defined(MURM2_W)
-// Murmulator 2.0 + RP2350B-Plus-W. Same carrier as MURM2, but two of its pairs
+#if defined(MURM2_WS)
+// Murmulator 2.0 + Waveshare RP2350B-Plus-W. Same carrier as MURM2, but two of its pairs
 // are gone: {20,21} is NESPAD CLK/LAT as before, and {26,27} / {38,39} must NOT
 // be offered — the header positions of GP26/27 carry GPIO40/41 (the pad's data
 // pair on this module) and GPIO38/39 ARE the radio's WL_CS/WL_CLK (Waveshare
@@ -46,10 +46,19 @@ static const UartPair ZIFI_PAIRS[] = {
     {20, 21, "off: NESPAD"},    // UART1
     {22, 23, "off: MIDI/WAV"},  // UART1
 };
-#elif defined(MURM_W)
-// Murmulator 1.x + RP2350B-Plus-W. MURM1's {26,27} "off: audio" pair becomes
+#elif defined(MURM2_W)
+// Murmulator 2.0 + Pico 2 W / Pimoroni Pico Plus 2 W: the plain MURM2 list minus
+// {22,23} — GP23 is the radio's WL_REG_ON on the stock W layout.
+static const UartPair ZIFI_PAIRS[] = {
+    {20, 21, "off: NESPAD"},    // UART1
+    {0, 1, ""},                 // UART0
+    {26, 27, "off: NESPAD"},    // UART1
+    {38, 39, ""},               // UART1 (RP2350B only, filtered at runtime)
+};
+#elif defined(MURM_WS)
+// Murmulator 1.x + Waveshare RP2350B-Plus-W. MURM1's {26,27} "off: audio" pair becomes
 // {40,41} here (same header positions, and still the audio pins). GP18-21 are
-// free on this board — the carrier's PIO SPI PSRAM is not built on MURM_W — but
+// free on this board — the carrier's PIO SPI PSRAM is not built on MURM_WS — but
 // they stay off the list: the APS6404 is still soldered to them and would drive
 // MISO whenever its CS floats low.
 static const UartPair ZIFI_PAIRS[] = {
@@ -58,10 +67,10 @@ static const UartPair ZIFI_PAIRS[] = {
     {40, 41, "off: audio"},     // UART1 — the only non-UART0 pair here, as on MURM1
 };
 #elif defined(PICO_DV)
-// Pimoroni Pico DV Demo Base — and PICO_DV_W (DVp2w), the same base with a
-// Waveshare RP2350B-Plus-W module: the module moves nothing this list touches
-// (GP0/1 and GP20/21 are Pico-compatible header positions, and the radio's own
-// GPIO36-39 are not offered here), so the two boards share one table. The pair
+// Pimoroni Pico DV Demo Base — and PICO_DV_W / PICO_DV_WS (DVp2w / DVp2ws), the
+// same base with a W module: neither module moves anything this list touches
+// (GP0/1 and GP20/21 are Pico-compatible header positions, and neither radio's
+// pins — GP23-25/29 stock, GPIO36-39 Waveshare — are offered here), so they share one table. The pair
 // list is a carrier property, the pin moves are the module's.
 static const UartPair ZIFI_PAIRS[] = {
     {0, 1, ""},                 // UART0, dedicated ZiFi header
@@ -77,9 +86,9 @@ static const UartPair ZIFI_PAIRS[] = {
                                 // on QFN-60/A silicon by pinOnPackage(); see below)
 };
 #elif defined(PICO_PC)
-// Olimex PICO-PC — and PICO_PC_W (PCp2w) with the Waveshare RP2350B-Plus-W: every
-// pair here is a Pico-compatible header position below GP23, so the module moves
-// none of them and the two boards share the table.
+// Olimex PICO-PC — and PICO_PC_W / PICO_PC_WS (PCp2w / PCp2ws) with a W module:
+// every pair here is a Pico-compatible header position below GP23, so neither
+// module moves any of them and the boards share the table.
 static const UartPair ZIFI_PAIRS[] = {
     {20, 21, "off: NESPAD"},    // UART1
     {2, 3, "QWST1"},            // UART0 (free)

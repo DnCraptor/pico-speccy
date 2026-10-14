@@ -34,14 +34,14 @@
 // bottom pads that a Murmulator socket does not reach. The per-board pin arms in
 // CMakeLists.txt carry that remap; nothing in this header does.
 
-#ifndef _BOARDS_PICOSPECCY_RP2350B_W_H
-#define _BOARDS_PICOSPECCY_RP2350B_W_H
+#ifndef _BOARDS_PICOSPECCY_RP2350B_WS_H
+#define _BOARDS_PICOSPECCY_RP2350B_WS_H
 
 pico_board_cmake_set(PICO_PLATFORM, rp2350)
 
 // For board detection
 #define PICOSPECCY_RP2350B
-#define PICOSPECCY_RP2350B_W
+#define PICOSPECCY_RP2350B_WS
 
 // --- RP2350 VARIANT ---
 #define PICO_RP2350A 0

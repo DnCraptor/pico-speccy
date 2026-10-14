@@ -17,7 +17,7 @@ option(SOFTTV "Enable TV soft composite output" OFF)
 # TMDS words through the PIO address converter (HDMI_HSTX=1); TMDS = HSTX with the
 # command expander and the hardware TMDS encoder, the line as a command list of
 # XRGB8888 pixels and no converter at all (HDMI_HSTX=2, see hdmi_tmds_line.h);
-# ON = RAW (the old spelling); AUTO = TMDS on PICO_PC/PICO_PC_W and MURM2/MURM2_W.
+# ON = RAW (the old spelling); AUTO = TMDS on PICO_PC and MURM2 (their W/WS variants included).
 set(HDMI_HSTX AUTO CACHE STRING "HDMI back-end: AUTO / OFF / RAW / TMDS (ON = RAW)")
 set_property(CACHE HDMI_HSTX PROPERTY STRINGS AUTO OFF RAW TMDS ON)
 option(MURM "Murmulator 1.x + Pi Pico 2" OFF)
@@ -25,24 +25,32 @@ option(MURM2 "Murmulator 2.0 + Pi Pico 2" OFF)
 option(PICO_PC "Olimex RP2040-PICO-PC + Pi Pico 2" OFF)
 option(PICO_DV "Pimoroni Pico DV Demo Base + Pi Pico 2" OFF)
 option(ZERO2 "Waveshare RP2350-PiZero" OFF)
-# Waveshare RP2350B-Plus-W in a Murmulator socket. The module is an RP2350B with
-# 16 MB flash, PSRAM pads on GPIO47 and a Raspberry Pi Radio Module 2 (CYW43439)
-# on board, so these are the SAME carriers as MURM/MURM2 with a different module:
-# each option turns its carrier on and then overrides the handful of pins that the
-# module moves. See src/drivers/board/boards/picospeccy_rp2350b_w.h.
-option(MURM_W "Murmulator 1.x + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
-option(MURM2_W "Murmulator 2.0 + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
-# The same module in the PIMORONI Pico DV Demo Base instead of a Murmulator
-# carrier: 16 MB flash, the CYW43439 radio and PSRAM pads on GPIO47 (a pin
-# PICO_DV already uses for butter PSRAM). The base keeps its own layout — SD on
-# SPI1, keyboard on GP14/15, ZiFi header on GP0/1, display base 6 — but the three
-# Pico positions for GP26/27/28 carry GPIO40/41/42 here, so the audio block
-# moves, exactly as on MURM_W. See src/drivers/board/boards/picospeccy_rp2350b_w.h.
-option(PICO_DV_W "Pimoroni Pico DV + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
-# And in the Olimex RP2040-PICO-PC (PCp2w): the display stays on GPIO 12-19, so the
+# W modules: the SAME carriers with a WiFi module plugged in. Each option turns its
+# carrier on and then overrides the handful of pins the module moves
+# (cmake/board-pins.cmake). There are two module layouts, and they need separate images:
+#
+#   *_W  (tag *p2w)  — Pimoroni Pico Plus 2 W: the stock Pico 2 W layout, radio
+#        (CYW43439) on GP23/24/25/29, LED on the radio, audio stays on GP26/27/28,
+#        16 MB flash, 8 MB PSRAM on GPIO47. A plain Raspberry Pi Pico 2 W has the same
+#        pins but only 4 MB of flash, which these images do not fit.
+#        See src/drivers/board/boards/picospeccy_rp2350_w.h.
+#   *_WS (tag *p2ws) — Waveshare RP2350B-Plus-W: radio on GPIO36-39, LED on GPIO23,
+#        the Pico GP26/27/28 header positions carry GPIO40/41/42, 16 MB flash, PSRAM
+#        pads on GPIO47. See src/drivers/board/boards/picospeccy_rp2350b_ws.h.
+option(MURM_W "Murmulator 1.x + Pimoroni Pico Plus 2 W (on-chip CYW43439 WiFi)" OFF)
+option(MURM2_W "Murmulator 2.0 + Pimoroni Pico Plus 2 W (on-chip CYW43439 WiFi)" OFF)
+option(PICO_DV_W "Pimoroni Pico DV + Pimoroni Pico Plus 2 W (on-chip CYW43439 WiFi)" OFF)
+option(PICO_PC_W "Olimex PICO-PC + Pimoroni Pico Plus 2 W (on-chip CYW43439 WiFi)" OFF)
+option(MURM_WS "Murmulator 1.x + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
+option(MURM2_WS "Murmulator 2.0 + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
+# The Waveshare module in the Pimoroni Pico DV Demo Base: the base keeps its own layout
+# (SD on SPI1, keyboard GP14/15, ZiFi header GP0/1, display base 6) but the audio block
+# moves to GPIO40/41/42, exactly as on MURM_WS.
+option(PICO_DV_WS "Pimoroni Pico DV + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
+# And in the Olimex RP2040-PICO-PC (PCp2ws): the display stays on GPIO 12-19, so the
 # HSTX back-ends work exactly as on PICO_PC; the module moves the GP26/27/28 audio
 # block (PWM, beeper/595 latch, MIDI TX) to GPIO40/41/42 and the LED to GPIO23.
-option(PICO_PC_W "Olimex PICO-PC + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
+option(PICO_PC_WS "Olimex PICO-PC + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi)" OFF)
 # OFF by default and shipped as a SEPARATE z0p2 firmware ("-PIOUSB" in the file name):
 # Pico-PIO-USB costs 17.7 KB of SRAM that cannot be reclaimed at runtime — 11.0 KB of
 # .time_critical code (the bit-banged host has to run from RAM) plus 6.7 KB of .bss,

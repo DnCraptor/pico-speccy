@@ -33,7 +33,7 @@ static void PWM_deinit_pin(uint pinN){
 }
 
 // A configured AY-clock pin may be unusable for two reasons: the board does not
-// route one at all (255 — MURM_W/MURM2_W/PICO_DV_W, whose module has no free GPIO
+// route one at all (255 — the W/WS boards, whose module has no free GPIO
 // where the carrier expects GP29), or ZiFi has claimed it for its UART. Same answer to
 // both: leave the pad alone.
 static inline bool ay_clk_usable(unsigned pin) {

@@ -79,7 +79,7 @@ NM_BOOL_ACCESS(rzxLoop,   rzx_loop)
 NM_BOOL_ACCESS(sdLed,     sdLedBlink)
 NM_BOOL_ACCESS(rtc,       rtc_enabled)
 NM_INT_ACCESS (mouseSens, mouse_sens)
-NM_BOOL_ACCESS(mouseSwap, mouse_swap)
+NM_INT_ACCESS (mouseSwap, mouse_swap)   // 0 Off / 1 On / 2 Auto
 NM_BOOL_ACCESS(p3Fast,    p3_fastdisk)
 NM_BOOL_ACCESS(p3Slock,   p3_speedlock)
 NM_BOOL_ACCESS(psramOn,   psram_enabled)
@@ -385,6 +385,9 @@ static bool    hook_tsconfVdac2Smooth(int32_t, int32_t) { Ft812::renderRequest()
 static int32_t get_tsconfVdac2Adapt()          { return Config::tsconf_vdac2_adapt ? 1 : 0; }
 static void    put_tsconfVdac2Adapt(int32_t v) { Config::tsconf_vdac2_adapt = v != 0; }
 static bool    hook_tsconfVdac2Adapt(int32_t, int32_t) { VIDEO::ftPaletteProgram(); return true; }   // cube back in, or the adaptive one rebuilt
+static int32_t get_screenTop()          { return (int32_t)Config::screen_top; }
+static void    put_screenTop(int32_t v) { Config::screen_top = (uint8_t)(v >= 0 && v <= 2 ? v : 0); }
+static bool    hook_screenTop(int32_t, int32_t) { VIDEO::screenTopApply(); return true; }
 static int32_t get_evoRaster()          { return (int32_t)Config::evo_raster; }
 static void    put_evoRaster(int32_t v) { Config::evo_raster = (uint8_t)(v & 3); }
 // The frame length, the audio set, the paper/border anchors and the display's v_total
@@ -837,7 +840,16 @@ static inline bool valid(uint16_t id) {
 
 namespace Stage {
 
+static const char* s_liveNote;     // set() switched a conflicting setting off
+
+const char* takeNote() {
+    const char* n = s_liveNote;
+    s_liveNote = nullptr;
+    return n;
+}
+
 void begin() {
+    s_liveNote = nullptr;
     memset(g_dirty, 0, sizeof(g_dirty));
     memset(g_val, 0, sizeof(g_val));
     memset(g_base, 0, sizeof(g_base));
@@ -861,6 +873,20 @@ void set(uint16_t id, int32_t v) {
     // write at all).
     if (v == g_base[id]) bmClr(g_dirty, id); else bmSet(g_dirty, id);
     g_seq[id] = g_seqNext++;      // most recently touched wins a mutual-exclusion tie
+
+    // Pairs that cannot both be on switch the OTHER one off at the moment of the pick,
+    // with a message, instead of only at Apply time: before, both rows read On for the
+    // rest of the session and the outcome was decided by resolveConstraints on exit.
+    // The rule there stays as the backstop (and owns the TC2048/TC2068 cases).
+    if (v) {
+        if (id == SET_TIMEX && get(SET_SAA1099)) {
+            set(SET_SAA1099, 0);
+            s_liveNote = "SAA1099 turned off: Timex needs it off";
+        } else if (id == SET_SAA1099 && get(SET_TIMEX)) {
+            set(SET_TIMEX, 0);
+            s_liveNote = "Timex turned off: SAA1099 needs it off";
+        }
+    }
 
     // F_PREVIEW settings are applied immediately: presentation hooks so the user
     // sees the change, link hooks so actions in the same menu run on the new value.

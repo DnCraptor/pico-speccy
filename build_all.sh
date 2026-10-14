@@ -28,7 +28,7 @@ while [ $# -gt 0 ]; do
 Usage: $0 [--clean] [-j JOBS_PER_BUILD] [-p MAX_PARALLEL] [TARGETS...]
 
 Env vars: BUILD_TYPE, MAX_PARALLEL, JOBS_PER_BUILD, CMAKE_GENERATOR
-Targets:  MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W (default: all)
+Targets:  MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W MURM_WS MURM2_WS PICO_DV_WS PICO_PC_WS (default: all)
 EOF
             exit 0 ;;
         *) POSITIONAL+=("$1"); shift ;;
@@ -87,7 +87,7 @@ else
 fi
 
 # All available targets (RP2350 only — RP2040 boards were dropped)
-ALL_TARGETS="MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W"
+ALL_TARGETS="MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W MURM_WS MURM2_WS PICO_DV_WS PICO_PC_WS"
 
 # Targets that support TFT+ILI9341 display variant
 TFT_TARGETS="MURM MURM2"
@@ -109,7 +109,7 @@ PIOUSB_TARGETS="ZERO2"
 # lives: they also ship an HSTX image (-DHDMI_HSTX=TMDS, named ...-VGA-HDMI-HSTX-*).
 # Their plain VGA_HDMI image is pinned to the PIO back-end (-DHDMI_HSTX=OFF), or
 # CMake's AUTO would make it HSTX too and the two images would be the same.
-HSTX_TARGETS="PICO_PC MURM2 MURM2_W PICO_PC_W"
+HSTX_TARGETS="PICO_PC MURM2 MURM2_W PICO_PC_W MURM2_WS PICO_PC_WS"
 
 # Parse arguments: pass target names to build specific ones, or nothing for all
 if [ $# -gt 0 ]; then
@@ -165,15 +165,16 @@ echo "Clean first:      $CLEAN"
 echo ""
 
 OUTPUT_DIR="$SCRIPT_DIR/firmware"
-LOG_DIR="$SCRIPT_DIR/build-logs"
+BUILD_ROOT="$SCRIPT_DIR/build-all"
+LOG_DIR="$BUILD_ROOT/logs"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
 build_dir_for() {
     local target="$1" display="$2"
     if [ "$display" = "VGA_HDMI" ]; then
-        echo "$SCRIPT_DIR/build-${target}"
+        echo "$BUILD_ROOT/${target}"
     else
-        echo "$SCRIPT_DIR/build-${target}-${display}"
+        echo "$BUILD_ROOT/${target}-${display}"
     fi
 }
 
@@ -286,7 +287,7 @@ build_one() {
 # Run builds with bounded concurrency via xargs -P.
 # xargs spawns one subshell per pair, at most MAX_PARALLEL concurrently.
 export -f build_one build_dir_for
-export SCRIPT_DIR BUILD_TYPE CMAKE_GENERATOR CMAKE_MAKE_PROGRAM LOG_DIR JOBS_PER_BUILD
+export SCRIPT_DIR BUILD_ROOT BUILD_TYPE CMAKE_GENERATOR CMAKE_MAKE_PROGRAM LOG_DIR JOBS_PER_BUILD
 export CCACHE_ARGS_STR="${CCACHE_ARGS[*]}"
 # Re-export CCACHE_ARGS as a string and reconstruct in subshell (arrays don't export cleanly).
 build_one_wrapper() {

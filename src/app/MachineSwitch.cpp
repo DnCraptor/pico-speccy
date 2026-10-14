@@ -311,7 +311,8 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
         // ~12 KB of heap rings — Profi forces ~80 KB of SRAM pages
         // and OOMs at VIDEO::Init otherwise. Persist Off so the boot
         // into Profi has the room (boot also skips ZiFi on Profi).
-        if (Config::arch == A_PROFI && Config::zifi_enabled) {
+        // Butter-less boards only: with butter PSRAM the Profi pages are not SRAM.
+        if (Config::arch == A_PROFI && Config::zifi_enabled && !butter_psram_size()) {
             Config::zifi_enabled = 0;
             ZiFi::enabled = 0;
             if (!ZiFiAT::connected) { ZiFiSock::end(); ZiFi::deinit(); }
@@ -345,8 +346,11 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
         // via ZC) — auto-enable it on entry so SD boot works
         // out of the box. esxDOS/MB-02+ are already forced off
         // above; skipped silently if the budget gate declines.
+        // ZX Evolution BaseConf too: its SD card is the same Z-Controller (#77/#57,
+        // EvoBase), which ERS and Dune II load through.
         if (((arch == A_PROFI && romset != R_PROFI) || arch == A_TSCONF ||
-             (arch == A_SCORP && isScorpEvoRomset(romset))) &&
+             (arch == A_SCORP && isScorpEvoRomset(romset)) ||
+             (arch == A_ATM && isEvoBaseRomset(romset))) &&
             !Config::zcontroller && FileUtils::fsMount &&
             OSD::featureBudgetGate(Subsystems::FEAT_ZCONTROLLER)) {
             Config::zcontroller = true;

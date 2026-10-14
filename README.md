@@ -15,14 +15,39 @@ Board supported:
  - Waveshare "RP2350-PiZero" + use PCM5122 for best sound;
  - Pimoroni "Pico DV Demo Base" + Raspberry "Pi Pico 2" or compatible;
  - Olimex "RP2040-PICO-PC" carrier board + Raspberry "Pi Pico 2" or compatible;
- - "Murmulator 1.x" or "Murmulator 2.0" + Waveshare "RP2350B-Plus-W" — the same two
-   carriers with a module that has WiFi/Bluetooth (Raspberry Pi Radio Module 2),
-   16 MB of flash and PSRAM pads on GPIO47;
- - Pimoroni "Pico DV Demo Base" + Waveshare "RP2350B-Plus-W" (DVp2w) — the same
-   module on the Pico DV carrier: WiFi on board, audio on GPIO40/41/42, LED on
-   GPIO23.
+ - "Murmulator 1.x", "Murmulator 2.0", Pimoroni "Pico DV Demo Base" or Olimex
+   "RP2040-PICO-PC" + Pimoroni "Pico Plus 2 W" (m1p2w / m2p2w / DVp2w / PCp2w) — the
+   same carriers with on-board WiFi (CYW43439), 16 MB flash and 8 MB PSRAM (a plain
+   Raspberry "Pi Pico 2 W" has the same pins but only 4 MB of flash, which these
+   images do not fit);
+ - the same four carriers + Waveshare "RP2350B-Plus-W" (m1p2ws / m2p2ws / DVp2ws /
+   PCp2ws) — WiFi on board (Raspberry Pi Radio Module 2), 16 MB of flash and PSRAM
+   pads on GPIO47; audio on GPIO40/41/42, LED on GPIO23.
 
-Best performance for case Pimoroni "Pico Plus 2" is used.
+Best performance for case Pimoroni "Pico Plus 2" / "Pico Plus 2 W" is used.
+
+Which firmware to flash (`<ver>` = release version; the chip is the one on the
+module plugged into the carrier):
+
+| Board (carrier + module) | Chip | CMake option | Firmware |
+|---|---|---|---|
+| Murmulator 1.x + Pi Pico 2 | RP2350A | `-DMURM=ON` | `m1p2-speccy-VGA-HDMI-<ver>.uf2`, `-TV-SOFT-`, `-ILI9341-`, `-ST7789-` |
+| Murmulator 2.0 + Pi Pico 2 | RP2350A | `-DMURM2=ON` | `m2p2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-`, `-TV-SOFT-`, `-ILI9341-`, `-ST7789-` |
+| Olimex RP2040-PICO-PC + Pi Pico 2 | RP2350A | `-DPICO_PC=ON` | `PCp2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Pimoroni Pico DV Demo Base + Pi Pico 2 / Pico Plus 2 | RP2350A / RP2350B | `-DPICO_DV=ON` | `DVp2-speccy-VGA-HDMI-<ver>.uf2` |
+| Waveshare RP2350-PiZero | RP2350B | `-DZERO2=ON` | `z0p2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-PIOUSB-` |
+| Murmulator 1.x + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DMURM_W=ON` | `m1p2w-speccy-VGA-HDMI-<ver>.uf2` |
+| Murmulator 2.0 + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DMURM2_W=ON` | `m2p2w-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Pico DV Demo Base + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DPICO_DV_W=ON` | `DVp2w-speccy-VGA-HDMI-<ver>.uf2` |
+| Olimex PICO-PC + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DPICO_PC_W=ON` | `PCp2w-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Murmulator 1.x + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DMURM_WS=ON` | `m1p2ws-speccy-VGA-HDMI-<ver>.uf2` |
+| Murmulator 2.0 + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DMURM2_WS=ON` | `m2p2ws-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Pico DV Demo Base + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DPICO_DV_WS=ON` | `DVp2ws-speccy-VGA-HDMI-<ver>.uf2` |
+| Olimex PICO-PC + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DPICO_PC_WS=ON` | `PCp2ws-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+
+`*p2w` and `*p2ws` images are NOT interchangeable: the two W modules wire the radio,
+audio and LED to different pins. A `*p2w` image needs 16 MB of flash, so a plain 4 MB
+Raspberry Pi Pico 2 W is not supported.
 
 ## Features
 
@@ -44,6 +69,7 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - TS-Conf (ZX-Evo) emulation (Machine → ZX Evolution → TS-Conf): TS-BIOS with either the Pentagon 128 or the Mr Gluk service ROM, 4 MB of RAM, the #nnAF register file with programmable FRAME/LINE/DMA interrupts, the DMA controller, a ZX-Evo DRAM timing model (CPU/video/DMA contention and the 14 MHz wait states), a 3.5/7/14 MHz CPU cap, all of the video modes (ZX, 16c, 256c, 80x30 text, NOGFX) with the TSU tile and sprite engine, Z-Controller SD and TR-DOS, and **.spg** program loading from the file browser. Needs a board with QSPI (butter) PSRAM and VGA/HDMI output (RP2350 only).
 - TS-Conf VDAC2 (Machine → ZX Evolution → TS-Conf options → VDAC2 (FT812)): the ZX-Evo video board with the FT812 (Bridgetek EVE) graphics chip, emulated on the Z-Controller SPI — STATUS reads 7, FT_EN switches the output to the chip's own display list, and its INT drives the LINE interrupt as on the FPGA. 1 MB RAM_G in PSRAM, the display-list engine (bitmaps in every FT81x format incl. the PALETTED family, transform matrices, blending, scissor), the coprocessor (DLSTART/SWAP, matrix commands, TEXT/NUMBER with synthesized ROM fonts, MEMWRITE/APPEND, zlib INFLATE) — plus the media FIFO with the chip's MJPEG/PCM AVI player (CMD_PLAYVIDEO, used by Wild Commander's FTVIEW) — enough for the ZUMA Deluxe and R-Type VDAC2 ports and the TSLib examples. The 1024x768 frame is scaled into the framebuffer through a dithered RGB cube or an **adaptive palette** built from the picture (VDAC2 adaptive palette), with an optional area filter for minified bitmaps (VDAC2 smooth); no stencil, tag or widget commands (RP2350, QSPI PSRAM).
 - VGA/HDMI output with 8 selectable video modes: 640x480@60Hz, 640x480@50Hz, 720x480@60Hz, 720x576@50Hz, plus a 90/75 Hz set (640x480@90, 640x480@75, 720x480@90, 720x576@75) that is offered with the CPU at 378 MHz and runs with V-Sync off (HDMI only on HSTX builds — the HSTX VGA clock cannot make it).
+- Big video modes: 800x600 (x2 / x3) and 1024x768 (x3 / x4) on HDMI and VGA, and the 16:9 HDMI modes 1280x720@50/60, 1440x576@50, 1440x480@60 and 720x576@50 16:9 (HSTX) — each offered only at the CPU clocks that can produce its pixel clock; Video → Mode lists the refresh and scale of every entry.
 - Hot video mode switching without reboot (VGA/HDMI).
 - VGA/HDMI scanlines effect with 5 selectable brightness levels (Off, Darkest, Dark, Light, Lightest).
 - VGA/HDMI CRT filter with 7 selectable levels (Off, Soft, Medium, Strong, Grille soft/med/hard): gamma correction, phosphor tint, black lift and a vertical aperture-grille mask.
@@ -90,7 +116,7 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - Two real joysticks support (Up to 8 button joysticks).
 - Joystick profiles (Joystick → Profile): 16 named slots in `joystick.cfg`, each a joystick type plus the full pad map — Enter uses one, F4 edits it on the Mapping page, F6 renames, F8 deletes; a .pss snapshot remembers which profile it ran with and offers to save a missing one.
 - USB HID gamepad support: XInput (Xbox 360/One), DualShock 4 (PS4), DualSense (PS5), generic HID gamepads with auto-detected report descriptors and analog trigger support.
-- Kempston mouse emulation from a USB mouse (ports #FADF/#FBDF/#FFDF), with the Karabas-Pro / ZX Next **wheel** in the buttons byte when the mouse's report descriptor carries one (re-centred by F11), a **Sensitivity** setting (Devices → Mouse → Sensitivity, x1/8 … x4) that keeps the sub-step remainder so slow movement no longer drifts, and **Swap buttons** (Devices → Mouse) for software that expects the left button on D0 (the UnrealSpeccy convention; the original Kempston interface puts the right one there).
+- Kempston mouse emulation from a USB mouse (ports #FADF/#FBDF/#FFDF), with the Karabas-Pro / ZX Next **wheel** in the buttons byte when the mouse's report descriptor carries one (re-centred by F11), a **Sensitivity** setting (Devices → Mouse → Sensitivity, x1/8 … x4) that keeps the sub-step remainder so slow movement no longer drifts, and **Swap buttons** (Devices → Mouse: Off / On / Auto) for software that expects the left button on D0 (the UnrealSpeccy convention; the original Kempston interface puts the right one there) — Auto takes the first button pressed in a session as the left one.
 - Emulation of Betadisk interface with four drives and TRD, SCL, UDI, FDI (read and write) and TD0 (Teledisk, read-only) support. Fast and realtime modes. Per-drive Write Protect, inline drive status in the Drives menu, F5 slot-picker popup (F2 toggle WP, F8 eject) when mounting from the file browser.
 - TR-DOS auto-boot: optionally inject a boot loader into TRD/SCL images that lack one, so downloaded disks auto-start (Storage → Betadisk → Auto-boot) (RP2350 only).
 - IDE/HDD emulation: NEMO, Profi, **SMUC** (the Scorpion HDD/NVRAM/RTC controller driven by the ProfROM and GMX firmware — partition the disk and mount TR-DOS pseudo-disks from the Shadow monitor), **IDEDOS** (+3e) and **DivIDE** (+3 divIDE) schemes, HDF / raw .hdd/.img / Fixed VHD images, create-empty-image helper, mounted from the Storage → IDE/HDD menu (RP2350 only).
@@ -100,8 +126,8 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - esxDOS support (DivMMC, DivIDE, DivSD); DivIDE mounts HDF, Fixed VHD and raw HDD/IMG images in both hd0/hd1 slots (dynamic/differencing VHD is not supported) — [esxdos.org](https://esxdos.org/index.html).
 - Z-Controller emulation: raw SD card access via ports #57/#77, mutually exclusive with esxDOS and MB-02+ (RP2350 only).
 - FDD activity LED indicator and mechanical head click/seek sound emulation (optional, toggled via Betadisk menu).
-- ZiFi WiFi network interface via an ESP-01S module (stock Espressif AT firmware — no reflash) or, on the Waveshare RP2350B-Plus-W (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W), the module's on-chip CYW43439 radio (Network → Transport → On-chip WiFi, lwIP on the RP2350): network access for ZX-Spectrum software (e.g. the MRF terminal) through the ZIFI-API FIFO, the 16550 UART window and the ZX-Uno UART window (#FC3B/#FD3B, as used by BridgeZX and the Karabas-Pro net tools), plus an MC146818 RTC (Pentagon "Mr Gluk" TimeKeeper) with SNTP time sync over WiFi; WiFi connect and time sync show the live ESP AT dialog in a scrollable log. The NIC also works with WiFi switched off, as a plain 115200 8N1 serial port the guest owns end to end (an Arduino or any other device on the 16550 window), and Network → Sync at boot turns the boot-time SNTP exchange off so nothing but the join is ever sent on that line (RP2350 only).
-- Unified F5 file browser with a location chooser (RP2350, when WiFi is configured): **Local (SD)**, **Remote (FTP/SFTP)**, **Web Archives** and **Add Remote** — all rendered in the same "Open File" window. **Enter** quick-starts a file (downloads to RAM and runs/mounts), **F5** saves it to a chosen SD folder; `..`/Backspace go up a level, Esc closes. Per-source listing cache (with manual F2 refresh) and remembered cursor/last location.
+- ZiFi WiFi network interface via an ESP-01S module (stock Espressif AT firmware — no reflash) or, on a W module (Pimoroni Pico Plus 2 W: MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W; Waveshare RP2350B-Plus-W: the *_WS builds), the module's on-chip CYW43439 radio (Network → Transport → On-chip WiFi, lwIP on the RP2350, with an emulated ESP8266 AT command set behind the guest NIC): network access for ZX-Spectrum software (e.g. the MRF terminal) through the ZIFI-API FIFO, the 16550 UART window and the ZX-Uno UART window (#FC3B/#FD3B, as used by BridgeZX and the Karabas-Pro net tools), plus an MC146818 RTC (Pentagon "Mr Gluk" TimeKeeper) with SNTP time sync over WiFi; WiFi connect and time sync show the live ESP AT dialog in a scrollable log. The NIC also works with WiFi switched off, as a plain 115200 8N1 serial port the guest owns end to end (an Arduino or any other device on the 16550 window), and Network → Sync at boot turns the boot-time SNTP exchange off so nothing but the join is ever sent on that line (RP2350 only).
+- Unified F5 file browser with a location chooser (RP2350, when WiFi is configured): **Local (SD)**, **Remote (FTP/SFTP)**, **Web Archives** and **Add Remote** — all rendered in the same "Open File" window. **Enter** quick-starts a file (downloads to RAM and runs/mounts; a file already fetched this session is started again without a new download), **F5** saves it to a chosen SD folder; `..`/Backspace go up a level, Esc closes. Per-source listing cache (with manual F2 refresh) and remembered cursor/last location.
 - Network file transfer (FTP / SFTP / SSH client): saved connections with optional alias and start path (passwords optionally stored, masked entry; TAB reveals); browse / download / upload / copy (recursive) / delete; SSH/SFTP crypto (curve25519, AES-CTR, HMAC-SHA256) runs on the RP2350 via mbedTLS; SFTP host-key trust-on-first-use; selectable ESP-01S UART baud up to 921600. See the [Network wiki page](https://github.com/drewpo28/pico-speccy/wiki/EN-Network).
 - Web Archives: browse and download ZX disk/tape images, ALF cartridges and VGM music packs from online catalogs (Virtual TR-DOS, Spectrum Computing, ZX-Art, ALF, VGMRips) over HTTPS straight to SD or RAM; downloaded .vgz tracks are unpacked to .vgm in place, ready for the VGM player plugin. Serverless GitHub-Pages catalog, on-device TLS, Cyrillic titles rendered (RP2350 only).
 - FTP server: share the SD card over the LAN (anonymous, active mode) from the Network menu (RP2350 only).
@@ -113,12 +139,13 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - Rodolfo Guerra's ROMs fast load routines support with on the fly standard speed blocks translation.
 - TAP file saving to SD card.
 - SNA and Z80 snapshot loading, plus the emulator's own **.pss** snapshot: one file holding the whole machine state (every machine incl. Scorpion, Profi, ATM, TS-Conf, Murmuzavr, DivMMC and the GS/NeoGS card with its RAM) together with the settings, mounted media and joystick profile it ran on; a load re-mounts the media and, when board settings differ, asks before applying them and rebooting. **F5 Convert** exports a .pss to .szx / .z80 / .sna wherever those formats can express the machine, listing what was dropped. **F1** on a snapshot in the F5 browser shows its machine, registers, pages, sound chips, media and settings (.pss, .szx, .sna, .z80, .rzx and .spg), and text files open in the built-in viewer (UTF-8 / CP866 / CP1251).
-- **RZX** input-recording playback (from the file browser, `.rzx` or zipped): the embedded SNA/Z80 snapshot is loaded and the recording replays by its own fetch counts, with every IN taken from the file; **Snapshots → Stop RZX playback** leaves you in control of the machine where the replay stopped. Recordings whose embedded snapshot is SZX are not supported yet, and recording is not implemented yet.
+- **RZX** input-recording playback (from the file browser, `.rzx` or zipped): the embedded SNA/Z80 snapshot is loaded and the recording replays by its own fetch counts, with every IN taken from the file; **Snapshots → Stop RZX playback** leaves you in control of the machine where the replay stopped. A recording without its own snapshot (or one naming an external file) starts from the .z80/.sna beside it, in the same folder or the same zip; esxDOS is switched off for the replay and restored afterwards. Recordings whose embedded snapshot is SZX are not supported yet, and recording is not implemented yet.
 - Snapshot saving and loading: one **Snapshots** menu with **Load from file** and 40 named **Quick slots** (F5 convert, F6 rename, F8 delete) saved as .pss; the suggested slot name is the last thing you started (tape, disk, cartridge, zip entry or Web-catalog file); the F3/F4 hot keys open the slot list directly, with Enter bound to the verb they were pressed for.
 - ZIP archive support: browse, extract, load and delete files inside ZIP archives.
 - Configurable keyboard hotkeys with hint display in menus.
 - Enhanced debugger: multi-breakpoint (up to 20), memory editor, port read/write breakpoints.
 - Render border (Video → Render border): turn the border off and the paper is scaled to fill the screen — even 3:2 / 5:2 pixel steps through the pair-slot driver and a scan-out line map where available, with the F8 box, notifications and LEDs kept readable (RP2350 only).
+- Screen position (Video → Screen position, 720x576 modes on Pentagon 128/512/1024, TS-Conf and ZX Evolution): picks which 288 of the Pentagon's 304 visible lines are shown — Even 48/192/48, Middle 60/192/36 or Full top 64/192/32 rows of top border / paper / bottom border — so border effects drawn in the top lines (Across the Edge) are no longer cut.
 - Render paper (Video → Render paper): switch off paper rendering so the border effects paint straight through the screen area — a border-timing debugging aid.
 - Debug → UART console: TX-only 115200 8N1 log (Debug::log and printf) on the board's console pin, switchable from the menu instead of a build option (see the build notes for the per-board pin).
 - Debug → Config folders: browse `/.config/pico-speccy` and `/pico-speccy` in the file browser (rename, new folder, delete) with a built-in text viewer for logs and config files — the config tree is hidden from the normal F5 browser.
@@ -127,10 +154,10 @@ Best performance for case Pimoroni "Pico Plus 2" is used.
 - ZX Keyboard overlay (main menu → ZX Keyboard): full-screen bitmap of the Spectrum keyboard for quick reference. Thanks to @const_bill and @tecnocat.
 - Pico-Zx-Player (Menu → Pico-Zx-Player, or Enter/F2 on a music file in the F5 browser): a native music player with the emulation paused — MP3, VGM/VGZ, MIDI, .ay, PT3/PT2/STC/STP/SQT, PSC/PT1/ASC/FTC/FLS/GTR/FXM/PSM/VTX, E-Tracker/SAM, TFC/TFD/TFE/TFM, MOD/S3M/XM/IT; playlists from a folder and its subfolders, shuffle/autoplay/repeat, a loop count and fade time for songs with a loop point (VGMPlay's, default 2 loops + 5 s; L / F cycle them in the player, Audio → Pico-Zx-Player sets them too), seek, volume/mute, a hot-key legend (hidden by default — F1 shows/hides it, an "F1 Help" hint sits in the bottom-right corner while it is hidden; Esc closes the player), a playlist that loads in the background while the picked track already plays, per-channel meters, and playback straight from FTP and Web Archives. Needs a board with QSPI (butter) PSRAM.
 - Pico-Scwong: a built-in native squash/pong game (tribute to andykarpov's Skvosh console) that runs on the RP2350 itself with no emulated machine and no SD card — last row of the Machine menu, or hold S at boot. Solo squash, Pong vs CPU with three difficulty levels, options for field/paddle/ball colours and sizes, and a CPU-vs-CPU attract mode after ten idle seconds.
-- Overclock menu: CPU frequency (252/378/504 MHz), Flash frequency (33–166 MHz), PSRAM frequency (66–166 MHz), VReg voltage (1.15–1.80 V).
+- Overclock menu: CPU frequency (252/378/504/540 MHz — 540 raises the voltage itself), Flash frequency (33–166 MHz), PSRAM frequency (66–166 MHz), VReg voltage (1.15–1.80 V).
 - Z80 turbo: emulated CPU speed selectable at 3.5/7/14/28 MHz (ALT+F2, remembered across reboots); machines with their own turbo control (Pentagon 1024SL #EFF7 and Scorpion GMX #7EFD while turbo is enabled, TS-Conf ZCLK outright) can switch it from software, and the hotkey then continues from whatever clock the machine is really running.
 - Complete file navigation system with autoindexing, folder support and search functions.
-- Complete OSD menu (English); typing a letter jumps to the next row starting with it.
+- Complete OSD menu (English); typing a letter jumps to the next row starting with it. Option lists show a Description block with the requirements of the option under the cursor (e.g. which CPU clock a video mode needs) and what it will turn on or off.
 - Config profiles (Options → Config profiles): 40 named slots, each a full copy of the settings — mounted tape/disks/IDE images and browser paths included. Enter/F3 loads one (and reboots into it), F4 saves, F6 renames, F8 deletes.
 - Interface menu: Slate or classic ZX Spectrum menu theme, solid on-grid VGA menu colours (no dither texture) or the full-depth scheme, rounded or square window corners, menu click volume (Off/Low/Normal/Loud) — all applied live; hot keys and LED indicator settings live there too.
 - Non-blocking notifications: hotkey messages (Gigascreen, max speed, turbo, LEDs, Scroll Lock cursor-as-joystick, tape flashload, write-protect) appear as a short toast in the top border while the machine keeps running.
@@ -263,7 +290,7 @@ GND          ──────────── GND (e.g. pin 6)
 
 ## Network (ZiFi / ESP-01S)
 
-On RP2350 boards, an **ESP-01S** (ESP8266) module on the UART adds networking. It runs the **stock Espressif AT firmware** — no reflashing needed. On the Waveshare RP2350B-Plus-W (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W builds) the module's own **CYW43439** radio can be used instead — pick **On-chip WiFi (CYW43)** under Network → Transport; the TCP/IP stack then runs on the RP2350 and no ESP module is required. Configured under the OSD **Network** menu:
+On RP2350 boards, an **ESP-01S** (ESP8266) module on the UART adds networking. It runs the **stock Espressif AT firmware** — no reflashing needed. On a W module — Pimoroni Pico Plus 2 W (`*p2w` builds) or Waveshare RP2350B-Plus-W (`*p2ws` builds) — the module's own **CYW43439** radio can be used instead — pick **On-chip WiFi (CYW43)** under Network → Transport; the TCP/IP stack then runs on the RP2350, the ZiFi NIC answers the guest with an emulated ESP8266 AT command set, and no ESP module is required. Configured under the OSD **Network** menu:
 
 - **ZiFi NIC** — network interface for ZX-Spectrum software (port `#EF`, 16550-UART window); works with the **MRF** terminal/drivers (<https://zxart.ee/eng/software/prikladnoe-po/mrf/tabs:releases/>).
 - **WiFi** — scan / connect / autoconnect, with the live ESP AT dialog shown in a scrollable log pane; **SNTP** time sync into the RTC (same live log).
@@ -314,10 +341,11 @@ Your filesystem tree must be look like:
 | `-DPICO_PC=ON` | Build for Olimex RP2040-PICO-PC carrier board |
 | `-DPICO_DV=ON` | Build for Pimoroni Pico DV Demo Base |
 | `-DZERO2=ON` | Build for Waveshare RP2350-PiZero |
-| `-DMURM_W=ON` | Build for Murmulator 1.x + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi). Same carrier as `-DMURM=ON`; the module moves audio to GPIO40/41/42, the LED to GPIO23 and PSRAM to GPIO47, and the carrier's PIO SPI PSRAM is dropped so the radio fits on pio0. |
-| `-DMURM2_W=ON` | Build for Murmulator 2.0 + Waveshare RP2350B-Plus-W (on-chip CYW43439 WiFi). Same carrier as `-DMURM2=ON`; audio is unchanged, the gamepad data pins move to GPIO40/41, the LED to GPIO23 and PSRAM to GPIO47. |
-| `-DPICO_DV_W=ON` | Build for Pimoroni Pico DV Demo Base + Waveshare RP2350B-Plus-W (DVp2w, on-chip CYW43439 WiFi). Same carrier as `-DPICO_DV=ON`; the module moves audio to GPIO40/41/42 and the LED to GPIO23, and brings the radio up on the PIO block the display is not using (pio0 under HDMI, pio2 under VGA). 16 MB flash, PSRAM pads on GPIO47 — the pin the base already uses for butter PSRAM. |
-| `-DPICO_PC_W=ON` | Build for Olimex PICO-PC + Waveshare RP2350B-Plus-W (PCp2w, on-chip CYW43439 WiFi). Same carrier as `-DPICO_PC=ON`, including the HSTX back-end (`-DHDMI_HSTX`); the module moves the PWM audio / beeper / MIDI TX to GPIO40/41/42 and the LED to GPIO23, PSRAM pads on GPIO47, 16 MB flash. |
+| `-DMURM_W=ON` / `-DMURM2_W=ON` / `-DPICO_DV_W=ON` / `-DPICO_PC_W=ON` | Build for the same carrier + Pimoroni Pico Plus 2 W (m1p2w / m2p2w / DVp2w / PCp2w, on-chip CYW43439 WiFi on GP23/24/25/29, 16 MB flash, 8 MB PSRAM on GPIO47). Every carrier pin stays where it is on the plain board; the LED is on the radio and the GP29 AY clock output is dropped. A 4 MB Raspberry Pi Pico 2 W has the same pins but these images do not fit its flash. |
+| `-DMURM_WS=ON` | Build for Murmulator 1.x + Waveshare RP2350B-Plus-W (m1p2ws, on-chip CYW43439 WiFi). Same carrier as `-DMURM=ON`; the module moves audio to GPIO40/41/42, the LED to GPIO23 and PSRAM to GPIO47, and the carrier's PIO SPI PSRAM is dropped so the radio fits on pio0. |
+| `-DMURM2_WS=ON` | Build for Murmulator 2.0 + Waveshare RP2350B-Plus-W (m2p2ws). Same carrier as `-DMURM2=ON`; audio is unchanged, the gamepad data pins move to GPIO40/41, the LED to GPIO23 and PSRAM to GPIO47. |
+| `-DPICO_DV_WS=ON` | Build for Pimoroni Pico DV Demo Base + Waveshare RP2350B-Plus-W (DVp2ws). Same carrier as `-DPICO_DV=ON`; the module moves audio to GPIO40/41/42 and the LED to GPIO23, and brings the radio up on the PIO block the display is not using (pio0 under HDMI, pio2 under VGA). 16 MB flash, PSRAM pads on GPIO47. |
+| `-DPICO_PC_WS=ON` | Build for Olimex PICO-PC + Waveshare RP2350B-Plus-W (PCp2ws). Same carrier as `-DPICO_PC=ON`, including the HSTX back-end (`-DHDMI_HSTX`); the module moves the PWM audio / beeper / MIDI TX to GPIO40/41/42 and the LED to GPIO23, PSRAM pads on GPIO47, 16 MB flash. |
 | `-DZERO2_PIO_USB=ON` | ZERO2: USB host on the second Type-C port (J2, PIO-USB on GP28/GP29). **Default OFF** — the bit-banged host costs ~18 KB of SRAM (RAM-resident code + endpoint pool), so it ships as a separate `z0p2-speccy-VGA-HDMI-PIOUSB-*.uf2` image instead. |
 | `-DVGA_HDMI=ON` | VGA/HDMI output (default) |
 | `-DSOFTTV=ON` | Software composite TV output |
@@ -347,7 +375,7 @@ To build firmware for all supported boards and display variants at once, use the
 ./build_all.sh [--clean] [-j JOBS_PER_BUILD] [-p MAX_PARALLEL] [TARGETS...]
 ```
 
-- Targets: `MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W` (default: all)
+- Targets: `MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W MURM_WS MURM2_WS PICO_DV_WS PICO_PC_WS` (default: all)
 - ZERO2 builds twice: the plain image and a `PIOUSB` one (`-DZERO2_PIO_USB=ON`, USB host on the second Type-C)
 - PICO_PC, PICO_PC_W, MURM2 and MURM2_W build twice: the plain image (PIO HDMI, `-DHDMI_HSTX=OFF`) and an `HSTX` one (`-DHDMI_HSTX=TMDS`, `...-VGA-HDMI-HSTX-*.uf2`)
 - `--clean` — wipe build dirs first (default: incremental rebuild)
@@ -355,7 +383,7 @@ To build firmware for all supported boards and display variants at once, use the
 - `-p` — max number of targets built concurrently (default: 3)
 - Env vars: `BUILD_TYPE` (default `MinSizeRel`), `MAX_PARALLEL`, `JOBS_PER_BUILD`, `CMAKE_GENERATOR`
 - Uses `ccache` automatically if installed (`apt install ccache` for ~2-5× faster rebuilds)
-- Per-target logs are written to `build-logs/`
+- Per-target logs are written to `build-all/logs/`
 
 Single-target builds produce artifacts in `pico-speccy/bin/`.
 

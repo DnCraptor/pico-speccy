@@ -70,7 +70,7 @@ if (Get-Command ccache -ErrorAction SilentlyContinue) {
 }
 
 # RP2350 only — the RP2040 targets (MURM_P1/MURM2_P1/ZERO) were dropped.
-$AllTargets    = @("MURM", "MURM2", "PICO_PC", "PICO_DV", "ZERO2", "MURM_W", "MURM2_W", "PICO_DV_W", "PICO_PC_W")
+$AllTargets    = @("MURM", "MURM2", "PICO_PC", "PICO_DV", "ZERO2", "MURM_W", "MURM2_W", "PICO_DV_W", "PICO_PC_W", "MURM_WS", "MURM2_WS", "PICO_DV_WS", "PICO_PC_WS")
 $TftTargets    = @("MURM", "MURM2")
 $TftStTargets  = @()
 $SofttvTargets = @("MURM", "MURM2")
@@ -80,7 +80,7 @@ $PiousbTargets = @("ZERO2")
 # Display on GPIO 12-19 (the RP2350 HSTX pins): also ship an HSTX image
 # (-DHDMI_HSTX=TMDS). Their plain VGA_HDMI image is pinned to PIO (-DHDMI_HSTX=OFF),
 # or CMake's AUTO would make it HSTX too and the two images would be the same.
-$HstxTargets   = @("PICO_PC", "MURM2", "MURM2_W", "PICO_PC_W")
+$HstxTargets   = @("PICO_PC", "MURM2", "MURM2_W", "PICO_PC_W", "MURM2_WS", "PICO_PC_WS")
 
 if (-not $Targets -or $Targets.Count -eq 0) { $Targets = $AllTargets }
 
@@ -117,13 +117,14 @@ Write-Host "Clean first:      $Clean"
 Write-Host ""
 
 $OutputDir = Join-Path $ScriptDir "firmware"
-$LogDir    = Join-Path $ScriptDir "build-logs"
+$BuildRoot = Join-Path $ScriptDir "build-all"
+$LogDir    = Join-Path $BuildRoot "logs"
 if (-not (Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir | Out-Null }
 if (-not (Test-Path $LogDir))    { New-Item -ItemType Directory -Path $LogDir    | Out-Null }
 
 function Get-BuildDir($Target, $Display) {
-    if ($Display -eq "VGA_HDMI") { Join-Path $ScriptDir "build-$Target" }
-    else { Join-Path $ScriptDir "build-${Target}-${Display}" }
+    if ($Display -eq "VGA_HDMI") { Join-Path (Join-Path $ScriptDir "build-all") "$Target" }
+    else { Join-Path (Join-Path $ScriptDir "build-all") "${Target}-${Display}" }
 }
 
 # Optional clean
@@ -147,10 +148,10 @@ $Worker = {
     $Target  = $Pair.Target
     $Display = $Pair.Display
     if ($Display -eq "VGA_HDMI") {
-        $BuildDir = Join-Path $ScriptDir "build-$Target"
+        $BuildDir = Join-Path (Join-Path $ScriptDir "build-all") "$Target"
         $Label    = "$Target (VGA_HDMI)"
     } else {
-        $BuildDir = Join-Path $ScriptDir "build-${Target}-${Display}"
+        $BuildDir = Join-Path (Join-Path $ScriptDir "build-all") "${Target}-${Display}"
         $Label    = "$Target ($Display)"
     }
     $LogFile = Join-Path $LogDir "${Target}-${Display}.log"

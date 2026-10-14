@@ -1,5 +1,7 @@
 # pico-speccy Project Memory
 
+**Build dirs (2026-10-14):** every side build dir lives in `build-all/` (build_all.* writes `build-all/<TARGET>[-<DISPLAY>]` and `build-all/logs`; ad-hoc twins go there too, e.g. `build-all/perf`); only the VS Code `build/` stays at the root. Older notes below that name `build-X/` mean `build-all/X/`.
+
 **Build files (split 2026-09-30):** `CMakeLists.txt` is the skeleton (SDK, target,
 link libs, PORT_VERSION — release scripts grep it there); the rest is `cmake/*.cmake`,
 each `include()`d at its old position: `options` (boards, displays, features), `trace` (every XXX_TRACE / debug option), `board`
@@ -923,7 +925,7 @@ garbage. Reference: NedoPC `fpga/current/dma/dma_zx.v` + `docs/dma_zx_doc.txt`
   is gated on #BB traffic, and the hang where the card waits for a command the
   host never sends has #BB traffic of exactly zero.
 - **The card side is in the memory dump now** (`tools/memdump.gdb` +
-  `tools/memdump.py`, NOT `OSD::saveDumpToFile` — the Ctrl+Alt+D dump is
+  `tools/memdump.py`, NOT `OSD::saveDumpToFile` — the Ctrl+Alt+M dump is
   produced over GDB by the VS Code extension, so firmware-side changes to
   saveDumpToFile never show up there): 64 KB of `s_ngs_low_ram` re-split into
   the GS-Z80's `0000-3FFF` and its fixed `4000-7FFF` window, plus GS-Z80
@@ -2458,6 +2460,14 @@ A5, A8, A9 and A10") — X = A10..A8 011, Y = 111, buttons A9=1 A8=0 with A10 fr
 would steal Kempston-joystick and Beta reads here). Z-Player 5.1 reads only #FADF/#FBDF/
 #FFDF and uses bits 4-7 as a counter (delta vs last read), bit 2 = middle — our model.
 
+**Swap buttons = Auto (2026-10-14, hw-confirmed DVp2):** `Config::mouse_swap` is now a
+u8 0 Off / 1 On / 2 Auto (NVS `mouse_swap` = "false"/"true"/"auto"; older builds read
+"auto" as Off). Auto: the first press of ONE button decides, and that button lands on
+**D0** — the "left" nearly all software expects (`mouseButtonL` drives D1 = the original
+Kempston layout, so a first press of the PHYSICAL left button means swap). The first cut
+decided the other way round and read inverted on hw. `s_auto_swap` (hid_app.cpp) is a
+file static: F11 keeps it, F12 reboots and re-decides.
+
 ### Mouse sensitivity, and the truncation that made a slow hand drift (2026-09-15, NOT hw-tested)
 
 **Devices > "Mouse sensitivity"** — `Config::mouse_sens` (NVS `mouse_sens`,
@@ -3564,7 +3574,7 @@ between the BIOS sets — `MENU_RESETTO_PENT` / `PENTGLUK` all over again):
   **MBR with a FAT32 partition** (type 0x05/0x0B/0x0C/0x0F — it scans the table at
   446+4 itself), which the owner's card evidently has.
 - If SD boot still fails, the next capture is `-DZC_PORT_TRACE=ON` (CS edges +
-  command frames) plus a Ctrl+Alt+D at the black screen: `start`'s error paths all
+  command frames) plus a Ctrl+Alt+M at the black screen: `start`'s error paths all
   end in a TEXT-mode box (`BT_ERROR` -> `TX_MODE`, and codes 2/3 then `jr nz,$`),
   so a BLACK screen means a hang BEFORE that — the SD read loops (`jr nz,$` after
   `cmd18`, `cp 0xFE / jr nz,$-5` after `wtdo`) are unbounded, everything else in
@@ -3818,7 +3828,7 @@ took eleven hardware rounds; the mechanisms, in the order they were peeled:
 ### Demorama: VConfig is per LINE, and a per-line palette effect must not be HELD (hw-confirmed 2026-09-17)
 
 "Part of the graphics is missing, and in one place the FPS drops to 25." Both came
-out of the guest's OWN tables in a Ctrl+Alt+D dump — read them before theorising,
+out of the guest's OWN tables in a Ctrl+Alt+M dump — read them before theorising,
 they are unambiguous. The demo (TS-Conf, 14 MHz, `intmask=03`) runs a **LINE INT on
 every one of the 320 lines** (handler at card-side ZX `#815C`) that, per line:
 `OUT (#FB),A` a sound sample, `OUT (#0FAF)` the **border** (`(sample & 3) | 0xFC` —
@@ -4396,7 +4406,7 @@ VSINT/frame-T/latency/vector), dumped as ONE binary transfer by
 ISR cost; `intMiss`/`brdT`/`d`/`intT`/`haltT` in `[PERF] 60f`.
 
 **Traps this cost time on, worth not repeating:**
-- **A missing symbol in `memdump.gdb` HANGS Ctrl+Alt+D, it does not just lose a
+- **A missing symbol in `memdump.gdb` HANGS Ctrl+Alt+M, it does not just lose a
   line** (2026-09-10, an ordinary `build/`: `PERF_TRACE` defaults OFF in
   CMakeLists, so the ring is absent unless a session asked for it): GDB has no
   try/catch, so an unknown symbol aborts the sourced file — and those blocks run
@@ -4893,7 +4903,7 @@ the MENU's palette, and nothing about the pair TABLES was wrong.
   dumps `profi_palette_live` and `profi2png.py` COLOURS with it, so the PNG shows
   what the emulator INTENDS. PNG wrong -> `profi_palette_live` is wrong (this
   bug). PNG right but the screen wrong -> the driver tables were clobbered (the
-  `applyPalette` bug above). Ctrl+Alt+D's `palsel=` + `cram[..]` says what the
+  `applyPalette` bug above). Ctrl+Alt+M's `palsel=` + `cram[..]` says what the
   guest actually asked for.
 ### ...and the one that started it: a top-border TOAST repainting the guest (hw-confirmed 2026-09-19)
 
@@ -5038,6 +5048,29 @@ for good.
   path), a TS-Conf title that flips 16c/256c per screen (Digger's intro is the
   known stripe case), GMX 640x200, and Gigascreen actually working in Profi and
   TS-Conf ZX mode — nothing in that combination has ever run.
+
+## The right pane's Description block (2026-10-14, partly hw-seen)
+
+Under a radio/bool row's options the right pane draws a `Description` block for the
+option under the cursor (left focus: the chosen one, and only if that value is in THIS
+row's list — machine rows share SET_MACHINE). One format: header, then per parameter a
+SUBHEADER (name + "now X" coloured green/red; with no value its NAME is coloured
+instead — red = warning / "Turns off", green = "Turns on") and indented RULES
+(requirement left, condition right, greyed when not in force). Content is
+`src/ui/UiDesc.cpp`, keyed on (setting, value) — the renderer (`drawDescRow`,
+UiRender.cpp) never changes; `sub()`/`rule()` are the API. Width budget 26 glyphs (the
+640x480 pane); max 10 lines, no scrolling (a long option list can push it off the pane —
+the Spectrum row with the +3 variants at 240 lines). A content hash in `flushDirty`
+repaints the pane when the block would change. Covered so far: ZX Evolution/TS-Conf
+(CPU >=504), every machine's "Turns on/off" table (mirrors MachineSwitch /
+resolveConstraints — keep them in step), GS (clock 12-14 / 12-20 by CPU) and NeoGS (CPU
+>=504), V-Sync (50 vs 60 Hz), Timex Gfx mode / SAA1099 (port #FF + machines),
+Overclock (warning on all four rows). Same session: the NeoGS Clock row was removed
+(Config::load forces ngs_clock = 0 = Auto); Timex <-> SAA1099 now switch each other off
+at the PICK (`Stage::set` + `Stage::takeNote` toast) instead of only at Apply; BaseConf
+auto-enables Z-Controller in MachineSwitch; Profi/Karabas keep the ZiFi NIC on boards
+WITH butter PSRAM (boot gate, MachineSwitch, autoDisabledMask). Not hw-confirmed beyond
+the owner reading the screens.
 
 ## The Machine menu is by FAMILY now, and the subheader names both halves (2026-09-11, NOT hw-tested)
 
@@ -5545,7 +5578,7 @@ three. hw-confirmed 2026-09-12 (owner: picking a .tap in the browser runs it).
 **How to remake it** — this is the only way, so follow it exactly: on real hardware
 with **Fast load OFF** (so nothing intercepts the loader), mount a .tap, type
 `LOAD ""`, press Enter. The machine then sits in LD-EDGE waiting for tape edges that
-never come; Ctrl+Alt+D there gives 48 KB + registers + the SCLD block. Then:
+never come; Ctrl+Alt+M there gives 48 KB + registers + the SCLD block. Then:
 
 - **Rewind two instructions**, from the dump's `PC=0x0199` (inside LD-EDGE) back to
   the `CP A` at EX-ROM **0x0110**: undo the `CALL 0x018D` at 0x0112, so `SP` goes
@@ -5802,7 +5835,7 @@ mbedtls/cyw43/lwip submodules.
   the four bytes of `g_memgates` (CPU.cpp), kept under their old names by macros,
   so every owner is untouched. A read is fast when `(w & 0xFFFF) == 1`, a write when
   `w == 1`: one load and one compare. `tools/memdump.gdb` reads
-  `g_memgates.b.atm_ro` now — a stale symbol there HANGS Ctrl+Alt+D.
+  `g_memgates.b.atm_ro` now — a stale symbol there HANGS Ctrl+Alt+M.
 - **No line test per guest access on the fast path**: the whole-line renderer is
   ticked at the next M1 (`exec_nocheck_ts` / `fetchOpcode`), i.e. at most one
   instruction late — a few T of an 896..1792-T line, the same as the write
@@ -5830,7 +5863,7 @@ mbedtls/cyw43/lwip submodules.
   (fishbone, TMNT, Bomberman, Ninja Gaiden — the 14 MHz path got every change but
   the DRAM-model removal), the same at 28 via the CPU cap, an ATM/Evo whole-line
   title and a Pentagon 16col screen (they share the fast path), a NeoGS ZX-DMA demo
-  (TheLink: the fast path switches off mid-slice), and Ctrl+Alt+D on an ATM machine
+  (TheLink: the fast path switches off mid-slice), and Ctrl+Alt+M on an ATM machine
   (the renamed `g_atm_ro`).
 
 ## Z80 DMA attribute multicolour (MB-02+/DATA-GEAR): NaPICu (2026-09-14; owner on `DVp2-napicu-dma2`: "работает" — letters and title both clean)
@@ -5876,7 +5909,7 @@ frame's tail, while the pass keeps writing black rows into page 5. Two defects i
   per row against a 228 T line; 197 x 7 + 154 = 1533 per charrow against 1824) says
   it was tuned on something slower than 4 T/byte, so if a hardware MB-02 timing is
   ever measured, revisit — but do not model contention without one.
-- **`tools/z80dma_sim/`**: `dump2bins.py` splits a Ctrl+Alt+D dump into pages +
+- **`tools/z80dma_sim/`**: `dump2bins.py` splits a Ctrl+Alt+M dump into pages +
   registers, `z80dma_sim.c` runs the guest on redcode with a mirror of Z80DMA.cpp's
   register decode (P lines = every #7FFD write, D lines = every transfer with its
   frame-relative T and data, optional page dumps at a frame), `analyse.py` replays the
@@ -6180,7 +6213,7 @@ lives in `Debug::uart*` (Debug.cpp), `BoardPins::dbgUart*` and
 
 ## HDMI on HSTX (GPIO 12-19 boards): raw serializer (hw-confirmed PCp2 2026-09-17) and the command expander (2026-09-22, NOT hw-tested)
 
-The RP2350's HSTX exists only on GPIO 12-19, so only PICO_PC, MURM2 and MURM2_W can
+The RP2350's HSTX exists only on GPIO 12-19, so only PICO_PC, MURM2 and MURM2_WS can
 use it (`HDMI_BASE_PIN == 12`). `HDMI_HSTX` (CMake cache, `AUTO/OFF/RAW/TMDS`, `ON` =
 RAW) picks the back-end; AUTO = **TMDS on PICO_PC, RAW on MURM2** (owner's call: B on
 PCp2 only until it is on hardware). Names: `-HSTX` / `+HSTX` for TMDS, `-HSTX-RAW` /
@@ -6858,7 +6891,7 @@ resistor ladder and the monitor's input integrate them, so every pixel carries i
 own level, there is no Bayer block to beat against 1-pixel detail, and the 16 flat
 ZX colours stop needing the solid / `vgaGridSnap` fork. `VGA_HSTX=1` rides on
 `HDMI_HSTX` in CMakeLists (same eight pins, same board rule: PICO_PC, MURM2,
-MURM2_W).
+MURM2_WS).
 
 **The blocker that had to move first, and it was the MODE TABLE, not the code.**
 `CLOCKS_CLK_HSTX_DIV_INT` is a TWO-BIT field with no FRAC (verified in the SDK
@@ -7673,7 +7706,7 @@ remains before the HARD floor stops the build:
 | DVp2 VGA-HDMI | 2502492 | 1691648 | 2060288 | 389120 |
 | m1p2 / m2p2 / PCp2 / z0p2 VGA-HDMI | 2506588 | 1687552 | 2056192 | 385024 |
 | z0p2 VGA-HDMI-PIOUSB | 2522972 | **1671168** | 2039808 | 368640 |
-| m1p2w / m2p2w (16 MB) | 2789212 | **13987840** | 14356480 | 12685312 |
+| m1p2ws / m2p2ws (16 MB) | 2789212 | **13987840** | 14356480 | 12685312 |
 
 Three things that table says:
 
@@ -8144,6 +8177,24 @@ off) keep the static SRAM pages, byte for byte.
   unmeasured), snapshot load/save, .pss, MB-02 / DivMMC page-0 windows, ZipExtract's
   page-5/7 fallback on a tight board, 640x480 (pages 5/7 stay in SRAM there — a
   different layout from 576p), and a Murmuzavr count past the chip (must refuse).
+- **Gigascreen went negative on IDL at 378 MHz after the move — its prev-FB now moves
+  to SRAM at the end of setup (2026-10-14, hw-confirmed: owner, "это пофиксило
+  перфоманс на 378").** On a butter board the prev-FB lived in PSRAM behind the
+  uncached scanline window (~2 x 52 KB of uncached QMI traffic a frame). Cheap while
+  the guest ran from SRAM; once pages 0-4/6 are butter every guest cache miss queues
+  behind it on the one XIP port. `VIDEO::gigascreenPreferSram()` (called right before
+  `setup: COMPLETE`) re-places it on the heap when `largest >= size + 32 KB`, and from
+  then on `ensurePrevFB` asks heap-first on butter boards (palloc's 32 KB margin, butter
+  fallback) — so the mode-gate resume and a menu enable go to SRAM too. The VIDEO::Init
+  boot pre-allocation still lands in butter on purpose (GS/MIDI/audio have not taken
+  their SRAM yet). The heap it uses is what the framebuffer stopped taking. Log:
+  `VIDEO: prevFB 50KB on heap` + `prevFB window OFF`, or `prevFB stays in butter
+  (largest heap ...)` when it does not fit. TS-Conf + NeoGS at 576p FITS (hw log
+  2026-10-14: `prevFB 50KB on heap`, `setup: COMPLETE, freeHeap=94360`) — the heap
+  the framebuffer gave back covers it with room to spare. Test ELF
+  `debug/DVp2-gigsram-1.0.9.elf`. The FTP server runs with it (owner, same day; on a
+  butter board its buffers go heap-first with the 32 KB margin, else butter — lending
+  declines there either way). 480p works too (owner, same day).
 - **Two things the re-test found, both fixed in `zxpsram6` (NOT hw-tested), neither
   caused by the move:**
   1. **"Pentagon 1024 + Gluk sees only 128K" = `MemESP::notMore128` was never cleared
@@ -8314,7 +8365,7 @@ symbols at 0x2002xxxx-0x2006xxxx) after every change, not just the section total
 
 Also moved in this round: the ATM/KAY glue (`atmPortReadEarly/WriteEarly`,
 `kay1FFDWrite`, `scorpionC000Page`, `Z80::check_trdos_atm`, `Z80::scorp_dos_exit_rom`),
-Hide border's `blExpandLine`/`blPutRow`. What that costs and must be checked on hw:
+Render border = No (the borderless scaler): `blExpandLine`/`blPutRow`. What that costs and must be checked on hw:
 Profi/Karabas port I/O now runs from XIP (FPS in DS80 and CP/M, FDC traffic), ATM/KAY
 ports and TR-DOS traps from XIP, the borderless scaler from XIP (FPS on a busy title),
 TS-Conf unchanged in speed (window = SRAM). Test ELFs `debug/{m2p2,m2p2-hstx,DVp2}-sram2-1.0.8`.
@@ -8541,7 +8592,7 @@ one-line-per-frame CONSISTENCY DETECTOR, not a trace of events.
   of events next time.
 - **`ts_dma_ring` (TS_VIDEO_TRACE builds, 128 x 20 B) + `tools/dmaring.py`**: every
   DMACtrl write with raster frame/line, mode, words, addresses, modelled duration,
-  and core1's `pend`/`posted` at that instant, read out by Ctrl+Alt+D
+  and core1's `pend`/`posted` at that instant, read out by Ctrl+Alt+M
   (`tools/memdump.gdb` probes it like `ts_int_ring`). Built because the UART cannot
   carry a per-DMA trace of a heavy frame (~14 DMAs in 20 ms ≈ 40 KB/s against
   115200 baud = 11.5 KB/s — every capture came back with the frame's first lines
@@ -8618,7 +8669,7 @@ flag 257). Window AUTO term is now +8192 B for data (19 152 of 22 272 B used).
   firmware reader is TS-gated, but `tools/memdump.gdb` prints that block
   unconditionally, and on another machine it would decode heap bytes as a
   register file. Moving them means teaching the dump script to skip the block —
-  and a wrong symbol there HANGS Ctrl+Alt+D (see the fishbone trap list), so it
+  and a wrong symbol there HANGS Ctrl+Alt+M (see the fishbone trap list), so it
   is not a change to make in passing.
 - Host tests re-run green: `tools/tsdram_cache_test.cpp` (fails=0) and
   `tools/tsdram_test.cpp` (OK). A `-DTSCONF_CODE_OVERLAY=OFF` build still links
@@ -9100,7 +9151,26 @@ for anything raised while the MENU owns the screen.
 - Expiry is wall time (`esp_timer_get_time`), not frames, so max speed does not
   flash it past.
 
-## Video > Hide border — the paper scaled to fill the screen (2026-09-27, NOT hw-tested)
+## Video > Screen position — which 288 of the Pentagon's 304 lines (2026-10-14, hw-confirmed DVp2)
+
+A real Pentagon shows 304 lines: 64 of top border (raster lines 16..79), 192 paper, 48
+bottom (272..319). The 720x576 window has 288 rows and used to show 48/192/48 (lines
+32..319), cutting the top — "Across the Edge" draws "ACROSS" in lines 16..31 (same
+report and fix on MiSTer: ZX-Spectrum_MISTer issue #44 / PR #73, "Pentagon Overscan").
+`Config::screen_top` (NVS `screen_top`, `SET_SCREEN_TOP` AC_LIVE) = **Even 48/192/48**
+(default), **Middle 60/192/36** (owner: "ровно по центру"), **Full top 64/192/32**.
+`VIDEO::screenTopRows()` is the one source: 48 for every machine that is not Pentagon
+128/512/1024, TS-Conf or `isEvoPentRaster()` (Profi excluded on purpose — owner), 24
+outside the 288-row modes. `VIDEO::Reset` moves `tStatesBorder` by `(top-48)*224` and
+sets `lin_end = top`, `lin_end2 = top+192`; the GMX-off and TS-Conf back-to-ZX restores
+take it from the helper; `screenTopApply()` (menu hook, between frames) shifts a running
+machine and asks for a full border repaint. TS-Conf whole-line modes keep their own
+RRES window. The row (under Render border) shows only for a staged 288-row mode on a
+Pentagon-raster machine; a Description block spells out the numbers.
+
+## Video > Render border = No — the paper scaled to fill the screen (2026-09-27, NOT hw-tested)
+
+The row is **Video > Render border** (`Config::render_border`, Yes = normal border); earlier notes called it "Hide border" — same setting, inverted wording.
 
 `Config::render_border` (NVS `render_border`, `SET_BORDERLESS`, AC_PURE) → `VIDEO::bl_live`,
 re-decided at EVERY EndFrame by `VIDEO::blRecalc()` (right after the DS80/GMX/Timex/
@@ -9138,7 +9208,7 @@ TS-Conf mode applies, before `gigascreenModeGate`), so the menu only writes Conf
   strip, notify banner over the picture (no blinking); toggling on/off; Gigascreen
   suspend/resume; Profi DS80 / GMX / TS-Conf mode switches in and out; FPS cost.
 
-### Hide border, stage 1: pair scaler + scanout line map (2026-09-27, NOT hw-tested)
+### Render border = No, stage 1: pair scaler + scanout line map (2026-09-27, NOT hw-tested)
 
 The 5/4 / 11/8 / 3/2 fb-level scaler above gives pixel widths 2,2,2,4 and line heights
 2,2,2,4 (480) / 2,4 (576) — uneven, visible in text. Two independent improvements, each
@@ -9874,7 +9944,7 @@ generated**; the same shape would bite any other family that keeps a raw bank.
   timing skeleton (224 T/line, paper T 14336, the `halfpix&4`/`>=125` no-data
   windows → 0xFF) but returns `grmem[offAtt[line]+hpoffset]` regardless of
   halfpix parity; with row 23 uniformly 0x55 both reads then land on 0x55.
-  Assigned in CPU::reset (was getFloatBusData48). Diagnosed from a Ctrl+Alt+D
+  Assigned in CPU::reset (was getFloatBusData48). Diagnosed from a Ctrl+Alt+M
   memory dump: PC parked at the loop at RAM 0x7355 named the whole check, and the
   dump's 0x5AE0=0x55 (page 5, = the page `grmem` reads) ruled out any page/grmem
   mismatch, leaving the odd-spacing parity flip as the only cause; the
@@ -10006,7 +10076,7 @@ entry" rule buys.
   **`R_SCORP_GMX6` (`ProfRomGMX_v6s.rom`, v6.44.9643, CRC32 FCA97CD6) shipped beside
   it for a day and was REMOVED on the owner's call the same day (2026-09-20)** — it
   was hw-confirmed while it lasted (its 640x200 Shadow monitor renders in full and the
-  keyboard works, from a Ctrl+Alt+D screenshot of the Main menu; the navigator and the
+  keyboard works, from a Ctrl+Alt+M screenshot of the Main menu; the navigator and the
   disk utilities were never covered), and it cost 212 992 B of flash. It is the
   reference case for what a second image of this family costs and how it packs — see
   the bullets below, which are kept for that reason. Two findings from the same day
@@ -10342,6 +10412,20 @@ entry" rule buys.
   the pair-slot framebuffer; it now repaints the bands via `gmxBorderFrame`
   instead. (Its paper walk is `Draw(tStatesPerLine)`, i.e. the same whole-line
   path as the HALT flush above — it needed the `frow` fix to be correct at all.)
+- **Every GMX line was rendered TWICE (fixed 2026-10-14, hw-measured on Edge Grinder
+  and HQ).** MainScreen reaches column 0 of a line twice (MainScreen_Blank's priming
+  Draw(0), then the first real slice; a HALT flush adds more), and the whole-line
+  branch keyed on `start_col == 0`: `[PERF] gmx:` read 400-808 lines a frame for 200.
+  A `gmx_last_line` guard draws each line once (TS-Conf's tsRenderLine had the same
+  fix). The line itself moved out of the RAM-resident MainScreen into
+  `VIDEO::gmxRenderLine` (flash, word reads, 4-entry colour table per byte —
+  `pairBits8`, shared with atmRenderLine): -448 B static SRAM on every board. Result:
+  render 6.7 -> 3.8 ms/frame; HQ heavy scene cpu 23.2 -> 20.3 ms, 41.7 -> 46.6 FPS.
+  ~19 us/line remains (bitmap + attribute pages both in butter PSRAM, 160 B/line
+  through XIP); not pursued (owner: enough). Same session, ATM/Evo: atmRenderLine
+  rewritten the same way (EGA byte LUT, 512 B heap) — EGA 12 -> 6 us/line, text 14.5
+  -> 8.8 us/line, CP/M cpu 19.0 -> 17.9 ms; a core1 line queue for ATM/16col/GMX was
+  measured and judged not worth it (16col render ~0.25 ms/frame).
 - **Attribute bit 7 = FLASH** (2026-08-31, NOT hw-tested): fg/bg swap on the flash
   phase, MAME's `invert_attrs`. bg is attr bits 3-6 and fg bit 3 is attr bit 6, so
   bit 7 is the only free one. Driven by the renderer's own `flashing` mask (0x80 /
@@ -11606,13 +11690,13 @@ untouched, only the far end changed. Plan + command inventory:
   bit 6 already did), and the port write paths call `AtEmu::drainTx()` once the
   ring passes 128 bytes.
 - **Cost**: non-W boards unchanged in SRAM (DVp2 `.data`/`.bss` byte-identical to
-  HEAD; flash −8 B from the removed `p_espSerial` menu predicate). DVp2w: +160 B
+  HEAD; flash −8 B from the removed `p_espSerial` menu predicate). DVp2ws: +160 B
   static (the `atEmu` tests in the RAM-resident ZiFi handlers), +5.9 KB flash, heap
   only while the NIC runs: `Ctx` (~1.5 KB) + 2 KB RX ring + 0.8 KB TX ring + up to
   ~3.3 KB of pbufs per active link.
 - Hardware Info: `ZiFi NIC : On (AT emu, mux N, K links)`. AT traffic is logged
   (`ZiFi AT< ...`) only in `-DZIFI_TRACE=ON` builds.
-- Test ELFs `debug/{DVp2w,PCp2w}-atemu-1.0.9.elf` (+ .uf2). **Hw 2026-10-12, owner:
+- Test ELFs `debug/{DVp2w,PCp2ws}-atemu-1.0.9.elf` (+ .uf2). **Hw 2026-10-12, owner:
   MRF works — browsed and downloaded an SCL through it; the zxwifi and EVO UART driver
   builds (16550 window `#F8EF..#FFEF`) and the real UN-64 / UNO UART build (ZX-UNO
   `#FC3B/#FD3B`) all work** — every guest window the emulator serves is confirmed. The AYWiFi56 build
@@ -12209,7 +12293,7 @@ wire cs1_n = dma_req ? 1'b1 : z80_cs1_n;
   against 4556 already in use and was living on the renderer term's spare, so the
   IDE arms merely pushed the TOTAL over; raise the term whose code grew, not the
   sum. **(b) The per-display-variant spread is GONE**: VGA-HDMI, SOFTTV,
-  TFT_ST7789, ZERO2-PIOUSB and MURM_W all measure byte for byte identical since
+  TFT_ST7789, ZERO2-PIOUSB and MURM_WS all measure byte for byte identical since
   the 2026-09-13 renderer split moved the display-dependent halves to flash (it
   was 14 724 vs 16 900 B in 2026-09-10, which cost a broken build_all run) — so
   the "cover the worst variant" rule still stands, it just currently costs
@@ -14410,7 +14494,7 @@ Fuse's `rzx.c` / `z80.c` for the playback semantics.
     and a grep for a string the change added must hit; the `build:` stamp is also
     logged right after `dbg uart: console on ...` (it used to go out before the console
     existed on a cold boot), so a capture names its firmware; and a board's test build
-    goes in that board's own dir (`build-PICO_DV/` here), never in the shared `build/`.
+    goes in that board's own dir (`build-all/PICO_DV/` here), never in the shared `build/`.
     Also from the same hour: the UART ring is drained inside every modal now
     (`Debug::pumpUart()` in `netBackgroundTick`, slices in the classic
     `osdCenteredMsg` pause) — a log that stopped mid-line inside the zip picker / the
@@ -14519,21 +14603,21 @@ OUT). Now masks `data & 0x07`.
   - Loader at 0x5E00, screen at 0x4000, main code at 0x6200
   - Main code starts with `CALL 0x817E` (IM 2 setup); exercises the ULA via port `0x01FE`
 
-## MURM_W / MURM2_W — Waveshare RP2350B-Plus-W (2026-09-06; m1p2w hw-confirmed: picture, I2S sound, 8 MB QSPI PSRAM, CYW43 WiFi + FTP server)
+## MURM_WS / MURM2_WS — Waveshare RP2350B-Plus-W (2026-09-06; m1p2ws hw-confirmed: picture, I2S sound, 8 MB QSPI PSRAM, CYW43 WiFi + FTP server)
 
 Two board targets = the Murmulator 1.x / 2.0 carriers with the Waveshare
 RP2350B-Plus-W module (RP2350B, Raspberry Pi Radio Module 2 = CYW43439, 16 MB
-flash, PSRAM pads on GPIO47). `MURM_W` turns `MURM` on and `MURM2_W` turns `MURM2`
+flash, PSRAM pads on GPIO47). `MURM_WS` turns `MURM` on and `MURM2_WS` turns `MURM2`
 on, so every carrier pin arm and `#if MURM2` keeps working; `PICOSPECCY_WIFI` is
 the one "this image has a radio" switch (`src/WifiNet.{h,cpp}`, called last of the
 PIO users from `main()`). **Either video output works**: the radio's pins are above
 GPIO31, so it needs a PIO block at gpio_base 16, pio1 is the keyboard at base 0, and
 the block that qualifies is the one the DISPLAY is not using — pio0 under HDMI (HDMI
 owns pio2), pio2 under VGA (VGA owns pio0). `BoardPins::auxPio()` is that single
-decision; the radio, MURM_W's I2S (GPIO40-42) and MURM2_W's NESPAD (data 40/41) all
+decision; the radio, MURM_WS's I2S (GPIO40-42) and MURM2_WS's NESPAD (data 40/41) all
 take their block from it at init (the compile-time `I2S_PIO`/`NESPAD_PIO` are only
 the HDMI-case defaults). The first cut forced HDMI (`SELECT_VGA=false` in
-`resolveVideoOutput`) — the owner pointed out MURM_W is a VGA_HDMI board like any
+`resolveVideoOutput`) — the owner pointed out MURM_WS is a VGA_HDMI board like any
 Murmulator; lifted 2026-09-06, VGA path NOT hw-tested. CMake still refuses
 SOFTTV/TV/TFT for the W boards (unpaired, not impossible).
 
@@ -14544,7 +14628,7 @@ SOFTTV/TV/TFT for the W boards (unpaired, not impossible).
   the radio's own WL_GPIO0, GPIO46 = VSYS_SENSE, GPIO47 = PSRAM_CS, VBUS_DET goes
   to RM2 GPIO2. The first cut had CS/CLK swapped (a derivation, 38=CLK 39=CS).
   They live as **static** `CYW43_DEFAULT_PIN_WL_*` in
-  `src/drivers/board/boards/picospeccy_rp2350b_w.h` with `CYW43_PIN_WL_DYNAMIC 0`, exactly like
+  `src/drivers/board/boards/picospeccy_rp2350b_ws.h` with `CYW43_PIN_WL_DYNAMIC 0`, exactly like
   `pico2_w.h` — the runtime `cyw43_set_pins_wl()` table was dropped.
   **`CYW43_PIN_WL_DYNAMIC 1` WITHOUT the `CYW43_DEFAULT_PIN_WL_*` defines does not
   compile** (SDK 2.3.0 `cyw43_bus_pio_spi.c` seeds its RAM table from them), which
@@ -14576,7 +14660,7 @@ SOFTTV/TV/TFT for the W boards (unpaired, not impossible).
      (CMake) + `cyw43_set_pio_clkdiv_int_frac8(ceil(clk_sys/75 MHz), 0)` in
      WifiNet::init (6 @378, 7 @504), which must run AFTER the `Config::cpu_mhz`
      switch — the new call site is.
-  **hw 2026-09-06, after the fix: m1p2w boots with a picture** (Hardware Info:
+  **hw 2026-09-06, after the fix: m1p2ws boots with a picture** (Hardware Info:
   RP2350B @252 MHz, VREG 1.50 V, 16 MB flash, **`+PSRAM on GP47: 8 MB (QSPI)`** —
   the tester's module HAS a chip soldered and the butter path found it unchanged,
   66 pages `s8:b58`, audio **i2s (auto)** — so I2S on pio0 @base 16 coexists with
@@ -14587,7 +14671,7 @@ SOFTTV/TV/TFT for the W boards (unpaired, not impossible).
   path are all hw-confirmed at once.
   The `WiFi[pre]`/`[post]` claim dump (`pio2 sm=####`/`gpio_base=0` for HDMI,
   `pio0 ... gpio_base=16` for the radio) is the check; it goes to the UART only.
-- **No sound on MURM_W (hw 2026-09-06, same tester; FIXED, sound back in Auto
+- **No sound on MURM_WS (hw 2026-09-06, same tester; FIXED, sound back in Auto
   with the mask fix below — the board was I2S-jumpered, so the probe was right):**
   Hardware Info said
   `Audio mode: i2s [0Ah] (auto)`. Two independent things, both in play:
@@ -14776,7 +14860,7 @@ set pinned at 25.2 MHz across 252/1.0, 378/1.5 and 504/2.0.
   (h_total 1200 at 37.8 MHz: refresh and ISR budget intact, but +50% DMA on the
   top-priority channel and a timing no CEA/DMT sink knows).
 
-### On-chip network transport = lwIP under the ZiFi facades (2026-09-06; hw-confirmed on m1p2w: WiFi join + FTP server work)
+### On-chip network transport = lwIP under the ZiFi facades (2026-09-06; hw-confirmed on m1p2ws: WiFi join + FTP server work)
 
 Network → **Transport** gained "On-chip WiFi (CYW43)" (`Config::zifi_transport == 2`,
 the DEFAULT on W builds; non-W builds fold a stray 2 back to 0 in `Config::load`).
@@ -14831,22 +14915,22 @@ Nothing above the two network facades knows which radio it is on:
   `butter_psram_size()`. Chip: **APS6404L-3SQR-SN** (8 MB, 3.3 V, SOP-8, the Pico
   Plus 2 part — the probe wants KGD 0x5D; pin 1 CS, 2 SO/SD1, 3 SD2, 4 GND, 5
   SI/SD0, 6 SCLK, 7 SD3, 8 VDD, matching the footprint). The MURM1-arm
-  `init_psram()` still runs on MURM_W but its body is `#ifdef PSRAM` (not defined
+  `init_psram()` still runs on MURM_WS but its body is `#ifdef PSRAM` (not defined
   there), so `psram_size()` stays 0 and nothing touches the 255 pins.
-- **MURM_W drops the carrier's PIO SPI PSRAM**, and the module ships with NO PSRAM
-  soldered — so a stock MURM_W is a no-PSRAM board (pages to SD swap, no GS /
+- **MURM_WS drops the carrier's PIO SPI PSRAM**, and the module ships with NO PSRAM
+  soldered — so a stock MURM_WS is a no-PSRAM board (pages to SD swap, no GS /
   Gigascreen). The stated reason is pio0 instruction budget: CYW43 (5-7) + I2S (9,
   17 for CS4334) + SPI PSRAM (18-20) > 32. But I2S is only loaded for a DAC board;
   with PWM audio, CYW43 + SPI PSRAM (25-27) fits. Candidate follow-up: keep the
-  APS6404 on MURM_W and make I2S and SPI PSRAM mutually exclusive there instead.
-- **MURM2_W: NES pad dead + WiFi missing — one cause, PIO gpio_base order
+  APS6404 on MURM_WS and make I2S and SPI PSRAM mutually exclusive there instead.
+- **MURM2_WS: NES pad dead + WiFi missing — one cause, PIO gpio_base order
   (hw-confirmed 2026-09-26, owner: "работает оба").** The SDK REFUSES
   `pio_set_gpio_base` once any program is loaded in the block, and
   `nespad_begin()` re-based AFTER `pio_add_program`: refused silently, then
   `pio_sm_init` failed BAD_ALIGNMENT (data on GPIO40/41) and the pad never ran —
   while `main.cpp` set `nespad_active = true` regardless and the `sm < 0` guard on a
   `uint8_t` could never fire. Second half: `init_sound()` put I2S into
-  `BoardPins::auxPio()` on EVERY W board, but MURM2_W's I2S is on GP9-11 (base 0),
+  `BoardPins::auxPio()` on EVERY W board, but MURM2_WS's I2S is on GP9-11 (base 0),
   so an I2S-detected board loaded a base-0 program into the radio's block. With
   HDMI on PIO (pio2 taken) that left the radio no base-16 block at all ->
   `cyw43_arch_init` failed -> no networks. Fixes: re-base BEFORE add_program (and
@@ -15403,16 +15487,16 @@ speccy4ever.speccy.org/_KA.htm (`curl -sk -A Mozilla`).
   0.2d); a 1 MB memory test on KAY1024 and 2 MB on the Phoenix (UMT); turbo with Alt+F2 on and a program writing
   1FFD D2; Reset Service's Gluk clock detect with CMOS + NVRAM on and off.
 
-## DVp2w — `PICO_DV_W`: the W module in a Pico DV base (2026-10-11, NOT hw-tested)
+## DVp2ws — `PICO_DV_WS`: the W module in a Pico DV base (2026-10-11, NOT hw-tested)
 
-`-DPICO_DV_W=ON` → `DVp2w-speccy-<display>-<ver>`, the third carrier for the
-Waveshare RP2350B-Plus-W module (the others: `m1p2w`, `m2p2w`). Same pattern as
-`MURM_W`/`MURM2_W`: the option turns `PICO_DV` on in `cmake/board.cmake` (before
+`-DPICO_DV_WS=ON` → `DVp2ws-speccy-<display>-<ver>`, the third carrier for the
+Waveshare RP2350B-Plus-W module (the others: `m1p2ws`, `m2p2ws`). Same pattern as
+`MURM_WS`/`MURM2_WS`: the option turns `PICO_DV` on in `cmake/board.cmake` (before
 the default-board guard) and raises `PICOSPECCY_WIFI`, so every `#if PICO_DV` arm
 keeps working unchanged — SD on `pio1` (`SDCARD_PIO`), keyboard GP14/15, the
 dedicated ZiFi header on GP0/1, display base 6, `linkVGA01 == 0x1F`, the 8 KB
 TinyUSB CDC buffers, and `dbgUartNote()`'s "off: WAV input". The W board header
-(`picospeccy_rp2350b_w.h`) is shared with the Murmulator W boards and supplies
+(`picospeccy_rp2350b_ws.h`) is shared with the Murmulator W boards and supplies
 16 MB flash, the CYW43439 on GPIO36-39 and PSRAM pads on GPIO47 — the pin the
 Pico DV base already uses for butter PSRAM.
 
@@ -15426,15 +15510,15 @@ Pico DV base already uses for butter PSRAM.
   SD (4) = 11/32. `BoardPins::auxPio()` needed **no change**: its `PIO_VGA=pio0`
   / `HDMI → pio2` assumption is exactly PICO_DV's, and `graphics_init()` brings
   up only one of the two, so the other block really is free. I2S follows the
-  module's pins — `I2S_PIO=pio0` in `cmake/wifi.cmake` (same line as MURM_W) plus
+  module's pins — `I2S_PIO=pio0` in `cmake/wifi.cmake` (same line as MURM_WS) plus
   pwm_audio's runtime `auxPio()` whenever an I2S pin is ≥ 32.
 - `BoardPins.cpp`'s ZiFi UART list is a CARRIER property here, so the plain
-  `PICO_DV` arm covers DVp2w: GP0/1 and GP20/21 are both still header positions
+  `PICO_DV` arm covers DVp2ws: GP0/1 and GP20/21 are both still header positions
   on the module, and its radio pins (36-39) are not offered on this board.
 - Measured against DVp2 (MinSizeRel): **+288.6 KB flash, +3788 B static SRAM**
   (CYW43 blob + lwIP + WifiNet/WifiSock); `check-release.sh` projects 44 216 B of
   free heap at `loop()` entry, between the two Murmulator W boards. The plain
-  `PICO_DV` arm and `MURM_W`/`MURM2_W` (all three images) were rebuilt after the
+  `PICO_DV` arm and `MURM_WS`/`MURM2_WS` (all three images) were rebuilt after the
   shared CMake changes and are unchanged.
 - **`check-release.sh`'s five non-W rows had stale ELF globs** (`m1-`, `m2-`,
   `PC-`, `DV-`, `z0-` — the pre-"no chip suffix" tags), so MURM/MURM2/PICO_PC/
@@ -15445,11 +15529,11 @@ Pico DV base already uses for butter PSRAM.
   Network → Transport defaulting to the on-chip CYW43, a WiFi join + SNTP, and
   the SD card (pio1 now carries PS/2 + SD; I2S left that block).
 
-## PCp2w — `PICO_PC_W`: the W module in an Olimex PICO-PC (2026-10-12, NOT hw-tested)
+## PCp2ws — `PICO_PC_WS`: the W module in an Olimex PICO-PC (2026-10-12, NOT hw-tested)
 
-`-DPICO_PC_W=ON` → `PCp2w-speccy-VGA-HDMI[-HSTX]-<ver>`, the DVp2w shape again: the
+`-DPICO_PC_WS=ON` → `PCp2ws-speccy-VGA-HDMI[-HSTX]-<ver>`, the DVp2ws shape again: the
 option turns `PICO_PC` on (cmake/board.cmake) and raises `PICOSPECCY_WIFI`; tag
-`PCp2w`, butter PSRAM on GPIO47 (the module's pads, not the Pico 2's GP8). The
+`PCp2ws`, butter PSRAM on GPIO47 (the module's pads, not the Pico 2's GP8). The
 PICO_PC pin arm now takes GP26/27/28 (PWM R/L, beeper/595 latch, MIDI TX — this
 carrier has no I2S, its "unsupported" mark of three equal pins is kept at 40),
 GP29 (AY clock -> 255) and the LED (-> 23) from the `W_*` variables, identity on
@@ -15460,21 +15544,105 @@ at base 0, the radio alone on `auxPio()`.
 
 **HSTX works as on PICO_PC** — `display.cmake`/`memory-layout.cmake` test
 `PICO_PC`, which the W option sets, and AUTO picks TMDS; `build_all.*` builds it
-twice (`HSTX_TARGETS`). MURM2_W already proved CYW43 beside the TMDS expander:
+twice (`HSTX_TARGETS`). MURM2_WS already proved CYW43 beside the TMDS expander:
 the expander claims no PIO, VGA_HSTX neither, RAW only pio2's address converter,
 so `auxPio()` (pio0 under HDMI, pio2 under VGA) is free in all cases. Both images
 link (RAM 161 KB, SCRATCH_X 4064-4068 B); test ELFs in `debug/PCp2w-*`.
 **First hw run (2026-10-12):** boots to `loop()`, radio up (pio0 base 16), HDMI
 running — a MONITOR shows the picture; the owner's HDMI CAPTURE CARD does not lock
 (PIO and HSTX alike). Pads are already 12 mA / fast slew, so there is no firmware
-lever; suspected margin on the module's LDO 3V3, the m1p2w 378 MHz story again.
+lever; suspected margin on the module's LDO 3V3, the m1p2ws 378 MHz story again.
 Found on the way: `nespad_begin` took `auxPio()` on EVERY W board, so a pad wired
-below GP32 (PCp2w GP5/9/20/21, MURM_W GP14-16 with PWM audio) sat in the radio's
+below GP32 (PCp2ws GP5/9/20/21, MURM_WS GP14-16 with PWM audio) sat in the radio's
 block at base 0 and cyw43 had no block to re-base. It now takes the aux block only
-when its pins reach GPIO32+ (MURM2_W), pio1 otherwise; PCp2w log: `NESPAD: pio1`.
+when its pins reach GPIO32+ (MURM2_WS), pio1 otherwise; PCp2ws log: `NESPAD: pio1`.
 `-DDBG_UART_DEFAULT_ON=ON` (cmake/trace.cmake) builds a diagnostic image whose
 UART console is on from `main()` entry even on a COLD boot with no SD card (the
 plain path starts it only from Config::load or a warm-reboot tag).
 Same day, owner: **WiFi works** (on-chip CYW43 join). The Olimex PICO-PC has no
 VGA connector, so the VGA half is not applicable on this carrier.
 **Still owed**: sound (PWM 41/42), MIDI (40), LED (23), NES pad (no pad to hand).
+
+## `*p2w` = Pimoroni Pico Plus 2 W (stock W layout); Waveshare moved to `*p2ws` (2026-10-12, NOT hw-tested)
+
+`-DMURM_W/MURM2_W/PICO_DV_W/PICO_PC_W=ON` → `m1p2w`/`m2p2w`/`DVp2w`/`PCp2w` now mean
+the **stock Pico 2 W layout on a Pimoroni Pico Plus 2 W** (RP2350B, 16 MB flash,
+8 MB PSRAM on GPIO47, CYW43439 on GP23 WL_REG_ON / GP24 WL_DATA / GP25 WL_CS /
+GP29 WL_CLK, LED on the radio's WL_GPIO0). Everything above that says `*_WS` /
+`*p2ws` is the Waveshare RP2350B-Plus-W (renamed the same day; m1p2w/m2p2w were
+published under the old names in 1.0.8/1.0.9 — the 1.0.10 Change History must say
+so). `debug/*p2w-*.elf` files from before 2026-10-12 are Waveshare builds.
+
+- **Board header** `src/drivers/board/boards/picospeccy_rp2350_w.h` (pins from the
+  SDK's pimoroni_pico_plus2_w_rp2350.h == pico2_w.h); the Waveshare one is now
+  `picospeccy_rp2350b_ws.h`. CMake: `PICOSPECCY_WIFI` = any W module,
+  `PICOSPECCY_WIFI_WS` = the Waveshare layout (also a 0/1 compile define).
+- **Pins**: every carrier pin stays as on the plain board (GP26/27/28 audio, GP25 LED
+  → 255, GP29 AY clock → 255 via `W_*` in cmake/board-pins.cmake); no carrier uses
+  GP23/24. MURM2_W's ZiFi list drops `{22,23}` (GP23 = WL_REG_ON). MURM_W KEEPS the
+  carrier's PIO SPI PSRAM (only MURM_WS dropped it for pio0 room). No I2S/NESPAD PIO
+  moves — the `I2S_PIO=pio0` / `NESPAD_PIO=pio0` defines are `*_WS` only.
+- **PIO**: radio pins < 32, so `WifiNet::init` does NOT re-base the aux block to 16
+  (`radioBase` from `CYW43_PIN_WL_CLOCK/CS`); the SDK takes any block with room.
+- **Flash: 16 MB, so a plain 4 MB Raspberry Pi Pico 2 W is NOT supported** by these
+  images: at 4 MB the stock DVp2w was ~94 KB short of the linker's hard GM.DLS floor
+  (`__psramrom_start` 0x1027F000). A Pico 2 W build would need a slimmer firmware.
+- `BUTTER_PSRAM_GPIO` = the carrier's plain value (probed only on an RP2350A; the
+  Plus 2 W is B → GPIO47).
+- Hw check owed (owner has a Pico Plus 2 W): boot + picture, `WiFi: cyw43_arch_init
+  pins REG_ON=23 DATA=24 CLK=29 CS=25` and a join, sound on GP26-28, PSRAM 8 MB found.
+- **"No picture on m1p2w" (review, 2026-10-13): the PUBLISHED v1.0.9 `m1p2w` is the
+  Waveshare (`*_WS`) image** — radio on GPIO36-39, LED on GP23, audio on 40-42. On a
+  Pimoroni Pico Plus 2 W it is the wrong firmware; the new `*_W` image is the one for
+  that module. Two robustness fixes came out of reading the bring-up path (NOT
+  hw-tested, `debug/m1p2w-radiofix-1.0.9.uf2` / `m1p2ws-radiofix-`): (1) the boot
+  radio-LED blink (WS boards only — it powers the radio up, ~0.35 s + firmware load)
+  ran BEFORE `vga_start_semaphore`, i.e. with the screen dark; it now runs after video
+  starts. (2) **The SDK leaks on a failed CYW43 bring-up**: `cyw43_ll_bus_init` never
+  undoes `cyw43_spi_init`, so each retry claimed a fresh PIO SM + program + 2 DMA
+  channels (the `assert(!bus_data)` is compiled out) — twelve retries from the blink
+  alone. `WifiNet::busUp()` tries the bus ONCE per session (`cyw43_poll` != NULL =
+  up), `radioDead()` latches the failure; connect/scan/autoBegin/ledSet go through it,
+  the log names the pins, and a WS boot shows "WiFi radio not found: wrong W image?".
+  PIO budget of the m1p2w image measured from the ELF: pio2 HDMI 18/20 + radio 6,
+  pio0 SPI PSRAM 18/20 (+ VGA 1), pio1 PS/2 7 + pad 7 + I2S 8 — no block overflows.
+  **Resolved 2026-10-14: the reviewer's "no picture" on the new m1p2w was bad header
+  soldering on the Pico, not firmware** — after resoldering it works (the plain m1p2
+  image had worked on the same module, which is what made the W image look guilty).
+  The two fixes above stay (they are correct regardless). Before blaming a W image for
+  a dead screen, try the plain image on the same module: if THAT works, check the
+  board's own pins/soldering before the radio — a diagnostic `WIFI_RADIO_OFF` build
+  (skip `cyw43_arch_init`) was made for the bisect and reverted unused.
+
+## Debugger grid follows the surface (2026-10-14, NOT hw-tested)
+
+`dbgBegin()` (OSDMain.cpp) measures the content grid from `nm::Sf` with
+`dbgFrameNu`'s own arithmetic instead of a fixed 20 x 50: 320 px / DS80 = 51
+columns, 360 px (720x480 / 720x576) = 57; 240 lines = 20 rows, 288 = 25
+(clamped 20..`DBG_MAX_ROWS` 32). The base layout is byte-identical to before
+(XR 32, 15 code lines, mnemonic 15, memory 8 hex / 20 ASCII bytes). Extra columns
+move the right panel (`s_dbg.xr = cols - 19`, min 32) and widen the left one:
+mnemonic room `XR - 17`, memory bytes per row from `dbgMemBpr()` (720: 12 hex /
+26 ASCII) — every former `memAsciiMode ? 20 : 8` goes through it. Extra rows go
+to the disassembly (720x576: 20 lines), and the rows that opens between Regs and
+Flags carry a `-Stack-` block (SP and the words above it). F2 Dump fills
+`s_dbg.rows`. Hw check owed: 720x576 and 720x480 (layout, memory edit at the
+last column, Alt+T ASCII), and 640x480 + DS80 unchanged.
+
+## Debugger stepping (2026-10-14, hw-confirmed DVp2)
+
+- **Alt+Space steps over only what returns to the next line** (`dbgStepOverLen`,
+  OSDMain.cpp): CALL/CALL cc (3), RST and HALT (1), DJNZ and the ED block repeats
+  (2). Everything else is a plain step — the old rule waited for PC = pc+3 on any
+  instruction, so PUSH ran 64K steps and left the debugger through a breakpoint.
+- **Shift+Enter = run to the cursor line**, stopping BEFORE it; a no-op on the PC
+  line. The stop needs the same page in that window (`ramCurrent[w]`, plus
+  `romInUse` for window 0 — GMX banks share base pointers) as when it was pressed:
+  a ROM #0 -> #1 switch otherwise stopped at the same address in the other bank.
+  Shift is tracked from VK_LSHIFT/RSHIFT events — the event's SHIFT bit is not
+  filled on every input path. Past 1M steps it falls back to an address-only
+  breakpoint (bank-blind, like Alt+Space's).
+- **After a step the right panel marks what changed** (`s_dbgSnap`, `DBG_CHG` ink):
+  register pairs per BYTE (LD A marks A, not F), flags per bit, stack words pushed
+  below the old SP or rewritten above it. PC and R are not marked (they move every
+  step). Invalidated when the debugger opens.

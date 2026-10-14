@@ -27,6 +27,7 @@
 #include "UiGfx.h"
 #include "UiFont.h"
 #include "UiStage.h"
+#include "UiDesc.h"
 #include "OSDMain.h"
 #include "app/Config.h"
 #include "speccy/video/Video.h"
@@ -402,6 +403,69 @@ static bool drawPalPreviewRow(const Node* n, int idx, int y) {
     return true;
 }
 
+// ── Description block ─────────────────────────────────────────────────────────
+// Under a radio's options: a blank row, a "Description" heading, then one line per
+// parameter (UiDesc.cpp). It describes the option under the cursor while the right
+// pane has focus, the chosen one otherwise. No lines = no block.
+static int descFor(const Node* n, DescLine* out) {
+    if (!n || curLevel().dyn || (n->kind != K_RADIO && n->kind != K_BOOL)) return 0;
+    uint8_t cnt; const Option* os = nodeOptions(*n, cnt);
+    if (S.focus == FOCUS_RIGHT && S.rsel < cnt)
+        return describe(*n, os[S.rsel].value, out, DESC_MAX_LINES);
+    // Left pane: the row's chosen option — but only if the value is one of THIS row's.
+    // Machine rows share SET_MACHINE, so the Spectrum row would otherwise describe the
+    // TS-Conf that is running.
+    const int32_t v = nodeValue(*n);
+    for (uint8_t i = 0; i < cnt; i++)
+        if (os[i].value == v) return describe(*n, v, out, DESC_MAX_LINES);
+    return 0;
+}
+
+static int descBase(const Node* n) {     // pane index of the heading row
+    return S.rcount + 1 + (palPreviewNode(n) ? PV_ROWS + 1 : 0);
+}
+
+static uint32_t s_desc_hash;             // content the pane was last drawn with
+
+static uint32_t descHash() {
+    DescLine d[DESC_MAX_LINES];
+    const int cnt = descFor(curNode(), d);
+    uint32_t h = 2166136261u ^ (uint32_t)cnt;
+    for (int i = 0; i < cnt; i++) {
+        const uint8_t* p = (const uint8_t*)&d[i];
+        for (size_t k = 0; k < sizeof(DescLine); k++) h = (h ^ p[k]) * 16777619u;
+    }
+    return h;
+}
+
+// True when idx belongs to the block (drawn or blank); false = not ours.
+static bool drawDescRow(const Node* n, int idx, int y) {
+    const int base = descBase(n);
+    if (idx < base) return false;
+    DescLine d[DESC_MAX_LINES];
+    const int cnt = descFor(n, d);
+    if (!cnt || idx > base + cnt) return false;
+    if (idx == base) {
+        hline(LY.rx + LY.pad, y, LY.rw - 2 * LY.pad, C_SEP);
+        text(LY.rx + LY.pad, y + 2, "Description", C_TEXT_DIM);
+        return true;
+    }
+    const DescLine& l = d[idx - base - 1];
+    const bool isRule = (l.kind == DESC_RULE);
+    const int x  = LY.rx + LY.pad + (isRule ? glyphW() : 0);   // rules indented
+    const int vw = l.value[0] ? textWidth(l.value) : 0;
+    const UiColor lInk = isRule ? (l.state == DESC_DIM ? C_DISABLED : C_TEXT)
+                       : (!vw && l.state == DESC_BAD) ? C_ICON_R    // warning / turns off
+                       : (!vw && l.state == DESC_OK)  ? C_ACCENT    // turns on
+                       : C_WHITE;
+    const UiColor vInk = isRule ? (l.state == DESC_DIM ? C_DISABLED : C_TEXT_DIM)
+                       : l.state == DESC_BAD ? C_ICON_R
+                       : l.state == DESC_OK  ? C_ACCENT : C_TEXT_DIM;
+    textClip(x, y + 1, LY.rx + LY.rw - LY.pad - x - vw - (vw ? LY.pad : 0), l.label, lInk);
+    if (vw) text(LY.rx + LY.rw - LY.pad - vw, y + 1, l.value, vInk);
+    return true;
+}
+
 static void drawRightRow(int visRow) {
     if (visRow < 0 || visRow >= LY.body_rows) return;
     const int y = rowY(visRow);
@@ -422,6 +486,7 @@ static void drawRightRow(int visRow) {
     fill(LY.rx, y, LY.rw, LY.row_h,
          sel ? (S.focus == FOCUS_RIGHT ? C_SEL_BG : C_SEL_BAND) : C_PANEL);
     if (idx >= S.rcount && drawPalPreviewRow(n, idx, y)) return;
+    if (idx >= S.rcount && drawDescRow(n, idx, y)) return;
     if (!n || idx >= S.rcount) return;
 
     switch (n->kind) {
@@ -518,6 +583,12 @@ void flushDirty() {
         s_pend_drawn = pend;
         s_dirty |= D_HEADER | D_FOOT;
     }
+
+    // The Description block follows the right-pane cursor and staged edits made on
+    // other rows; a cursor move only repaints two rows, so repaint the pane when
+    // what the block would say has changed.
+    const uint32_t dh = descHash();
+    if (dh != s_desc_hash) { s_desc_hash = dh; s_dirty |= D_RIGHT; }
 
     if (s_dirty & D_HEADER) drawHeader();
     if (s_dirty & D_SUB)    drawSubHeader();

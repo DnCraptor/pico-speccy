@@ -450,6 +450,10 @@ void VIDEO::profiPaletteWrite(uint8_t index, uint8_t profi_color) {
 #if defined(VGA_HDMI) && HDMI_HSTX < 2
 extern "C" bool hdmi_mode_uses_x3(int mode);
 #endif
+#if PERF_TRACE
+extern volatile uint32_t gmx_render_us, gmx_render_lines;   // defined with gmxRenderLine
+#endif
+static uint32_t profi_pair_gen = 1;   // bumped whenever profi_pair_lookup is rebuilt
 static void init_profi_pair_lookup() {
     // safe[]: all slots except 240..244 (sync/scanline) and 255 (border) → 250 slots.
     // With HDMI audio the Data Island machinery owns 40 more indices (184..199 =
@@ -502,6 +506,7 @@ static void init_profi_pair_lookup() {
         }
     }
     // slot_idx == 250 here (210 with reserve_di)
+    profi_pair_gen++;   // derived tables (the ATM EGA byte LUT) rebuild on the next use
 }
 
 bool VIDEO::isProfiDS80() {
@@ -755,6 +760,27 @@ static void tsTmbCapture(uint16_t* dst, uint32_t tm_line) {
 static TsRenderJob*      ts_c1_ring = nullptr;
 static bool tsGlineEnsure();   // GFXOVR line buffer, claimed on the first GFXOVR line posted (defined by the renderer)
 static volatile uint32_t ts_c1_w = 0, ts_c1_r = 0;     // producer / consumer indices (free-running)
+// Two renderers on one queue (core1, and core0 while it waits — tsC1HelpOne).
+// ts_c1_c = the next job to claim; ts_c1_r stays the RELEASE point every waiter
+// reads: a job at r or above may still be in flight, everything below is drawn.
+// A core holds at most one job (ts_c1_fly), so r = the other core's job if it has
+// one, else c. Claim and release go under one hardware spinlock (a few cycles,
+// IRQs off for that long — the HDMI line ISR on core1 never waits more).
+// What core0 does NOT take: a DMA job (bulk copies stay ordered on core1 with
+// nothing else in flight), any line while a queued DMA has not run, and a GFXOVR
+// line (its flash merge uses the single s_gline/s_tsline pair).
+#define TS_C1_NONE 0xFFFFFFFFu
+static volatile uint32_t ts_c1_c = 0;
+static volatile uint32_t ts_c1_fly[2] = { TS_C1_NONE, TS_C1_NONE };
+static spin_lock_t*      ts_c1_lock = nullptr;
+static uint8_t  TS_OVL_BSS s_tsline[512];       // core1's (and the sync path's) compose buffer
+static uint8_t*          s_tsline0 = nullptr;   // core0's compose buffer (512 B, SRAM)
+volatile uint32_t ts_c0_jobs = 0;      // queued lines core0 rendered (PERF)
+volatile uint32_t ts_c0_us = 0;        // core0 time inside them (PERF)
+static inline void tsC1QueueClear() {   // ring empty, nothing claimed (core1 idle or wedged)
+    ts_c1_r = ts_c1_w = ts_c1_c = 0;
+    ts_c1_fly[0] = ts_c1_fly[1] = TS_C1_NONE;
+}
 static bool              ts_c1_enabled = true;   // tsC1PlacementPoll() owns it from here on
 static bool              ts_c1_stuck = false;    // the 100 ms drain timeout fired once: queue off for the session
 volatile uint32_t ts_c1_us = 0;        // core1 time inside tsRenderExec (PERF)
@@ -792,7 +818,7 @@ static volatile bool ts_c1_core0_waiting = false;
 // its ESPectrum::loop / frame-wait service points.
 static inline void tsC1Spin() {
     ts_c1_core0_waiting = true;
-    tight_loop_contents();
+    if (!VIDEO::tsC1HelpOne()) tight_loop_contents();
 }
 static inline void tsC1SpinEnd() { ts_c1_core0_waiting = false; }
 
@@ -849,7 +875,7 @@ static void tsC1RingCarve(uint8_t* blk) {
     memset(ts_c1_tsu_job, 0, sizeof(uint32_t) * TS_C1_TSU);
     memset(ts_c1_sf_job, 0, sizeof(uint32_t) * TS_C1_SFILE);
     ts_c1_tsu_cur = ts_c1_sf_cur = 0; ts_c1_sf_gen = 0xFFFFFFFFu;
-    ts_c1_r = ts_c1_w = 0;
+    tsC1QueueClear();
 }
 void VIDEO::tsC1RingAlloc() {
     if (ts_c1_ring || s_c1borrowed) return;
@@ -868,6 +894,9 @@ void VIDEO::tsC1RingAlloc() {
     }
     if (!blk) blk = (uint8_t*)Buffer::palloc(bytes, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
     if (blk) { s_c1blk = blk; s_c1blkBytes = bytes; tsC1RingCarve(blk); }
+    if (blk && !ts_c1_lock) ts_c1_lock = spin_lock_instance((uint)spin_lock_claim_unused(true));
+    // core0's own compose buffer: SRAM or nothing (core0 then just waits, as before).
+    if (blk && !s_tsline0 && getLargestAllocatable() >= 512 + 8192) s_tsline0 = (uint8_t*)tryMalloc(512);
     // The address names the tier: 0x2000xxxx = SRAM heap, 0x11xxxxxx = butter PSRAM.
     Debug::log("[TSC1] core1 line renderer %s (%u-job ring + %u TSU states + %u SFILE slots, %u B @%08lX%s)",
                ts_c1_ring ? "ON" : "unavailable (no RAM)", (unsigned)TS_C1_RING, (unsigned)TS_C1_TSU,
@@ -889,7 +918,8 @@ void VIDEO::tsRenderDrain() {
             Debug::log("[TSC1] core1 render queue stuck (r=%u w=%u) - falling back to core0", (unsigned)ts_c1_r, (unsigned)ts_c1_w);
             ts_c1_enabled = false;
             ts_c1_stuck = true;        // sticky: the placement policy must not re-enable it
-            ts_c1_r = ts_c1_w;
+            ts_c1_c = ts_c1_r = ts_c1_w;
+            ts_c1_fly[0] = ts_c1_fly[1] = TS_C1_NONE;
             ts_c1_dma_done = ts_c1_dma_posted;
             TsConf::wrGateRecalc(); tsC1LiveRecalc();
             break;
@@ -1073,29 +1103,77 @@ static void tsC1PlacementPoll() {
 // old property that mattered here: no flash body, so no XIP fetch per iteration
 // out of the loop that also runs the renderer and the GS. Same reason pcm_call()
 // was taken out of that loop.)
+// Claim the next job for `core` (see ts_c1_c). Returns false when there is none
+// this core may take now.
+static bool TS_RENDER_HOT tsC1Claim(unsigned core, uint32_t& idx, TsRenderJob& j) {
+    const uint32_t irq = spin_lock_blocking(ts_c1_lock);
+    bool ok = false;
+    const uint32_t c = ts_c1_c;
+    if (c != ts_c1_w) {
+        j = ts_c1_ring[TS_C1_SLOT(c)];
+        if (j.l.kind & 1) ok = core == 1 && ts_c1_fly[0] == TS_C1_NONE;   // DMA: alone
+        else if (core == 0) ok = !(j.l.vconf & 0x08) && ts_c1_dma_posted == ts_c1_dma_done;
+        else ok = true;
+        if (ok) { ts_c1_fly[core] = c; ts_c1_c = c + 1; idx = c; }
+    }
+    spin_unlock(ts_c1_lock, irq);
+    return ok;
+}
+// Done with the claimed job: move the release point and publish where the
+// renderer is for tsPalettePoll (the line AT r is the first one not drawn).
+static void TS_RENDER_HOT tsC1Release(unsigned core) {
+    const uint32_t irq = spin_lock_blocking(ts_c1_lock);
+    ts_c1_fly[core] = TS_C1_NONE;
+    const uint32_t o = ts_c1_fly[core ^ 1];
+    const uint32_t nr = (o != TS_C1_NONE) ? o : ts_c1_c;
+    if ((int32_t)(nr - ts_c1_r) > 0) {
+        __dmb();
+        ts_c1_r = nr;
+        const bool last = (nr == ts_c1_w);
+        const TsRenderJob& p = ts_c1_ring[TS_C1_SLOT(last ? nr - 1 : nr)];
+        if (!(p.l.kind & 1))
+            ts_render_pos = ((uint32_t)(p.l.kind >> 4) << 16) | (jobLine(p) + (last ? 1u : 0u));
+    }
+    spin_unlock(ts_c1_lock, irq);
+}
+
 void TS_RENDER_HOT VIDEO::tsRenderCore1Pump() {
-    if (ts_c1_r == ts_c1_w) return;
+    if (ts_c1_c == ts_c1_w) return;
     const uint64_t t0 = time_us_64();
-    for (int n = 0; n < 8 && ts_c1_r != ts_c1_w; n++) {
-        const TsRenderJob j = ts_c1_ring[TS_C1_SLOT(ts_c1_r)];
+    for (int n = 0; n < 8; n++) {
+        uint32_t idx; TsRenderJob j;
+        if (!tsC1Claim(1, idx, j)) break;
         if (j.l.kind & 1) {
             const uint64_t d0 = time_us_64();
             TsConf::dmaExecBulk(j.d.ctrl, (uint32_t)j.d.s[0] | ((uint32_t)j.d.s[1] << 8) | ((uint32_t)j.d.s[2] << 16),
                                 (uint32_t)j.d.d[0] | ((uint32_t)j.d.d[1] << 8) | ((uint32_t)j.d.d[2] << 16),
                                 j.d.len, j.d.num);
             ts_dma_c1_us += (uint32_t)(time_us_64() - d0);
-            __dmb();
-            ts_c1_r = ts_c1_r + 1;
+            tsC1Release(1);
             ts_c1_dma_done = ts_c1_dma_done + 1;
             break;                                    // a DMA is long; let pcm_call/GS::pump run
         }
         const TsuState& st = ts_c1_tsu[j.l.tsu & (TS_C1_TSU - 1)];
-        tsRenderExec(j, &st, ts_c1_sf + (uint32_t)(st.sfidx & (TS_C1_SFILE - 1)) * 256, ts_c1_r);
-        __dmb();
-        ts_c1_r = ts_c1_r + 1;
+        tsRenderExec(j, &st, ts_c1_sf + (uint32_t)(st.sfidx & (TS_C1_SFILE - 1)) * 256, idx, s_tsline);
+        tsC1Release(1);
         ts_c1_jobs = ts_c1_jobs + 1;
     }
     ts_c1_us += (uint32_t)(time_us_64() - t0);
+}
+// core0, from every wait on the queue and from the frame-pacing idle: render the
+// oldest line core0 may take. One line per call (~15-30 us), so a caller that is
+// watching a clock (v_sync, the frame deadline) sees it move between lines.
+bool TS_RENDER_HOT VIDEO::tsC1HelpOne() {
+    if (!s_tsline0 || !ts_c1_lock || !g_ts_c1_live || ts_c1_c == ts_c1_w) return false;
+    uint32_t idx; TsRenderJob j;
+    if (!tsC1Claim(0, idx, j)) return false;
+    const uint64_t t0 = time_us_64();
+    const TsuState& st = ts_c1_tsu[j.l.tsu & (TS_C1_TSU - 1)];
+    tsRenderExec(j, &st, ts_c1_sf + (uint32_t)(st.sfidx & (TS_C1_SFILE - 1)) * 256, idx, s_tsline0);
+    tsC1Release(0);
+    ts_c0_jobs = ts_c0_jobs + 1;
+    ts_c0_us += (uint32_t)(time_us_64() - t0);
+    return true;
 }
 extern "C" void TS_RENDER_HOT ts_render_core1_pump() { VIDEO::tsRenderCore1Pump(); }
 // core1 (render_core): queued lines pre-empt GS::pump while core0 is blocked on
@@ -4295,6 +4373,18 @@ static bool prevFBAllocChunked(int lines, int prev_stride, size_t want) {
     return false;
 }
 
+// SRAM before butter for the prev-FB once setup() is over (VIDEO::gigascreenPreferSram).
+// On a butter board the prev-FB used to go to PSRAM unconditionally, served through the
+// uncached scanline window below: ~2 x 52 KB of uncached QMI traffic a frame, which is
+// cheap only while nothing else on core0 needs the XIP port. Since the ZX pages 0-4/6
+// live in butter (2026-10-13) every guest access that misses the cache queues behind
+// that traffic, and Gigascreen at 378 MHz went negative on IDL. The heap the framebuffer
+// no longer takes (it sits in the donated page SRAM) pays for an SRAM prev-FB instead.
+// Not during setup: the boot pre-allocation in VIDEO::Init runs before GS, MIDI and
+// audio have taken their SRAM, so it stays on butter and is moved at the end.
+static bool s_prev_sram_ok = false;
+#define PREV_SRAM_MARGIN (32 * 1024)   // = Buffer's HEAP_SAFETY_MARGIN, checked up front
+
 static bool ensurePrevFB(int lines, int stride) {
     // (There used to be an `arch == A_PROFI -> return true` here, which reported
     // success without allocating anything: GsSubsys::apply() then built the prev-FB
@@ -4324,8 +4414,13 @@ static bool ensurePrevFB(int lines, int stride) {
     // buffer down the chunked path, which is slower AND disables the prev-FB DMA
     // window (pwRefreshGate declines a chunked buffer). palloc's own last-resort
     // heap tier returns NULL rather than panicking, so nothing is lost by asking it.
+    // After setup (s_prev_sram_ok) a butter board asks for the heap first; palloc's heap
+    // tier keeps its 32 KB margin and falls back to butter by itself.
+    const uint32_t prevFlags = (s_prev_sram_ok && butter_psram_size() != 0)
+                             ? (uint32_t)Buffer::NEED_POINTER
+                             : (uint32_t)(Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
     if ((butter_psram_size() != 0 || getLargestAllocatable() >= want + PREV_CHUNK_SLACK) &&
-        sharedFB_prevBuf.alloc(want, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM)) {
+        sharedFB_prevBuf.alloc(want, prevFlags)) {
         uint8_t *p = sharedFB_prevBuf.data();
         memset(p, 0, want);
         sharedFB_prev = p;
@@ -4765,6 +4860,41 @@ void VIDEO::gigascreenRestoreAfterNet() {
     VIDEO::InitPrevBuffer();                     // reseed from the live frame
     VIDEO::gigascreen_enabled = (Config::gigascreen_onoff == 1);  // On=live, Auto=armed
     VIDEO::gigascreen_auto_countdown = 0;
+}
+
+// End of setup(): from here on the prev-FB prefers SRAM (see s_prev_sram_ok), and one
+// already sitting in butter moves there if the heap can spare it plus the margin. The
+// emulator has not run a frame yet, so nothing reads prev-FB while it moves; the blank
+// reseed is what InitPrevBuffer would have produced anyway.
+void VIDEO::gigascreenPreferSram() {
+    s_prev_sram_ok = true;
+    if (!butter_psram_size() || !sharedFB_prev || sharedFB_prev_nchunks || !pwPrevInButter()) return;
+    const size_t want = sharedFB_prev_size;
+    const size_t largest = getLargestAllocatable();
+    if (largest < want + PREV_SRAM_MARGIN) {
+        Debug::log("VIDEO: prevFB stays in butter (largest heap %u < %u + %u)",
+                   (unsigned)largest, (unsigned)want, (unsigned)PREV_SRAM_MARGIN);
+        return;
+    }
+    pwShutdown();
+    prevFBFree();
+    if (!ensurePrevFB(sharedFB_lines, sharedFB_stride)) {
+        // Cannot happen short of a race with nothing; leave Gigascreen off rather than
+        // with a row array pointing at freed memory.
+        VIDEO::vga.prevFrameBuffer = nullptr;
+        Config::gigascreen_enabled = false;
+        VIDEO::gigascreen_enabled = false;
+        return;
+    }
+    if (sharedFB_arr2) {
+        const int prev_stride = sharedFB_stride / 2;
+        for (int i = 0; i < sharedFB_lines; i++) sharedFB_arr2[i] = prevRowPtr(i, prev_stride);
+        for (int i = sharedFB_lines; i < FB_MAX_LINES; i++)
+            sharedFB_arr2[i] = prevRowPtr(sharedFB_lines - 1, prev_stride);
+        VIDEO::vga.prevFrameBuffer = (unsigned char**)sharedFB_arr2;
+    }
+    pwRefreshGate();   // prev-FB left butter: the scanline window closes
+    InitPrevBuffer();
 }
 
 size_t VIDEO::gigascreenPrevFBBytes() {
@@ -5420,8 +5550,12 @@ void VIDEO::Reset() {
     Select_Update_Border();
 
     if (isFullBorder && !isFullBorder240) {
-        lin_end = 48;
-        lin_end2 = 240;
+        // Video > Screen position: the window starts (top - 48) lines earlier on the
+        // raster and the paper sits that much lower in the framebuffer.
+        const int top = VIDEO::screenTopRows();
+        tStatesBorder -= (top - 48) * (int)tStatesPerLine;
+        lin_end = top;
+        lin_end2 = top + 192;
         lineptr_offset = ((Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isTsconf || Config::isEvoPentRaster() || Config::isEvo60Raster()) ? 26 : 24) / 2;
     } else if (isFullBorder && isFullBorder240) {
         // Profi centred like Pentagon (24 top / 24 bottom border): using 32/224
@@ -6109,7 +6243,16 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
         unsigned int end_col = coldraw_cnt < 32u ? coldraw_cnt : 32u;
         unsigned int start_col = end_col - loopCount;
         uint32_t line = curline;   // 0..199
-        if (start_col == 0) {
+        // MainScreen reaches column 0 of a line TWICE — MainScreen_Blank's priming
+        // Draw(0) and then the first real slice — so a whole-line renderer keyed on
+        // start_col == 0 drew every line two times (and four under a HALT flush):
+        // [PERF] gmx showed 400-808 lines a frame for 200 (hw 2026-10-14, Edge
+        // Grinder / HQ). TS-Conf's tsRenderLine de-duplicates the same way. Lines
+        // run 0..199 within a frame, so "not the line drawn last" is enough: the
+        // next frame (or a paused redraw) starts again at line 0 after line 199.
+        static int16_t gmx_last_line = -1;
+        if (start_col == 0 && (int16_t)line != gmx_last_line) {
+            gmx_last_line = (int16_t)line;
             if (line == 0 || gmx_frame_bmp == nullptr) {
                 // Per-frame latch (rend_profi model): pages + scroll captured at
                 // line 0 so mid-frame flips don't tear.
@@ -6145,38 +6288,14 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
                 if (Z80Ops::isAtm) {
                     atmRenderLine(line, fb_row, pad_l);   // ATM-Turbo EGA / hires / text
                 } else {
-                uint32_t srow = line + gmx_frame_srow;
-                if (srow >= 200) srow -= 200;
-                uint32_t off = srow * 80;
-                const uint8_t* bmp = gmx_frame_bmp;
-                const uint8_t* att = gmx_frame_att;
-                // Attr bit 7 = FLASH: fg/bg swap on the flash phase (MAME
-                // `invert_attrs`). bg is bits 3-6 and fg bit 3 is attr bit 6, so
-                // bit 7 is the only free one. `flashing` is the ULA flash mask
-                // (0x80 / 0x00, toggled every 16 frames in ESPectrum::loop), so
-                // GMX blinks in step with the standard renderer.
-                const uint8_t gmx_flash = flashing;
-                if (bmp) {
-                    for (int j = 0; j < 80; j++) {
-                        uint8_t b = bmp[off + j];
-                        uint8_t a = att ? att[off + j] : 0x07;
-                        uint8_t fg = (uint8_t)(((a >> 3) & 0x08) | (a & 0x07));
-                        uint8_t bg = (uint8_t)((a >> 3) & 0x0F);
-                        if (a & gmx_flash) { uint8_t t = fg; fg = bg; bg = t; }
-                        // 8 source pixels → 4 pair bytes, (k^2) pre-swizzled for the
-                        // ISR's x^2 read pattern (same trick as the DS80 branch), one
-                        // aligned uint32_t store per source byte.
-                        uint8_t p0 = profi_pair_lookup[(b & 0x08) ? fg : bg][(b & 0x04) ? fg : bg]; // k=2 → +0
-                        uint8_t p1 = profi_pair_lookup[(b & 0x02) ? fg : bg][(b & 0x01) ? fg : bg]; // k=3 → +1
-                        uint8_t p2 = profi_pair_lookup[(b & 0x80) ? fg : bg][(b & 0x40) ? fg : bg]; // k=0 → +2
-                        uint8_t p3 = profi_pair_lookup[(b & 0x20) ? fg : bg][(b & 0x10) ? fg : bg]; // k=1 → +3
-                        *(uint32_t*)(fb_row + pad_l + j * 4) =
-                            (uint32_t)p0 | ((uint32_t)p1 << 8) | ((uint32_t)p2 << 16) | ((uint32_t)p3 << 24);
-                    }
-                } else {
-                    // Attr/bitmap page not backed (butter-less board) — black line.
-                    memset(fb_row + pad_l, profi_pair_lookup[0][0], 320);
-                }
+#if PERF_TRACE
+                const uint32_t pt0 = timer_hw->timerawl;
+                gmxRenderLine(line, fb_row, pad_l);
+                gmx_render_us += timer_hw->timerawl - pt0;
+                gmx_render_lines++;
+#else
+                gmxRenderLine(line, fb_row, pad_l);
+#endif
                 }
             }
         }
@@ -7282,8 +7401,8 @@ void VIDEO::gmxApplyPending() {
         }
         // Restore the standard Scorpion line window (mirror of Reset's generic
         // block; Scorpion always takes the 24/216 arm unless full-border 288).
-        if (isFullBorder && !isFullBorder240()) { lin_end = 48; lin_end2 = 240; }
-        else                                    { lin_end = 24; lin_end2 = 216; }
+        lin_end  = (unsigned)VIDEO::screenTopRows();
+        lin_end2 = lin_end + 192;
         tstateDraw   = tStatesScreen;
         linedraw_cnt = lin_end;
         DrawBorder = &Border_Blank; // mid-frame border state is stale — skip this frame
@@ -7355,6 +7474,79 @@ static inline uint32_t atmPack4(uint8_t d0, uint8_t d1, uint8_t d2, uint8_t d3) 
     return (uint32_t)d2 | ((uint32_t)d3 << 8) | ((uint32_t)d0 << 16) | ((uint32_t)d1 << 24);
 }
 
+// EGA byte -> its two lores pixels as solid pair slots (low byte = the even
+// pixel, high = the odd one), rebuilt whenever profi_pair_lookup is. Heap, and
+// only on a machine that shows EGA: 512 B nobody else needs.
+static uint16_t* s_atm_ega = nullptr;
+static uint32_t  s_atm_ega_gen = 0;
+static const uint16_t* atmEgaLut() {
+    if (!s_atm_ega) {
+        s_atm_ega = (uint16_t*)tryMalloc(256 * sizeof(uint16_t));
+        if (!s_atm_ega) return nullptr;
+        s_atm_ega_gen = 0;
+    }
+    if (s_atm_ega_gen != profi_pair_gen) {
+        for (int v = 0; v < 256; v++) {
+            const uint8_t e = (uint8_t)(((v & 0x40) >> 3) | (v & 0x07));
+            const uint8_t d = (uint8_t)(((v & 0x80) >> 4) | ((v >> 3) & 0x07));
+            s_atm_ega[v] = (uint16_t)(VIDEO::profi_pair_lookup[e][e] | (VIDEO::profi_pair_lookup[d][d] << 8));
+        }
+        s_atm_ega_gen = profi_pair_gen;
+    }
+    return s_atm_ega;
+}
+
+// One bitmap byte b in colours (fg, bg) as four pair slots in the fb's (k^2)
+// order: c4[] = the four (left, right) colour combinations of a bit pair.
+static inline __attribute__((always_inline)) uint32_t pairBits8(uint8_t b, uint8_t fg, uint8_t bg) {
+    const uint8_t* rf = VIDEO::profi_pair_lookup[fg];
+    const uint8_t* rb = VIDEO::profi_pair_lookup[bg];
+    const uint8_t c4[4] = { rb[bg], rb[fg], rf[bg], rf[fg] };
+    return (uint32_t)c4[(b >> 2) & 3] | ((uint32_t)c4[b & 3] << 8)
+         | ((uint32_t)c4[b >> 6] << 16) | ((uint32_t)c4[(b >> 4) & 3] << 24);
+}
+// ATM attribute: ink = bits 6,2..0, paper = bits 7,5..3.
+static inline __attribute__((always_inline)) uint32_t atmBits8(uint8_t b, uint8_t at) {
+    return pairBits8(b, (uint8_t)(((at & 0x40) >> 3) | (at & 0x07)),
+                        (uint8_t)(((at & 0x80) >> 4) | ((at >> 3) & 0x07)));
+}
+
+#if PERF_TRACE
+// [PERF] gmx: core0 time inside gmxRenderLine.
+volatile uint32_t gmx_render_us = 0, gmx_render_lines = 0;
+#endif
+// Scorpion GMX 640x200x16, one content line (MAME scorpiongmx
+// spectrum_update_screen): bitmap 80 bytes/line linear in page 57/59, attributes
+// byte-per-8px at the same offset in page+64; fg = ((attr>>3)&8)|(attr&7), bg =
+// (attr>>3)&0xF; attr bit 7 = FLASH (fg/bg swap on the flash phase, MAME
+// `invert_attrs`, in step with the ULA's `flashing` mask). Pages and scroll are
+// latched per frame by the caller (MainScreen's GMX branch). Flash, not part of
+// the RAM-resident MainScreen: GMX is one machine, and its pages are butter PSRAM.
+void VIDEO::gmxRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
+    uint32_t* out = (uint32_t*)(fb_row + pad_l);     // pad_l is 0 or 20: word aligned
+    const uint8_t* bmp = gmx_frame_bmp;
+    const uint8_t* att = gmx_frame_att;
+    if (!bmp) { memset(out, profi_pair_lookup[0][0], 320); return; }   // page not backed
+    uint32_t srow = line + gmx_frame_srow;
+    if (srow >= 200) srow -= 200;
+    const uint32_t off = srow * 80;                   // 16-aligned: word reads below
+    const uint8_t fl = flashing;
+    const uint32_t* b32 = (const uint32_t*)(bmp + off);
+    const uint32_t* a32 = att ? (const uint32_t*)(att + off) : nullptr;
+    for (int q = 0; q < 20; q++) {
+        uint32_t wb = b32[q];
+        uint32_t wa = a32 ? a32[q] : 0x07070707u;
+        for (int k = 0; k < 4; k++) {
+            const uint8_t a = (uint8_t)wa;
+            uint8_t fg = (uint8_t)(((a >> 3) & 0x08) | (a & 0x07));
+            uint8_t bg = (uint8_t)((a >> 3) & 0x0F);
+            if (a & fl) { const uint8_t t = fg; fg = bg; bg = t; }
+            *out++ = pairBits8((uint8_t)wb, fg, bg);
+            wb >>= 8; wa >>= 8;
+        }
+    }
+}
+
 void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
     const uint8_t pg = MemESP::videoLatch ? 7 : 5;
     const uint8_t* scr = MemESP::ram[pg].direct();
@@ -7362,41 +7554,53 @@ void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
     uint8_t* dst = fb_row + pad_l;
     if (!scr || !alt) { memset(dst, profi_pair_lookup[0][0], 320); return; }
     const Atm::VMode vm = Atm::videoMode();
+    uint32_t* out = (uint32_t*)dst;      // pad_l is 0 or 20: word aligned
     if (vm == Atm::VM_EGA) {
         // 320x200x16: each byte = two pixels, even = bits 6,2,1,0 / odd = 7,5,4,3
         // (bit 6 / bit 7 are the BRIGHT bit of the index). Column c's eight pixels
         // come from alt[o], scr[o], alt[o+#2000], scr[o+#2000]. One lores pixel = one
-        // solid pair byte.
+        // solid pair byte. Words in, words out: o = line*40 is 8-aligned, and the
+        // alt half sits in PSRAM since the ZX pages moved there, so four columns
+        // per load matters as much as the table.
         const uint32_t o = line * 40;
-        for (int c = 0; c < 40; c++) {
-            uint8_t px[8];
-            const uint8_t b[4] = { alt[o + c], scr[o + c], alt[0x2000 + o + c], scr[0x2000 + o + c] };
-            for (int k = 0; k < 4; k++) {
-                const uint8_t v = b[k];
-                const uint8_t e = (uint8_t)(((v & 0x40) >> 3) | (v & 0x07));
-                const uint8_t d = (uint8_t)(((v & 0x80) >> 4) | ((v >> 3) & 0x07));
-                px[k * 2]     = profi_pair_lookup[e][e];
-                px[k * 2 + 1] = profi_pair_lookup[d][d];
+        const uint16_t* lut = atmEgaLut();
+        if (lut) {
+            const uint32_t* a0 = (const uint32_t*)(alt + o);
+            const uint32_t* s0 = (const uint32_t*)(scr + o);
+            const uint32_t* a1 = (const uint32_t*)(alt + 0x2000 + o);
+            const uint32_t* s1 = (const uint32_t*)(scr + 0x2000 + o);
+            for (int q = 0; q < 10; q++) {
+                uint32_t wa0 = a0[q], ws0 = s0[q], wa1 = a1[q], ws1 = s1[q];
+                for (int k = 0; k < 4; k++) {
+                    out[0] = (uint32_t)lut[ws0 & 0xFF] | ((uint32_t)lut[wa0 & 0xFF] << 16);
+                    out[1] = (uint32_t)lut[ws1 & 0xFF] | ((uint32_t)lut[wa1 & 0xFF] << 16);
+                    out += 2;
+                    wa0 >>= 8; ws0 >>= 8; wa1 >>= 8; ws1 >>= 8;
+                }
             }
-            uint32_t* w = (uint32_t*)(dst + c * 8);
-            w[0] = atmPack4(px[0], px[1], px[2], px[3]);
-            w[1] = atmPack4(px[4], px[5], px[6], px[7]);
+        } else {
+            for (int c = 0; c < 40; c++) {
+                uint8_t px[8];
+                const uint8_t b[4] = { alt[o + c], scr[o + c], alt[0x2000 + o + c], scr[0x2000 + o + c] };
+                for (int k = 0; k < 4; k++) {
+                    const uint8_t v = b[k];
+                    const uint8_t e = (uint8_t)(((v & 0x40) >> 3) | (v & 0x07));
+                    const uint8_t d = (uint8_t)(((v & 0x80) >> 4) | ((v >> 3) & 0x07));
+                    px[k * 2]     = profi_pair_lookup[e][e];
+                    px[k * 2 + 1] = profi_pair_lookup[d][d];
+                }
+                out[c * 2]     = atmPack4(px[0], px[1], px[2], px[3]);
+                out[c * 2 + 1] = atmPack4(px[4], px[5], px[6], px[7]);
+            }
         }
     } else if (vm == Atm::VM_HIRES) {
         // 640x200: bitmap byte + attribute byte per 8 pixels; ink = attr 6,2..0, paper
         // = attr 7,5..3 (no FLASH). Byte j of the line: even j from +0, odd from +#2000.
         const uint32_t o = line * 40;
-        for (int j = 0; j < 80; j++) {
-            const uint32_t a = o + (uint32_t)(j >> 1) + ((j & 1) ? 0x2000u : 0u);
-            const uint8_t b  = scr[a];
-            const uint8_t at = alt[a];
-            const uint8_t fg = (uint8_t)(((at & 0x40) >> 3) | (at & 0x07));
-            const uint8_t bg = (uint8_t)(((at & 0x80) >> 4) | ((at >> 3) & 0x07));
-            *(uint32_t*)(dst + j * 4) = atmPack4(
-                profi_pair_lookup[(b & 0x80) ? fg : bg][(b & 0x40) ? fg : bg],
-                profi_pair_lookup[(b & 0x20) ? fg : bg][(b & 0x10) ? fg : bg],
-                profi_pair_lookup[(b & 0x08) ? fg : bg][(b & 0x04) ? fg : bg],
-                profi_pair_lookup[(b & 0x02) ? fg : bg][(b & 0x01) ? fg : bg]);
+        for (int x = 0; x < 40; x++) {
+            out[0] = atmBits8(scr[o + x], alt[o + x]);
+            out[1] = atmBits8(scr[0x2000 + o + x], alt[0x2000 + o + x]);
+            out += 2;
         }
     } else {
         // 80x25 text (ATM-Turbo 2+): 64-byte rows from #01C0; even columns take the
@@ -7406,7 +7610,7 @@ void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
         const uint32_t row = line >> 3, gl = line & 7;
         const uint32_t base = 0x01C0 + row * 64;
         // ZX-Evo: the character generator is a RAM (#BF D2), initialised from the ATM font.
-        const uint8_t* fnt = (Atm::evo && EvoBase::font) ? EvoBase::font : gb_rom_atm_font;
+        const uint8_t* fnt = ((Atm::evo && EvoBase::font) ? EvoBase::font : gb_rom_atm_font) + gl;
         // TEXT1 (ZX-Evo mode 7, video_addrgen.v addr_at with mode_a_txt_1page): the
         // page select of mode 6 (symbols 5 / attributes 1) becomes +#2000 inside RAM
         // page 8, and mode 6's +#2000 half-line interleave becomes +#1000.
@@ -7416,19 +7620,14 @@ void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
         const uint8_t* ts = one ? p8 : scr;              // symbols
         const uint8_t* ta = one ? p8 + 0x2000 : alt;     // attributes
         const uint32_t half = one ? 0x1000u : 0x2000u;   // second half of the line
-        for (int cx = 0; cx < 80; cx++) {
-            const uint32_t x = (uint32_t)cx >> 1;
-            uint8_t sym, at;
-            if (cx & 1) { sym = ts[half + base + x]; at = ta[base + x + 1]; }
-            else        { sym = ts[base + x];        at = ta[half + base + x]; }
-            const uint8_t b  = fnt[sym * 8 + gl];
-            const uint8_t fg = (uint8_t)(((at & 0x40) >> 3) | (at & 0x07));
-            const uint8_t bg = (uint8_t)(((at & 0x80) >> 4) | ((at >> 3) & 0x07));
-            *(uint32_t*)(dst + cx * 4) = atmPack4(
-                profi_pair_lookup[(b & 0x80) ? fg : bg][(b & 0x40) ? fg : bg],
-                profi_pair_lookup[(b & 0x20) ? fg : bg][(b & 0x10) ? fg : bg],
-                profi_pair_lookup[(b & 0x08) ? fg : bg][(b & 0x04) ? fg : bg],
-                profi_pair_lookup[(b & 0x02) ? fg : bg][(b & 0x01) ? fg : bg]);
+        const uint8_t* s0 = ts + base;          // even columns' symbols
+        const uint8_t* s1 = ts + half + base;   // odd columns' symbols
+        const uint8_t* t0 = ta + half + base;   // even columns' attributes
+        const uint8_t* t1 = ta + base + 1;      // odd columns' attributes
+        for (int x = 0; x < 40; x++) {
+            out[0] = atmBits8(fnt[s0[x] * 8], t0[x]);
+            out[1] = atmBits8(fnt[s1[x] * 8], t1[x]);
+            out += 2;
         }
     }
 }
@@ -7436,6 +7635,11 @@ void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
 // The ATM/Evo whole-line tick (EndFrame arms it, tsDrawTick dispatches here). One
 // content line per raster line from tStatesScreen; the top/bottom bands stay with
 // gmxBorderFrame at EndFrame, the side pads are painted per line as in MainScreen.
+#if PERF_TRACE
+// [PERF] atm: core0 time inside atmRenderLine — what a core1 line queue for the
+// ATM/Evo whole-line modes could take off core0 at most.
+volatile uint32_t atm_render_us = 0, atm_render_lines = 0;
+#endif
 void VIDEO::atmDrawTick() {
     do {
         const uint32_t line = ts_row_idx;
@@ -7451,7 +7655,14 @@ void VIDEO::atmDrawTick() {
             }
             curline = line;
             linedraw_cnt = frow;
+#if PERF_TRACE
+            const uint32_t pt0 = timer_hw->timerawl;
             atmRenderLine(line, fb_row, pad_l);
+            atm_render_us += timer_hw->timerawl - pt0;
+            atm_render_lines++;
+#else
+            atmRenderLine(line, fb_row, pad_l);
+#endif
         }
         ts_line_t += tStatesPerLine << ESPectrum::multiplicator;
         if (++ts_row_idx >= 200) {
@@ -7530,6 +7741,42 @@ void VIDEO::col16DrawTick() {
 }
 
 int VIDEO::gmxTopBandRows() { return (gmx_ext_live || ts_render_live) ? (int)lin_end : 0; }
+
+// Video > Screen position. A real Pentagon shows 304 lines: 64 of top border, 192 of
+// paper, 48 of bottom (lines 16..303 of the 320-line frame are visible; "Across the
+// Edge" draws in lines 16..31). The 288-row window cannot hold all of them, so the user
+// picks which 16 to lose: 48/192/48 (lines 32..319, the default), 60/192/36, 64/192/32.
+// Only the Pentagon raster has the extra top lines (48K/128K show ~48 on top), and Profi
+// keeps its own geometry. Flash: called from Reset / mode restores / the menu hook.
+int VIDEO::screenTopRows() {
+    if (!isFullBorder || isFullBorder240()) return 24;
+    const bool pentRaster = Config::arch == A_PENT || Config::arch == A_P512 ||
+                            Config::arch == A_P1024 || Config::arch == A_TSCONF ||
+                            Config::isEvoPentRaster();
+    if (!pentRaster) return 48;
+    static const uint8_t kTop[3] = { 48, 60, 64 };   // Even / Middle / Full top
+    return kTop[Config::screen_top <= 2 ? Config::screen_top : 0];
+}
+
+void VIDEO::screenTopApply() {
+    if (!isFullBorder || isFullBorder240()) return;
+    // Modes with their own line window re-derive it from screenTopRows() on the way
+    // back to the standard renderer (gmxApplyPending / tsVideoApplyPending).
+    if (gmx_ext_live || ts_render_live || ds80_border_geom || ft_live) return;
+    const int top = screenTopRows(), old = (int)lin_end;
+    if (top == old) return;
+    tStatesBorder -= (top - old) * (int)tStatesPerLine;
+    lin_end  = (unsigned)top;
+    lin_end2 = (unsigned)top + 192;
+    linedraw_cnt  = lin_end;
+    tstateDraw    = tStatesScreen;
+    lastBrdTstate = tStatesBorder;
+    DrawBorder    = bl_live ? &Border_Blank : &TopBorder_Blank;
+    brdChange     = false;
+    brdnextframe  = true;          // the next EndFrame repaints every border row
+    Debug::log("VIDEO: screen position %d/192/%d, border from T=%d",
+               top, (int)vga.yres - top - 192, tStatesBorder);
+}
 
 // True while a whole-line renderer owns the content rows and the per-T-state
 // border machine is parked (Scorpion GMX 640x200, every TS-Conf non-ZX mode):
@@ -7752,7 +7999,7 @@ void VIDEO::tsVideoApplyPending() {
     }
     if (wantRender && ts_c1_enabled && !ts_c1_ring && !s_c1borrowed) {
         tsC1RingAlloc();
-        ts_c1_r = ts_c1_w = 0;
+        tsC1QueueClear();
         TsConf::wrGateRecalc(); tsC1LiveRecalc();
     }
     if (wantPal256) { tsPalette256Flush(!ts_pal256_live); tsCramDirty = false; }
@@ -7762,8 +8009,8 @@ void VIDEO::tsVideoApplyPending() {
     if (!wantRender) {
         // Back to the standard renderer: Pentagon line window (Reset's generic
         // block) and the per-T-state border machine.
-        if (isFullBorder && !isFullBorder240()) { lin_end = 48; lin_end2 = 240; }
-        else                                    { lin_end = 24; lin_end2 = 216; }
+        lin_end  = (unsigned)VIDEO::screenTopRows();
+        lin_end2 = lin_end + 192;
         ts_crop_top = 0;
         tStatesScreen = TS_SCREEN_TSCONF;
         DrawBorder = &Border_Blank;   // mid-frame border state is stale — skip this frame
@@ -8067,7 +8314,7 @@ void VIDEO::tsRenderLine(uint32_t curline) {
 // window on every TS-Conf session (2026-09-22). If the claim fails the line is
 // posted without the GFXOVR bit and renders on the ordinary compose path.
 static uint16_t* s_gline = nullptr;
-static uint8_t  TS_OVL_BSS s_tsline[512];
+// s_tsline: defined with the core1 queue above (core1's compose buffer).
 static __attribute__((noinline)) bool tsGlineEnsure() {
     if (s_gline) return true;
     s_gline = (uint16_t*)Buffer::palloc(512 * sizeof(uint16_t), Buffer::NEED_POINTER | Buffer::HOT_SRAM);
@@ -8213,11 +8460,14 @@ static inline __attribute__((always_inline)) void tsFillPad(uint8_t* fb_row, int
     if (b > cx1) memset(fb_row + cx1, brd, (size_t)(b - cx1));
 }
 __attribute__((optimize("O2", "no-unroll-loops")))
-void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st, const uint16_t* sfile, uint32_t seq) {
+void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st, const uint16_t* sfile, uint32_t seq, uint8_t* tsl) {
     const uint32_t curline = jobLine(j);
     const uint32_t ygctr = jobYgctr(j);
     const uint32_t frow = curline + lin_end;
-    ts_render_pos = ((uint32_t)(j.l.kind >> 4) << 16) | curline;   // lines below this one are done (tsPalettePoll)
+    // The queue (tsl != nullptr) publishes the render position at the release
+    // point instead (tsC1Release): with two renderers a line can finish before
+    // the one above it.
+    if (!tsl) { ts_render_pos = ((uint32_t)(j.l.kind >> 4) << 16) | curline; tsl = s_tsline; }   // lines below this one are done (tsPalettePoll)
 #if TSPAL_DBG
     if (frow < sizeof ts_row_gen) ts_row_gen[frow] = ts_row_gen_posted[frow];
     {   // the beam already scanned this row in the current sweep: it showed the OLD pixels
@@ -8324,10 +8574,10 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
         const uint8_t* bl = nullptr;
         if (ts_tsu_live) {
             const uint32_t t1 = tsRenderUs();
-            memset(s_tsline, 0, (size_t)g.w);     // 0 = transparent
-            tsuComposeLine((uint32_t)curline + ts_crop_top, s_tsline, *st, sfile, j.l.palsel, seq, (uint8_t)((j.l.kind >> 1) & 1));
+            memset(tsl, 0, (size_t)g.w);     // 0 = transparent
+            tsuComposeLine((uint32_t)curline + ts_crop_top, tsl, *st, sfile, j.l.palsel, seq, (uint8_t)((j.l.kind >> 1) & 1));
             ts_tsu_us += tsRenderUs() - t1;
-            bl = s_tsline;
+            bl = tsl;
         }
         // Text is hires: g.w lores pixels = 2*g.w hires pixels = g.w/4 chars
         // of 8 (80 at RRES 320) — each char = 4 pair bytes.
@@ -8393,7 +8643,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     // ── Base graphics layer + TSU compose (video_render.v) ──────────────────
     // Per area pixel: bits 7..0 = CRAM index, bit 8 = "gfx pixel visible"
     // (pixv: ZX ink dot after flash, non-zero colour in 16c/256c) — the
-    // GFXOVR priority input. TSU pixels land in s_tsline as CRAM indices, 0 =
+    // GFXOVR priority input. TSU pixels land in tsl as CRAM indices, 0 =
     // transparent (video_render.v: tsu_visible = |tsdata[3:0]).
     const uint32_t t0b = tsRenderUs();
     const int w = (int)g.w;
@@ -8421,7 +8671,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
         // path below is not needed and the output is one table lookup per
         // pixel. 2026-09-13: fishbone c1 = 14.4 ms of which base 3.9 / tsu 8.3 /
         // out 2.1 — this path plus the SWAR blit (TsuBlit.h) is the answer.
-        uint8_t* bl = s_tsline;
+        uint8_t* bl = tsl;
         if (nogfx) {
             memset(bl, border_idx, (size_t)w);
         } else if (lvm == TSV_ZX) {
@@ -8977,6 +9227,9 @@ IRAM_ATTR void VIDEO::EndFrame() {
         ts_dma_words_ram = ts_dma_words_blt = ts_dma_words_fill = 0;
         c1_accum += ts_c1_us; c1w_accum += ts_c1_wait_us; if (ts_c1_wait_us > c1w_max) c1w_max = ts_c1_wait_us;
         c1j_accum += ts_c1_jobs; c1n_accum += ts_c1_waits;
+        static uint32_t c0_accum = 0, c0j_accum = 0;
+        extern volatile uint32_t ts_c0_us, ts_c0_jobs;
+        c0_accum += ts_c0_us; c0j_accum += ts_c0_jobs; ts_c0_us = ts_c0_jobs = 0;
         c1d_accum += ts_dma_c1_us; c1wd_accum += ts_c1_wait_dma_us; if (ts_c1_wait_dma_us > c1wd_max) c1wd_max = ts_c1_wait_dma_us;
         ts_render_us = ts_tsu_us = ts_dma_us = ts_dma_words = 0;
         ts_c1_us = ts_c1_wait_us = ts_c1_jobs = ts_c1_waits = ts_dma_c1_us = ts_c1_wait_dma_us = 0;
@@ -9039,14 +9292,31 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
                     (unsigned)ticks, (unsigned)hold, (unsigned)flat,
                     (unsigned)und, (unsigned)skip, (unsigned)dup, (unsigned)qmin, (unsigned)qmax);
             }
+            if (gmx_ext_live && !Z80Ops::isAtm) {
+                extern volatile uint32_t gmx_render_us, gmx_render_lines;
+                Debug::log("[PERF] gmx: render=%.2fms/fr lines=%u/fr (%.1fus/line) mult=%u",
+                           gmx_render_us / 60000.0f, (unsigned)(gmx_render_lines / 60),
+                           gmx_render_lines ? (float)gmx_render_us / (float)gmx_render_lines : 0.0f,
+                           (unsigned)ESPectrum::multiplicator);
+                gmx_render_us = gmx_render_lines = 0;
+            }
+            if (Z80Ops::isAtm) {
+                extern volatile uint32_t atm_render_us, atm_render_lines;
+                Debug::log("[PERF] atm: render=%.2fms/fr lines=%u/fr (%.1fus/line) mode=%u evo=%d mult=%u",
+                           atm_render_us / 60000.0f, (unsigned)(atm_render_lines / 60),
+                           atm_render_lines ? (float)atm_render_us / (float)atm_render_lines : 0.0f,
+                           (unsigned)Atm::videoMode(), (int)Atm::evo, (unsigned)ESPectrum::multiplicator);
+                atm_render_us = atm_render_lines = 0;
+            }
             // TS-Conf half on its own line: Debug::log truncates at 256 bytes.
             if (Z80Ops::isTsconf)
-                Debug::log("[PERF] ts: tsRender=%.1fms (max %.1fms, base %.1f tsu %.1f out %.1f) c1=%.1fms/%ul wait=%.1fms (max %.1fms, %u/60) dmaC1=%.1fms waitDma=%.1fms (max %.1fms) dma=%.1fms/%uw (ram %u blt %u fill %u) poll=%u ff=%u/%ukT frmInt=%u/60f frmLate=%u frmMiss=%u",
+                Debug::log("[PERF] ts: tsRender=%.1fms (max %.1fms, base %.1f tsu %.1f out %.1f) c1=%.1fms/%ul c0=%.1fms/%ul wait=%.1fms (max %.1fms, %u/60) dmaC1=%.1fms waitDma=%.1fms (max %.1fms) dma=%.1fms/%uw (ram %u blt %u fill %u) poll=%u ff=%u/%ukT frmInt=%u/60f frmLate=%u frmMiss=%u",
                     tsr_accum / 60000.0f, tsr_max / 1000.0f, base_accum / 60000.0f, tsu_accum / 60000.0f, out_accum / 60000.0f,
-                    c1_accum / 60000.0f, (unsigned)(c1j_accum / 60), c1w_accum / 60000.0f, c1w_max / 1000.0f, (unsigned)c1n_accum,
+                    c1_accum / 60000.0f, (unsigned)(c1j_accum / 60), c0_accum / 60000.0f, (unsigned)(c0j_accum / 60), c1w_accum / 60000.0f, c1w_max / 1000.0f, (unsigned)c1n_accum,
                     c1d_accum / 60000.0f, c1wd_accum / 60000.0f, c1wd_max / 1000.0f,
                     dma_accum / 60000.0f, (unsigned)(dmaw_accum / 60), (unsigned)(dmar_accum / 60), (unsigned)(dmab_accum / 60), (unsigned)(dmaf_accum / 60),
                     (unsigned)(prd_accum / 60), (unsigned)(pff_accum / 60), (unsigned)(pfft_accum / 60000), (unsigned)frm_accum, (unsigned)late_accum, (unsigned)miss_accum);
+            c0_accum = c0j_accum = 0;
             // DRAM model (TsConf.cpp): CPU wait states inserted at 14 MHz, DRAM cycles
             // the CPU and the video fetcher took from running DMAs, against the
             // DMAs' own cycle count — the numbers that decide Bomberman's copy phase.
@@ -10524,7 +10794,7 @@ static bool ftGlueEnsure() {
         // wait out anything still queued, then the block is ours.
         VIDEO::tsRenderDrain();
         ts_c1_ring = nullptr; ts_c1_tsu = nullptr; ts_c1_sf = nullptr; ts_c1_tsu_job = nullptr; ts_c1_sf_job = nullptr;
-        ts_c1_r = ts_c1_w = 0;
+        tsC1QueueClear();
         s_c1borrowed = true;
         tsC1LiveRecalc();
         rows = s_ftRows;

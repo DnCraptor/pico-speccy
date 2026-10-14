@@ -76,7 +76,7 @@ if !errorlevel! equ 0 (
 )
 
 :: All available targets (RP2350 only — RP2040 boards were dropped)
-set "ALL_TARGETS=MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W"
+set "ALL_TARGETS=MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W MURM_WS MURM2_WS PICO_DV_WS PICO_PC_WS"
 set "TFT_TARGETS=MURM MURM2"
 set "TFT_ST_TARGETS="
 set "SOFTTV_TARGETS=MURM MURM2"
@@ -86,7 +86,7 @@ set "PIOUSB_TARGETS=ZERO2"
 :: Display on GPIO 12-19 (the RP2350 HSTX pins): also ship an HSTX image
 :: (-DHDMI_HSTX=TMDS). Their plain VGA_HDMI image is pinned to PIO (-DHDMI_HSTX=OFF),
 :: or CMake's AUTO would make it HSTX too and the two images would be the same.
-set "HSTX_TARGETS=PICO_PC MURM2 MURM2_W PICO_PC_W"
+set "HSTX_TARGETS=PICO_PC MURM2 MURM2_W PICO_PC_W MURM2_WS PICO_PC_WS"
 
 if "%POSARGS%"=="" (
     set "TARGETS=%ALL_TARGETS%"
@@ -120,8 +120,9 @@ echo Clean first:      %CLEAN%
 echo.
 
 set "OUTPUT_DIR=%SCRIPT_DIR%\firmware"
-set "LOG_DIR=%SCRIPT_DIR%\build-logs"
-set "STATE_DIR=%SCRIPT_DIR%\build-logs\.state"
+set "BUILD_ROOT=%SCRIPT_DIR%\build-all"
+set "LOG_DIR=%BUILD_ROOT%\logs"
+set "STATE_DIR=%LOG_DIR%\.state"
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 if not exist "%LOG_DIR%"    mkdir "%LOG_DIR%"
 if exist "%STATE_DIR%" rmdir /s /q "%STATE_DIR%"
@@ -257,7 +258,7 @@ goto :eof
 echo Usage: %~nx0 [--clean] [-j JOBS_PER_BUILD] [-p MAX_PARALLEL] [TARGETS...]
 echo.
 echo Env vars: BUILD_TYPE, MAX_PARALLEL, JOBS_PER_BUILD, CMAKE_GENERATOR
-echo Targets:  MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W (default: all)
+echo Targets:  MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W MURM_WS MURM2_WS PICO_DV_WS PICO_PC_WS (default: all)
 exit /b 0
 
 :::::::::::::::::::::::::::::::::::::::::::::::::::::
@@ -271,10 +272,10 @@ set "W_DISPLAY=%~2"
 set "W_MARK=%STATE_DIR%\%W_TARGET%-%W_DISPLAY%"
 
 if "%W_DISPLAY%"=="VGA_HDMI" (
-    set "W_BUILD_DIR=%SCRIPT_DIR%\build-%W_TARGET%"
+    set "W_BUILD_DIR=%BUILD_ROOT%\%W_TARGET%"
     set "W_LABEL=%W_TARGET% (VGA_HDMI)"
 ) else (
-    set "W_BUILD_DIR=%SCRIPT_DIR%\build-%W_TARGET%-%W_DISPLAY%"
+    set "W_BUILD_DIR=%BUILD_ROOT%\%W_TARGET%-%W_DISPLAY%"
     set "W_LABEL=%W_TARGET% (%W_DISPLAY%)"
 )
 

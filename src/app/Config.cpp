@@ -82,12 +82,13 @@ bool     Config::Issue2 = true;
 uint16_t Config::mem_pg_cnt = 64;      // Murmuzavr off; the live count is MEM_PG_CNT
 uint8_t  Config::tsconf_clk_cap = 2;   // ZCLK cap: 14 MHz allowed
 uint8_t  Config::evo_raster = 0;       // BaseConf raster: Pentagon
+uint8_t  Config::screen_top = 0;       // 48 / 192 / 48
 bool     Config::tsconf_vdac2 = false;
 bool     Config::tsconf_vdac2_smooth = false;
 bool     Config::tsconf_vdac2_adapt = true;
 uint8_t  Config::next_clk_cap = 2;     // nextreg 0x07 cap: 14 MHz (28 not real-time yet)
 bool     Config::rtc_enabled = false;
-bool     Config::mouse_swap = true;  // Kempston original: D0 = right, D1 = left
+uint8_t  Config::mouse_swap = 2;
 uint16_t Config::mouse_sens = 64;        // Q8: 64 = x1/4, the historical divisor
 bool     Config::psram_enabled = true;   // Debug > PSRAM (runtime set(PSRAM OFF) twin)
 #ifndef DBG_UART_DEFAULT
@@ -1352,7 +1353,11 @@ void Config::load() {
         nvs_get_b("Issue2", Issue2, sts);
         nvs_get_b("rtc_enabled", rtc_enabled, sts);
         nvs_get_u16("mouse_sens", mouse_sens, sts);
-        nvs_get_b("mouse_swap", mouse_swap, sts);
+        {   // "true"/"false" from older builds, "auto" since 2026-10-14
+            string t;
+            if (nvs_get_str("mouse_swap", t, sts))
+                mouse_swap = (t == "auto") ? 2 : (t == "true") ? 1 : 0;
+        }
         if (mouse_sens < 8 || mouse_sens > 1024) mouse_sens = 64;   // a stale/foreign NVS value
         nvs_get_b("psram_enabled", psram_enabled, sts);
         nvs_get_b("dbg_uart", dbg_uart, sts);
@@ -1470,7 +1475,10 @@ void Config::load() {
         nvs_get_u8("gs_ram_size", Config::gs_ram_size, sts);
         nvs_get_u8("gs_clock", Config::gs_clock, sts);
         nvs_get_u8("ngs_clock", Config::ngs_clock, sts);
-        if (Config::ngs_clock > 4) Config::ngs_clock = 0;
+        // The NeoGS Clock row is gone (owner, 2026-10-14): only Auto (the firmware's
+        // own CKSEL pick) works properly, so a forced rate saved by an older build
+        // must not stay in force with no way to see or change it.
+        Config::ngs_clock = 0;
         nvs_get_u8("throtling2", Config::throtling, sts);
         nvs_get_b("CursorAsJoy", CursorAsJoy, sts);
         nvs_get_b("betadisk", betadisk, sts);
@@ -1704,6 +1712,9 @@ void Config::load() {
         int evr = 0;
         nvs_get_i("evo_raster", evr, sts);
         evo_raster = (evr >= 0 && evr <= 3) ? (uint8_t)evr : 0;
+        int sct = 0;
+        nvs_get_i("screen_top", sct, sts);
+        screen_top = (sct >= 0 && sct <= 2) ? (uint8_t)sct : 0;
         nvs_get_b("tsconf_vdac2", tsconf_vdac2, sts);
         nvs_get_b("tsconf_vdac2_smooth", tsconf_vdac2_smooth, sts);
         nvs_get_b("tsconf_vdac2_adapt", tsconf_vdac2_adapt, sts);
@@ -1841,7 +1852,7 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_str(buf,"Issue2", Issue2 ? "true" : "false");
     nvs_set_str(buf,"rtc_enabled", rtc_enabled ? "true" : "false");
     nvs_set_i(buf,"mouse_sens", mouse_sens);
-    nvs_set_str(buf,"mouse_swap", mouse_swap ? "true" : "false");
+    nvs_set_str(buf,"mouse_swap", mouse_swap == 2 ? "auto" : mouse_swap ? "true" : "false");
     nvs_set_str(buf,"psram_enabled", psram_enabled ? "true" : "false");
     nvs_set_str(buf,"dbg_uart", dbg_uart ? "true" : "false");
     nvs_set_str(buf,"debug_log", Debug::log_enabled ? "true" : "false");
@@ -2027,6 +2038,7 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_i(buf,"MEM_PG_CNT", mem_pg_cnt);
     nvs_set_i(buf,"tsconf_clk_cap", tsconf_clk_cap);
     nvs_set_i(buf,"evo_raster", evo_raster);
+    nvs_set_i(buf,"screen_top", screen_top);
     nvs_set_str(buf,"tsconf_vdac2", tsconf_vdac2 ? "true" : "false");
     nvs_set_str(buf,"tsconf_vdac2_smooth", tsconf_vdac2_smooth ? "true" : "false");
     nvs_set_str(buf,"tsconf_vdac2_adapt", tsconf_vdac2_adapt ? "true" : "false");

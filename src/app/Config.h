@@ -213,6 +213,10 @@ public:
     // ZX Evolution BaseConf raster: 0 Pentagon / 1 60 Hz / 2 48K / 3 128K. On the real
     // board the AVR keeps it in the PCF8583 NVRAM and Scroll Lock cycles it.
     static uint8_t  evo_raster;
+    // Video > Screen position (720x576 modes, Pentagon raster only): 0/1/2 = 48/60/64
+    // rows of top border in the 288-row window (bottom 48/40/32). A real Pentagon shows
+    // 64 top + 48 bottom lines; 288 rows cannot hold both. VIDEO::screenTopRows().
+    static uint8_t  screen_top;
     // VDAC2 (FT812) video board on the Z-Controller SPI (Ft812.h). Reboot-class:
     // its 1 MB RAM_G is carved out of the butter PSRAM at boot (Buffer::pageBudget).
     static bool     tsconf_vdac2;
@@ -258,7 +262,9 @@ public:
     // what the divisor in mouse_apply() always was, so it is the default. The serial
     // (COM) mouse has its own scaling at packet-build time and is not affected.
     static uint16_t mouse_sens;
-    static bool     mouse_swap;     // Devices > Mouse > Swap buttons: left/right exchanged at the source
+    // Devices > Mouse > Swap buttons: 0 Off, 1 On (left/right exchanged at the source),
+    // 2 Auto — the first button pressed in the session is LEFT (hid_app.cpp).
+    static uint8_t  mouse_swap;
     // Debug > PSRAM. Read once at boot (ESPectrum::setup, right after load()): false
     // makes the firmware behave as if the board had no PSRAM — the runtime twin of the
     // CMake set(PSRAM OFF) kill-switch. See board_psram_disable() in main.cpp.

@@ -1,7 +1,7 @@
 #pragma once
 
-// On-chip WiFi (MURM_W / MURM2_W / PICO_DV_W / PICO_PC_W: Raspberry Pi Radio Module 2 =
-// CYW43439) with lwIP, in poll mode.
+// On-chip WiFi (the *_W / *_WS boards: the CYW43439 of a Pico 2 W / Pico Plus 2 W or
+// of the Waveshare module's Radio Module 2) with lwIP, in poll mode.
 //
 // This is the station/SNTP half of the on-chip network transport; WifiSock is the
 // TCP half. Neither is called by the application layer directly: `ZiFiAT` and
@@ -33,6 +33,15 @@ bool ready();
 // True when the on-chip radio is the configured network transport
 // (Config::zifi_transport == 2). ZiFiAT/ZiFiSock dispatch on this.
 bool selected();
+
+// Bring the radio's bus up (power-on + firmware download) if it is not yet. Tried
+// ONCE per session: a failed bring-up leaks a PIO SM/program and two DMA channels
+// in the SDK, so after the first failure this answers false without touching the
+// hardware again. Every call that would power the radio goes through it.
+bool busUp();
+// The radio was tried and did not answer (wrong W image for this module, or a
+// dead radio). Stays true for the session.
+bool radioDead();
 
 // Service the driver + lwIP. Cheap when idle. Called once per emulated frame
 // from ESPectrum::loop and inside every blocking wait of WifiNet/WifiSock.

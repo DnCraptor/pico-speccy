@@ -13,6 +13,7 @@
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
+#include "hardware/timer.h"
 #include "lwip/netif.h"
 #include "lwip/dns.h"
 #include "lwip/udp.h"
@@ -49,7 +50,7 @@ extern "C" void picospeccy_lwip_free(void* p) {
 }
 
 // ── RM2 host pins ────────────────────────────────────────────────────────────
-// Fixed by the board header (src/drivers/board/boards/picospeccy_rp2350b_w.h), read off the
+// Fixed by the board header (src/drivers/board/boards/picospeccy_rp2350b_ws.h), read off the
 // Waveshare schematic: WL_ON=36, WL_D=37, WL_CS=38, WL_CLK=39. They are static
 // (CYW43_PIN_WL_DYNAMIC 0) like every SDK W board, so the SDK's PIO SPI driver
 // reads them as constants and there is no runtime table to get wrong. All four
@@ -59,6 +60,8 @@ extern "C" void picospeccy_lwip_free(void* p) {
 namespace {
 
 bool s_ready = false;
+// The radio's bus failed to come up once this session: never try again (busUp()).
+bool s_dead  = false;
 
 }  // namespace
 
@@ -91,23 +94,29 @@ bool init() {
     // the call site for the two hardware failures that fixed this order.
     logPioDmaClaims("pre");
 
-    // Pin pio0 to gpio_base 16 OURSELVES before asking the SDK for a block. Its
-    // pio_claim_free_sm_and_add_program_for_gpio_range() walks pio2 -> pio1 -> pio0
-    // and, on a second pass, re-bases ANY block whose four state machines are all
-    // free — on hardware (2026-09-06) that was pio2, and hdmi_init() then found its
-    // block at base 16 with the display on GPIO6-13: radio up, screen dead. With
-    // pio0 already at 16 the FIRST pass finds it compatible (pio1/pio2 at base 0
-    // are not), so the pick is deterministic whatever else has or has not run.
-    // I2S (MURM_W, PICO_DV_W) / NESPAD (MURM2_W) may have set the same base already; the
-    // SDK refuses a re-base once a program is loaded, which is fine if it is 16.
-    // "pio0" above is the HDMI case; with VGA live it is pio2 (VGA owns pio0 at
-    // base 0 and HDMI is not started) — BoardPins::auxPio() is the one decision.
+    // Pin the radio's block to the gpio_base its pins need OURSELVES before asking the
+    // SDK for one. Its pio_claim_free_sm_and_add_program_for_gpio_range() walks
+    // pio2 -> pio1 -> pio0 and, on a second pass, re-bases ANY block whose four
+    // state machines are all free — on hardware (2026-09-06, Waveshare module) that
+    // was pio2, and hdmi_init() then found its block at base 16 with the display on
+    // GPIO6-13: radio up, screen dead. With the aux block already at 16 the FIRST
+    // pass finds it compatible (pio1/pio2 at base 0 are not), so the pick is
+    // deterministic whatever else has or has not run. I2S (MURM_WS, PICO_DV_WS) /
+    // NESPAD (MURM2_WS) may have set the same base already; the SDK refuses a re-base
+    // once a program is loaded, which is fine if it is 16. "pio0" above is the HDMI
+    // case; with VGA live it is pio2 (VGA owns pio0 at base 0 and HDMI is not
+    // started) — BoardPins::auxPio() is the one decision.
+    // Stock Pico 2 W / Pico Plus 2 W (*_W): the radio is on GP23-25/29, base 0 — the
+    // default every block already has, so nothing is re-based and the SDK takes any
+    // block with room.
+    const uint radioMax = CYW43_PIN_WL_CLOCK > CYW43_PIN_WL_CS ? CYW43_PIN_WL_CLOCK : CYW43_PIN_WL_CS;
+    const uint radioBase = (radioMax >= 32u) ? 16u : 0u;
     PIO aux = BoardPins::auxPio();
-    if (pio_get_gpio_base(aux) != 16) {
-        int brc = pio_set_gpio_base(aux, 16);
+    if (radioBase != 0u && pio_get_gpio_base(aux) != radioBase) {
+        int brc = pio_set_gpio_base(aux, radioBase);
         if (brc != PICO_OK)
-            Debug::log("WiFi: pio%u gpio_base 16 refused rc=%d (base=%u, programs already loaded?)",
-                       (unsigned)PIO_NUM(aux), brc, (unsigned)pio_get_gpio_base(aux));
+            Debug::log("WiFi: pio%u gpio_base %u refused rc=%d (base=%u, programs already loaded?)",
+                       (unsigned)PIO_NUM(aux), radioBase, brc, (unsigned)pio_get_gpio_base(aux));
     }
 
     // The SDK's default divider (CYW43_PIO_CLOCK_DIV_INT 2) assumes a 150 MHz Pico
@@ -321,6 +330,36 @@ int sntpStep(int tz, std::string* out_str, int& tries, uint32_t& send_deadline) 
 
 bool selected() { return Config::zifi_transport == 2; }
 
+// The bus (power-on + ~230 KB firmware download) comes up lazily, inside the first
+// cyw43 call that needs it. A FAILED bring-up is not undone by the SDK:
+// cyw43_ll_bus_init() leaves the PIO state machine, its program and the two DMA
+// channels cyw43_spi_init() claimed, and the next call claims a fresh set (the
+// assert(!bus_data) that would catch it is compiled out). A radio that does not
+// answer — e.g. a *_WS (Waveshare, radio on GPIO36-39) image on a Pimoroni Pico
+// Plus 2 W (radio on GP23-25/29), which is exactly what the v1.0.9 "m1p2w" was —
+// then lost a set on every LED blink and every WiFi action, ~0.35 s each. So the
+// bring-up is tried ONCE per session, and every entry point that would trigger it
+// goes through here.
+bool busUp() {
+    if (!s_ready || s_dead) return false;
+    if (cyw43_poll) return true;                 // already up
+    const uint32_t t0 = time_us_32();
+    const int rc = cyw43_gpio_set(&cyw43_state, CYW43_WL_GPIO_LED_PIN, false);
+    if (rc == 0 && cyw43_poll) {
+        Debug::log("WiFi: radio bus up in %u ms", (unsigned)((time_us_32() - t0) / 1000u));
+        return true;
+    }
+    s_dead = true;
+    Debug::log("WiFi: radio does not answer (rc=%d, REG_ON=%u DATA=%u CLK=%u CS=%u) - "
+               "wrong W image for this module? Radio off for this session",
+               rc, (unsigned)CYW43_PIN_WL_REG_ON, (unsigned)CYW43_PIN_WL_DATA_OUT,
+               (unsigned)CYW43_PIN_WL_CLOCK, (unsigned)CYW43_PIN_WL_CS);
+    logPioDmaClaims("dead");
+    return false;
+}
+
+bool radioDead() { return s_dead; }
+
 void poll() {
     if (s_ready) cyw43_arch_poll();
 }
@@ -339,7 +378,8 @@ bool ipString(char* out, size_t cap) {
 }
 
 int connect(const char* ssid_, const char* pass, uint32_t timeout_ms) {
-    if (!s_ready) { wlog("WiFi: radio not up"); return PICO_ERROR_GENERIC; }
+    if (!busUp()) { wlog(s_dead ? "WiFi: radio does not answer (wrong firmware image for this module?)"
+                                : "WiFi: radio not up"); return PICO_ERROR_GENERIC; }
     autoCancel();               // the user is driving the radio now
     snprintf(s_ssid, sizeof(s_ssid), "%s", ssid_ ? ssid_ : "");
     cyw43_arch_enable_sta_mode();
@@ -360,7 +400,7 @@ int connect(const char* ssid_, const char* pass, uint32_t timeout_ms) {
 }
 
 void disconnect() {
-    if (!s_ready) return;
+    if (!s_ready || !cyw43_poll) return;   // never up: nothing to leave (and no bring-up)
     autoCancel();               // or the boot FSM re-joins behind the user's back
     cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
     wlog("WiFi: disconnected");
@@ -381,7 +421,8 @@ int scanCb(void* env_, const cyw43_ev_scan_result_t* r) {
 }  // namespace
 
 int scan(std::string* out, int maxn, uint32_t timeout_ms) {
-    if (!s_ready) return 0;
+    if (!busUp()) { wlog(s_dead ? "WiFi: radio does not answer (wrong firmware image for this module?)"
+                                : "WiFi: radio not up"); return 0; }
     autoCancel();               // a scan cannot share the radio with a join
     ScanEnv env{ out, 0, maxn };
     cyw43_arch_enable_sta_mode();
@@ -411,7 +452,7 @@ bool sntpSync(int tz, std::string& out_str) {
 }
 
 void autoBegin(const char* ssid_, const char* pass, int tz, bool sntp) {
-    if (!s_ready) { a_state = A_FAIL; return; }
+    if (!busUp()) { a_state = A_FAIL; return; }
     snprintf(s_ssid, sizeof(s_ssid), "%s", ssid_ ? ssid_ : "");
     snprintf(a_pass, sizeof(a_pass), "%s", pass ? pass : "");
     a_tz = tz; a_join_tries = 0; a_sntp_tries = 0; a_sntp = sntp;
@@ -460,7 +501,7 @@ void autoPoll() {
 bool ready() { return s_ready; }
 
 void ledSet(bool on) {
-    if (!s_ready) return;
+    if (!busUp()) return;
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on);
 }
 

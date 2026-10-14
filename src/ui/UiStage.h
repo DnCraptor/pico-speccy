@@ -343,7 +343,7 @@ const char* romsetName(int32_t composite);
     /* flag decides how many bytes a palette entry and a line-buffer pixel are, and */ \
     /* both are allocated once at boot. Appended last per the APPEND ONLY rule.     */ \
     X(SET_VGA_PWM,         AC_REBOOT, 0,                     get_vgaPwm,     put_vgaPwm,     nullptr,        -1) \
-    /* Video > Hide border (Config::render_border). AC_PURE: VIDEO::blRecalc re-decides */ \
+    /* Video > Render border (Config::render_border). AC_PURE: VIDEO::blRecalc re-decides */ \
     /* at every EndFrame from Config, so writing it IS the apply — after the menu     */ \
     /* closes, which is also the only time the effect can be seen. Appended last.     */ \
     X(SET_BORDER,          AC_PURE,   0,                     get_border, put_border, nullptr,        -1) \
@@ -377,7 +377,11 @@ const char* romsetName(int32_t composite);
     X(SET_PL_LOOPS,       AC_PURE,   0,                     get_plLoops,    put_plLoops,   nullptr,        -1)          \
     X(SET_PL_FADE,        AC_PURE,   0,                     get_plFade,     put_plFade,    nullptr,        -1)          \
     /* Devices > Mouse > Swap buttons. AC_PURE: mouse_apply() reads it per report. */ \
-    X(SET_MOUSE_SWAP,     AC_PURE,   0,                     get_mouseSwap,  put_mouseSwap, nullptr,        -1)
+    X(SET_MOUSE_SWAP,     AC_PURE,   0,                     get_mouseSwap,  put_mouseSwap, nullptr,        -1) \
+    /* Video > Screen position (Config::screen_top: 48/60/64 rows of top border in   */ \
+    /* the 288-row window, Pentagon raster only). Live: VIDEO::screenTopApply moves  */ \
+    /* the border/paper window between frames. Appended last per the APPEND ONLY rule.*/ \
+    X(SET_SCREEN_TOP,     AC_LIVE,   0,                     get_screenTop,  put_screenTop, hook_screenTop, -1)
 
 #define NM_X_ENUM(id, cls, flags, g, p, h, f) id,
 enum SettingId : uint16_t {
@@ -415,6 +419,10 @@ struct CommitReport {
 
 // The single exit point of the menu: resolve, persist once, apply, report.
 void commit(CommitReport& out);
+
+// The message of a mutual exclusion set() just applied (the other setting of a pair
+// switched off), or nullptr; cleared by the call.
+const char* takeNote();
 
 // True when editing `id` may draw modal boxes over the menu (F_PREVIEW | F_MODAL) —
 // the nav then restores the whole chrome, exactly like runModal after an action.

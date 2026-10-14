@@ -72,7 +72,7 @@ option(AY_STEREO_SLOT "AY: share one SRAM slot between the four stereo mixers in
 # heap on every other one). Measured on PICO_DV/MinSizeRel 2026-09-10:
 #   .tsovl  23 520 B (13 460 loaded + 10 060 .tsovl_bss) on 2026-09-19, and it
 #           is now the SAME on every variant — VGA-HDMI, SOFTTV, TFT_ST7789,
-#           ZERO2-PIOUSB and MURM_W all measure byte for byte identical, because
+#           ZERO2-PIOUSB and MURM_WS all measure byte for byte identical, because
 #           the 2026-09-13 renderer split moved the display-dependent halves to
 #           flash. It was NOT always so (14 724 B on PICO_DV against 16 900 on a
 #           SOFTTV build in 2026-09-10, which cost one broken build_all run), so
@@ -101,8 +101,10 @@ if (TSOVL_WIN_SIZE STREQUAL "AUTO")
         # Video.cpp's .tsovl: 8068 B, plus its 28 B .tsovl_ro and most of the
         # 248 B of linker veneers the window needs for calls out of it. It was
         # 14 776 B before the 2026-09-13 renderer split (tsRenderExec at -O2
-        # without unrolling, the GFXOVR merge left in flash).
-        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 8448")
+        # without unrolling, the GFXOVR merge left in flash). +768 on 2026-10-14:
+        # the two-renderer queue (claim/release under a spinlock, the core0
+        # helper) added 624 B.
+        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 9216")
     endif()
     if (TSCONF_HOT_IN_RAM)
         # TsConf.cpp's .tsovl: 4556 B (portRead/portWrite, dmaStatus/dmaStart/

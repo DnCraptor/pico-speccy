@@ -213,6 +213,20 @@ static unsigned vmRowHz(const VmRow& r, unsigned mhz, int vga) {
     return 50;
 }
 
+// Refresh of the STAGED video mode at the staged CPU clock (the Description block of
+// V-Sync asks). 0 when the mode is not in the table.
+unsigned stagedVideoHz() {
+    const int32_t vm = Stage::get(SET_VIDEO_MODE);
+#ifdef VGA_HDMI
+    const int vga = ::SELECT_VGA ? 1 : 0;
+#else
+    const int vga = 0;
+#endif
+    for (uint8_t i = 0; i < kVmOptCount; i++)
+        if (kVmRows[i].vm == vm) return vmRowHz(kVmRows[i], (unsigned)Stage::get(SET_CPU_MHZ), vga);
+    return 0;
+}
+
 // The video-mode list carries the PIO divider each mode would run at, because that
 // divider is the whole point of the "fast" set and of the VGA pixel clocks: an
 // integer one repeats its phase per pixel, a fractional one jitters (1.5 is the
@@ -458,8 +472,8 @@ static const Option opt_dma[] = {
     { "Off",           0 },
     // The value picks the counting behaviour, not the port: both answer on
     // #0B and #6B (Ports.cpp). DATA-GEAR is a real Zilog chip -> value 1.
-    { "Z80 DMA (MB-02+/DATA-GEAR)", 1 },
-    { "zxnDMA (Next)",              2 },
+    { "Z80 DMA", 1 },
+    { "zxnDMA",  2 },
 };
 
 // ── Overclock: every value here is read once at boot ───────────────────────────
@@ -1068,6 +1082,14 @@ static const Option opt_esxdos[] = {
     { "DivSD",  3 },
 };
 
+// Values ARE Config::mouse_swap. Auto: the first button the user presses this session
+// becomes LEFT (kept until F12 — a machine reset does not forget it).
+static const Option opt_mouse_swap[] = {
+    { "Auto (1st press = left)", 2, "Auto" },
+    { "On",   1 },
+    { "Off",  0 },
+};
+
 // Kempston mouse sensitivity: the value IS Config::mouse_sens, a Q8 multiplier on the
 // raw HID counts (256 = one counter step per count), so the row order is free. x1/4 is
 // what mouse_apply()'s divisor always was — every other entry is new ground.
@@ -1085,7 +1107,7 @@ static const Option opt_mouse_sens[] = {
 // ZEsarUX and the Next put the RIGHT button on D0, UnrealSpeccy and software tested
 // on it (Port Demonstration 3.2) the LEFT one. Karabas-Pro's AVR has the same switch.
 static const Node kMouse[] = {
-    NM_BOOL  (TXT_HW_MOUSE_SWAP, SET_MOUSE_SWAP, nullptr),
+    NM_RADIO (TXT_HW_MOUSE_SWAP, SET_MOUSE_SWAP, opt_mouse_swap, nullptr),
     NM_RADIO (TXT_HW_MOUSE_SENS, SET_MOUSE_SENS, opt_mouse_sens, nullptr),
 };
 
@@ -1225,10 +1247,32 @@ static const Node kVga[] = {
     NM_RADIO(NM_IND TXT_VID_VGA_DITHER, SET_VGA_DITHER, opt_vga_dither, p_vgaDither),
 };
 
+// Video > Screen position: which 288 of the Pentagon's 304 visible lines the 720x576
+// window shows (top / paper / bottom border rows). Offered for the 288-row modes on a
+// Pentagon-raster machine (Pentagon 128/512/1024, TS-Conf, ZX Evolution in its
+// Pentagon raster); everywhere else the window stays 48/192/48.
+static const Option opt_screen_top[] = {
+    { "Even (48/192/48)",     0, "Even" },
+    { "Middle (60/192/36)",   1, "Middle" },
+    { "Full top (64/192/32)", 2, "Full top" },
+};
+static bool p_screenTop() {
+    const int32_t vm = Stage::get(SET_VIDEO_MODE);
+    if (vm < 0) return false;
+    const uint8_t b = Config::baseVideoMode((uint8_t)vm);
+    if (b != Config::VM_720x576_50 && vm != Config::VM_800x600_X2 &&
+        vm != Config::VM_720x576_169 && vm != Config::VM_1440x576_X3) return false;
+    const int32_t m = Stage::get(SET_MACHINE);
+    const int a = (m < 0) ? (int)Config::arch : ((m >> 8) & 0xFF);
+    if (a == A_PENT || a == A_P512 || a == A_P1024 || a == A_TSCONF) return true;
+    return (a == (int)Config::arch) && Config::isEvoPentRaster();   // BaseConf / ScorpEvo, live
+}
+
 static const Node kVideo[] = {
     NM_RADIO_D(TXT_VID_MODE,     SET_VIDEO_MODE, video_modeOpts, nullptr),
     NM_SUB  (TXT_VID_HDMI,       kHdmi,          p_hdmiOut),
     NM_SUB  (TXT_VID_VGA,        kVga,           p_vgaOut),
+    NM_RADIO(TXT_VID_SCREEN_TOP, SET_SCREEN_TOP, opt_screen_top, p_screenTop),
     NM_BOOL (TXT_VID_BORDER,     SET_BORDER,     nullptr),
     // Border-timing aid: No = the paper area is not rendered; the border state
     // machine paints through it, showing the border colour "under" the paper as
@@ -1261,11 +1305,9 @@ static bool p_gsAvail() { return Buffer::gsPsramAvailable(); }
 // the RAM pick is NeoGS only (classic GS stays on its 2 MB default).
 static bool p_gsClassic() { return p_gsAvail() && Stage::get(SET_GS_MODE) == 1; }
 static bool p_gsNeo()     { return p_gsAvail() && Stage::get(SET_GS_MODE) == 2; }
-// Clock is two rows sharing one label — the classic table (12..24 MHz) and the
-// NeoGS one (Auto + the four CKSEL rates) have no values in common. They are
-// mutually exclusive by VISIBILITY rather than greyed like their neighbours,
-// because both being visible would put two identical "Clock" lines on screen.
-// Off still shows the classic row greyed, as before.
+// Clock is classic-GS only: NeoGS has no Clock row (owner, 2026-10-14 — it only
+// works properly on Auto, the firmware's own CKSEL pick, which Config::load now
+// forces). Hidden for NeoGS, greyed for Off, as before.
 static bool p_gsClockCls() { return p_gsAvail() && Stage::get(SET_GS_MODE) != 2; }
 
 // values ARE Config::gs_enabled. Built at runtime (NM_RADIO_D) because NeoGS is
@@ -1315,20 +1357,6 @@ static const Option opt_gs_clock[] = {          // values are Config::gs_clock i
     { "14 MHz", 2 },
     { "20 MHz", 3 },
     { "24 MHz", 4 },
-};
-
-// NeoGS clock. "Auto" is the real behaviour — the card's firmware picks one of
-// these four through GSCFG0 CKSEL. Forcing a lower one emulates a card clocked
-// down: the 37.5 kHz DAC tick is a divider of the clock, so pitch and tempo do
-// not move, only the firmware's T-state budget per sample. Worth doing because
-// the emulated GS-Z80 needs the whole of core1 to sustain 24 MHz at 504 MHz and
-// cannot reach it at 378 — a starved producer crackles, a slower card does not.
-static const Option opt_ngs_clock[] = {         // values ARE Config::ngs_clock
-    { "Auto (fw)", 0 },
-    { "24 MHz",    1 },
-    { "20 MHz",    2 },
-    { "12 MHz",    3 },
-    { "10 MHz",    4 },
 };
 
 // ── MIDI ───────────────────────────────────────────────────────────────────────
@@ -1405,7 +1433,6 @@ static const Node kAudio[] = {
                 opt_midi_bank_hints, p_hasSD, p_midiDls),
     NM_RADIO_D (TXT_AUD_GS,          SET_GS_MODE,  gs_modeOpts,  p_gsAvail),
     NM_RADIO_EN(NM_IND TXT_GS_CLOCK, SET_GS_CLOCK,  opt_gs_clock,  p_gsClockCls, p_gsClassic),
-    NM_RADIO   (NM_IND TXT_GS_CLOCK, SET_NGS_CLOCK, opt_ngs_clock, p_gsNeo),
     NM_RADIO_DE(NM_IND TXT_GS_RAM,   SET_GS_RAM,    gs_ramOpts,    p_gsAvail, p_gsNeo),
     NM_RADIO   (TXT_AUD_BOOST,       SET_AUDIO_BOOST, opt_boost,  nullptr),
     NM_SUB     (TXT_AUD_PLAYER,      kPlayerOpts,     p_player),
