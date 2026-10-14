@@ -166,6 +166,9 @@ private:
     static void emitRow(int row);          // post / draw one fb row
     static void emitRowBody(int row);     // NEXT_TRACE: emitRow's body, timed
     static void renderRowSegments(int row); // core0: a row with mid-line copper palette writes
+    static bool segPost(int row, NextLineState& st);   // ...posted to the queue instead
+    static bool segPostBody(int row, NextLineState& st);   // NEXT_TRACE: segPost's body
+    static void segCompose(int row, unsigned start, unsigned mask, int n, bool pool);
     static bool computeGeometry();         // firstVisibleLine/paperTopRow (50/60 Hz)
     static void RenderLine(int row);
     static void RenderLayers(uint8_t* fb, int row);   // RenderLine's body, linear pixel order

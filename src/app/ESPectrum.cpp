@@ -4908,6 +4908,16 @@ void ESPectrum::loop() {
 
     totalsecondsnodelay += elapsed;
 
+    if (!maxSpeed && Z80Ops::isNext && !Config::v_sync_enabled && idle > 0) {
+      // The Next renders on core1; rows it has not reached yet are rendered
+      // here while core0 would only wait (NEXTVID::c0Help, one row a call).
+      // TX-1696 at 576p, sprite-heavy scenes: core1 22 ms a frame, core0 14
+      // (hw 2026-10-13). A row costs < 0.1 ms, so the deadline holds.
+      const int64_t e = (int64_t)ts_start + (int64_t)target - 200;
+      while ((int64_t)time_us_64() < e && NEXTVID::c0Help()) {}
+      const int64_t rem = target - (int64_t)(time_us_64() - ts_start);
+      idle = rem > 0 ? rem : 0;
+    }
     if (!maxSpeed) {
       // ZiFi over USB-CDC: the frame-pacing waits below are the longest no-pump
       // windows in the whole loop (up to ~13 ms busy-NOP) — long enough for a
@@ -4929,6 +4939,8 @@ void ESPectrum::loop() {
           // The SD mailbox does have to stay: the GS-Z80 blocks on it.
           if (GS::neogs) NgsSd::service();
           Debug::pumpUart();
+          // the Next: render a queued row here instead of spinning (c0Help)
+          if (Z80Ops::isNext && !v_sync) NEXTVID::c0Help();
           // A TS-Conf palette change waiting for the beam to reach its row
           // (VIDEO::tsPalettePoll): the beam moves while we wait here.
           if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);

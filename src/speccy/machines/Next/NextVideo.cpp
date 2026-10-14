@@ -211,6 +211,7 @@ struct NxCtx {
     // mix (NXModPlayer: L2 on, all transparent, no sprites — mix 8.8 of 24 ms of
     // core1 a frame, hw 2026-10-10).
     bool     rowL2, rowSpr;
+    int16_t  sprX0, sprX1;     // fb x span [x0, x1) of this row's opaque sprite pixels (rowSpr)
     bool     sample;           // NEXT_TRACE: this row is timed
 };
 static NxBand s_band[2] = { { nullptr, 0xFFFFFFFFu, -1000, 0 }, { nullptr, 0xFFFFFFFFu, -1000, 0 } };
@@ -234,6 +235,8 @@ static inline __attribute__((always_inline, const)) NxCtx* nxCtx() {
 #define s_dx1     (nxCtx()->dx1)
 #define nxRowL2   (nxCtx()->rowL2)
 #define nxRowSpr  (nxCtx()->rowSpr)
+#define nxSprX0   (nxCtx()->sprX0)
+#define nxSprX1   (nxCtx()->sprX1)
 #if NEXT_TRACE
 #define nx_layer_sample (nxCtx()->sample)
 #endif
@@ -401,6 +404,23 @@ static constexpr int NX_PAL_DELTAS = 32;
 static NxPalDelta s_pd[NX_PAL_DELTAS];
 static uint8_t  s_pdn = 0;
 static bool     s_pdRec = false;       // ScanlineWork is inside the line's copper span
+// A row with copper palette writes goes to the queue with its deltas (segPost):
+// copied into a pool beside the ring, the ring slot names them (nx_segOf: pool
+// start << 6 | count, 0 = an ordinary row). Such a row is rendered by ONE core
+// with the other idle (it rolls the shared palette back and forward), so the
+// claim waits for the other core and blocks the next claim (nx_segRun) — far
+// cheaper than the old full drain on core0 (TX-1696: ~14 rows a frame, 10 ms
+// of core0 a frame waiting, hw 2026-10-13). Pool full = the old drain path.
+static constexpr unsigned NX_SEG_POOL = 256;      // deltas, power of two
+static constexpr unsigned NX_SEG_Q    = 32;       // posted segment rows in flight
+struct NxSegRec { uint32_t job, end; };
+static NxPalDelta* s_segPool = nullptr;           // [NX_SEG_POOL]  (queue heap block)
+static uint16_t*   nx_segOf  = nullptr;           // [NEXT_C1_RING]
+static NxSegRec*   s_segQ    = nullptr;           // [NX_SEG_Q]
+static uint32_t    s_segW = 0, s_segRel = 0, s_segQh = 0, s_segQt = 0;
+static uint16_t    s_segPost = 0;                 // emitRow: the row being posted carries this
+static volatile uint8_t  nx_segRun = 0;           // a segment row is being rendered
+static uint16_t          s_jobSeg[2] = { 0, 0 };  // per core: the claimed job's segment word
 static int32_t  s_copT = 0;            // copper clock, 28 MHz = 1/4 hc_ula, in the line being run
 static int16_t  s_copXBase = 0;        // fb x of hc_ula 0 for the line being run
 static const NextLineState* s_preCap = nullptr;   // emitRow: state already captured
@@ -445,7 +465,10 @@ __attribute__((noinline)) IRAM_ATTR bool NEXTVID::rowClaim(unsigned core, uint32
         __dmb();
         const uint32_t j = nx_ring[c % NEXT_C1_RING];
         const NextLineState& st = nx_st[j >> 16];
-        if (core == 0 && st.hires == 1) {
+        const uint16_t seg = nx_segOf ? nx_segOf[c % NEXT_C1_RING] : 0;
+        if (nx_segRun) {
+            ok = false;                       // the other core rolls the palette back right now
+        } else if (core == 0 && st.hires == 1) {
             ok = false;                       // Timex hi-res: one shared row scratch (hiresRow)
         } else if (!nx_busy[core ^ 1]) {
             sprApply(st.sprSeq);              // nobody renders: move the logs on
@@ -453,9 +476,11 @@ __attribute__((noinline)) IRAM_ATTR bool NEXTVID::rowClaim(unsigned core, uint32
             if (sprR->dirty) resolveSprites();
             ok = true;
         } else {
-            ok = (int32_t)(st.sprSeq - spr_app) <= 0 && (int32_t)(st.palSeq - pal_app) <= 0 && !sprR->dirty;
+            ok = !seg && (int32_t)(st.sprSeq - spr_app) <= 0 && (int32_t)(st.palSeq - pal_app) <= 0 && !sprR->dirty;
         }
         if (ok) {
+            s_jobSeg[core] = seg;
+            if (seg) nx_segRun = 1;
             job = j;
             nx_jobAt[core] = c;
             nx_busy[core] = 1;
@@ -473,6 +498,7 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::rowRelease(unsigned core) {
     __dmb();                                  // the row is written before it is released
     spin_lock_unsafe_blocking(nx_lock);
     nx_busy[core] = 0;
+    if (s_jobSeg[core]) { s_jobSeg[core] = 0; nx_segRun = 0; }
     const uint32_t r = nx_busy[core ^ 1] ? nx_jobAt[core ^ 1] : nx_c;
     if ((int32_t)(r - nx_r) > 0) nx_r = r;
     spin_unlock_unsafe(nx_lock);
@@ -483,6 +509,10 @@ static volatile uint8_t s_frameSeq;   // walks the layer-timing sample across th
 #endif
 __attribute__((noinline)) IRAM_ATTR void NEXTVID::renderJob(uint32_t j) {
     LS = &nx_st[j >> 16];
+    if (const uint16_t seg = s_jobSeg[*(const uint32_t*)SIO_BASE & 1]) {
+        segCompose((int)(j & 0xFFFF), seg >> 6, NX_SEG_POOL - 1, seg & 63, true);
+        return;
+    }
 #if NEXT_TRACE
     // every 16th job, shifted by one each frame: 240 rows a frame keep a plain
     // /16 counter on the same rows every frame (and rows 0, 16, 32... are
@@ -527,9 +557,10 @@ static constexpr unsigned NX_C0_LINES = 384 + 4 * 768 + 768 + 768 + 384;
 static constexpr unsigned NX_C0_BAND  = 320 * 8;
 static uint8_t* s_c0Band = nullptr;
 static uint32_t s_c0Retry = 0;   // frames until the next allocation attempt
-// Plain heap with a 3 KB margin, not HOT_SRAM's 8 KB: this block is freed on
-// every menu / F5 entry (nm::gfxBegin -> helperFree), and a trace build at
-// NEXTEST had ~13 KB left after the 640 tables — never enough for the 8 KB rule.
+// Plain heap with a 3 KB margin, not HOT_SRAM's 8 KB: a trace build at NEXTEST
+// had ~13 KB left after the 640 tables — never enough for the 8 KB rule. Taken
+// at the first Next frame in every mode and kept across menu visits (it was
+// freed on each, and a fragmented heap then had no room to take it back).
 extern "C" size_t getLargestAllocatable(void);
 static uint8_t* nxC0Sram(unsigned n) {
     if (getLargestAllocatable() < n + 3072) return nullptr;
@@ -584,7 +615,10 @@ void NEXTVID::helperFree() {
 // Perf baseline (NEXT perf: line): how often and how long core0 waits for
 // core1's line queue, and how long core1 spends rendering.
 volatile uint32_t g_nx_drain_n = 0, g_nx_drain_us = 0, g_nx_c1_us = 0;
-volatile uint32_t g_nx_drain_src[4] = {};    // waits per source (c1Drain's src)
+// c1DrainRange waits by reason (0 L2, 1 map, 2 defs, 3 ULA/LoRes): count, us,
+// lines waited for; and the 4 commonest DMA targets (bank << 16 | o0 hi | o1 hi).
+volatile uint32_t g_nx_dmaw[4][3] = {}, g_nx_dmaw_key[4][2] = {}, g_nx_dmaw_sh = 0;
+volatile uint32_t g_nx_drain_src[8] = {};    // waits per source: c1Drain's src, 4 = DMA range, 5 = sprite log full
 #endif
 IRAM_ATTR void NEXTVID::c1Drain(uint8_t src) {
     (void)src;
@@ -598,7 +632,7 @@ IRAM_ATTR void NEXTVID::c1Drain(uint8_t src) {
     }
 #if NEXT_TRACE
     g_nx_drain_n = g_nx_drain_n + 1;
-    g_nx_drain_src[src & 3] = g_nx_drain_src[src & 3] + 1;
+    g_nx_drain_src[src & 7] = g_nx_drain_src[src & 7] + 1;
     g_nx_drain_us = g_nx_drain_us + (uint32_t)(time_us_64() - t0);
 #endif
 }
@@ -624,11 +658,14 @@ static void __not_in_flash_func(nxWaitUntil)(uint32_t w1) {
 static bool nxRangeHit(uint8_t b, uint32_t a0, uint32_t a1, uint8_t bank, uint16_t o0, uint16_t o1) {
     return b == bank && a0 <= o1 && a1 >= o0;
 }
-static bool nxLineReads(const NextLineState& st, int row, int paperTop, uint8_t bank, uint16_t o0, uint16_t o1) {
+// what a posted line reads in [o0, o1]: 0 nothing, 1 Layer 2, 2 tilemap map row,
+// 3 tile definitions, 4 ULA / LoRes (the NEXT dmaw trace splits the waits by it)
+static int nxLineReads(const NextLineState& st, int row, int paperTop, uint8_t bank, uint16_t o0, uint16_t o1,
+                       bool withMap = true, bool noDefs = false) {
     // Layer 2 (NR 0x12, 3 banks, 5 in 320/640 modes)
     if ((st.p123B & 0x02) || (st.r69 & 0x80)) {
         const uint8_t l2 = st.r12 & 0x7F, n = (st.r70 & 0x30) ? 5 : 3;
-        if (bank >= l2 && bank < l2 + n) return true;
+        if (bank >= l2 && bank < l2 + n) return 1;
     }
     // tilemap: this line's map row + the definitions
     if (st.r6B & 0x80) {
@@ -638,33 +675,182 @@ static bool nxLineReads(const NextLineState& st, int row, int paperTop, uint8_t 
             const int rowBytes = ((st.r6B & 0x40) ? 80 : 40) * ((st.r6B & 0x20) ? 1 : 2);
             const uint8_t sy = (uint8_t)(ty + st.r31);
             const uint32_t m0 = ((uint32_t)(st.r6E & 0x3F) << 8) + (uint32_t)(sy >> 3) * rowBytes;
-            if (m0 + rowBytes > 0x4000) { if (mb == bank) return true; }   // wraps: whole bank
-            else if (nxRangeHit(mb, m0, m0 + rowBytes - 1, bank, o0, o1)) return true;
+            if (!withMap) {}
+            else if (m0 + rowBytes > 0x4000) { if (mb == bank) return 2; }   // wraps: whole bank
+            else if (nxRangeHit(mb, m0, m0 + rowBytes - 1, bank, o0, o1)) return 2;
             const uint32_t d0 = (uint32_t)(st.r6F & 0x3F) << 8;
             const uint32_t dl = (st.r6B & 0x08) ? 0x800 : (st.r6B & 0x02) ? 0x4000 : 0x2000;   // text / 512 / 256 tiles
-            if (d0 + dl > 0x4000) { if (db == bank) return true; }
-            else if (nxRangeHit(db, d0, d0 + dl - 1, bank, o0, o1)) return true;
+            if (noDefs) {}
+            else if (d0 + dl > 0x4000) { if (db == bank) return 3; }
+            else if (nxRangeHit(db, d0, d0 + dl - 1, bank, o0, o1)) return 3;
         }
     }
     // ULA / LoRes: paper rows only, unless the ULA is off
     const int y = row - paperTop;
     if (y >= 0 && y < 192 && !(st.r68 & 0x80)) {
         const uint8_t ub = (st.grmem == MemESP::ram[7].direct()) ? 7 : 5;
-        if (ub != bank) return false;
+        if (ub != bank) return 0;
         if (st.r15 & 0x80) {
             const uint8_t ly = (uint8_t)((y + st.r33) % 192);
             if (st.r6A & 0x20) {                       // Radastan: 64 bytes a row pair
                 const uint32_t a = (((st.r69 ^ (st.r6A >> 4)) & 1) ? 0x2000 : 0) + (uint32_t)(ly >> 1) * 64;
-                return nxRangeHit(ub, a, a + 63, bank, o0, o1);
+                return nxRangeHit(ub, a, a + 63, bank, o0, o1) ? 4 : 0;
             }
             const uint8_t ry = ly >> 1;
             const uint32_t a = ry < 48 ? (uint32_t)ry * 128 : 0x2000 + (uint32_t)(ry - 48) * 128;
-            return nxRangeHit(ub, a, a + 127, bank, o0, o1);
+            return nxRangeHit(ub, a, a + 127, bank, o0, o1) ? 4 : 0;
         }
-        if (nxRangeHit(ub, 0, 0x1AFF, bank, o0, o1)) return true;
-        if ((st.r69 & 0x03) || st.hires == 1) return nxRangeHit(ub, 0x2000, 0x3AFF, bank, o0, o1);
+        if (nxRangeHit(ub, 0, 0x1AFF, bank, o0, o1)) return 4;
+        if ((st.r69 & 0x03) || st.hires == 1) return nxRangeHit(ub, 0x2000, 0x3AFF, bank, o0, o1) ? 4 : 0;
+    }
+    return 0;
+}
+
+// ── Tilemap map-row shadows (copy-on-write for the batched DMA) ──────────────
+// TX-1696 DMAs map rows (bank 5 0x1A00-0x1CFF) right behind the raster, ~15
+// times a frame; the posted lines still to be rendered read the OLD row. Waiting
+// for them (c1DrainRange) cost core0 ~9 ms a frame at 576p (hw 2026-10-13). So
+// the old row is copied here before the write instead: a line whose job index
+// is <= `until` reads the copy (the oldest copy that covers it), later lines
+// read guest RAM. An entry is free once nx_r has passed `until`. Writer core0,
+// readers both renderers (renderJob only: nx_busy set). Publication order:
+// live = 0, fields + data, live = 1; a reader reads key/until, then live.
+struct NxMapShadow {
+    volatile uint32_t until;      // newest job index that reads this copy
+    volatile uint32_t key;        // bank << 16 | offset in the bank
+    volatile uint8_t  live;
+    uint8_t  n;                   // row bytes (<= 160)
+    uint8_t  data[160];
+};
+static constexpr int NX_MAP_SH = 32;
+static NxMapShadow* s_mapSh = nullptr;            // [NX_MAP_SH] (queue heap block)
+static volatile uint8_t s_mapShLive = 0;          // any entry possibly live (renderer fast test)
+
+// the tilemap map row a posted line reads: false = none (tilemap off / out of range)
+static bool nxLineMapRow(const NextLineState& st, int row, int paperTop, uint8_t& bank, uint32_t& m0, int& rowBytes) {
+    if (!(st.r6B & 0x80)) return false;
+    const int ty = row - (paperTop - 32);
+    if (ty < 0 || ty >= 256) return false;
+    bank = (st.r6E & 0x80) ? 7 : 5;
+    rowBytes = ((st.r6B & 0x40) ? 80 : 40) * ((st.r6B & 0x20) ? 1 : 2);
+    const uint8_t sy = (uint8_t)(ty + st.r31);
+    m0 = ((uint32_t)(st.r6E & 0x3F) << 8) + (uint32_t)(sy >> 3) * rowBytes;
+    return m0 + rowBytes <= 0x4000;
+}
+
+// renderer: the copy of this map row the current job must read, or `live`
+__attribute__((noinline)) static const uint8_t* nxMapRowFor(uint8_t bank, uint32_t off, const uint8_t* live) {
+    const unsigned core = *(const uint32_t*)SIO_BASE & 1;
+    if (!nx_busy[core] || !s_mapSh) return live;
+    const uint32_t job = nx_jobAt[core];
+    const uint32_t key = ((uint32_t)bank << 16) | off;
+    const NxMapShadow* best = nullptr;
+    uint32_t bestUntil = 0;
+    for (int k = 0; k < NX_MAP_SH; k++) {
+        const NxMapShadow& e = s_mapSh[k];
+        const uint32_t u = e.until, kk = e.key;
+        __dmb();
+        if (!e.live || kk != key || (int32_t)(u - job) < 0) continue;
+        if (!best || (int32_t)(u - bestUntil) < 0) { best = &e; bestUntil = u; }
+    }
+    return best ? best->data : live;
+}
+
+// core0: the copy of map row (bank, off) posted job `job` will read, or `live`
+static const uint8_t* nxMapRowForJob(uint8_t bank, uint32_t off, const uint8_t* live, uint32_t job) {
+    if (!s_mapSh || !s_mapShLive) return live;
+    const uint32_t key = ((uint32_t)bank << 16) | off;
+    const NxMapShadow* best = nullptr;
+    uint32_t bestUntil = 0;
+    for (int k = 0; k < NX_MAP_SH; k++) {
+        const NxMapShadow& e = s_mapSh[k];
+        if (!e.live || e.key != key || (int32_t)(e.until - job) < 0) continue;
+        if (!best || (int32_t)(e.until - bestUntil) < 0) { best = &e; bestUntil = e.until; }
+    }
+    return best ? best->data : live;
+}
+
+// core0: does posted line (st, row, job) draw a tile whose definition lies in
+// [o0, o1] of `bank`? Every tilemap line "reads" the whole definition area, so
+// the coarse test makes a DMA into ONE animated tile wait for the whole queue
+// (TX-1696: 20-50 such waits a second at 576p, hw 2026-10-13). Conservative:
+// any doubt (wrapping map row, text attribute modes) answers true.
+static bool nxLineUsesTiles(const NextLineState& st, int row, int paperTop, uint32_t job,
+                            uint8_t bank, uint16_t o0, uint16_t o1) {
+    uint8_t mb; uint32_t m0; int n;
+    if (!nxLineMapRow(st, row, paperTop, mb, m0, n)) return true;
+    const uint8_t db = (st.r6F & 0x80) ? 7 : 5;
+    if (db != bank) return false;
+    const bool text = st.r6B & 0x08, noAttr = st.r6B & 0x20, m512 = st.r6B & 0x02;
+    const uint32_t d0 = (uint32_t)(st.r6F & 0x3F) << 8;
+    const uint32_t tsz = text ? 8 : 32;
+    if (o1 < d0) return false;
+    const uint32_t lo = (o0 > d0 ? o0 - d0 : 0) / tsz, hi = (uint32_t)(o1 - d0) / tsz;   // tile numbers written
+    const uint8_t* live = MemESP::ram[mb].direct() + m0;
+    const uint8_t* e = nxMapRowForJob(mb, m0, live, job);
+    const int es = noAttr ? 1 : 2, cnt = n / es;
+    for (int i = 0; i < cnt; i++) {
+        uint32_t t = e[i * es];
+        if (m512 && !noAttr) t |= (uint32_t)(e[i * es + 1] & 1) << 8;
+        else if (m512) return true;          // 512 tiles without attributes: bit 8 from NR 0x6C
+        if (t >= lo && t <= hi) return true;
     }
     return false;
+}
+
+// core0: copy map row (bank, m0) for the posted jobs up to `until`. false = no
+// free entry (the caller waits instead).
+static bool nxMapShadowTake(uint8_t bank, uint32_t m0, int n, uint32_t until) {
+    const uint32_t key = ((uint32_t)bank << 16) | m0;
+    int freeK = -1;
+    for (int k = 0; k < NX_MAP_SH; k++) {
+        NxMapShadow& e = s_mapSh[k];
+        if (e.live && (int32_t)(nx_r - e.until) > 0) e.live = 0;       // all its lines rendered
+        if (e.live && e.key == key && e.until == until) return true;   // already copied for them
+        if (!e.live && freeK < 0) freeK = k;
+    }
+    if (freeK < 0) return false;
+    NxMapShadow& e = s_mapSh[freeK];
+    e.live = 0;
+    __dmb();
+    e.key = key; e.until = until; e.n = (uint8_t)n;
+    memcpy(e.data, MemESP::ram[bank].direct() + m0, n);
+    __dmb();
+    e.live = 1;
+    s_mapShLive = 1;
+    return true;
+}
+
+// core0: the DMA is about to write [o0, o1] of `bank`. If the only posted lines
+// that read it read it as a tilemap MAP ROW, copy those rows and return true
+// (no wait). Anything else (Layer 2, tile definitions, ULA, no free entry):
+// false, the caller waits as before.
+static bool nxMapShadowCover(uint8_t bank, uint16_t o0, uint16_t o1, int paperTop) {
+    if (!s_mapSh) return false;
+    const uint32_t r = nx_r;
+    // pass 1: is every hit a map-row hit? (newest job first, as c1DrainRange)
+    struct { uint32_t m0, until; int n; } rows[16];
+    int nr = 0;
+    for (uint32_t i = nx_w; i != r; ) {
+        i--;
+        if ((int32_t)(nx_r - i) > 0) break;
+        const uint32_t j = nx_ring[i % NEXT_C1_RING];
+        const NextLineState& st = nx_st[j >> 16];
+        const int row = (int)(j & 0xFFFF);
+        if (nxLineReads(st, row, paperTop, bank, o0, o1, false)) return false;
+        uint8_t mb; uint32_t m0; int n;
+        if (!nxLineMapRow(st, row, paperTop, mb, m0, n)) continue;
+        if (mb != bank || !nxRangeHit(mb, m0, m0 + n - 1, bank, o0, o1)) continue;
+        int k = 0;
+        for (; k < nr; k++) if (rows[k].m0 == m0) break;
+        if (k == nr) {
+            if (nr == 16) return false;
+            rows[nr++] = { m0, i, n };                // i: the newest job reading it
+        }
+    }
+    for (int k = 0; k < nr; k++)
+        if (!nxMapShadowTake(bank, rows[k].m0, rows[k].n, rows[k].until)) return false;
+    return true;
 }
 
 // core0, before guest RAM [o0, o1] of 16K bank `bank` is overwritten faster than
@@ -673,20 +859,38 @@ static bool nxLineReads(const NextLineState& st, int row, int paperTop, uint8_t 
 // tilemap rows a frame by DMA; a full drain each cost 2.5-3.4 ms, hw 2026-10-09).
 void NEXTVID::c1DrainRange(uint8_t bank, uint16_t o0, uint16_t o1) {
     if (!g_next_c1_live) return;
+    if (nxMapShadowCover(bank, o0, o1, paperTopRow)) {
+#if NEXT_TRACE
+        g_nx_dmaw_sh = g_nx_dmaw_sh + 1;
+#endif
+        return;
+    }
     const uint32_t r = nx_r;
     for (uint32_t i = nx_w; i != r; ) {
         i--;
         if ((int32_t)(nx_r - i) > 0) return;   // core1 already past it
         const uint32_t j = nx_ring[i % NEXT_C1_RING];
-        if (nxLineReads(nx_st[j >> 16], (int)(j & 0xFFFF), paperTopRow, bank, o0, o1)) {
+        int why = nxLineReads(nx_st[j >> 16], (int)(j & 0xFFFF), paperTopRow, bank, o0, o1);
+        if (why == 3 && !nxLineUsesTiles(nx_st[j >> 16], (int)(j & 0xFFFF), paperTopRow, i, bank, o0, o1))
+            why = nxLineReads(nx_st[j >> 16], (int)(j & 0xFFFF), paperTopRow, bank, o0, o1, true, true);
+        if (why) {
 #if NEXT_TRACE
             const uint32_t t0 = timer_hw->timerawl;
+            const uint32_t lines = i + 1 - nx_r;
 #endif
             nxWaitUntil(i + 1);
 #if NEXT_TRACE
+            const uint32_t dt = timer_hw->timerawl - t0;
             g_nx_drain_n = g_nx_drain_n + 1;
-            g_nx_drain_src[0] = g_nx_drain_src[0] + 1;
-            g_nx_drain_us = g_nx_drain_us + (timer_hw->timerawl - t0);
+            g_nx_drain_src[4] = g_nx_drain_src[4] + 1;
+            g_nx_drain_us = g_nx_drain_us + dt;
+            g_nx_dmaw[(why - 1) & 3][0]++;                    // 0 L2, 1 map, 2 defs, 3 ULA/LoRes
+            g_nx_dmaw[(why - 1) & 3][1] += dt;
+            g_nx_dmaw[(why - 1) & 3][2] += lines;
+            const uint32_t key = ((uint32_t)bank << 16) | (o0 & 0xFF00) | (o1 >> 8);
+            int k = 0;
+            for (; k < 4; k++) if (g_nx_dmaw_key[k][0] == key || g_nx_dmaw_key[k][0] == 0) break;
+            if (k < 4) { g_nx_dmaw_key[k][0] = key; g_nx_dmaw_key[k][1]++; }
 #endif
             return;
         }
@@ -936,7 +1140,6 @@ static void p80RemapPal(const uint8_t old[16]) {
 
 void NEXTVID::pairForceOff() {
     if (!p80Live) return;
-    helperFree();
     c1Drain();
     {
         // back to palette indices: each byte shows its left pixel's colour
@@ -952,6 +1155,9 @@ void NEXTVID::pairForceOff() {
 
 void NEXTVID::pairPoll() {
     const uint8_t* r = NextReg::reg;
+    // core0's own row scratch in EVERY mode now, not only the 640 pair frame:
+    // it renders queued rows in its frame-pacing idle as well (ESPectrum::loop)
+    nxHelperAlloc();
     {
         // the frame shows a 256-line window: move the fb window with the
         // program's own screen change, at the frame boundary
@@ -1088,7 +1294,16 @@ IRAM_ATTR bool NEXTVID::nrHot(uint8_t r, uint8_t v) {
 IRAM_ATTR void NEXTVID::setLutEntry(uint8_t pal, uint8_t idx, uint16_t rgb333) {
     if (s_pdRec && s_pdn < NX_PAL_DELTAS) {
         const int x = s_copXBase + (s_copT >> 2);
-        if (x < (int)VIDEO::vga.xres)
+        // A write that lands before the first pixel its palette can colour
+        // splits nothing: the ULA palette also paints the border (x 0), the
+        // Layer 2 / sprite / tilemap ones start at the 320-wide area's left edge
+        // (pal = NR 0x43 bits 6:4, xx0 = ULA). Such writes come before the
+        // row's capture (hc 140), so the captured palette already has them.
+        // TX-1696: 3 tilemap-palette writes at x 13..16 on 14 rows a frame —
+        // at 576p the tilemap starts at x 20, and every one cost a full extra
+        // pass of the row (4 renders a row; at 480p it starts at x 0, none).
+        const int first = (pal & 3) ? xPaperOff - 32 : 0;
+        if (x > first && x < (int)VIDEO::vga.xres)
             s_pd[s_pdn++] = { (uint16_t)(x < 0 ? 0 : x), pal, idx, cRaw[pal][idx], rgb333 };
     }
     cRaw[pal][idx] = rgb333;
@@ -1413,7 +1628,9 @@ void NEXTVID::Reset() {
         // PREFER_PSRAM again (2026-10-11 evening): read per sprite row, 8-16
         // contiguous bytes = one XIP line fill; 19 KB of SRAM heap was what kept
         // F5 and 720x576 out of reach of a Next session.
-        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        // HOT_SRAM again (2026-10-13): read per sprite row; the hot-page pool is
+        // off (NEXT_HOT_FRAMES 0), its heap pays for this block.
+        uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
         const unsigned sprSz = (sizeof(SprRender) + 3) & ~3u;
         // Two blocks, not one: the renderer state is read per sprite per line
         // (core1), the log only for the bytes written since the last line. As
@@ -1478,20 +1695,37 @@ void NEXTVID::Reset() {
         // palLog have always relied on: both cores see one coherent XIP cache,
         // so a state core0 wrote is visible to core1. Costs 9 216 B of SRAM
         // heap back; watch `c1=` / FPS and the `ring=` field of the NEXT line.
-        uint8_t* q = (uint8_t*)Buffer::palloc(4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
-                                              + 4 * NEXT_C1_STATES,
-                                              Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        // + the copper segment rows: 256 x 8 B deltas, 32 x 8 B records,
+        // 320 x 2 B ring tags = 2 944 B.
+        constexpr unsigned base = 4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
+                                + 4 * NEXT_C1_STATES;
+        constexpr unsigned segB = sizeof(NxPalDelta) * NX_SEG_POOL + sizeof(NxSegRec) * NX_SEG_Q
+                                + 2 * NEXT_C1_RING;
+        constexpr unsigned shB = sizeof(NxMapShadow) * NX_MAP_SH;   // map-row copies, 5.4 KB
+        static_assert(base % 4 == 0, "segment pool alignment");
+        // PSRAM (2026-10-14): read a few bytes a line, the 24 KB of SRAM bought ~nothing
+        // (TX-1696 at 576p) and cost the core0 row helper its place after a menu visit.
+        uint8_t* q = (uint8_t*)Buffer::palloc(base + segB + shB + 4, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         if (q) {
             nx_ring = (uint32_t*)q;
             nx_st = (NextLineState*)(q + 4 * NEXT_C1_RING);
             nx_st_job = (uint32_t*)(q + 4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES);
             memset(nx_st_job, 0, 4 * NEXT_C1_STATES);
+            s_segQ    = (NxSegRec*)(q + base);
+            s_segPool = (NxPalDelta*)(q + base + sizeof(NxSegRec) * NX_SEG_Q);
+            nx_segOf  = (uint16_t*)(q + base + sizeof(NxSegRec) * NX_SEG_Q + sizeof(NxPalDelta) * NX_SEG_POOL);
+            memset(nx_segOf, 0, 2 * NEXT_C1_RING);
+            s_mapSh = (NxMapShadow*)(q + ((base + segB + 3) & ~3u));
+            memset((void*)s_mapSh, 0, shB);
         }
         Debug::log("[NXC1] core1 line renderer %s @%08X", q ? "ON" : "unavailable (no RAM)", (unsigned)(uintptr_t)q);
     }
     nx_have = false;
     nx_c = nx_r = nx_w;               // drained above; a dead queue may have left a core "busy"
     nx_busy[0] = nx_busy[1] = 0;
+    nx_segRun = 0; s_jobSeg[0] = s_jobSeg[1] = 0;
+    s_segRel = s_segW; s_segQt = s_segQh;
+    if (s_mapSh) for (int k = 0; k < NX_MAP_SH; k++) s_mapSh[k].live = 0;
     g_next_c1_live = nx_ring != nullptr;
     if (firstReset)
         Debug::log("[NXV] video state took %u B of heap (%u -> %u)",
@@ -1823,8 +2057,10 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::ScanlineWork() {
             s_pdRec = false;
             if (draw) {
                 if (s_pdn) {
-                    nx_sync = st;
-                    renderRowSegments(row);
+                    if (!segPost(row, st)) {
+                        nx_sync = st;
+                        renderRowSegments(row);
+                    }
                 } else {
                     s_preCap = &st;
                     emitRow(row);
@@ -1877,6 +2113,7 @@ __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
     }
     if (g_next_c1_live) {
         nx_ring[nx_w % NEXT_C1_RING] = (uint32_t)row | (nx_cur << 16);
+        nx_segOf[nx_w % NEXT_C1_RING] = s_segPost;
         __dmb();                    // job + state visible before the index
         nx_w = nx_w + 1;
         nx_st_job[nx_cur] = nx_w;
@@ -1960,30 +2197,97 @@ __attribute__((noinline)) void NEXTVID::renderRowSegments(int row) {
     c1Drain(3);
     palApply(pal_w);              // line-end values, as the deltas below expect
     LS = &nx_sync;
+    segCompose(row, 0, 0xFFFFFFFFu, s_pdn, false);
+}
+
+// Post a copper-segmented row to the queue (see NX_SEG_POOL). false = no room
+// (pool / record ring full, or no queue): the caller takes the drain path.
+// The row's palette log position is the line END: the deltas' `neu` values are
+// the line-end palette, and segCompose rolls back from there.
+#if NEXT_TRACE
+// Copper segment rows, per second: [0] posted [1] drain fallback [2] deltas
+// [3] distinct x (= extra passes) [4] palette mask (bit = pal) [5] x min
+// [6] x max [7] deltas in the left border [8] deltas in the right border
+// [9] rows whose deltas are all outside the paper.
+volatile uint32_t g_nx_seg[10] = { 0, 0, 0, 0, 0, 0xFFFF, 0, 0, 0, 0 };
+static __attribute__((noinline)) void nxSegNote(bool posted, int xp) {
+    g_nx_seg[posted ? 0 : 1] = g_nx_seg[posted ? 0 : 1] + 1;
+    g_nx_seg[2] = g_nx_seg[2] + s_pdn;
+    int lastX = -1, outside = 0;
+    for (unsigned i = 0; i < s_pdn; i++) {
+        const int x = s_pd[i].x;
+        if (x != lastX) { g_nx_seg[3] = g_nx_seg[3] + 1; lastX = x; }
+        g_nx_seg[4] = g_nx_seg[4] | (1u << (s_pd[i].pal & 7));
+        if ((uint32_t)x < g_nx_seg[5]) g_nx_seg[5] = x;
+        if ((uint32_t)x > g_nx_seg[6]) g_nx_seg[6] = x;
+        if (x < xp) { g_nx_seg[7] = g_nx_seg[7] + 1; outside++; }
+        else if (x >= xp + 256) { g_nx_seg[8] = g_nx_seg[8] + 1; outside++; }
+    }
+    if (outside == (int)s_pdn) g_nx_seg[9] = g_nx_seg[9] + 1;
+}
+#endif
+
+__attribute__((noinline)) bool NEXTVID::segPost(int row, NextLineState& st) {
+#if NEXT_TRACE
+    const bool ok = segPostBody(row, st);
+    nxSegNote(ok, xPaperOff);
+    return ok;
+}
+__attribute__((noinline)) bool NEXTVID::segPostBody(int row, NextLineState& st) {
+#endif
+    if (!g_next_c1_live || !nx_segOf) return false;
+    const unsigned n = s_pdn;
+    while (s_segQt != s_segQh && (int32_t)(nx_r - s_segQ[s_segQt % NX_SEG_Q].job) > 0) {
+        s_segRel = s_segQ[s_segQt % NX_SEG_Q].end;      // rendered: its deltas are free
+        s_segQt++;
+    }
+    if (s_segQh - s_segQt >= NX_SEG_Q || s_segW + n - s_segRel > NX_SEG_POOL) return false;
+    const uint32_t start = s_segW;
+    for (unsigned i = 0; i < n; i++) s_segPool[(start + i) & (NX_SEG_POOL - 1)] = s_pd[i];
+    st.palSeq = pal_w;
+    s_segPost = (uint16_t)(((start & (NX_SEG_POOL - 1)) << 6) | n);   // n <= 32
+    s_preCap = &st;
+    emitRow(row);
+    s_preCap = nullptr;
+    s_segPost = 0;
+    s_segQ[s_segQh % NX_SEG_Q] = { nx_w - 1, start + n };
+    s_segQh++;
+    s_segW = start + n;
+    return true;
+}
+
+// Compose a row whose palette the copper rewrote mid-line: roll the palette back
+// to the line start, compose once per palette state, keep each pass's span. The
+// caller guarantees no other renderer reads the palette meanwhile (core0 after a
+// drain, or a queue claim with the other core idle and blocked).
+__attribute__((noinline)) void NEXTVID::segCompose(int row, unsigned start, unsigned mask, int n, bool pool) {
+    const NxPalDelta* const d = pool ? s_segPool : s_pd;
+#define D(i) d[(start + (unsigned)(i)) & mask]
     uint8_t* const lineBuf = nxCtx()->line;
     uint8_t acc[400];
     const int xres = VIDEO::vga.xres;
-    for (int i = s_pdn - 1; i >= 0; i--) {
-        rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].old; s_palMonoDirty[s_pd[i].pal] = 1;
-        lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].old & 0x1FF];
+    for (int i = n - 1; i >= 0; i--) {
+        rawPal[D(i).pal][D(i).idx] = D(i).old; s_palMonoDirty[D(i).pal] = 1;
+        lut[D(i).pal][D(i).idx] = remap[D(i).old & 0x1FF];
     }
     int x0 = 0, i = 0;
     while (x0 < xres) {
         // apply every write that takes effect at or before x0
-        while (i < s_pdn && s_pd[i].x <= x0) {
-            rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].neu; s_palMonoDirty[s_pd[i].pal] = 1;
-            lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].neu & 0x1FF];
+        while (i < n && D(i).x <= x0) {
+            rawPal[D(i).pal][D(i).idx] = D(i).neu; s_palMonoDirty[D(i).pal] = 1;
+            lut[D(i).pal][D(i).idx] = remap[D(i).neu & 0x1FF];
             i++;
         }
-        const int x1 = (i < s_pdn && s_pd[i].x < xres) ? s_pd[i].x : xres;
+        const int x1 = (i < n && D(i).x < xres) ? D(i).x : xres;
         RenderLayers(lineBuf, row);
         for (int x = x0; x < x1; x++) acc[x] = lineBuf[x];
         x0 = x1;
     }
-    for (; i < s_pdn; i++) {   // writes past the visible line: still the final palette
-        rawPal[s_pd[i].pal][s_pd[i].idx] = s_pd[i].neu; s_palMonoDirty[s_pd[i].pal] = 1;
-        lut[s_pd[i].pal][s_pd[i].idx] = remap[s_pd[i].neu & 0x1FF];
+    for (; i < n; i++) {   // writes past the visible line: still the final palette
+        rawPal[D(i).pal][D(i).idx] = D(i).neu; s_palMonoDirty[D(i).pal] = 1;
+        lut[D(i).pal][D(i).idx] = remap[D(i).neu & 0x1FF];
     }
+#undef D
     for (int x = 0; x < xres; x++) lineBuf[x] = acc[x];
     s_rowDiff = false;            // the right pixels were not kept per segment: solid pairs
     s_lineReady = true;
@@ -2470,12 +2774,12 @@ void nxUlaMerge(bool stencil, int xres) {
 template <int MODE, bool L2, bool MERGE = false>
 static IRAM_ATTR __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns")))
 void nxMixT(uint8_t* __restrict fb, const uint16_t* __restrict pu, const uint8_t* __restrict remap,
-            uint16_t fb9, int xres) {
+            uint16_t fb9, int xres, int x0 = 0) {
     const uint16_t* __restrict pl = nxL;
     const uint16_t* __restrict ps = nxS;
     const uint16_t* __restrict pt = nxT;
     if (MERGE) pu = nxU;
-    for (int x = 0; x < xres; x++) {
+    for (int x = x0; x < xres; x++) {
         const uint16_t l = L2 ? pl[x] : NX_TR, s = ps[x];
         uint16_t uf = pu[x];
         if (MERGE) {
@@ -2507,10 +2811,10 @@ void nxMixT(uint8_t* __restrict fb, const uint16_t* __restrict pu, const uint8_t
 template <bool MERGE>
 static IRAM_ATTR __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns")))
 void nxMixU(uint8_t* __restrict fb, const uint16_t* __restrict pu, const uint8_t* __restrict remap,
-            uint16_t fb9, int xres) {
+            uint16_t fb9, int xres, int x0 = 0) {
     const uint16_t* __restrict pt = nxT;
     if (MERGE) pu = nxU;
-    for (int x = 0; x < xres; x++) {
+    for (int x = x0; x < xres; x++) {
         uint16_t uf = pu[x];
         if (MERGE) {
             const uint16_t tv = pt[x];
@@ -2521,8 +2825,44 @@ void nxMixU(uint8_t* __restrict fb, const uint16_t* __restrict pu, const uint8_t
     }
 }
 
-static IRAM_ATTR void nxMixOrder(const NxMix& m, int xres, int mode) {
+#if NEXT_TRACE
+volatile uint32_t g_nx_mix_span = 0, g_nx_mix_spanRows = 0;   // sprite-span rows and their pixels
+#endif
+template <bool MERGE>
+static inline __attribute__((always_inline)) void nxMixSprSpan(const NxMix& m, const uint16_t* pu, int xres,
+                                                               int mode, int s0, int s1) {
+    // outside [s0, s1) no sprite pixel is opaque: every order reduces to nxMixU
+    if (s0 > 0) nxMixU<MERGE>(m.fb, pu, m.remap, m.fb9, s0);
+    switch (mode) {
+        case 0: nxMixT<0, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
+        case 1: nxMixT<1, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
+        case 2: nxMixT<2, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
+        case 3: nxMixT<3, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
+        case 4: nxMixT<4, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
+        default: nxMixT<5, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
+    }
+    if (s1 < xres) nxMixU<MERGE>(m.fb, pu, m.remap, m.fb9, xres, s1);
+}
+
+static IRAM_ATTR void nxMixOrder(const NxMix& m, int xres, int mode, bool span = false) {
     const uint16_t* pu;
+    if (span && !m.l2 && m.spr && !m.stencil) {
+        // sprites without Layer 2 (TX-1696 at 576p: ~100 sprite rows a frame,
+        // each a full nxUlaMerge pass + a full nxMixT pass): resolve the sprite
+        // layer only over its opaque span, the ULA/tilemap merge inline
+        int s0 = nxSprX0, s1 = nxSprX1;
+        if (s0 < 0) s0 = 0;
+        if (s1 > xres) s1 = xres;
+        if (s0 < s1) {
+#if NEXT_TRACE
+            g_nx_mix_span = g_nx_mix_span + (uint32_t)(s1 - s0);
+            g_nx_mix_spanRows = g_nx_mix_spanRows + 1;
+#endif
+            if (m.ulaEn && m.tm) nxMixSprSpan<true>(m, nxU, xres, mode, s0, s1);
+            else nxMixSprSpan<false>(m, m.ulaEn ? nxU : nxT, xres, mode, s0, s1);
+            return;
+        }
+    }
     if (!m.l2 && !m.spr) {
         if (m.ulaEn && m.tm && !m.stencil) { nxMixU<true>(m.fb, nxU, m.remap, m.fb9, xres); return; }
         if (m.ulaEn && m.tm) { nxUlaMerge(m.stencil, xres); pu = nxU; }
@@ -2694,11 +3034,10 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     if (!tmEn && !l2En && !(r15 & 0x01) && !(LS->r68 & 0x80)) {
         // ULA alone (NextZXOS, every 48K/128K title): the order is moot, only
         // transparency -> fallback is left of the mixer
-        const uint16_t fb9 = rgb332_to_333(LS->r4A);
-        for (int x = 0; x < xres; x++) {
-            const uint16_t u = nxU[x];
-            fb[x] = (u & NX_SLOT) ? (uint8_t)u : remap[((u & NX_TR) ? fb9 : u) & 0x1FF];
-        }
+        // the -O2 / __restrict loop: inline here (RenderLayers is -Os) every fb
+        // byte store reloaded remap and nxU — 7.5 ms of core1 a frame for 288
+        // rows of ULA alone (TX-1696's title screen at 576p, hw 2026-10-13)
+        nxMixU<false>(fb, nxU, remap, rgb332_to_333(LS->r4A), xres);
         NX_LT_END(4);
         return;
     }
@@ -2727,6 +3066,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     NX_LT_END(2);
     nxFillTr(nxS, xres);
     nxRowSpr = false;
+    nxSprX0 = 0; nxSprX1 = (int16_t)xres;
     if (r15 & 0x01) RenderSpritesLine(y);
     NX_LT_END(3);
 
@@ -2757,7 +3097,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
 #if NEXT_TRACE
     nxMixNote(m.l2, m.spr, p2, p2 ? dx1 - dx0 : 0);
 #endif
-    if (order < 6) nxMixOrder(m, xres, order);
+    if (order < 6) nxMixOrder(m, xres, order, !p2);
     else nxMixBlend(m, xres, order == 7);
     if (p2) {
         // the right pixels: same layers, the tilemap's odd phase, only over
@@ -3026,6 +3366,9 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
     int cols = cols80 ? 80 : 40;
     int entrySz = noAttr ? 1 : 2;
     const uint8_t* mrow = map + (sy >> 3) * cols * entrySz;
+    if (s_mapShLive)                      // a DMA rewrote map rows still owed to queued lines
+        mrow = nxMapRowFor((LS->r6E & 0x80) ? 7 : 5,
+                           (uint32_t)(LS->r6E & 0x3F) * 256 + (uint32_t)(sy >> 3) * cols * entrySz, mrow);
     uint8_t inRow = sy & 7;
     const int xOrig = xPaperOff - 32;
     const int xres = VIDEO::vga.xres;
@@ -3202,7 +3545,7 @@ static inline bool sprIsRel(const uint8_t* a) {
 // queue drains: nothing renders then.
 IRAM_ATTR void NEXTVID::sprLogPut(uint32_t e) {
     if (spr_w - spr_app >= SPR_LOG) {
-        c1Drain();
+        c1Drain(5);
         sprApply(spr_w);
     }
     sprLog[spr_w % SPR_LOG] = e;
@@ -3450,6 +3793,19 @@ IRAM_ATTR void NEXTVID::RenderSpritesLine(int y) {
         }
     }
     if (collided) sprFlags |= 0x01;
+    if (nxRowSpr) {
+        // the opaque span, from the coverage bits (bit = paper x + 32): the
+        // mixer resolves the sprite layer only there (nxMixOrder)
+        int k0 = 0, k1 = 10;
+        while (k0 < 11 && !coverage[k0]) k0++;
+        while (k1 > k0 && !coverage[k1]) k1--;
+        if (k0 < 11) {
+            const int b0 = k0 * 32 + __builtin_ctz(coverage[k0]);
+            const int b1 = k1 * 32 + 31 - __builtin_clz(coverage[k1]);
+            nxSprX0 = (int16_t)(b0 - 32 + xPaperOff);
+            nxSprX1 = (int16_t)(b1 - 32 + xPaperOff + 1);
+        }
+    }
 #if NEXT_TRACE
     nxSprNote(2, (uint32_t)nv); nxSprNote(3, (uint32_t)rendered);
 #endif

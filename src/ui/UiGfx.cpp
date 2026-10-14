@@ -230,9 +230,11 @@ void gfxInstallPalette() {
 
 void gfxBegin() {
     VIDEO::tsRenderDrain();   // core1 may still be painting TS-Conf content rows
-    // Next: core0's row-helper scratch (~8 KB SRAM) back to the heap for the
-    // menu / F5 browser; pairPoll takes it again when the machine runs
-    if (Config::arch == A_NEXT) NEXTVID::helperFree();
+    // Next: the core1 line queue finishes before the menu draws over the fb.
+    // core0's row-helper scratch (~8 KB) is KEPT: freed here, a fragmented heap
+    // often had no room to take it back, and core0 stopped helping the renderer
+    // for the rest of the session (TX-1696 at 576p, hw 2026-10-13).
+    if (Config::arch == A_NEXT) NEXTVID::c1Drain();
     VIDEO::ftHold();          // ...or a VDAC2 frame / video (FT812, core1)
     VIDEO::blVmapSuspend();   // borderless: show what is drawn over the fb row for row
     gfxComputeSurface();

@@ -271,15 +271,35 @@ void next_trace_dump(uint32_t frames) {
         {
             extern volatile uint32_t g_nx_drain_n, g_nx_drain_us, g_nx_c1_us, g_nx_idle_neg;
             extern volatile int32_t g_nx_idle_min;
-            extern volatile uint32_t g_nx_drain_src[4];
-            Debug::log("NEXT perf: idl_min=%d neg=%u/%u c1=%u.%ums/fr drain=%u x %u.%ums/fr (oth %u pal %u lut %u seg %u)",
+            extern volatile uint32_t g_nx_drain_src[8];
+            Debug::log("NEXT perf: idl_min=%d neg=%u/%u c1=%u.%ums/fr drain=%u x %u.%ums/fr (oth %u pal %u lut %u seg %u dma %u sprlog %u)",
                 (int)g_nx_idle_min, (unsigned)g_nx_idle_neg, (unsigned)frames,
                 (unsigned)(g_nx_c1_us / f / 1000u), (unsigned)(g_nx_c1_us / f % 1000u / 100u),
                 (unsigned)g_nx_drain_n,
                 (unsigned)(g_nx_drain_us / f / 1000u), (unsigned)(g_nx_drain_us / f % 1000u / 100u),
                 (unsigned)g_nx_drain_src[0], (unsigned)g_nx_drain_src[1],
-                (unsigned)g_nx_drain_src[2], (unsigned)g_nx_drain_src[3]);
-            for (int i = 0; i < 4; i++) g_nx_drain_src[i] = 0;
+                (unsigned)g_nx_drain_src[2], (unsigned)g_nx_drain_src[3],
+                (unsigned)g_nx_drain_src[4], (unsigned)g_nx_drain_src[5]);
+            for (int i = 0; i < 8; i++) g_nx_drain_src[i] = 0;
+            {
+                extern volatile uint32_t g_nx_dmaw[4][3], g_nx_dmaw_key[4][2], g_nx_dmaw_sh;
+                char kb[96]; int kn = 0; kb[0] = 0;
+                for (int k = 0; k < 4 && g_nx_dmaw_key[k][0]; k++)
+                    kn += snprintf(kb + kn, sizeof kb - kn, " b%u:%02X..%02XFF x%u",
+                        (unsigned)(g_nx_dmaw_key[k][0] >> 16), (unsigned)((g_nx_dmaw_key[k][0] >> 8) & 0xFF),
+                        (unsigned)(g_nx_dmaw_key[k][0] & 0xFF), (unsigned)g_nx_dmaw_key[k][1]);
+                Debug::log("NEXT dmaw: copied %u | l2 %u/%ums map %u/%ums defs %u/%ums ula %u/%ums avg lines %u |%s",
+                    (unsigned)g_nx_dmaw_sh,
+                    (unsigned)g_nx_dmaw[0][0], (unsigned)(g_nx_dmaw[0][1] / 1000u),
+                    (unsigned)g_nx_dmaw[1][0], (unsigned)(g_nx_dmaw[1][1] / 1000u),
+                    (unsigned)g_nx_dmaw[2][0], (unsigned)(g_nx_dmaw[2][1] / 1000u),
+                    (unsigned)g_nx_dmaw[3][0], (unsigned)(g_nx_dmaw[3][1] / 1000u),
+                    (unsigned)((g_nx_dmaw[0][2] + g_nx_dmaw[1][2] + g_nx_dmaw[2][2] + g_nx_dmaw[3][2]) /
+                               (g_nx_dmaw[0][0] + g_nx_dmaw[1][0] + g_nx_dmaw[2][0] + g_nx_dmaw[3][0] + 1)), kb);
+                memset((void*)g_nx_dmaw, 0, sizeof g_nx_dmaw);
+                memset((void*)g_nx_dmaw_key, 0, sizeof g_nx_dmaw_key);
+                g_nx_dmaw_sh = 0;
+            }
             {
                 // the row queue's two renderers: core0 helps while it waits for core1
                 extern volatile uint32_t g_nx_c0_us, g_nx_c0_rows, g_nx_c1_rows, g_nx_claim_blk;
@@ -293,11 +313,24 @@ void next_trace_dump(uint32_t frames) {
                     (unsigned)(g_nx_mix[0] / f), (unsigned)(g_nx_mix[1] / f), (unsigned)(g_nx_mix[2] / f),
                     (unsigned)(g_nx_mix[3] / f), (unsigned)(g_nx_mix[3] ? g_nx_mix[4] / g_nx_mix[3] : 0));
                 for (int i = 0; i < 5; i++) g_nx_mix[i] = 0;
+                extern volatile uint32_t g_nx_mix_span, g_nx_mix_spanRows;
+                Debug::log("NEXT mixspan: %u rows/fr, %u px/row",
+                    (unsigned)(g_nx_mix_spanRows / f),
+                    (unsigned)(g_nx_mix_spanRows ? g_nx_mix_span / g_nx_mix_spanRows : 0));
+                g_nx_mix_span = g_nx_mix_spanRows = 0;
                 extern volatile uint32_t g_nx_spr[4];
                 Debug::log("NEXT spr: resolve %u/fr (span %u) | tested %u/fr drawn %u/fr",
                     (unsigned)(g_nx_spr[0] / f), (unsigned)(g_nx_spr[0] ? g_nx_spr[1] / g_nx_spr[0] : 0),
                     (unsigned)(g_nx_spr[2] / f), (unsigned)(g_nx_spr[3] / f));
                 for (int i = 0; i < 4; i++) g_nx_spr[i] = 0;
+                extern volatile uint32_t g_nx_seg[10];
+                Debug::log("NEXT seg: rows %u/fr (drain %u/fr) deltas %u/fr passes %u/fr pal %02X x %u..%u | left %u right %u /fr, border-only rows %u/fr",
+                    (unsigned)(g_nx_seg[0] / f), (unsigned)(g_nx_seg[1] / f), (unsigned)(g_nx_seg[2] / f),
+                    (unsigned)(g_nx_seg[3] / f), (unsigned)g_nx_seg[4],
+                    (unsigned)(g_nx_seg[5] == 0xFFFF ? 0 : g_nx_seg[5]), (unsigned)g_nx_seg[6],
+                    (unsigned)(g_nx_seg[7] / f), (unsigned)(g_nx_seg[8] / f), (unsigned)(g_nx_seg[9] / f));
+                for (int i = 0; i < 10; i++) g_nx_seg[i] = 0;
+                g_nx_seg[5] = 0xFFFF;
             }
             // Printed here, right after perf: the later lines are the ones a
             // saturated UART drops (NXModPlayer, hw 2026-10-10: no vid line at all).
