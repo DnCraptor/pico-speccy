@@ -15053,3 +15053,18 @@ so). `debug/*p2w-*.elf` files from before 2026-10-12 are Waveshare builds.
   a dead screen, try the plain image on the same module: if THAT works, check the
   board's own pins/soldering before the radio — a diagnostic `WIFI_RADIO_OFF` build
   (skip `cyw43_arch_init`) was made for the bisect and reverted unused.
+
+## Debugger grid follows the surface (2026-10-14, NOT hw-tested)
+
+`dbgBegin()` (OSDMain.cpp) measures the content grid from `nm::Sf` with
+`dbgFrameNu`'s own arithmetic instead of a fixed 20 x 50: 320 px / DS80 = 51
+columns, 360 px (720x480 / 720x576) = 57; 240 lines = 20 rows, 288 = 25
+(clamped 20..`DBG_MAX_ROWS` 32). The base layout is byte-identical to before
+(XR 32, 15 code lines, mnemonic 15, memory 8 hex / 20 ASCII bytes). Extra columns
+move the right panel (`s_dbg.xr = cols - 19`, min 32) and widen the left one:
+mnemonic room `XR - 17`, memory bytes per row from `dbgMemBpr()` (720: 12 hex /
+26 ASCII) — every former `memAsciiMode ? 20 : 8` goes through it. Extra rows go
+to the disassembly (720x576: 20 lines), and the rows that opens between Regs and
+Flags carry a `-Stack-` block (SP and the words above it). F2 Dump fills
+`s_dbg.rows`. Hw check owed: 720x576 and 720x480 (layout, memory edit at the
+last column, Alt+T ASCII), and 640x480 + DS80 unchanged.

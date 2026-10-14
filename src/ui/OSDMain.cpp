@@ -4352,8 +4352,15 @@ enum DbgInk : uint8_t {
     DBG_TITLE,      // title bar text
 };
 
+// Largest content grid the facade lays out (360x288 gives 25 rows, DS80 and the
+// 240-line modes 20); line_addr[] and the like are sized by it.
+static constexpr int DBG_MAX_ROWS = 32;
+
 struct DbgSkin {
     int  cx, cy;        // pixel origin of content cell (0,0)
+    int  rows;          // content rows the frame holds (>= 20)
+    int  cols;          // content columns the frame holds (>= 51 on 320 px)
+    int  xr;            // content column of the right panel
     int  code_lines;    // disassembly rows
     int  mem_hdr_row;   // content row of the "-Memory-" rule (Flags aligns to it)
     int  regs_hdr_row;  // content row of the "-Regs-" rule
@@ -4424,16 +4431,43 @@ static void dbgFrame(const char* section) {
     snprintf(buf, sizeof(buf), "Debugger  [%s]", section);
     dbgFrameNu(buf, "Tab Sect  Spc Step  Ent Edit  F5 BP  F1 Help");
 }
-// Grid geometry for this session. The 20-row content grid needs ~50 columns, which
-// every supported mode has — DS80 included, since the surface covers the whole
-// framebuffer (640 px / 12-px doubled glyphs = 53 columns).
+// Grid geometry for this session, measured from the surface with the same
+// arithmetic dbgFrameNu draws with. The base layout is 20 rows x ~50 columns,
+// which every supported mode has (DS80 included: 640 px / 12-px glyphs = 51).
+// The 720-wide modes give it more: 360 px = 57 columns, and 720x576's 288 lines
+// = 25 rows. Extra columns widen the left panel (longer mnemonics, more memory
+// bytes per row); extra rows go to the disassembly, and the right column uses the
+// rows they open between Regs and Flags for a stack view.
 static void dbgBegin() {
     nm::gfxComputeSurface();
-    // 20 content rows: 15 code + memory rule + 4 dump; the right column packs
-    // Pages / Regs / Flags into the same 20 (T-states and BPs move under Flags).
-    s_dbg.code_lines   = 15;
-    s_dbg.mem_hdr_row  = 15;
+    const int sc = nm::Sf.glyphScale;
+    const int margin = 2 * sc, ix = margin + sc, iy = 3, pad = 2 * sc;
+    const int ih = nm::Sf.h - iy - 3;
+    const int cx = ix + 2 * pad, cy = iy + UI_FONT_H + 6 + 2;
+    const int fy = iy + ih - (UI_FONT_H + 4);
+    int rows = (fy - cy) / UI_FONT_H;
+    int cols = (nm::Sf.w - 2 * cx) / dbgCellW();
+    if (rows < 20) rows = 20;
+    if (rows > DBG_MAX_ROWS) rows = DBG_MAX_ROWS;
+    if (cols < 51) cols = 51;
+    s_dbg.rows = rows;
+    s_dbg.cols = cols;
+    // Right panel is 17 columns wide; 32 is the hw-proven column on 320 px.
+    s_dbg.xr = cols - 19 > 32 ? cols - 19 : 32;
+    // Base: 15 code + memory rule + 4 dump; the right column packs Pages / Regs /
+    // Flags into the same 20 (T-states and BPs move under Flags).
+    s_dbg.code_lines   = 15 + (rows - 20);
+    s_dbg.mem_hdr_row  = s_dbg.code_lines;
     s_dbg.regs_hdr_row = 5;
+}
+
+// Memory section bytes per row: HEX groups pairs ("BBBB BBBB"), so a row of n
+// bytes ends at column 5 + 2.5n; keep two columns clear of the right panel.
+static int dbgMemBpr(bool ascii) {
+    if (ascii) return s_dbg.xr - 12;             // 20 on the base layout
+    int n = 8;
+    while (5 + (n + 2) * 5 / 2 <= s_dbg.xr - 3) n += 2;
+    return n;
 }
 
 // ── Debugger modals ────────────────────────────────────────────────────────────
@@ -4570,10 +4604,10 @@ static bool dbgDumpRangeNu(uint16_t& from, uint16_t& to) {
 
 } // namespace
 
-// F2 memory dump: the whole facade grid (20 rows x 16 bytes). Up/Down +-16,
+// F2 memory dump: the whole facade grid (s_dbg.rows x 16 bytes). Up/Down +-16,
 // PgUp/PgDn a page, 0 top, F8 go, Alt+F2 save range, Esc closes.
 void OSD::osdDump() {
-    const int rows = s_dbg.mem_hdr_row + 5;      // full content grid (20 rows)
+    const int rows = s_dbg.rows;                 // full content grid
     char buf[52];
     bool alt = false;
     bool redraw_frame = true;
@@ -4643,7 +4677,7 @@ void OSD::osdDebug(uint16_t gotoAddr) {
     flushKbd();
     const int CODE_LINES = s_dbg.code_lines;
 
-    char buf[40];
+    char buf[64];
     int ii = 3;
     int cursor_row = 3; // cursor starts at PC line
     uint32_t t1 = 0;
@@ -4656,7 +4690,7 @@ void OSD::osdDebug(uint16_t gotoAddr) {
     int memCursorRow = 0;
     int memCursorCol = 0; // 0-3 = byte index
     uint16_t memViewAddr = Z80::getRegPC();
-    const int XR = 32;      // content column of the right panel
+    const int XR = s_dbg.xr;   // content column of the right panel
     int pagesCursorRow = 0; // 0=PAGE0, 1=PAGE3, 2=VIDEO, 3=PAGING LOCK
     bool memAsciiMode = false;
     bool gotoApplied = false;
@@ -4682,7 +4716,7 @@ c:
     }
     const int MEM_LINES = 4;
     int i = 0;
-    uint16_t line_addr[18];             // max code_lines across skins
+    uint16_t line_addr[DBG_MAX_ROWS];   // max code_lines across layouts
     int regStartRow = 0;
   if (redrawCode) {
     uint16_t pci = pc - ii; // starting address for line 0
@@ -4768,8 +4802,10 @@ c:
                 if (p != string::npos) mem.replace(p, 1, tmp);
             }
         }
-        if (mem.length() > 15) mem = mem.substr(0, 15);
-        snprintf(buf, 40, "%c%04X %s%-15s", pci == pc ? '*' : ' ', pci, hexbytes, mem.c_str());
+        const int mlen = XR - 17;       // mnemonic room: 15 on the base layout
+        if ((int)mem.length() > mlen) mem = mem.substr(0, mlen);
+        snprintf(buf, sizeof(buf), "%c%04X %s%-*s", pci == pc ? '*' : ' ', pci, hexbytes,
+                 mlen, mem.c_str());
         dbgText(0, i, buf, rowInk);
         if (Config::numPcBP > 0 && Config::hasBreakPoint(pci, Config::BP_PC))
             dbgBpDot(i);
@@ -4779,12 +4815,17 @@ c:
   } // redrawCode
 
   if (redrawMem) {
-    // === MEMORY DUMP (bottom of left panel, 4 rows) ===
-    int memBytesPerRow = memAsciiMode ? 20 : 8;
+    // === MEMORY DUMP (bottom of left panel, 4 rows; bytes per row by width) ===
+    int memBytesPerRow = dbgMemBpr(memAsciiMode);
     {
-        dbgText(0, s_dbg.mem_hdr_row,
-                memAsciiMode ? "-Memory (ASCII)---------------"
-                             : "-Memory (HEX)-----------------", DBG_HDR);
+        {
+            char rule[64];
+            int n = snprintf(rule, sizeof(rule), "%s",
+                             memAsciiMode ? "-Memory (ASCII)" : "-Memory (HEX)");
+            while (n < XR - 2 && n < (int)sizeof(rule) - 1) rule[n++] = '-';
+            rule[n] = 0;
+            dbgText(0, s_dbg.mem_hdr_row, rule, DBG_HDR);
+        }
         for (int row = 0; row < MEM_LINES; row++) {
             const int r = s_dbg.mem_hdr_row + 1 + row;
             uint16_t addr = (memViewAddr + row * memBytesPerRow) & 0xFFFF;
@@ -4800,17 +4841,18 @@ c:
                     dbgText(6 + col, r, s,
                             (isRow && col == memCursorCol) ? DBG_SEL_BYTE : rowInk);
                 }
-                dbgText(6 + memBytesPerRow, r, "  ", DBG_NORM);   // clear rest
+                dbgFillRow(6 + memBytesPerRow, r, XR - 1 - (6 + memBytesPerRow), DBG_NORM);
             } else {
-                // HEX: 8 bytes per row as BBBB BBBB BBBB BBBB, cursor byte marked
-                for (int col = 0; col < 8; col++) {
+                // HEX: n bytes per row as BBBB BBBB ..., cursor byte marked
+                for (int col = 0; col < memBytesPerRow; col++) {
                     uint8_t val = MemESP::dbgPeek((addr + col) & 0xFFFF);
                     char s[3]; snprintf(s, 3, "%02X", val);
                     const int c = 6 + col * 2 + (col / 2);
                     dbgText(c, r, s, (isRow && col == memCursorCol) ? DBG_SEL_BYTE : rowInk);
-                    if ((col & 1) && col < 7) dbgText(c + 2, r, " ", rowInk);
+                    if ((col & 1) && col < memBytesPerRow - 1) dbgText(c + 2, r, " ", rowInk);
                 }
-                dbgText(25, r, "  ", DBG_NORM);                   // clear trailing
+                const int endc = 6 + memBytesPerRow * 2 + memBytesPerRow / 2 - 1;
+                dbgFillRow(endc, r, XR - 1 - endc, DBG_NORM);     // clear trailing
             }
         }
     }
@@ -4899,6 +4941,19 @@ c:
             i++;
         }
 
+    }
+
+    // --- STACK block, in the rows a taller grid opens between Regs and Flags ---
+    if (s_dbg.mem_hdr_row - i >= 2) {
+        dbgText(XR, i++, "-Stack-----------", DBG_HDR);
+        uint16_t sp = Z80::getRegSP();
+        while (i < s_dbg.mem_hdr_row) {
+            const uint16_t v = MemESP::dbgPeek(sp) | (MemESP::dbgPeek((uint16_t)(sp + 1)) << 8);
+            snprintf(buf, sizeof(buf), "%04X %04X        ", sp, v);
+            buf[17] = 0;
+            dbgText(XR, i++, buf, DBG_NORM);
+            sp += 2;
+        }
     }
 
     // --- FLAGS block, aligned with the Memory rule ---
@@ -5060,7 +5115,7 @@ c:
                     redrawCode = false; redrawMem = false;
                 } else if (activeSection == 1) {
                     if (memCursorRow > 0) memCursorRow--;
-                    else memViewAddr = (memViewAddr - (memAsciiMode ? 20 : 8)) & 0xFFFF;
+                    else memViewAddr = (memViewAddr - dbgMemBpr(memAsciiMode)) & 0xFFFF;
                     redrawCode = false; redrawRight = false;
                 } else if (activeSection == 3) {
                     if (regCursorRow > 0) regCursorRow--;
@@ -5077,7 +5132,7 @@ c:
                     redrawCode = false; redrawMem = false;
                 } else if (activeSection == 1) {
                     if (memCursorRow < MEM_LINES - 1) memCursorRow++;
-                    else memViewAddr = (memViewAddr + (memAsciiMode ? 20 : 8)) & 0xFFFF;
+                    else memViewAddr = (memViewAddr + dbgMemBpr(memAsciiMode)) & 0xFFFF;
                     redrawCode = false; redrawRight = false;
                 } else if (activeSection == 3) {
                     if (regCursorRow < 8) regCursorRow++;
@@ -5123,7 +5178,7 @@ c:
                         MemESP::pagingLock = !MemESP::pagingLock;
                     }
                 } else if (activeSection == 1) {
-                    if (memCursorCol < (memAsciiMode ? 19 : 7)) memCursorCol++;
+                    if (memCursorCol < dbgMemBpr(memAsciiMode) - 1) memCursorCol++;
                     redrawCode = false; redrawRight = false;
                 } else if (activeSection == 3) {
                     regAltSet = !regAltSet;
@@ -5138,12 +5193,12 @@ c:
             } else
             if (Nextkey.vk == fabgl::VK_PAGEUP) {
                 if (activeSection == 0) ii += CODE_LINES;
-                else if (activeSection == 1) { memViewAddr = (memViewAddr - MEM_LINES * (memAsciiMode ? 20 : 8)) & 0xFFFF; redrawCode = false; redrawRight = false; }
+                else if (activeSection == 1) { memViewAddr = (memViewAddr - MEM_LINES * dbgMemBpr(memAsciiMode)) & 0xFFFF; redrawCode = false; redrawRight = false; }
                 goto c;
             } else
             if (Nextkey.vk == fabgl::VK_PAGEDOWN) {
                 if (activeSection == 0) ii -= CODE_LINES;
-                else if (activeSection == 1) { memViewAddr = (memViewAddr + MEM_LINES * (memAsciiMode ? 20 : 8)) & 0xFFFF; redrawCode = false; redrawRight = false; }
+                else if (activeSection == 1) { memViewAddr = (memViewAddr + MEM_LINES * dbgMemBpr(memAsciiMode)) & 0xFFFF; redrawCode = false; redrawRight = false; }
                 goto c;
             } else
             if (Nextkey.vk == fabgl::VK_T && alt) {
@@ -5248,7 +5303,7 @@ c:
                     }
                 } else if (activeSection == 1) {
                     // Memory: inline byte edit (left panel, below code)
-                    int bpr = memAsciiMode ? 20 : 8;
+                    int bpr = dbgMemBpr(memAsciiMode);
                     uint16_t addr = (memViewAddr + memCursorRow * bpr + memCursorCol) & 0xFFFF;
                     char hexbuf[3];
                     snprintf(hexbuf, 3, "%02X", MemESP::dbgPeek(addr));
