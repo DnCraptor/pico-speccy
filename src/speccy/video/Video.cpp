@@ -743,6 +743,27 @@ static void tsTmbCapture(uint16_t* dst, uint32_t tm_line) {
 static TsRenderJob*      ts_c1_ring = nullptr;
 static bool tsGlineEnsure();   // GFXOVR line buffer, claimed on the first GFXOVR line posted (defined by the renderer)
 static volatile uint32_t ts_c1_w = 0, ts_c1_r = 0;     // producer / consumer indices (free-running)
+// Two renderers on one queue (core1, and core0 while it waits — tsC1HelpOne).
+// ts_c1_c = the next job to claim; ts_c1_r stays the RELEASE point every waiter
+// reads: a job at r or above may still be in flight, everything below is drawn.
+// A core holds at most one job (ts_c1_fly), so r = the other core's job if it has
+// one, else c. Claim and release go under one hardware spinlock (a few cycles,
+// IRQs off for that long — the HDMI line ISR on core1 never waits more).
+// What core0 does NOT take: a DMA job (bulk copies stay ordered on core1 with
+// nothing else in flight), any line while a queued DMA has not run, and a GFXOVR
+// line (its flash merge uses the single s_gline/s_tsline pair).
+#define TS_C1_NONE 0xFFFFFFFFu
+static volatile uint32_t ts_c1_c = 0;
+static volatile uint32_t ts_c1_fly[2] = { TS_C1_NONE, TS_C1_NONE };
+static spin_lock_t*      ts_c1_lock = nullptr;
+static uint8_t  TS_OVL_BSS s_tsline[512];       // core1's (and the sync path's) compose buffer
+static uint8_t*          s_tsline0 = nullptr;   // core0's compose buffer (512 B, SRAM)
+volatile uint32_t ts_c0_jobs = 0;      // queued lines core0 rendered (PERF)
+volatile uint32_t ts_c0_us = 0;        // core0 time inside them (PERF)
+static inline void tsC1QueueClear() {   // ring empty, nothing claimed (core1 idle or wedged)
+    ts_c1_r = ts_c1_w = ts_c1_c = 0;
+    ts_c1_fly[0] = ts_c1_fly[1] = TS_C1_NONE;
+}
 static bool              ts_c1_enabled = true;   // tsC1PlacementPoll() owns it from here on
 static bool              ts_c1_stuck = false;    // the 100 ms drain timeout fired once: queue off for the session
 volatile uint32_t ts_c1_us = 0;        // core1 time inside tsRenderExec (PERF)
@@ -780,7 +801,7 @@ static volatile bool ts_c1_core0_waiting = false;
 // its ESPectrum::loop / frame-wait service points.
 static inline void tsC1Spin() {
     ts_c1_core0_waiting = true;
-    tight_loop_contents();
+    if (!VIDEO::tsC1HelpOne()) tight_loop_contents();
 }
 static inline void tsC1SpinEnd() { ts_c1_core0_waiting = false; }
 
@@ -837,7 +858,7 @@ static void tsC1RingCarve(uint8_t* blk) {
     memset(ts_c1_tsu_job, 0, sizeof(uint32_t) * TS_C1_TSU);
     memset(ts_c1_sf_job, 0, sizeof(uint32_t) * TS_C1_SFILE);
     ts_c1_tsu_cur = ts_c1_sf_cur = 0; ts_c1_sf_gen = 0xFFFFFFFFu;
-    ts_c1_r = ts_c1_w = 0;
+    tsC1QueueClear();
 }
 void VIDEO::tsC1RingAlloc() {
     if (ts_c1_ring || s_c1borrowed) return;
@@ -856,6 +877,9 @@ void VIDEO::tsC1RingAlloc() {
     }
     if (!blk) blk = (uint8_t*)Buffer::palloc(bytes, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
     if (blk) { s_c1blk = blk; s_c1blkBytes = bytes; tsC1RingCarve(blk); }
+    if (blk && !ts_c1_lock) ts_c1_lock = spin_lock_instance((uint)spin_lock_claim_unused(true));
+    // core0's own compose buffer: SRAM or nothing (core0 then just waits, as before).
+    if (blk && !s_tsline0 && getLargestAllocatable() >= 512 + 8192) s_tsline0 = (uint8_t*)tryMalloc(512);
     // The address names the tier: 0x2000xxxx = SRAM heap, 0x11xxxxxx = butter PSRAM.
     Debug::log("[TSC1] core1 line renderer %s (%u-job ring + %u TSU states + %u SFILE slots, %u B @%08lX%s)",
                ts_c1_ring ? "ON" : "unavailable (no RAM)", (unsigned)TS_C1_RING, (unsigned)TS_C1_TSU,
@@ -876,7 +900,8 @@ void VIDEO::tsRenderDrain() {
             Debug::log("[TSC1] core1 render queue stuck (r=%u w=%u) - falling back to core0", (unsigned)ts_c1_r, (unsigned)ts_c1_w);
             ts_c1_enabled = false;
             ts_c1_stuck = true;        // sticky: the placement policy must not re-enable it
-            ts_c1_r = ts_c1_w;
+            ts_c1_c = ts_c1_r = ts_c1_w;
+            ts_c1_fly[0] = ts_c1_fly[1] = TS_C1_NONE;
             ts_c1_dma_done = ts_c1_dma_posted;
             TsConf::wrGateRecalc(); tsC1LiveRecalc();
             break;
@@ -1060,29 +1085,77 @@ static void tsC1PlacementPoll() {
 // old property that mattered here: no flash body, so no XIP fetch per iteration
 // out of the loop that also runs the renderer and the GS. Same reason pcm_call()
 // was taken out of that loop.)
+// Claim the next job for `core` (see ts_c1_c). Returns false when there is none
+// this core may take now.
+static bool TS_RENDER_HOT tsC1Claim(unsigned core, uint32_t& idx, TsRenderJob& j) {
+    const uint32_t irq = spin_lock_blocking(ts_c1_lock);
+    bool ok = false;
+    const uint32_t c = ts_c1_c;
+    if (c != ts_c1_w) {
+        j = ts_c1_ring[TS_C1_SLOT(c)];
+        if (j.l.kind & 1) ok = core == 1 && ts_c1_fly[0] == TS_C1_NONE;   // DMA: alone
+        else if (core == 0) ok = !(j.l.vconf & 0x08) && ts_c1_dma_posted == ts_c1_dma_done;
+        else ok = true;
+        if (ok) { ts_c1_fly[core] = c; ts_c1_c = c + 1; idx = c; }
+    }
+    spin_unlock(ts_c1_lock, irq);
+    return ok;
+}
+// Done with the claimed job: move the release point and publish where the
+// renderer is for tsPalettePoll (the line AT r is the first one not drawn).
+static void TS_RENDER_HOT tsC1Release(unsigned core) {
+    const uint32_t irq = spin_lock_blocking(ts_c1_lock);
+    ts_c1_fly[core] = TS_C1_NONE;
+    const uint32_t o = ts_c1_fly[core ^ 1];
+    const uint32_t nr = (o != TS_C1_NONE) ? o : ts_c1_c;
+    if ((int32_t)(nr - ts_c1_r) > 0) {
+        __dmb();
+        ts_c1_r = nr;
+        const bool last = (nr == ts_c1_w);
+        const TsRenderJob& p = ts_c1_ring[TS_C1_SLOT(last ? nr - 1 : nr)];
+        if (!(p.l.kind & 1))
+            ts_render_pos = ((uint32_t)(p.l.kind >> 4) << 16) | (jobLine(p) + (last ? 1u : 0u));
+    }
+    spin_unlock(ts_c1_lock, irq);
+}
+
 void TS_RENDER_HOT VIDEO::tsRenderCore1Pump() {
-    if (ts_c1_r == ts_c1_w) return;
+    if (ts_c1_c == ts_c1_w) return;
     const uint64_t t0 = time_us_64();
-    for (int n = 0; n < 8 && ts_c1_r != ts_c1_w; n++) {
-        const TsRenderJob j = ts_c1_ring[TS_C1_SLOT(ts_c1_r)];
+    for (int n = 0; n < 8; n++) {
+        uint32_t idx; TsRenderJob j;
+        if (!tsC1Claim(1, idx, j)) break;
         if (j.l.kind & 1) {
             const uint64_t d0 = time_us_64();
             TsConf::dmaExecBulk(j.d.ctrl, (uint32_t)j.d.s[0] | ((uint32_t)j.d.s[1] << 8) | ((uint32_t)j.d.s[2] << 16),
                                 (uint32_t)j.d.d[0] | ((uint32_t)j.d.d[1] << 8) | ((uint32_t)j.d.d[2] << 16),
                                 j.d.len, j.d.num);
             ts_dma_c1_us += (uint32_t)(time_us_64() - d0);
-            __dmb();
-            ts_c1_r = ts_c1_r + 1;
+            tsC1Release(1);
             ts_c1_dma_done = ts_c1_dma_done + 1;
             break;                                    // a DMA is long; let pcm_call/GS::pump run
         }
         const TsuState& st = ts_c1_tsu[j.l.tsu & (TS_C1_TSU - 1)];
-        tsRenderExec(j, &st, ts_c1_sf + (uint32_t)(st.sfidx & (TS_C1_SFILE - 1)) * 256, ts_c1_r);
-        __dmb();
-        ts_c1_r = ts_c1_r + 1;
+        tsRenderExec(j, &st, ts_c1_sf + (uint32_t)(st.sfidx & (TS_C1_SFILE - 1)) * 256, idx, s_tsline);
+        tsC1Release(1);
         ts_c1_jobs = ts_c1_jobs + 1;
     }
     ts_c1_us += (uint32_t)(time_us_64() - t0);
+}
+// core0, from every wait on the queue and from the frame-pacing idle: render the
+// oldest line core0 may take. One line per call (~15-30 us), so a caller that is
+// watching a clock (v_sync, the frame deadline) sees it move between lines.
+bool TS_RENDER_HOT VIDEO::tsC1HelpOne() {
+    if (!s_tsline0 || !ts_c1_lock || !g_ts_c1_live || ts_c1_c == ts_c1_w) return false;
+    uint32_t idx; TsRenderJob j;
+    if (!tsC1Claim(0, idx, j)) return false;
+    const uint64_t t0 = time_us_64();
+    const TsuState& st = ts_c1_tsu[j.l.tsu & (TS_C1_TSU - 1)];
+    tsRenderExec(j, &st, ts_c1_sf + (uint32_t)(st.sfidx & (TS_C1_SFILE - 1)) * 256, idx, s_tsline0);
+    tsC1Release(0);
+    ts_c0_jobs = ts_c0_jobs + 1;
+    ts_c0_us += (uint32_t)(time_us_64() - t0);
+    return true;
 }
 extern "C" void TS_RENDER_HOT ts_render_core1_pump() { VIDEO::tsRenderCore1Pump(); }
 // core1 (render_core): queued lines pre-empt GS::pump while core0 is blocked on
@@ -7610,7 +7683,7 @@ void VIDEO::tsVideoApplyPending() {
     }
     if (wantRender && ts_c1_enabled && !ts_c1_ring && !s_c1borrowed) {
         tsC1RingAlloc();
-        ts_c1_r = ts_c1_w = 0;
+        tsC1QueueClear();
         TsConf::wrGateRecalc(); tsC1LiveRecalc();
     }
     if (wantPal256) { tsPalette256Flush(!ts_pal256_live); tsCramDirty = false; }
@@ -7925,7 +7998,7 @@ void VIDEO::tsRenderLine(uint32_t curline) {
 // window on every TS-Conf session (2026-09-22). If the claim fails the line is
 // posted without the GFXOVR bit and renders on the ordinary compose path.
 static uint16_t* s_gline = nullptr;
-static uint8_t  TS_OVL_BSS s_tsline[512];
+// s_tsline: defined with the core1 queue above (core1's compose buffer).
 static __attribute__((noinline)) bool tsGlineEnsure() {
     if (s_gline) return true;
     s_gline = (uint16_t*)Buffer::palloc(512 * sizeof(uint16_t), Buffer::NEED_POINTER | Buffer::HOT_SRAM);
@@ -8071,11 +8144,14 @@ static inline __attribute__((always_inline)) void tsFillPad(uint8_t* fb_row, int
     if (b > cx1) memset(fb_row + cx1, brd, (size_t)(b - cx1));
 }
 __attribute__((optimize("O2", "no-unroll-loops")))
-void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st, const uint16_t* sfile, uint32_t seq) {
+void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st, const uint16_t* sfile, uint32_t seq, uint8_t* tsl) {
     const uint32_t curline = jobLine(j);
     const uint32_t ygctr = jobYgctr(j);
     const uint32_t frow = curline + lin_end;
-    ts_render_pos = ((uint32_t)(j.l.kind >> 4) << 16) | curline;   // lines below this one are done (tsPalettePoll)
+    // The queue (tsl != nullptr) publishes the render position at the release
+    // point instead (tsC1Release): with two renderers a line can finish before
+    // the one above it.
+    if (!tsl) { ts_render_pos = ((uint32_t)(j.l.kind >> 4) << 16) | curline; tsl = s_tsline; }   // lines below this one are done (tsPalettePoll)
 #if TSPAL_DBG
     if (frow < sizeof ts_row_gen) ts_row_gen[frow] = ts_row_gen_posted[frow];
     {   // the beam already scanned this row in the current sweep: it showed the OLD pixels
@@ -8182,10 +8258,10 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
         const uint8_t* bl = nullptr;
         if (ts_tsu_live) {
             const uint32_t t1 = tsRenderUs();
-            memset(s_tsline, 0, (size_t)g.w);     // 0 = transparent
-            tsuComposeLine((uint32_t)curline + ts_crop_top, s_tsline, *st, sfile, j.l.palsel, seq, (uint8_t)((j.l.kind >> 1) & 1));
+            memset(tsl, 0, (size_t)g.w);     // 0 = transparent
+            tsuComposeLine((uint32_t)curline + ts_crop_top, tsl, *st, sfile, j.l.palsel, seq, (uint8_t)((j.l.kind >> 1) & 1));
             ts_tsu_us += tsRenderUs() - t1;
-            bl = s_tsline;
+            bl = tsl;
         }
         // Text is hires: g.w lores pixels = 2*g.w hires pixels = g.w/4 chars
         // of 8 (80 at RRES 320) — each char = 4 pair bytes.
@@ -8251,7 +8327,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     // ── Base graphics layer + TSU compose (video_render.v) ──────────────────
     // Per area pixel: bits 7..0 = CRAM index, bit 8 = "gfx pixel visible"
     // (pixv: ZX ink dot after flash, non-zero colour in 16c/256c) — the
-    // GFXOVR priority input. TSU pixels land in s_tsline as CRAM indices, 0 =
+    // GFXOVR priority input. TSU pixels land in tsl as CRAM indices, 0 =
     // transparent (video_render.v: tsu_visible = |tsdata[3:0]).
     const uint32_t t0b = tsRenderUs();
     const int w = (int)g.w;
@@ -8279,7 +8355,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
         // path below is not needed and the output is one table lookup per
         // pixel. 2026-09-13: fishbone c1 = 14.4 ms of which base 3.9 / tsu 8.3 /
         // out 2.1 — this path plus the SWAR blit (TsuBlit.h) is the answer.
-        uint8_t* bl = s_tsline;
+        uint8_t* bl = tsl;
         if (nogfx) {
             memset(bl, border_idx, (size_t)w);
         } else if (lvm == TSV_ZX) {
@@ -8800,6 +8876,9 @@ IRAM_ATTR void VIDEO::EndFrame() {
         ts_dma_words_ram = ts_dma_words_blt = ts_dma_words_fill = 0;
         c1_accum += ts_c1_us; c1w_accum += ts_c1_wait_us; if (ts_c1_wait_us > c1w_max) c1w_max = ts_c1_wait_us;
         c1j_accum += ts_c1_jobs; c1n_accum += ts_c1_waits;
+        static uint32_t c0_accum = 0, c0j_accum = 0;
+        extern volatile uint32_t ts_c0_us, ts_c0_jobs;
+        c0_accum += ts_c0_us; c0j_accum += ts_c0_jobs; ts_c0_us = ts_c0_jobs = 0;
         c1d_accum += ts_dma_c1_us; c1wd_accum += ts_c1_wait_dma_us; if (ts_c1_wait_dma_us > c1wd_max) c1wd_max = ts_c1_wait_dma_us;
         ts_render_us = ts_tsu_us = ts_dma_us = ts_dma_words = 0;
         ts_c1_us = ts_c1_wait_us = ts_c1_jobs = ts_c1_waits = ts_dma_c1_us = ts_c1_wait_dma_us = 0;
@@ -8864,12 +8943,13 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
             }
             // TS-Conf half on its own line: Debug::log truncates at 256 bytes.
             if (Z80Ops::isTsconf)
-                Debug::log("[PERF] ts: tsRender=%.1fms (max %.1fms, base %.1f tsu %.1f out %.1f) c1=%.1fms/%ul wait=%.1fms (max %.1fms, %u/60) dmaC1=%.1fms waitDma=%.1fms (max %.1fms) dma=%.1fms/%uw (ram %u blt %u fill %u) poll=%u ff=%u/%ukT frmInt=%u/60f frmLate=%u frmMiss=%u",
+                Debug::log("[PERF] ts: tsRender=%.1fms (max %.1fms, base %.1f tsu %.1f out %.1f) c1=%.1fms/%ul c0=%.1fms/%ul wait=%.1fms (max %.1fms, %u/60) dmaC1=%.1fms waitDma=%.1fms (max %.1fms) dma=%.1fms/%uw (ram %u blt %u fill %u) poll=%u ff=%u/%ukT frmInt=%u/60f frmLate=%u frmMiss=%u",
                     tsr_accum / 60000.0f, tsr_max / 1000.0f, base_accum / 60000.0f, tsu_accum / 60000.0f, out_accum / 60000.0f,
-                    c1_accum / 60000.0f, (unsigned)(c1j_accum / 60), c1w_accum / 60000.0f, c1w_max / 1000.0f, (unsigned)c1n_accum,
+                    c1_accum / 60000.0f, (unsigned)(c1j_accum / 60), c0_accum / 60000.0f, (unsigned)(c0j_accum / 60), c1w_accum / 60000.0f, c1w_max / 1000.0f, (unsigned)c1n_accum,
                     c1d_accum / 60000.0f, c1wd_accum / 60000.0f, c1wd_max / 1000.0f,
                     dma_accum / 60000.0f, (unsigned)(dmaw_accum / 60), (unsigned)(dmar_accum / 60), (unsigned)(dmab_accum / 60), (unsigned)(dmaf_accum / 60),
                     (unsigned)(prd_accum / 60), (unsigned)(pff_accum / 60), (unsigned)(pfft_accum / 60000), (unsigned)frm_accum, (unsigned)late_accum, (unsigned)miss_accum);
+            c0_accum = c0j_accum = 0;
             // DRAM model (TsConf.cpp): CPU wait states inserted at 14 MHz, DRAM cycles
             // the CPU and the video fetcher took from running DMAs, against the
             // DMAs' own cycle count — the numbers that decide Bomberman's copy phase.
@@ -10345,7 +10425,7 @@ static bool ftGlueEnsure() {
         // wait out anything still queued, then the block is ours.
         VIDEO::tsRenderDrain();
         ts_c1_ring = nullptr; ts_c1_tsu = nullptr; ts_c1_sf = nullptr; ts_c1_tsu_job = nullptr; ts_c1_sf_job = nullptr;
-        ts_c1_r = ts_c1_w = 0;
+        tsC1QueueClear();
         s_c1borrowed = true;
         tsC1LiveRecalc();
         rows = s_ftRows;

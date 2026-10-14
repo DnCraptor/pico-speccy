@@ -98,8 +98,10 @@ if (TSOVL_WIN_SIZE STREQUAL "AUTO")
         # Video.cpp's .tsovl: 8068 B, plus its 28 B .tsovl_ro and most of the
         # 248 B of linker veneers the window needs for calls out of it. It was
         # 14 776 B before the 2026-09-13 renderer split (tsRenderExec at -O2
-        # without unrolling, the GFXOVR merge left in flash).
-        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 8448")
+        # without unrolling, the GFXOVR merge left in flash). +768 on 2026-10-14:
+        # the two-renderer queue (claim/release under a spinlock, the core0
+        # helper) added 624 B.
+        math(EXPR _TSOVL_BYTES "${_TSOVL_BYTES} + 9216")
     endif()
     if (TSCONF_HOT_IN_RAM)
         # TsConf.cpp's .tsovl: 4556 B (portRead/portWrite, dmaStatus/dmaStart/

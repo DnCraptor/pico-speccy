@@ -381,6 +381,7 @@ double ESPectrum::totalsecondsnodelay = 0;
 int64_t ESPectrum::target;
 int ESPectrum::sync_cnt = 0;
 volatile bool ESPectrum::v_sync = false;
+extern "C" volatile bool g_ts_c1_live;   // Video.cpp: TS-Conf core1 line queue live (guards the overlay call)
 int64_t ESPectrum::ts_start;
 int64_t ESPectrum::elapsed;
 int64_t ESPectrum::idle;
@@ -4396,6 +4397,8 @@ void ESPectrum::loop() {
           // A TS-Conf palette change waiting for the beam to reach its row
           // (VIDEO::tsPalettePoll): the beam moves while we wait here.
           if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);
+          // TS-Conf: take queued lines off core1 while there is nothing else to do.
+          if (g_ts_c1_live) VIDEO::tsC1HelpOne();
           if (v_sync) {
             v_sync = false;
             break;
@@ -4416,6 +4419,7 @@ void ESPectrum::loop() {
             while ((int64_t)time_us_64() < e) {
               ZiFi::cdcPump();
               if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);
+              if (g_ts_c1_live) VIDEO::tsC1HelpOne();
             }
           } else
           if (GS::neogs) {
@@ -4424,13 +4428,18 @@ void ESPectrum::loop() {
             while ((int64_t)time_us_64() < e) {
               NgsSd::service();
               if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);
+              if (g_ts_c1_live) VIDEO::tsC1HelpOne();
             }
           } else
-          if (Z80Ops::isTsconf && VIDEO::tsPollWanted()) {
+          if (Z80Ops::isTsconf && (VIDEO::tsPollWanted() || g_ts_c1_live)) {
             // Palette change waiting for the beam (tsPalettePoll): poll instead
-            // of sleeping through the rows it is waiting for.
+            // of sleeping through the rows it is waiting for. And render queued
+            // lines here instead of leaving them all to core1.
             int64_t e = (int64_t)time_us_64() + idle;
-            while ((int64_t)time_us_64() < e) VIDEO::tsPalettePoll(false);
+            while ((int64_t)time_us_64() < e) {
+              if (VIDEO::tsPollWanted()) VIDEO::tsPalettePoll(false);
+              if (!g_ts_c1_live || !VIDEO::tsC1HelpOne()) tight_loop_contents();
+            }
           } else
           {
             delayMicroseconds(idle);

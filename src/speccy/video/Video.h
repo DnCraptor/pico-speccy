@@ -399,7 +399,11 @@ public:
   static uint32_t tsCramToRgb(uint16_t cram);   // RGB555 cell → RGB888 through the real-PWM gamma
   static uint8_t  tsBorderSlot();        // Border register → fb byte for the live mode
   static void     tsRenderLine(uint32_t curline); // whole-line renderer (non-ZX modes / TSU); timed wrapper
-  static void     tsRenderExec(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq); // one line, core1 or core0
+  // One line, core1 or core0. tsl = the caller's 512-byte compose buffer (queue
+  // renderers: one per core) or nullptr = the synchronous path (s_tsline, and it
+  // publishes the render position itself).
+  static void     tsRenderExec(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq, uint8_t* tsl = nullptr);
+  static bool     tsC1HelpOne();         // core0: render one queued line if one is free (true = did)
   static void     tsRenderExecOvr(const union TsRenderJob& j, const struct TsuState* st, const uint16_t* sfile, uint32_t seq, const struct TsLineCtx& c); // the GFXOVR merge (flash)
   static void     tsRenderCore1Pump();   // core1 render loop: run queued lines
   static void     tsRenderDrain();       // core0: wait for the core1 queue to empty
