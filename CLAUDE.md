@@ -14981,3 +14981,10 @@ so). `debug/*p2w-*.elf` files from before 2026-10-12 are Waveshare builds.
   the log names the pins, and a WS boot shows "WiFi radio not found: wrong W image?".
   PIO budget of the m1p2w image measured from the ELF: pio2 HDMI 18/20 + radio 6,
   pio0 SPI PSRAM 18/20 (+ VGA 1), pio1 PS/2 7 + pad 7 + I2S 8 — no block overflows.
+  **Resolved 2026-10-14: the reviewer's "no picture" on the new m1p2w was bad header
+  soldering on the Pico, not firmware** — after resoldering it works (the plain m1p2
+  image had worked on the same module, which is what made the W image look guilty).
+  The two fixes above stay (they are correct regardless). Before blaming a W image for
+  a dead screen, try the plain image on the same module: if THAT works, check the
+  board's own pins/soldering before the radio — a diagnostic `WIFI_RADIO_OFF` build
+  (skip `cyw43_arch_init`) was made for the bisect and reverted unused.
