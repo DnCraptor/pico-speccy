@@ -1206,10 +1206,32 @@ static const Node kVga[] = {
     NM_RADIO(NM_IND TXT_VID_VGA_DITHER, SET_VGA_DITHER, opt_vga_dither, p_vgaDither),
 };
 
+// Video > Screen position: which 288 of the Pentagon's 304 visible lines the 720x576
+// window shows (top / paper / bottom border rows). Offered for the 288-row modes on a
+// Pentagon-raster machine (Pentagon 128/512/1024, TS-Conf, ZX Evolution in its
+// Pentagon raster); everywhere else the window stays 48/192/48.
+static const Option opt_screen_top[] = {
+    { "Even (48/192/48)",     0, "Even" },
+    { "Middle (60/192/36)",   1, "Middle" },
+    { "Full top (64/192/32)", 2, "Full top" },
+};
+static bool p_screenTop() {
+    const int32_t vm = Stage::get(SET_VIDEO_MODE);
+    if (vm < 0) return false;
+    const uint8_t b = Config::baseVideoMode((uint8_t)vm);
+    if (b != Config::VM_720x576_50 && vm != Config::VM_800x600_X2 &&
+        vm != Config::VM_720x576_169 && vm != Config::VM_1440x576_X3) return false;
+    const int32_t m = Stage::get(SET_MACHINE);
+    const int a = (m < 0) ? (int)Config::arch : ((m >> 8) & 0xFF);
+    if (a == A_PENT || a == A_P512 || a == A_P1024 || a == A_TSCONF) return true;
+    return (a == (int)Config::arch) && Config::isEvoPentRaster();   // BaseConf / ScorpEvo, live
+}
+
 static const Node kVideo[] = {
     NM_RADIO_D(TXT_VID_MODE,     SET_VIDEO_MODE, video_modeOpts, nullptr),
     NM_SUB  (TXT_VID_HDMI,       kHdmi,          p_hdmiOut),
     NM_SUB  (TXT_VID_VGA,        kVga,           p_vgaOut),
+    NM_RADIO(TXT_VID_SCREEN_TOP, SET_SCREEN_TOP, opt_screen_top, p_screenTop),
     NM_BOOL (TXT_VID_BORDER,     SET_BORDER,     nullptr),
     // Border-timing aid: No = the paper area is not rendered; the border state
     // machine paints through it, showing the border colour "under" the paper as

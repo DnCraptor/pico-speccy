@@ -5320,8 +5320,12 @@ void VIDEO::Reset() {
     Select_Update_Border();
 
     if (isFullBorder && !isFullBorder240) {
-        lin_end = 48;
-        lin_end2 = 240;
+        // Video > Screen position: the window starts (top - 48) lines earlier on the
+        // raster and the paper sits that much lower in the framebuffer.
+        const int top = VIDEO::screenTopRows();
+        tStatesBorder -= (top - 48) * (int)tStatesPerLine;
+        lin_end = top;
+        lin_end2 = top + 192;
         lineptr_offset = ((Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isTsconf || Config::isEvoPentRaster() || Config::isEvo60Raster()) ? 26 : 24) / 2;
     } else if (isFullBorder && isFullBorder240) {
         // Profi centred like Pentagon (24 top / 24 bottom border): using 32/224
@@ -7209,8 +7213,8 @@ void VIDEO::gmxApplyPending() {
         }
         // Restore the standard Scorpion line window (mirror of Reset's generic
         // block; Scorpion always takes the 24/216 arm unless full-border 288).
-        if (isFullBorder && !isFullBorder240()) { lin_end = 48; lin_end2 = 240; }
-        else                                    { lin_end = 24; lin_end2 = 216; }
+        lin_end  = (unsigned)VIDEO::screenTopRows();
+        lin_end2 = lin_end + 192;
         tstateDraw   = tStatesScreen;
         linedraw_cnt = lin_end;
         DrawBorder = &Border_Blank; // mid-frame border state is stale — skip this frame
@@ -7550,6 +7554,42 @@ void VIDEO::col16DrawTick() {
 
 int VIDEO::gmxTopBandRows() { return (gmx_ext_live || ts_render_live) ? (int)lin_end : 0; }
 
+// Video > Screen position. A real Pentagon shows 304 lines: 64 of top border, 192 of
+// paper, 48 of bottom (lines 16..303 of the 320-line frame are visible; "Across the
+// Edge" draws in lines 16..31). The 288-row window cannot hold all of them, so the user
+// picks which 16 to lose: 48/192/48 (lines 32..319, the default), 60/192/36, 64/192/32.
+// Only the Pentagon raster has the extra top lines (48K/128K show ~48 on top), and Profi
+// keeps its own geometry. Flash: called from Reset / mode restores / the menu hook.
+int VIDEO::screenTopRows() {
+    if (!isFullBorder || isFullBorder240()) return 24;
+    const bool pentRaster = Config::arch == A_PENT || Config::arch == A_P512 ||
+                            Config::arch == A_P1024 || Config::arch == A_TSCONF ||
+                            Config::isEvoPentRaster();
+    if (!pentRaster) return 48;
+    static const uint8_t kTop[3] = { 48, 60, 64 };   // Even / Middle / Full top
+    return kTop[Config::screen_top <= 2 ? Config::screen_top : 0];
+}
+
+void VIDEO::screenTopApply() {
+    if (!isFullBorder || isFullBorder240()) return;
+    // Modes with their own line window re-derive it from screenTopRows() on the way
+    // back to the standard renderer (gmxApplyPending / tsVideoApplyPending).
+    if (gmx_ext_live || ts_render_live || ds80_border_geom || ft_live) return;
+    const int top = screenTopRows(), old = (int)lin_end;
+    if (top == old) return;
+    tStatesBorder -= (top - old) * (int)tStatesPerLine;
+    lin_end  = (unsigned)top;
+    lin_end2 = (unsigned)top + 192;
+    linedraw_cnt  = lin_end;
+    tstateDraw    = tStatesScreen;
+    lastBrdTstate = tStatesBorder;
+    DrawBorder    = bl_live ? &Border_Blank : &TopBorder_Blank;
+    brdChange     = false;
+    brdnextframe  = true;          // the next EndFrame repaints every border row
+    Debug::log("VIDEO: screen position %d/192/%d, border from T=%d",
+               top, (int)vga.yres - top - 192, tStatesBorder);
+}
+
 // True while a whole-line renderer owns the content rows and the per-T-state
 // border machine is parked (Scorpion GMX 640x200, every TS-Conf non-ZX mode):
 // the top/bottom bands are painted frame-granularly by gmxBorderFrame and their
@@ -7775,8 +7815,8 @@ void VIDEO::tsVideoApplyPending() {
     if (!wantRender) {
         // Back to the standard renderer: Pentagon line window (Reset's generic
         // block) and the per-T-state border machine.
-        if (isFullBorder && !isFullBorder240()) { lin_end = 48; lin_end2 = 240; }
-        else                                    { lin_end = 24; lin_end2 = 216; }
+        lin_end  = (unsigned)VIDEO::screenTopRows();
+        lin_end2 = lin_end + 192;
         ts_crop_top = 0;
         tStatesScreen = TS_SCREEN_TSCONF;
         DrawBorder = &Border_Blank;   // mid-frame border state is stale — skip this frame

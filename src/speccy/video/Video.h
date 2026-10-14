@@ -592,6 +592,13 @@ public:
                                        || vm == Config::VM_720x576_169
                                        || vm == Config::VM_1440x576_X3; }
   static bool isFullBorderMode() { return isFullBorder240() || isFullBorder288(); }
+  // Video > Screen position: rows of TOP border in the 288-row window (48/60/64 on a
+  // Pentagon-raster machine per Config::screen_top, 48 elsewhere; 24 outside the
+  // 288-row modes). The paper is always 192 rows below it.
+  static int  screenTopRows();
+  // Re-derive the window from Config::screen_top on a running machine (menu commit,
+  // between frames). No-op outside the standard 288-row geometry.
+  static void screenTopApply();
   // A big HDMI mode that shows only part of the framebuffer is on screen (1024x768 x4:
   // the centre 256x192; 800x600 x3: the centre 264x200). Returns that window.
   static bool bigWindow(int& fbx, int& w, int& oy, int& h);

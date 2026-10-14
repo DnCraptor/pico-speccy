@@ -171,6 +171,30 @@ static int describeVsync(int32_t v, DescLine* out, int max) {
     return n;
 }
 
+// Video > Screen position: what the three numbers are (border rows above the paper,
+// the paper, border rows below) and which raster lines of the Pentagon's 304 visible
+// ones that keeps — lines 16..303 are visible on the real machine.
+static int describeScreenTop(int32_t v, DescLine* out, int max) {
+    if (v < 0 || v > 2) return 0;
+    static const int kTop[3] = { 48, 60, 64 };
+    const int top = kTop[v], bot = 96 - top;
+    char a[24], b[24], c[24];
+    int n = sub(out, 0, max, "Rows on screen", nullptr, DESC_PLAIN);
+    snprintf(a, sizeof(a), "Top border %d", top);
+    n = rule(out, n, max, a, "");
+    n = rule(out, n, max, "Paper 192", "");
+    snprintf(b, sizeof(b), "Bottom border %d", bot);
+    n = rule(out, n, max, b, "");
+    n = sub(out, n, max, "Pentagon lines", nullptr, DESC_PLAIN);
+    snprintf(c, sizeof(c), "%d..%d of 16..303", 80 - top, 271 + bot);
+    n = rule(out, n, max, c, "");
+    snprintf(a, sizeof(a), "%d", 64 - top);
+    n = rule(out, n, max, "Top lines cut", a, top != 64);
+    snprintf(b, sizeof(b), "%d", 48 - bot);
+    n = rule(out, n, max, "Bottom lines cut", b, bot != 48);
+    return n;
+}
+
 // The machine the commit will end on: the staged pick, else the running one.
 static void stagedMachine(ArchIdx& a, RomsetIdx& r) {
     const int32_t m = Stage::get(SET_MACHINE);
@@ -236,6 +260,7 @@ int describe(const Node& n, int32_t value, DescLine* out, int max) {
         case SET_MACHINE: return describeMachine(value, out, max);
         case SET_GS_MODE: return describeGs(value, out, max);
         case SET_VSYNC:   return describeVsync(value, out, max);
+        case SET_SCREEN_TOP: return describeScreenTop(value, out, max);
         case SET_CPU_MHZ:
         case SET_VREG:
         case SET_FLASH_FREQ:

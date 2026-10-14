@@ -213,6 +213,10 @@ public:
     // ZX Evolution BaseConf raster: 0 Pentagon / 1 60 Hz / 2 48K / 3 128K. On the real
     // board the AVR keeps it in the PCF8583 NVRAM and Scroll Lock cycles it.
     static uint8_t  evo_raster;
+    // Video > Screen position (720x576 modes, Pentagon raster only): 0/1/2 = 48/60/64
+    // rows of top border in the 288-row window (bottom 48/40/32). A real Pentagon shows
+    // 64 top + 48 bottom lines; 288 rows cannot hold both. VIDEO::screenTopRows().
+    static uint8_t  screen_top;
     // VDAC2 (FT812) video board on the Z-Controller SPI (Ft812.h). Reboot-class:
     // its 1 MB RAM_G is carved out of the butter PSRAM at boot (Buffer::pageBudget).
     static bool     tsconf_vdac2;

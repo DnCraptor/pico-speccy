@@ -401,7 +401,7 @@ garbage. Reference: NedoPC `fpga/current/dma/dma_zx.v` + `docs/dma_zx_doc.txt`
   is gated on #BB traffic, and the hang where the card waits for a command the
   host never sends has #BB traffic of exactly zero.
 - **The card side is in the memory dump now** (`tools/memdump.gdb` +
-  `tools/memdump.py`, NOT `OSD::saveDumpToFile` — the Ctrl+Alt+D dump is
+  `tools/memdump.py`, NOT `OSD::saveDumpToFile` — the Ctrl+Alt+M dump is
   produced over GDB by the VS Code extension, so firmware-side changes to
   saveDumpToFile never show up there): 64 KB of `s_ngs_low_ram` re-split into
   the GS-Z80's `0000-3FFF` and its fixed `4000-7FFF` window, plus GS-Z80
@@ -3050,7 +3050,7 @@ between the BIOS sets — `MENU_RESETTO_PENT` / `PENTGLUK` all over again):
   **MBR with a FAT32 partition** (type 0x05/0x0B/0x0C/0x0F — it scans the table at
   446+4 itself), which the owner's card evidently has.
 - If SD boot still fails, the next capture is `-DZC_PORT_TRACE=ON` (CS edges +
-  command frames) plus a Ctrl+Alt+D at the black screen: `start`'s error paths all
+  command frames) plus a Ctrl+Alt+M at the black screen: `start`'s error paths all
   end in a TEXT-mode box (`BT_ERROR` -> `TX_MODE`, and codes 2/3 then `jr nz,$`),
   so a BLACK screen means a hang BEFORE that — the SD read loops (`jr nz,$` after
   `cmd18`, `cp 0xFE / jr nz,$-5` after `wtdo`) are unbounded, everything else in
@@ -3304,7 +3304,7 @@ took eleven hardware rounds; the mechanisms, in the order they were peeled:
 ### Demorama: VConfig is per LINE, and a per-line palette effect must not be HELD (hw-confirmed 2026-09-17)
 
 "Part of the graphics is missing, and in one place the FPS drops to 25." Both came
-out of the guest's OWN tables in a Ctrl+Alt+D dump — read them before theorising,
+out of the guest's OWN tables in a Ctrl+Alt+M dump — read them before theorising,
 they are unambiguous. The demo (TS-Conf, 14 MHz, `intmask=03`) runs a **LINE INT on
 every one of the 320 lines** (handler at card-side ZX `#815C`) that, per line:
 `OUT (#FB),A` a sound sample, `OUT (#0FAF)` the **border** (`(sample & 3) | 0xFC` —
@@ -3882,7 +3882,7 @@ VSINT/frame-T/latency/vector), dumped as ONE binary transfer by
 ISR cost; `intMiss`/`brdT`/`d`/`intT`/`haltT` in `[PERF] 60f`.
 
 **Traps this cost time on, worth not repeating:**
-- **A missing symbol in `memdump.gdb` HANGS Ctrl+Alt+D, it does not just lose a
+- **A missing symbol in `memdump.gdb` HANGS Ctrl+Alt+M, it does not just lose a
   line** (2026-09-10, an ordinary `build/`: `PERF_TRACE` defaults OFF in
   CMakeLists, so the ring is absent unless a session asked for it): GDB has no
   try/catch, so an unknown symbol aborts the sourced file — and those blocks run
@@ -4379,7 +4379,7 @@ the MENU's palette, and nothing about the pair TABLES was wrong.
   dumps `profi_palette_live` and `profi2png.py` COLOURS with it, so the PNG shows
   what the emulator INTENDS. PNG wrong -> `profi_palette_live` is wrong (this
   bug). PNG right but the screen wrong -> the driver tables were clobbered (the
-  `applyPalette` bug above). Ctrl+Alt+D's `palsel=` + `cram[..]` says what the
+  `applyPalette` bug above). Ctrl+Alt+M's `palsel=` + `cram[..]` says what the
   guest actually asked for.
 ### ...and the one that started it: a top-border TOAST repainting the guest (hw-confirmed 2026-09-19)
 
@@ -5054,7 +5054,7 @@ three. hw-confirmed 2026-09-12 (owner: picking a .tap in the browser runs it).
 **How to remake it** — this is the only way, so follow it exactly: on real hardware
 with **Fast load OFF** (so nothing intercepts the loader), mount a .tap, type
 `LOAD ""`, press Enter. The machine then sits in LD-EDGE waiting for tape edges that
-never come; Ctrl+Alt+D there gives 48 KB + registers + the SCLD block. Then:
+never come; Ctrl+Alt+M there gives 48 KB + registers + the SCLD block. Then:
 
 - **Rewind two instructions**, from the dump's `PC=0x0199` (inside LD-EDGE) back to
   the `CP A` at EX-ROM **0x0110**: undo the `CALL 0x018D` at 0x0112, so `SP` goes
@@ -5311,7 +5311,7 @@ mbedtls/cyw43/lwip submodules.
   the four bytes of `g_memgates` (CPU.cpp), kept under their old names by macros,
   so every owner is untouched. A read is fast when `(w & 0xFFFF) == 1`, a write when
   `w == 1`: one load and one compare. `tools/memdump.gdb` reads
-  `g_memgates.b.atm_ro` now — a stale symbol there HANGS Ctrl+Alt+D.
+  `g_memgates.b.atm_ro` now — a stale symbol there HANGS Ctrl+Alt+M.
 - **No line test per guest access on the fast path**: the whole-line renderer is
   ticked at the next M1 (`exec_nocheck_ts` / `fetchOpcode`), i.e. at most one
   instruction late — a few T of an 896..1792-T line, the same as the write
@@ -5339,7 +5339,7 @@ mbedtls/cyw43/lwip submodules.
   (fishbone, TMNT, Bomberman, Ninja Gaiden — the 14 MHz path got every change but
   the DRAM-model removal), the same at 28 via the CPU cap, an ATM/Evo whole-line
   title and a Pentagon 16col screen (they share the fast path), a NeoGS ZX-DMA demo
-  (TheLink: the fast path switches off mid-slice), and Ctrl+Alt+D on an ATM machine
+  (TheLink: the fast path switches off mid-slice), and Ctrl+Alt+M on an ATM machine
   (the renamed `g_atm_ro`).
 
 ## Z80 DMA attribute multicolour (MB-02+/DATA-GEAR): NaPICu (2026-09-14; owner on `DVp2-napicu-dma2`: "работает" — letters and title both clean)
@@ -5385,7 +5385,7 @@ frame's tail, while the pass keeps writing black rows into page 5. Two defects i
   per row against a 228 T line; 197 x 7 + 154 = 1533 per charrow against 1824) says
   it was tuned on something slower than 4 T/byte, so if a hardware MB-02 timing is
   ever measured, revisit — but do not model contention without one.
-- **`tools/z80dma_sim/`**: `dump2bins.py` splits a Ctrl+Alt+D dump into pages +
+- **`tools/z80dma_sim/`**: `dump2bins.py` splits a Ctrl+Alt+M dump into pages +
   registers, `z80dma_sim.c` runs the guest on redcode with a mirror of Z80DMA.cpp's
   register decode (P lines = every #7FFD write, D lines = every transfer with its
   frame-relative T and data, optional page dumps at a frame), `analyse.py` replays the
@@ -7841,7 +7841,7 @@ symbols at 0x2002xxxx-0x2006xxxx) after every change, not just the section total
 
 Also moved in this round: the ATM/KAY glue (`atmPortReadEarly/WriteEarly`,
 `kay1FFDWrite`, `scorpionC000Page`, `Z80::check_trdos_atm`, `Z80::scorp_dos_exit_rom`),
-Hide border's `blExpandLine`/`blPutRow`. What that costs and must be checked on hw:
+Render border = No (the borderless scaler): `blExpandLine`/`blPutRow`. What that costs and must be checked on hw:
 Profi/Karabas port I/O now runs from XIP (FPS in DS80 and CP/M, FDC traffic), ATM/KAY
 ports and TR-DOS traps from XIP, the borderless scaler from XIP (FPS on a busy title),
 TS-Conf unchanged in speed (window = SRAM). Test ELFs `debug/{m2p2,m2p2-hstx,DVp2}-sram2-1.0.8`.
@@ -8051,7 +8051,7 @@ one-line-per-frame CONSISTENCY DETECTOR, not a trace of events.
   of events next time.
 - **`ts_dma_ring` (TS_VIDEO_TRACE builds, 128 x 20 B) + `tools/dmaring.py`**: every
   DMACtrl write with raster frame/line, mode, words, addresses, modelled duration,
-  and core1's `pend`/`posted` at that instant, read out by Ctrl+Alt+D
+  and core1's `pend`/`posted` at that instant, read out by Ctrl+Alt+M
   (`tools/memdump.gdb` probes it like `ts_int_ring`). Built because the UART cannot
   carry a per-DMA trace of a heavy frame (~14 DMAs in 20 ms ≈ 40 KB/s against
   115200 baud = 11.5 KB/s — every capture came back with the frame's first lines
@@ -8128,7 +8128,7 @@ flag 257). Window AUTO term is now +8192 B for data (19 152 of 22 272 B used).
   firmware reader is TS-gated, but `tools/memdump.gdb` prints that block
   unconditionally, and on another machine it would decode heap bytes as a
   register file. Moving them means teaching the dump script to skip the block —
-  and a wrong symbol there HANGS Ctrl+Alt+D (see the fishbone trap list), so it
+  and a wrong symbol there HANGS Ctrl+Alt+M (see the fishbone trap list), so it
   is not a change to make in passing.
 - Host tests re-run green: `tools/tsdram_cache_test.cpp` (fails=0) and
   `tools/tsdram_test.cpp` (OK). A `-DTSCONF_CODE_OVERLAY=OFF` build still links
@@ -8610,7 +8610,26 @@ for anything raised while the MENU owns the screen.
 - Expiry is wall time (`esp_timer_get_time`), not frames, so max speed does not
   flash it past.
 
-## Video > Hide border — the paper scaled to fill the screen (2026-09-27, NOT hw-tested)
+## Video > Screen position — which 288 of the Pentagon's 304 lines (2026-10-14, hw-confirmed DVp2)
+
+A real Pentagon shows 304 lines: 64 of top border (raster lines 16..79), 192 paper, 48
+bottom (272..319). The 720x576 window has 288 rows and used to show 48/192/48 (lines
+32..319), cutting the top — "Across the Edge" draws "ACROSS" in lines 16..31 (same
+report and fix on MiSTer: ZX-Spectrum_MISTer issue #44 / PR #73, "Pentagon Overscan").
+`Config::screen_top` (NVS `screen_top`, `SET_SCREEN_TOP` AC_LIVE) = **Even 48/192/48**
+(default), **Middle 60/192/36** (owner: "ровно по центру"), **Full top 64/192/32**.
+`VIDEO::screenTopRows()` is the one source: 48 for every machine that is not Pentagon
+128/512/1024, TS-Conf or `isEvoPentRaster()` (Profi excluded on purpose — owner), 24
+outside the 288-row modes. `VIDEO::Reset` moves `tStatesBorder` by `(top-48)*224` and
+sets `lin_end = top`, `lin_end2 = top+192`; the GMX-off and TS-Conf back-to-ZX restores
+take it from the helper; `screenTopApply()` (menu hook, between frames) shifts a running
+machine and asks for a full border repaint. TS-Conf whole-line modes keep their own
+RRES window. The row (under Render border) shows only for a staged 288-row mode on a
+Pentagon-raster machine; a Description block spells out the numbers.
+
+## Video > Render border = No — the paper scaled to fill the screen (2026-09-27, NOT hw-tested)
+
+The row is **Video > Render border** (`Config::render_border`, Yes = normal border); earlier notes called it "Hide border" — same setting, inverted wording.
 
 `Config::render_border` (NVS `render_border`, `SET_BORDERLESS`, AC_PURE) → `VIDEO::bl_live`,
 re-decided at EVERY EndFrame by `VIDEO::blRecalc()` (right after the DS80/GMX/Timex/
@@ -8648,7 +8667,7 @@ TS-Conf mode applies, before `gigascreenModeGate`), so the menu only writes Conf
   strip, notify banner over the picture (no blinking); toggling on/off; Gigascreen
   suspend/resume; Profi DS80 / GMX / TS-Conf mode switches in and out; FPS cost.
 
-### Hide border, stage 1: pair scaler + scanout line map (2026-09-27, NOT hw-tested)
+### Render border = No, stage 1: pair scaler + scanout line map (2026-09-27, NOT hw-tested)
 
 The 5/4 / 11/8 / 3/2 fb-level scaler above gives pixel widths 2,2,2,4 and line heights
 2,2,2,4 (480) / 2,4 (576) — uneven, visible in text. Two independent improvements, each
@@ -9384,7 +9403,7 @@ generated**; the same shape would bite any other family that keeps a raw bank.
   timing skeleton (224 T/line, paper T 14336, the `halfpix&4`/`>=125` no-data
   windows → 0xFF) but returns `grmem[offAtt[line]+hpoffset]` regardless of
   halfpix parity; with row 23 uniformly 0x55 both reads then land on 0x55.
-  Assigned in CPU::reset (was getFloatBusData48). Diagnosed from a Ctrl+Alt+D
+  Assigned in CPU::reset (was getFloatBusData48). Diagnosed from a Ctrl+Alt+M
   memory dump: PC parked at the loop at RAM 0x7355 named the whole check, and the
   dump's 0x5AE0=0x55 (page 5, = the page `grmem` reads) ruled out any page/grmem
   mismatch, leaving the odd-spacing parity flip as the only cause; the
@@ -9516,7 +9535,7 @@ entry" rule buys.
   **`R_SCORP_GMX6` (`ProfRomGMX_v6s.rom`, v6.44.9643, CRC32 FCA97CD6) shipped beside
   it for a day and was REMOVED on the owner's call the same day (2026-09-20)** — it
   was hw-confirmed while it lasted (its 640x200 Shadow monitor renders in full and the
-  keyboard works, from a Ctrl+Alt+D screenshot of the Main menu; the navigator and the
+  keyboard works, from a Ctrl+Alt+M screenshot of the Main menu; the navigator and the
   disk utilities were never covered), and it cost 212 992 B of flash. It is the
   reference case for what a second image of this family costs and how it packs — see
   the bullets below, which are kept for that reason. Two findings from the same day
