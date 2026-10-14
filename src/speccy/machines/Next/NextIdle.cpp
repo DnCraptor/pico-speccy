@@ -6,6 +6,9 @@
 #include "speccy/core/MemESP.h"
 #include "speccy/core/Rzx.h"
 #include "app/CodeOverlay.h"
+#include "speccy/devices/storage/DivMMC.h"
+
+extern bool g_nxmf_mem;   // NextMf.h: the Multiface overlay serves 0x0000-0x3FFF
 
 namespace NextIdle {
 uint16_t tgt = 0xFFFF, tgt2 = 0xFFFF, tgt3 = 0xFFFF;
@@ -54,6 +57,25 @@ static int plainLen(uint16_t a) {
     }
 }
 
+// Below 0x4000 a pass is allowed only where plain RAM is what the CPU sees
+// (MMU0/1 on a RAM page) and nothing can trap the fetch: no ROM, no divMMC
+// (automapped or CONMEM), no Layer 2 read mapping, no Multiface, no bootrom /
+// config window — and not an automap entry point (RSTs and 0x0066 below
+// 0x0068, the 0x1FF8-0x1FFF exit, 0x3Dxx). With RAM there "ROM3" is false, so
+// the 0x04C6 / 0x0562 family cannot fire either. Halls of the Things waits at
+// 0x0460 (LD A,(#948F) / OR A / JR Z) with page 2 at 0x0000: 88% of a 28 MHz
+// frame, hw 2026-10-14.
+static bool lowOk(uint16_t a) {
+    if (a >= 0x4000) return true;
+    const uint8_t slot = (uint8_t)(a >> 13);
+    if ((MemESP::next_rom_mask >> slot) & 1) return false;
+    if ((MemESP::l2_rd_mask >> slot) & 1) return false;
+    if (DivMMC::automap || DivMMC::conmem || g_nxmf_mem) return false;
+    if (MemESP::nextBootRomActive || MemESP::nextConfigMode) return false;
+    if (a < 0x0068 || (a >= 0x1FF8 && a <= 0x1FFF) || (a & 0xFF00) == 0x3D00) return false;
+    return true;
+}
+
 // The pass from S: every path that does not leave the loop must come back to
 // S through allowed instructions only. A conditional JP / JR to S closes the
 // loop (its other side is the exit, not followed); any other conditional jump
@@ -65,7 +87,7 @@ static int plainLen(uint16_t a) {
 //   NextBench S: LD DE,(nn) / LD HL,(nn) / CALL f / OR A / JP NZ,S
 //             f: XOR A / SBC HL,DE / RET NZ / INC A / RET
 static bool validate(uint16_t s) {
-    if (s < 0x4000) return false;                    // divMMC automap / ROM space
+    if (!lowOk(s)) return false;                     // ROM / divMMC / trap space (lowOk)
     struct Path { uint16_t pc; uint8_t sp; uint16_t ret[4]; };
     Path work[8];
     int nw = 0, steps = 0;
@@ -80,7 +102,7 @@ static bool validate(uint16_t s) {
             if (++steps > 48) return false;
             if (p.pc == s && steps > 1) { closed = true; break; }
             const uint16_t a = p.pc;
-            if (a < 0x4000) return false;
+            if (!lowOk(a) || !lowOk((uint16_t)(a + 3))) return false;
             const uint8_t o = MemESP::dbgPeek(a);
             const int len = plainLen(a);
             if (len) { p.pc = (uint16_t)(a + len); continue; }
@@ -153,6 +175,8 @@ void jump() {
         readRegs(s_regs);
         return;
     }
+    // the low-RAM verdict depends on the live mapping, not just on the code
+    if (s < 0x4000 && !lowOk(s)) { s_ok = 0xFFFF; return; }
     const uint32_t now = CPU::tstates, r = Z80::getFetchCounter();
     const uint32_t d = now - s_lastT, dR = r - s_lastR;
     s_lastT = now; s_lastR = r;
