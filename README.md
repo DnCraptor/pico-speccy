@@ -24,7 +24,30 @@ Board supported:
    PCp2ws) — WiFi on board (Raspberry Pi Radio Module 2), 16 MB of flash and PSRAM
    pads on GPIO47; audio on GPIO40/41/42, LED on GPIO23.
 
-Best performance for case Pimoroni "Pico Plus 2" is used.
+Best performance for case Pimoroni "Pico Plus 2" / "Pico Plus 2 W" is used.
+
+Which firmware to flash (`<ver>` = release version; the chip is the one on the
+module plugged into the carrier):
+
+| Board (carrier + module) | Chip | CMake option | Firmware |
+|---|---|---|---|
+| Murmulator 1.x + Pi Pico 2 | RP2350A | `-DMURM=ON` | `m1p2-speccy-VGA-HDMI-<ver>.uf2`, `-TV-SOFT-`, `-ILI9341-`, `-ST7789-` |
+| Murmulator 2.0 + Pi Pico 2 | RP2350A | `-DMURM2=ON` | `m2p2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-`, `-TV-SOFT-`, `-ILI9341-`, `-ST7789-` |
+| Olimex RP2040-PICO-PC + Pi Pico 2 | RP2350A | `-DPICO_PC=ON` | `PCp2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Pimoroni Pico DV Demo Base + Pi Pico 2 / Pico Plus 2 | RP2350A / RP2350B | `-DPICO_DV=ON` | `DVp2-speccy-VGA-HDMI-<ver>.uf2` |
+| Waveshare RP2350-PiZero | RP2350B | `-DZERO2=ON` | `z0p2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-PIOUSB-` |
+| Murmulator 1.x + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DMURM_W=ON` | `m1p2w-speccy-VGA-HDMI-<ver>.uf2` |
+| Murmulator 2.0 + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DMURM2_W=ON` | `m2p2w-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Pico DV Demo Base + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DPICO_DV_W=ON` | `DVp2w-speccy-VGA-HDMI-<ver>.uf2` |
+| Olimex PICO-PC + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DPICO_PC_W=ON` | `PCp2w-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Murmulator 1.x + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DMURM_WS=ON` | `m1p2ws-speccy-VGA-HDMI-<ver>.uf2` |
+| Murmulator 2.0 + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DMURM2_WS=ON` | `m2p2ws-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Pico DV Demo Base + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DPICO_DV_WS=ON` | `DVp2ws-speccy-VGA-HDMI-<ver>.uf2` |
+| Olimex PICO-PC + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DPICO_PC_WS=ON` | `PCp2ws-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+
+`*p2w` and `*p2ws` images are NOT interchangeable: the two W modules wire the radio,
+audio and LED to different pins. A `*p2w` image needs 16 MB of flash, so a plain 4 MB
+Raspberry Pi Pico 2 W is not supported.
 
 ## Features
 
@@ -350,7 +373,7 @@ To build firmware for all supported boards and display variants at once, use the
 ./build_all.sh [--clean] [-j JOBS_PER_BUILD] [-p MAX_PARALLEL] [TARGETS...]
 ```
 
-- Targets: `MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W` (default: all)
+- Targets: `MURM MURM2 PICO_PC PICO_DV ZERO2 MURM_W MURM2_W PICO_DV_W PICO_PC_W MURM_WS MURM2_WS PICO_DV_WS PICO_PC_WS` (default: all)
 - ZERO2 builds twice: the plain image and a `PIOUSB` one (`-DZERO2_PIO_USB=ON`, USB host on the second Type-C)
 - PICO_PC, PICO_PC_W, MURM2 and MURM2_W build twice: the plain image (PIO HDMI, `-DHDMI_HSTX=OFF`) and an `HSTX` one (`-DHDMI_HSTX=TMDS`, `...-VGA-HDMI-HSTX-*.uf2`)
 - `--clean` — wipe build dirs first (default: incremental rebuild)
