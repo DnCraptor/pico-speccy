@@ -15068,3 +15068,21 @@ to the disassembly (720x576: 20 lines), and the rows that opens between Regs and
 Flags carry a `-Stack-` block (SP and the words above it). F2 Dump fills
 `s_dbg.rows`. Hw check owed: 720x576 and 720x480 (layout, memory edit at the
 last column, Alt+T ASCII), and 640x480 + DS80 unchanged.
+
+## Debugger stepping (2026-10-14, hw-confirmed DVp2)
+
+- **Alt+Space steps over only what returns to the next line** (`dbgStepOverLen`,
+  OSDMain.cpp): CALL/CALL cc (3), RST and HALT (1), DJNZ and the ED block repeats
+  (2). Everything else is a plain step — the old rule waited for PC = pc+3 on any
+  instruction, so PUSH ran 64K steps and left the debugger through a breakpoint.
+- **Shift+Enter = run to the cursor line**, stopping BEFORE it; a no-op on the PC
+  line. The stop needs the same page in that window (`ramCurrent[w]`, plus
+  `romInUse` for window 0 — GMX banks share base pointers) as when it was pressed:
+  a ROM #0 -> #1 switch otherwise stopped at the same address in the other bank.
+  Shift is tracked from VK_LSHIFT/RSHIFT events — the event's SHIFT bit is not
+  filled on every input path. Past 1M steps it falls back to an address-only
+  breakpoint (bank-blind, like Alt+Space's).
+- **After a step the right panel marks what changed** (`s_dbgSnap`, `DBG_CHG` ink):
+  register pairs per BYTE (LD A marks A, not F), flags per bit, stack words pushed
+  below the old SP or rewritten above it. PC and R are not marked (they move every
+  step). Invalidated when the debugger opens.
