@@ -984,7 +984,9 @@ static uint32_t autoDisabledMask(FeatureId f) {
     // by the switch any more, so crediting those bytes would let a butter-less
     // board take the switch and then find no heap at VIDEO::Init. It is now an
     // ordinary manual candidate in the free-list instead.
-    if (f == FEAT_PROFI) return (1u << FEAT_ZIFI) | (1u << FEAT_DIVMMC);
+    // (ZiFi only on butter-less boards — with butter PSRAM the Profi switch keeps it.)
+    if (f == FEAT_PROFI)
+        return (butter_psram_size() ? 0u : (1u << FEAT_ZIFI)) | (1u << FEAT_DIVMMC);
     // Z-Controller and IDE both displace esxDOS DivMMC (shared SD ports) — credit
     // its freed SRAM and exclude it from the manual free-list.
     if (f == FEAT_ZCONTROLLER || f == FEAT_IDE) return (1u << FEAT_DIVMMC);

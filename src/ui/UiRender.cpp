@@ -455,7 +455,9 @@ static bool drawDescRow(const Node* n, int idx, int y) {
     const int x  = LY.rx + LY.pad + (isRule ? glyphW() : 0);   // rules indented
     const int vw = l.value[0] ? textWidth(l.value) : 0;
     const UiColor lInk = isRule ? (l.state == DESC_DIM ? C_DISABLED : C_TEXT)
-                       : (!vw && l.state == DESC_BAD) ? C_ICON_R : C_WHITE;   // warning
+                       : (!vw && l.state == DESC_BAD) ? C_ICON_R    // warning / turns off
+                       : (!vw && l.state == DESC_OK)  ? C_ACCENT    // turns on
+                       : C_WHITE;
     const UiColor vInk = isRule ? (l.state == DESC_DIM ? C_DISABLED : C_TEXT_DIM)
                        : l.state == DESC_BAD ? C_ICON_R
                        : l.state == DESC_OK  ? C_ACCENT : C_TEXT_DIM;

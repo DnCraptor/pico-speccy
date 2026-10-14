@@ -25,18 +25,18 @@
 namespace nm {
 
 enum : uint8_t { DESC_SUB = 0, DESC_RULE };
-// Subheader: colours its value; a subheader with NO value and DESC_BAD is a warning
-// and its name goes red. Rule: DESC_PLAIN = applies now, DESC_DIM = does not.
+// Subheader: colours its value; a subheader with NO value colours its NAME instead —
+// DESC_BAD red (a warning, "Turns off"), DESC_OK green ("Turns on"). Rule: DESC_PLAIN = applies now, DESC_DIM = does not.
 enum : uint8_t { DESC_PLAIN = 0, DESC_OK, DESC_BAD, DESC_DIM };
 
 struct DescLine {
     uint8_t kind;           // DESC_SUB / DESC_RULE
     uint8_t state;          // see above
-    char    label[20];      // parameter name / requirement, left-aligned
+    char    label[24];      // parameter name / requirement, left-aligned
     char    value[20];      // current value / condition, right-aligned ("" = none)
 };
 
-constexpr int DESC_MAX_LINES = 6;
+constexpr int DESC_MAX_LINES = 10;
 
 // Refresh of the staged video mode in Hz (UiTree.cpp, beside the mode table).
 unsigned stagedVideoHz();

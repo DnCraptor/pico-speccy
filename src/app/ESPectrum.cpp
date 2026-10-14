@@ -1437,14 +1437,15 @@ void ESPectrum::setup() {
         Debug::log2SD("setup: Z80DMA::reset");
         Z80DMA::reset();
     }
-    // Profi forces ~80 KB of SRAM pages and OOMs at VIDEO::Init if the NIC's heap
-    // rings (~12 KB) are also up — so never bring ZiFi up on Profi, regardless of a
-    // stale zifi_enabled. (The menu also turns the NIC off when switching to Profi.)
+    // Profi on a board WITHOUT butter PSRAM forces ~80 KB of SRAM pages and OOMs at
+    // VIDEO::Init if the NIC's rings are also up — so ZiFi stays down there. With
+    // butter PSRAM the pages live in PSRAM and the rings are 2-4 KB (2026-10-01), so
+    // Profi/Karabas keep the NIC (owner, 2026-10-14).
     // WiFi is deliberately NOT a condition: the NIC is the guest's serial port, and
     // with WiFi off it is a plain UART nobody but the guest writes to (see
     // Config::zifi_enabled). Requiring WiFi here was what made the ports read 0xFF
     // in that configuration.
-    ZiFi::enabled = Config::zifi_enabled && Config::arch != A_PROFI;
+    ZiFi::enabled = Config::zifi_enabled && !(Config::arch == A_PROFI && !butter_psram_size());
     if (ZiFi::enabled)
         ZiFi::init();
 

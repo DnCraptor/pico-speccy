@@ -8,6 +8,8 @@
 #include "UiStage.h"
 #include "app/Config.h"
 
+extern uint32_t butter_psram_size();
+
 namespace nm {
 
 static int addLine(DescLine* out, int n, int max, uint8_t kind, const char* label,
@@ -37,23 +39,97 @@ static void mhzNow(char (&buf)[20], unsigned mhz) { snprintf(buf, sizeof(buf), "
 // in this session before it is applied.
 static int needCpu(DescLine* out, int n, int max, unsigned minMhz) {
     const unsigned mhz = (unsigned)Stage::get(SET_CPU_MHZ);
-    char now[20], req[20];
+    char now[20], req[24];
     mhzNow(now, mhz);
     snprintf(req, sizeof(req), ">=%u MHz", minMhz);
     n = sub(out, n, max, "CPU", now, mhz >= minMhz ? DESC_OK : DESC_BAD);
     return rule(out, n, max, req, "");
 }
 
+// What picking a machine turns on and off by itself: the same rules as
+// UiStage resolveConstraints / MachineSwitch / the CPU::reset backstops, written out
+// for the user. A list, not a per-setting state: up to 2 + 3 short lines, comma-packed
+// (a rule is at most 23 glyphs, 25 fit the narrowest pane with the indent).
+struct MachFx { const char* on[2]; const char* off[3]; };
+
+static const MachFx* machineFx(ArchIdx a, RomsetIdx r) {
+    static const MachFx kTsconf = { { "Z-Controller, Betadisk" },
+                                    { "Timex, esxDOS, MB-02+", "YM2413, SN76489", "16col, Murmuzavr" } };
+    static const MachFx kEvo    = { { "Z-Controller, Betadisk" },
+                                    { "Timex, esxDOS, MB-02+", "16col, Murmuzavr" } };
+    static const MachFx kAtm    = { { "Betadisk" },
+                                    { "Timex, esxDOS, MB-02+", "16col, Murmuzavr" } };
+    static const MachFx kZcBeta = { { "Z-Controller, Betadisk" }, { "MB-02+" } };
+    static const MachFx kBeta   = { { "Betadisk" }, { "MB-02+" } };
+    static const MachFx kGmx    = { { "Betadisk" }, { "MB-02+, Timex" } };
+    // ZiFi NIC goes off on Profi/Karabas only on boards without butter PSRAM
+    // (MachineSwitch): the guest pages are SRAM there.
+    static const MachFx kProfi  = { { "Betadisk" }, { "Timex, esxDOS, MB-02+" } };
+    static const MachFx kKarab  = { { "Z-Controller, Betadisk" }, { "Timex, esxDOS, MB-02+" } };
+    static const MachFx kProfiN = { { "Betadisk" },
+                                    { "Timex, esxDOS, MB-02+", "ZiFi NIC" } };
+    static const MachFx kKarabN = { { "Z-Controller, Betadisk" },
+                                    { "Timex, esxDOS, MB-02+", "ZiFi NIC" } };
+    const bool butter = butter_psram_size() != 0;
+    static const MachFx kP3     = { { nullptr },
+                                    { "Betadisk, Timex, MB-02+", "esxDOS, Z-Controller" } };
+    static const MachFx kP3e    = { { "IDE: IDEDOS" },
+                                    { "Betadisk, Timex, MB-02+", "esxDOS, Z-Controller", "ZiFi NIC" } };
+    static const MachFx kP3div  = { { "IDE: DivIDE" },
+                                    { "Betadisk, Timex, MB-02+", "esxDOS, Z-Controller" } };
+    static const MachFx kTc2048 = { { "Timex Gfx mode" }, { "SAA1099" } };
+    static const MachFx kTc2068 = { { "Timex Gfx mode" }, { "SAA1099, esxDOS" } };
+    static const MachFx kByte48 = { { nullptr }, { "Betadisk, Timex, MB-02+" } };
+    static const MachFx kByte   = { { nullptr }, { "Timex, MB-02+" } };
+
+    if (a == A_TSCONF)                          return &kTsconf;
+    if (a == A_ATM) return isEvoBaseRomset(r) ? &kEvo : &kAtm;
+    if (a == A_KARABAS || (a == A_PROFI && isKarabasRomset(r)))
+        return butter ? &kKarab : &kKarabN;
+    if (a == A_PROFI) return butter ? &kProfi : &kProfiN;
+    if (a == A_PENT || a == A_P512 || a == A_P1024) return &kBeta;
+    if (a == A_SCORP) {
+        if (isScorpEvoRomset(r)) return &kZcBeta;
+        if (isScorpGmxRomset(r)) return &kGmx;
+        return &kBeta;
+    }
+    if (isPlus3eRomset(r))   return &kP3e;
+    if (isPlus3DivRomset(r)) return &kP3div;
+    if (isPlus3Romset(r))    return &kP3;
+    if (r == R_TC2068)       return &kTc2068;
+    if (isTimexRomset(r))    return &kTc2048;
+    if (r == R_48K_BY)       return &kByte48;
+    if (r == R_128K_BY || r == R_128K_BY_GLUK) return &kByte;
+    return nullptr;
+}
+
+static int machineEffects(DescLine* out, int n, int max, int32_t v) {
+    const MachFx* fx = machineFx((ArchIdx)((v >> 8) & 0xFF), (RomsetIdx)(v & 0xFF));
+    if (!fx) return n;
+    if (fx->on[0]) {
+        n = sub(out, n, max, "Turns on", "", DESC_OK);     // green
+        for (const char* l : fx->on)  if (l) n = rule(out, n, max, l, "");
+    }
+    if (fx->off[0]) {
+        n = sub(out, n, max, "Turns off", "", DESC_BAD);   // red
+        for (const char* l : fx->off) if (l) n = rule(out, n, max, l, "");
+    }
+    return n;
+}
+
 static int describeMachine(int32_t v, DescLine* out, int max) {
+    int n = 0;
     switch (v) {
         // ZX Evolution: TS-Conf (14 MHz Z80 + whole-line video) and BaseConf (14 MHz
         // ATM manager) both overrun the frame at the lower clocks.
         case NM_MACH(A_ATM,    R_EVO_BASE):
         case NM_MACH(A_TSCONF, R_TSCONF):
         case NM_MACH(A_TSCONF, R_TSCONF_GLUK):
-            return needCpu(out, 0, max, 504);
-        default: return 0;
+            n = needCpu(out, n, max, 504);
+            break;
+        default: break;
     }
+    return machineEffects(out, n, max, v);
 }
 
 // General Sound: the GS-Z80 runs on core1 beside the video ISR, so how fast it can be
