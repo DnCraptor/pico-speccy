@@ -861,9 +861,8 @@ bool NextReg::osTapeTrapArmed() {
 }
 static void applyBankC000();
 
-// 28 MHz is beyond what the emulation core keeps up with today — the frame
-// takes longer than its 20 ms budget and the machine crawls — so the EFFECTIVE
-// speed is capped by Config::next_clk_cap (menu: CPU cap, default 14 MHz).
+// The EFFECTIVE speed is capped by Config::next_clk_cap (fixed at 3 = 28 MHz,
+// i.e. no cap; the menu row was removed).
 // reg[0x07] keeps the programmed value and the read-back reports the actual
 // speed in bits 5:4, which is how real boards expose "asked for more than I
 // can do". Same idea as TS-Conf's tsconf_clk_cap.

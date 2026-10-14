@@ -17,9 +17,8 @@ Reference: https://wiki.specnext.dev/TBBlue_Register_Select
 #include <inttypes.h>
 
 // The highest EFFECTIVE CPU-speed multiplier honoured by nextreg 0x07
-// (0=3.5, 1=7, 2=14, 3=28 MHz) is Config::next_clk_cap — Machine > Spectrum
-// Next > Options > CPU cap, default 14 MHz because 28 is not real-time on the
-// RP2350 yet. The programmed value is kept and the read-back reports the
+// (0=3.5, 1=7, 2=14, 3=28 MHz) is Config::next_clk_cap — fixed at 28 MHz
+// (no cap) since the Options row was removed. The programmed value is kept and the read-back reports the
 // actual speed in bits 5:4.
 
 class NextReg {

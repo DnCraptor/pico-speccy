@@ -225,7 +225,7 @@ public:
     // VDAC2 renderer: true = per-frame adaptive palette (median cut) instead of the fixed RGB cube
     static bool     tsconf_vdac2_adapt;
     // next_clk_cap bounds the guest's nextreg 0x07 speed (0/1/2/3 = 3.5/7/14/
-    // 28 MHz). Default 14: 28 MHz does not run in real time on the RP2350 yet.
+    // 28 MHz). Fixed at 3 (no cap): the menu row is gone and it is not persisted.
     static uint8_t  next_clk_cap;
     // The page-strip length the NEXT boot of `a` needs. The single source for
     // the live MEM_PG_CNT (ESPectrum::setup) and for the boot-layout reboot

@@ -11,6 +11,8 @@
 #include "OSDMain.h"
 #include "speccy/video/Video.h"
 #include "speccy/machines/Next/NextVideo.h"
+#include "speccy/z80/z80.h"
+#include "speccy/z80/z80operations.h"   // Z80Ops::isNext
 #include "app/Config.h"     // ui_vga_solid / ui_rounded — the menu-look preferences
 
 extern "C" volatile bool profi_ds80_active;
@@ -234,7 +236,10 @@ void gfxBegin() {
     // core0's row-helper scratch (~8 KB) is KEPT: freed here, a fragmented heap
     // often had no room to take it back, and core0 stopped helping the renderer
     // for the rest of the session (TX-1696 at 576p, hw 2026-10-13).
-    if (Config::arch == A_NEXT) NEXTVID::c1Drain();
+    // The LIVE machine, not Config::arch: a machine switch writes A_NEXT before
+    // its reboot and may show a message in between, while the .nxovl code is
+    // not loaded (SIGBUS in c1Drain, Pentagon -> Next, hw 2026-10-14).
+    if (Z80Ops::isNext) NEXTVID::c1Drain();
     VIDEO::ftHold();          // ...or a VDAC2 frame / video (FT812, core1)
     VIDEO::blVmapSuspend();   // borderless: show what is drawn over the fb row for row
     gfxComputeSurface();
