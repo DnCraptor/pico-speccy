@@ -821,7 +821,16 @@ static inline bool valid(uint16_t id) {
 
 namespace Stage {
 
+static const char* s_liveNote;     // set() switched a conflicting setting off
+
+const char* takeNote() {
+    const char* n = s_liveNote;
+    s_liveNote = nullptr;
+    return n;
+}
+
 void begin() {
+    s_liveNote = nullptr;
     memset(g_dirty, 0, sizeof(g_dirty));
     memset(g_val, 0, sizeof(g_val));
     memset(g_base, 0, sizeof(g_base));
@@ -845,6 +854,20 @@ void set(uint16_t id, int32_t v) {
     // write at all).
     if (v == g_base[id]) bmClr(g_dirty, id); else bmSet(g_dirty, id);
     g_seq[id] = g_seqNext++;      // most recently touched wins a mutual-exclusion tie
+
+    // Pairs that cannot both be on switch the OTHER one off at the moment of the pick,
+    // with a message, instead of only at Apply time: before, both rows read On for the
+    // rest of the session and the outcome was decided by resolveConstraints on exit.
+    // The rule there stays as the backstop (and owns the TC2048/TC2068 cases).
+    if (v) {
+        if (id == SET_TIMEX && get(SET_SAA1099)) {
+            set(SET_SAA1099, 0);
+            s_liveNote = "SAA1099 turned off: Timex needs it off";
+        } else if (id == SET_SAA1099 && get(SET_TIMEX)) {
+            set(SET_TIMEX, 0);
+            s_liveNote = "Timex turned off: SAA1099 needs it off";
+        }
+    }
 
     // F_PREVIEW settings are applied immediately: presentation hooks so the user
     // sees the change, link hooks so actions in the same menu run on the new value.

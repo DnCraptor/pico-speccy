@@ -427,6 +427,13 @@ static void activate() {
                 uint8_t cnt; const Option* o = nodeOptions(*n, cnt);
                 if (S.rsel >= cnt) break;
                 nodeSetValue(*n, o[S.rsel].value);
+                // A conflicting setting was switched off by this pick: say so now,
+                // then repaint everything the box covered.
+                if (const char* note = Stage::takeNote()) {
+                    uiToast(note, true, 2000);
+                    drawFrameOnce();
+                    markDirty(D_ALL);
+                }
                 // A value can gate other rows: picking Profi reveals XT keyboard and OSD
                 // palette, picking a Byte ROM reveals COBMECT mode. Rebuild the visible
                 // set so that happens now rather than on the next entry into the level.

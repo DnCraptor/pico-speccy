@@ -413,6 +413,10 @@ struct CommitReport {
 // The single exit point of the menu: resolve, persist once, apply, report.
 void commit(CommitReport& out);
 
+// The message of a mutual exclusion set() just applied (the other setting of a pair
+// switched off), or nullptr; cleared by the call.
+const char* takeNote();
+
 // True when editing `id` may draw modal boxes over the menu (F_PREVIEW | F_MODAL) —
 // the nav then restores the whole chrome, exactly like runModal after an action.
 bool editDrawsModal(uint16_t id);

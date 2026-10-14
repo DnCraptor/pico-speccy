@@ -1439,7 +1439,10 @@ void Config::load() {
         nvs_get_u8("gs_ram_size", Config::gs_ram_size, sts);
         nvs_get_u8("gs_clock", Config::gs_clock, sts);
         nvs_get_u8("ngs_clock", Config::ngs_clock, sts);
-        if (Config::ngs_clock > 4) Config::ngs_clock = 0;
+        // The NeoGS Clock row is gone (owner, 2026-10-14): only Auto (the firmware's
+        // own CKSEL pick) works properly, so a forced rate saved by an older build
+        // must not stay in force with no way to see or change it.
+        Config::ngs_clock = 0;
         nvs_get_u8("throtling2", Config::throtling, sts);
         nvs_get_b("CursorAsJoy", CursorAsJoy, sts);
         nvs_get_b("betadisk", betadisk, sts);
