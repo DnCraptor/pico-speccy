@@ -216,6 +216,25 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   пикселя в 0x6000 (hi-colour 8×1), при показе теневого экрана (NR 69 b6)
   режим = 000. Тест: `debug/Timex/next_timex_modes.tap` (клавиши 0/1/2/3/6).
   hw-confirmed 2026-10-08 (владелец: «работает», личность TC2048, не детализировано).
+- **Timex hi-res на Next: прозрачность paper/ink по ПОЛУпикселям + бордюр по VHDL**
+  (2026-10-15, hw-confirmed тем же днём — владелец: «фиксед» на
+  `debug/DVp2-next-hires-tr-1.0.10.elf`, тест MrKWatkins `LmxHiRes.snx`; не детализировано —
+  LmxHiCol / LmixLoRs после правки на железе не перепроверялись). Было: `nxHiresUlaRow` метил всю ULA-строку `HIRES_MARK` (непрозрачно),
+  поэтому в порядках SUL/USL/ULS Layer 2 и спрайты ПОД ULA исчезали целиком (на тесте —
+  пропадала вся серая подложка L2 и подписи в этих фазах; priority-зелёный оставался).
+  Теперь ink/paper/border идут через `nxRgb` (NR 0x14): lores-пиксель = две половины —
+  обе непрозрачны → `HIRES_MARK` + слот пары; обе прозрачны → `NX_TR` (микшер отдаёт слой
+  ниже); одна → `HIRES_MARK2` (0xF0, sync-слот, индексом не бывает) + в `hiresRow` «какая
+  половина + её ZX-цвет», вторая половина — `nxHiresUnder(x)` = правило порядка NR 0x15
+  по буферам слоёв с прозрачной ULA (`s_hrMix` заполняет RenderLayers; orders 6/7 ≈ 1).
+  Бордюр (zxula.vhd 419/492-500): ULANext = `128 + attr(5:3)` = paper БЕЗ bright (тест
+  сам пишет: ядро 2.00.25+ показывает [130]; раньше брали 138), формат FF → fallback;
+  ULA+ в hi-res и ink, и paper — в группе paper (`"11" & attr(7:6) & 1` → 0xD8|c; было
+  0xD0|ink); классика — 16+8|paper. Все три функции во flash; `.nxovl` 50 808 из 51 200.
+  **Скриншот-тулы врут на Next hi-res**: `profi2png` красит через `profi_palette_live`,
+  а Timex-путь пишет ZX-16 прямо в драйвер (`timexHiresDriverPalette`), так что в
+  `profi_palette_live` лежит палитра прошлого 640-кадра (`nextPairPalette`) — декодировать
+  надо ZX-палитрой; и `profi_lut.bin` = `lut[ink][paper]→slot`, НЕ обратная таблица.
 - **NEXT_TRACE** (CMake, по умолч. ON в текущем кэше): 1 Hz `NEXT:` state-line
   + `NEXT ev:` кольцо (64) nextreg/легаси-портов/automap с PC. Дизайн — уроки
   NGS-кольца: новейшие в конце, `..` при усечении, флуд (палитра 0x40/41/44,

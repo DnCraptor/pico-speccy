@@ -900,6 +900,12 @@ void NEXTVID::c1DrainRange(uint8_t bank, uint16_t o0, uint16_t o1) {
 // 17..183 the cube), so it marks "Timex hi-res pixel here" in lineBuf.
 static constexpr uint8_t HIRES_MARK = 16;
 static_assert(HIRES_MARK == 0x10, "RenderLine's word test spells it 0x10101010");
+// A hi-res lores pixel with ONE opaque half: the ULA wins the mix (this mark),
+// the other half shows what the mix gives with the ULA transparent there
+// (nxHiresUnder). hiresRow holds bit 7 = the opaque half is the LEFT one,
+// bits 3:0 its ZX colour. 0xF0 is a sync slot in the fb palette: never an index.
+static constexpr uint8_t HIRES_MARK2 = 0xF0;
+static_assert(!NEXTVID::isSlot(HIRES_MARK2) && HIRES_MARK2 > 16, "HIRES_MARK2 must be a free index");
 #if NEXT_TRACE
 uint32_t g_nextvid_frames = 0; // completed frames with composition enabled
 #endif
@@ -2344,20 +2350,30 @@ static inline __attribute__((always_inline)) void nxCarve(int row, int words, in
 // xPaperOff is a multiple of 4 in both fb widths (32 / 52), so paper words
 // line up with hiresRow. Flash: Timex hi-res is rare on the Next, and the
 // .nxovl window is full (2026-10-12).
+static uint16_t nxHiresUnder(int x);          // the mix at fb x with the ULA transparent (9-bit RGB)
+static uint8_t  nxZxNearest(uint16_t v);
 __attribute__((noinline)) static void nxHiresPairRow(uint8_t* lineBuf, const uint8_t* hiresRow,
                                                      const uint8_t* pairMap, int x0, int words) {
     uint32_t* lw = (uint32_t*)lineBuf;
     const uint32_t* hw = (const uint32_t*)hiresRow;
+    const uint8_t* const pr = &VIDEO::profi_pair_lookup[0][0];
     for (int k = 0; k < words; k++) {
         const uint32_t w = lw[k];
         const int x = k << 2;
         if (w == 0x10101010u && (unsigned)(x - x0) < 256u) { lw[k] = hw[(x - x0) >> 2]; continue; }
         const uint8_t b0 = (uint8_t)w;
-        if (w == b0 * 0x01010101u && b0 != HIRES_MARK) { lw[k] = pairMap[b0] * 0x01010101u; continue; }
+        if (w == b0 * 0x01010101u && b0 != HIRES_MARK && b0 != HIRES_MARK2) {
+            lw[k] = pairMap[b0] * 0x01010101u; continue;
+        }
         uint8_t* b = (uint8_t*)&lw[k];
         for (int i = 0; i < 4; i++) {
             const uint8_t v = b[i];
-            b[i] = (v == HIRES_MARK && (unsigned)(x + i - x0) < 256u) ? hiresRow[x + i - x0] : pairMap[v];
+            const int hx = x + i - x0;
+            if (v == HIRES_MARK && (unsigned)hx < 256u) b[i] = hiresRow[hx];
+            else if (v == HIRES_MARK2 && (unsigned)hx < 256u) {
+                const uint8_t h = hiresRow[hx], c = h & 0x0F, u = nxZxNearest(nxHiresUnder(x + i));
+                b[i] = (h & 0x80) ? pr[(c << 4) | u] : pr[(u << 4) | c];
+            } else b[i] = pairMap[v];
         }
     }
 }
@@ -2487,53 +2503,68 @@ __attribute__((noinline)) static uint8_t nxZxNearest(uint16_t v) {
 // go through whatever palette the ULA uses (classic, ULANext, ULA+) like any
 // attribute. Flash, with nxHiresUlaRow below: hi-res is rare on the Next and
 // the .nxovl window is full (2026-10-12).
+// Ink, paper and border carry NX_TR like any ULA pixel (colour == NR 0x14):
+// a transparent hi-res paper shows the layers under the ULA at half-pixel
+// width (LmxHiRes). zxula.vhd 483-560 for the three palette paths:
+//   ULANext  ink = attr & format; paper = 128 + attr >> shift (format 2^n-1,
+//            else the fallback); BORDER = 128 + attr(5:3), i.e. the paper
+//            WITHOUT the bright bit (the test's "core 2.00.25+ shows [130]")
+//   ULA+     "11" & attr(7:6) & 1: hi-res puts the INK in the paper group too
+//   classic  ink 8|ink, paper = border = 16 + 8|paper
 __attribute__((noinline)) static void nxHiresInkPaper(const NextLineState* ls, const uint16_t* raw,
                                                       uint8_t mask, uint16_t fallback, bool ulaNext,
-                                                      bool ulap, uint16_t& hrInk, uint16_t& hrPap) {
-    const uint8_t ink = (ls->r69 >> 3) & 7;
-    const uint8_t a = (uint8_t)(0x40 | ((~ink & 7) << 3) | ink);
+                                                      bool ulap, uint8_t tr, uint16_t& hrInk,
+                                                      uint16_t& hrPap, uint16_t& hrBrd) {
+    const uint8_t ink = (ls->r69 >> 3) & 7, pap = (uint8_t)(~ink & 7);
+    const uint8_t a = (uint8_t)(0x40 | (pap << 3) | ink);
     if (ulaNext) {
         uint8_t shift = 0;
         for (uint8_t m = mask; m; m >>= 1) shift++;
         const bool bgnd = (mask & (uint8_t)(mask + 1)) != 0 || mask == 0xFF || mask == 0;
-        hrInk = raw[a & mask] & 0x1FF;
-        hrPap = bgnd ? (fallback & 0x1FF) : (raw[128 + (a >> shift)] & 0x1FF);
+        hrInk = nxRgb(raw[a & mask], tr);
+        hrPap = bgnd ? (uint16_t)(fallback & 0x1FF) : nxRgb(raw[128 + (a >> shift)], tr);
+        hrBrd = mask == 0xFF ? (uint16_t)(fallback & 0x1FF) : nxRgb(raw[128 + pap], tr);
     } else if (ulap) {
-        hrInk = raw[0xD0 | ink] & 0x1FF;
-        hrPap = raw[0xD8 | ((a >> 3) & 7)] & 0x1FF;
+        hrInk = nxRgb(raw[0xD8 | ink], tr);
+        hrPap = hrBrd = nxRgb(raw[0xD8 | pap], tr);
     } else {
-        hrInk = raw[8 | ink] & 0x1FF;
-        hrPap = raw[16 + (8 | ((a >> 3) & 7))] & 0x1FF;
+        hrInk = nxRgb(raw[8 | ink], tr);
+        hrPap = hrBrd = nxRgb(raw[16 + (8 | pap)], tr);
     }
 }
 // Timex hi-res 512x192 (zxula.vhd vram_a, shift_reg_32): each 16-pixel column
 // is the "pixel" byte (left 8) then the "attribute" byte (right 8), fetched per
 // mode bits 1:0 — mode 6: 0x4000 / 0x6000 pixels (the usual hi-res), 7: 0x6000
 // twice, 4: 0x4000 pixels / 0x5800 attributes, 5: 0x6000 pixels / 0x7800
-// attributes. hiresRow gets pair slots of the nearest ZX colours of ink /
-// paper; the paper carries HIRES_MARK as a ready fb slot so layers drawn over
-// the ULA win.
+// attributes. One lores pixel = two hi-res halves, each ink or paper, each
+// opaque or transparent (NX_TR on hrInk / hrPap):
+//   both opaque       -> NX_SLOT | HIRES_MARK, hiresRow = the pair slot
+//   both transparent  -> NX_TR (the mix shows the layers under the ULA)
+//   one opaque        -> NX_SLOT | HIRES_MARK2, hiresRow = which half + its
+//                        ZX colour; the other half is resolved after the mix
+//                        (nxHiresUnder) — a sprite over the ULA still covers both.
 __attribute__((noinline)) static void nxHiresUlaRow(const NextLineState* ls, uint16_t* p, int sy,
                                                     uint16_t hrInk, uint16_t hrPap, uint8_t* hiresRow) {
     const uint8_t m = ls->r69 & 7;
-    const uint8_t ci = nxZxNearest(hrInk), cp = nxZxNearest(hrPap);
-    uint16_t hl[16];
-    for (int n = 0; n < 16; n++) {
-        const uint8_t c3 = (n & 8) ? ci : cp, c2 = (n & 4) ? ci : cp;
-        const uint8_t c1 = (n & 2) ? ci : cp, c0 = (n & 1) ? ci : cp;
-        hl[n] = (uint16_t)(VIDEO::profi_pair_lookup[c3][c2]
-              | ((uint16_t)VIDEO::profi_pair_lookup[c1][c0] << 8));
+    const bool iOp = !(hrInk & NX_TR), pOp = !(hrPap & NX_TR);
+    const uint8_t ci = iOp ? nxZxNearest(hrInk) : 0, cp = pOp ? nxZxNearest(hrPap) : 0;
+    uint16_t pv[4]; uint8_t hv[4];               // per 2-bit pattern: nxU value, hiresRow byte
+    for (int q = 0; q < 4; q++) {
+        const bool lOp = (q & 2) ? iOp : pOp, rOp = (q & 1) ? iOp : pOp;
+        const uint8_t lc = (q & 2) ? ci : cp, rc = (q & 1) ? ci : cp;
+        if (lOp && rOp)       { pv[q] = NX_SLOT | HIRES_MARK;  hv[q] = VIDEO::profi_pair_lookup[lc][rc]; }
+        else if (!lOp && !rOp){ pv[q] = NX_TR;                 hv[q] = 0; }
+        else                  { pv[q] = NX_SLOT | HIRES_MARK2; hv[q] = (uint8_t)(lOp ? 0x80 | lc : rc); }
     }
     const uint8_t* lb = ls->grmem + ((m & 1) << 13) + VIDEO::offBmp[sy];
     const uint8_t* rb = (m & 2) ? ls->grmem + 0x2000 + VIDEO::offBmp[sy]
                                 : ls->grmem + ((m & 1) << 13) + VIDEO::offAtt[sy];
-    uint32_t* hrw = (uint32_t*)hiresRow;
     for (int col = 0; col < 32; col++) {
         const uint8_t e = lb[col], o = rb[col];
-        hrw[2 * col]     = (uint32_t)hl[e >> 4] | ((uint32_t)hl[e & 0x0F] << 16);
-        hrw[2 * col + 1] = (uint32_t)hl[o >> 4] | ((uint32_t)hl[o & 0x0F] << 16);
+        uint16_t* pp = p + col * 8; uint8_t* hp = hiresRow + col * 8;
+        for (int k = 0; k < 4; k++) { const uint8_t q = (e >> (6 - 2 * k)) & 3; pp[k] = pv[q]; hp[k] = hv[q]; }
+        for (int k = 0; k < 4; k++) { const uint8_t q = (o >> (6 - 2 * k)) & 3; pp[4 + k] = pv[q]; hp[4 + k] = hv[q]; }
     }
-    for (int x = 0; x < 256; x++) p[x] = NX_SLOT | HIRES_MARK;
 }
 
 // Returns false when the whole row (border included) is transparent; nxU is
@@ -2562,9 +2593,10 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
     // Ink / paper go through whatever palette the ULA uses (classic, ULANext,
     // ULA+) like any attribute.
     const bool hr = LS->hires == 1 && !(LS->r69 & 0x40);
-    uint16_t hrInk = 0, hrPap = 0;
-    if (hr) nxHiresInkPaper(LS, raw, mask, fallback, ulaNext, ulap, hrInk, hrPap);
-    const uint16_t borderV = hr ? (uint16_t)(hrPap | NX_BRD) : bc[LS->border & 7];
+    uint16_t hrInk = 0, hrPap = 0, hrBrd = 0;
+    if (hr) nxHiresInkPaper(LS, raw, mask, fallback, ulaNext, ulap, tr, hrInk, hrPap, hrBrd);
+    const uint16_t borderV = hr ? ((hrBrd & NX_TR) ? NX_TR : (uint16_t)(hrBrd | NX_BRD))
+                               : bc[LS->border & 7];
     const int y = row - paperTopRow;
 
     // A row that is transparent end to end (NXModPlayer: black screen, black
@@ -3031,11 +3063,39 @@ __attribute__((noinline)) static void nxRowProbe(int y, int xres, int x0) {
 }
 #endif
 
+// Timex hi-res, the transparent half of a HIRES_MARK2 pixel: what the mix
+// gives at fb x with the ULA transparent there — nxMixT's order rules over
+// the layer lines RenderLayers left (core1 only: core0 never renders hi-res
+// rows). The per-line mixer flags are kept in s_hrMix by RenderLayers.
+// Orders 6/7 (Layer 2 blends) are approximated by order 1. Flash: rare.
+struct NxHrMix { uint16_t fb9; uint8_t order; bool layers, l2, spr, tm, stencil; };
+static NxHrMix s_hrMix;
+__attribute__((noinline)) static uint16_t nxHiresUnder(int x) {
+    const NxHrMix& m = s_hrMix;
+    if (!m.layers) return m.fb9;
+    const uint16_t t = m.tm ? nxT[x] : NX_TR;
+    const uint16_t uf = (m.stencil || (t & NX_TR)) ? NX_TR : (uint16_t)(t & 0x1FF);   // ula_final, ULA transparent
+    const uint16_t l = m.l2 ? nxL[x] : NX_TR, s = m.spr ? nxS[x] : NX_TR;
+    const bool lTr = l & NX_TR, sTr = s & NX_TR, uTr = uf & NX_TR;
+    const bool lPrio = (l & (NX_TR | NX_PRIO)) == NX_PRIO;
+    uint16_t v = m.fb9;
+    switch (m.order) {
+        case 0:  if (lPrio) v = l; else if (!sTr) v = s; else if (!lTr) v = l; else if (!uTr) v = uf; break;
+        case 2:  if (lPrio) v = l; else if (!sTr) v = s; else if (!uTr) v = uf; else if (!lTr) v = l; break;
+        case 3:  if (!lTr) v = l; else if (!uTr) v = uf; else if (!sTr) v = s; break;
+        case 4:  if (lPrio) v = l; else if (!uTr) v = uf; else if (!sTr) v = s; else if (!lTr) v = l; break;
+        case 5:  if (lPrio) v = l; else if (!uTr) v = uf; else if (!lTr) v = l; else if (!sTr) v = s; break;
+        default: if (!lTr) v = l; else if (!sTr) v = s; else if (!uTr) v = uf; break;   // 1, 6, 7
+    }
+    return (uint16_t)(v & 0x1FF);
+}
+
 IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     const int xres = VIDEO::vga.xres;
     const int y = row - paperTopRow;
     const uint8_t r15 = LS->r15;
     s_rowDiff = false;
+    if (LS->hires == 1) { s_hrMix.fb9 = rgb332_to_333(LS->r4A); s_hrMix.layers = false; }
     NX_LT_BEGIN();
     sprApply(LS->sprSeq);               // keep the attribute log moving on every line
     palApply(LS->palSeq);
@@ -3108,6 +3168,10 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     m.spr = (r15 & 0x01) && nxRowSpr;
     m.blend = (LS->r68 >> 5) & 3;
     const int order = (r15 >> 2) & 7;
+    if (LS->hires == 1) {
+        s_hrMix.layers = true; s_hrMix.order = (uint8_t)order;
+        s_hrMix.l2 = m.l2; s_hrMix.spr = m.spr; s_hrMix.tm = m.tm; s_hrMix.stencil = m.stencil;
+    }
     // nxUlaMerge rewrites nxU in place: keep the ULA span for the second pass
     if (p2 && m.ulaEn && m.tm) {
         const uint32_t* a = (const uint32_t*)nxU; uint32_t* b = (uint32_t*)nxUs;
