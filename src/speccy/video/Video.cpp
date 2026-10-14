@@ -448,6 +448,9 @@ void VIDEO::profiPaletteWrite(uint8_t index, uint8_t profi_color) {
 #if defined(VGA_HDMI) && HDMI_HSTX < 2
 extern "C" bool hdmi_mode_uses_x3(int mode);
 #endif
+#if PERF_TRACE
+extern volatile uint32_t gmx_render_us, gmx_render_lines;   // defined with gmxRenderLine
+#endif
 static uint32_t profi_pair_gen = 1;   // bumped whenever profi_pair_lookup is rebuilt
 static void init_profi_pair_lookup() {
     // safe[]: all slots except 240..244 (sync/scanline) and 255 (border) → 250 slots.
@@ -6071,7 +6074,16 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
         unsigned int end_col = coldraw_cnt < 32u ? coldraw_cnt : 32u;
         unsigned int start_col = end_col - loopCount;
         uint32_t line = curline;   // 0..199
-        if (start_col == 0) {
+        // MainScreen reaches column 0 of a line TWICE — MainScreen_Blank's priming
+        // Draw(0) and then the first real slice — so a whole-line renderer keyed on
+        // start_col == 0 drew every line two times (and four under a HALT flush):
+        // [PERF] gmx showed 400-808 lines a frame for 200 (hw 2026-10-14, Edge
+        // Grinder / HQ). TS-Conf's tsRenderLine de-duplicates the same way. Lines
+        // run 0..199 within a frame, so "not the line drawn last" is enough: the
+        // next frame (or a paused redraw) starts again at line 0 after line 199.
+        static int16_t gmx_last_line = -1;
+        if (start_col == 0 && (int16_t)line != gmx_last_line) {
+            gmx_last_line = (int16_t)line;
             if (line == 0 || gmx_frame_bmp == nullptr) {
                 // Per-frame latch (rend_profi model): pages + scroll captured at
                 // line 0 so mid-frame flips don't tear.
@@ -6107,38 +6119,14 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
                 if (Z80Ops::isAtm) {
                     atmRenderLine(line, fb_row, pad_l);   // ATM-Turbo EGA / hires / text
                 } else {
-                uint32_t srow = line + gmx_frame_srow;
-                if (srow >= 200) srow -= 200;
-                uint32_t off = srow * 80;
-                const uint8_t* bmp = gmx_frame_bmp;
-                const uint8_t* att = gmx_frame_att;
-                // Attr bit 7 = FLASH: fg/bg swap on the flash phase (MAME
-                // `invert_attrs`). bg is bits 3-6 and fg bit 3 is attr bit 6, so
-                // bit 7 is the only free one. `flashing` is the ULA flash mask
-                // (0x80 / 0x00, toggled every 16 frames in ESPectrum::loop), so
-                // GMX blinks in step with the standard renderer.
-                const uint8_t gmx_flash = flashing;
-                if (bmp) {
-                    for (int j = 0; j < 80; j++) {
-                        uint8_t b = bmp[off + j];
-                        uint8_t a = att ? att[off + j] : 0x07;
-                        uint8_t fg = (uint8_t)(((a >> 3) & 0x08) | (a & 0x07));
-                        uint8_t bg = (uint8_t)((a >> 3) & 0x0F);
-                        if (a & gmx_flash) { uint8_t t = fg; fg = bg; bg = t; }
-                        // 8 source pixels → 4 pair bytes, (k^2) pre-swizzled for the
-                        // ISR's x^2 read pattern (same trick as the DS80 branch), one
-                        // aligned uint32_t store per source byte.
-                        uint8_t p0 = profi_pair_lookup[(b & 0x08) ? fg : bg][(b & 0x04) ? fg : bg]; // k=2 → +0
-                        uint8_t p1 = profi_pair_lookup[(b & 0x02) ? fg : bg][(b & 0x01) ? fg : bg]; // k=3 → +1
-                        uint8_t p2 = profi_pair_lookup[(b & 0x80) ? fg : bg][(b & 0x40) ? fg : bg]; // k=0 → +2
-                        uint8_t p3 = profi_pair_lookup[(b & 0x20) ? fg : bg][(b & 0x10) ? fg : bg]; // k=1 → +3
-                        *(uint32_t*)(fb_row + pad_l + j * 4) =
-                            (uint32_t)p0 | ((uint32_t)p1 << 8) | ((uint32_t)p2 << 16) | ((uint32_t)p3 << 24);
-                    }
-                } else {
-                    // Attr/bitmap page not backed (butter-less board) — black line.
-                    memset(fb_row + pad_l, profi_pair_lookup[0][0], 320);
-                }
+#if PERF_TRACE
+                const uint32_t pt0 = timer_hw->timerawl;
+                gmxRenderLine(line, fb_row, pad_l);
+                gmx_render_us += timer_hw->timerawl - pt0;
+                gmx_render_lines++;
+#else
+                gmxRenderLine(line, fb_row, pad_l);
+#endif
                 }
             }
         }
@@ -7318,14 +7306,53 @@ static const uint16_t* atmEgaLut() {
 
 // One bitmap byte b in colours (fg, bg) as four pair slots in the fb's (k^2)
 // order: c4[] = the four (left, right) colour combinations of a bit pair.
-static inline __attribute__((always_inline)) uint32_t atmBits8(uint8_t b, uint8_t at) {
-    const uint8_t fg = (uint8_t)(((at & 0x40) >> 3) | (at & 0x07));
-    const uint8_t bg = (uint8_t)(((at & 0x80) >> 4) | ((at >> 3) & 0x07));
+static inline __attribute__((always_inline)) uint32_t pairBits8(uint8_t b, uint8_t fg, uint8_t bg) {
     const uint8_t* rf = VIDEO::profi_pair_lookup[fg];
     const uint8_t* rb = VIDEO::profi_pair_lookup[bg];
     const uint8_t c4[4] = { rb[bg], rb[fg], rf[bg], rf[fg] };
     return (uint32_t)c4[(b >> 2) & 3] | ((uint32_t)c4[b & 3] << 8)
          | ((uint32_t)c4[b >> 6] << 16) | ((uint32_t)c4[(b >> 4) & 3] << 24);
+}
+// ATM attribute: ink = bits 6,2..0, paper = bits 7,5..3.
+static inline __attribute__((always_inline)) uint32_t atmBits8(uint8_t b, uint8_t at) {
+    return pairBits8(b, (uint8_t)(((at & 0x40) >> 3) | (at & 0x07)),
+                        (uint8_t)(((at & 0x80) >> 4) | ((at >> 3) & 0x07)));
+}
+
+#if PERF_TRACE
+// [PERF] gmx: core0 time inside gmxRenderLine.
+volatile uint32_t gmx_render_us = 0, gmx_render_lines = 0;
+#endif
+// Scorpion GMX 640x200x16, one content line (MAME scorpiongmx
+// spectrum_update_screen): bitmap 80 bytes/line linear in page 57/59, attributes
+// byte-per-8px at the same offset in page+64; fg = ((attr>>3)&8)|(attr&7), bg =
+// (attr>>3)&0xF; attr bit 7 = FLASH (fg/bg swap on the flash phase, MAME
+// `invert_attrs`, in step with the ULA's `flashing` mask). Pages and scroll are
+// latched per frame by the caller (MainScreen's GMX branch). Flash, not part of
+// the RAM-resident MainScreen: GMX is one machine, and its pages are butter PSRAM.
+void VIDEO::gmxRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
+    uint32_t* out = (uint32_t*)(fb_row + pad_l);     // pad_l is 0 or 20: word aligned
+    const uint8_t* bmp = gmx_frame_bmp;
+    const uint8_t* att = gmx_frame_att;
+    if (!bmp) { memset(out, profi_pair_lookup[0][0], 320); return; }   // page not backed
+    uint32_t srow = line + gmx_frame_srow;
+    if (srow >= 200) srow -= 200;
+    const uint32_t off = srow * 80;                   // 16-aligned: word reads below
+    const uint8_t fl = flashing;
+    const uint32_t* b32 = (const uint32_t*)(bmp + off);
+    const uint32_t* a32 = att ? (const uint32_t*)(att + off) : nullptr;
+    for (int q = 0; q < 20; q++) {
+        uint32_t wb = b32[q];
+        uint32_t wa = a32 ? a32[q] : 0x07070707u;
+        for (int k = 0; k < 4; k++) {
+            const uint8_t a = (uint8_t)wa;
+            uint8_t fg = (uint8_t)(((a >> 3) & 0x08) | (a & 0x07));
+            uint8_t bg = (uint8_t)((a >> 3) & 0x0F);
+            if (a & fl) { const uint8_t t = fg; fg = bg; bg = t; }
+            *out++ = pairBits8((uint8_t)wb, fg, bg);
+            wb >>= 8; wa >>= 8;
+        }
+    }
 }
 
 void VIDEO::atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l) {
@@ -8995,6 +9022,14 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
                 Debug::log("[PERF] aud: ticks=%u hold=%u flat=%u/60 hdmi: und=%u skip=%u dup=%u q=%u..%u",
                     (unsigned)ticks, (unsigned)hold, (unsigned)flat,
                     (unsigned)und, (unsigned)skip, (unsigned)dup, (unsigned)qmin, (unsigned)qmax);
+            }
+            if (gmx_ext_live && !Z80Ops::isAtm) {
+                extern volatile uint32_t gmx_render_us, gmx_render_lines;
+                Debug::log("[PERF] gmx: render=%.2fms/fr lines=%u/fr (%.1fus/line) mult=%u",
+                           gmx_render_us / 60000.0f, (unsigned)(gmx_render_lines / 60),
+                           gmx_render_lines ? (float)gmx_render_us / (float)gmx_render_lines : 0.0f,
+                           (unsigned)ESPectrum::multiplicator);
+                gmx_render_us = gmx_render_lines = 0;
             }
             if (Z80Ops::isAtm) {
                 extern volatile uint32_t atm_render_us, atm_render_lines;

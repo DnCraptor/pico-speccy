@@ -366,6 +366,7 @@ public:
   static void atmPaletteFlush();         // EndFrame: palette -> hardware slots / pair table
   static void atmPaletteRestore();       // leaving the ATM: standard slots back
   static void atmRenderLine(uint32_t line, uint8_t* fb_row, int pad_l);
+  static void gmxRenderLine(uint32_t line, uint8_t* fb_row, int pad_l);   // Scorpion GMX 640x200 (flash)
   static void atmDrawTick();      // ATM/Evo whole-line modes on the fast memory path (flash)
   // Pentagon 16col (#EFF7 D0): the same shape — one content line per raster line
   // (Pentagon::col16RenderLine) at the END of its paper, the per-T border machine

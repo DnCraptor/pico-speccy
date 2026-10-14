@@ -9819,6 +9819,20 @@ entry" rule buys.
   the pair-slot framebuffer; it now repaints the bands via `gmxBorderFrame`
   instead. (Its paper walk is `Draw(tStatesPerLine)`, i.e. the same whole-line
   path as the HALT flush above — it needed the `frow` fix to be correct at all.)
+- **Every GMX line was rendered TWICE (fixed 2026-10-14, hw-measured on Edge Grinder
+  and HQ).** MainScreen reaches column 0 of a line twice (MainScreen_Blank's priming
+  Draw(0), then the first real slice; a HALT flush adds more), and the whole-line
+  branch keyed on `start_col == 0`: `[PERF] gmx:` read 400-808 lines a frame for 200.
+  A `gmx_last_line` guard draws each line once (TS-Conf's tsRenderLine had the same
+  fix). The line itself moved out of the RAM-resident MainScreen into
+  `VIDEO::gmxRenderLine` (flash, word reads, 4-entry colour table per byte —
+  `pairBits8`, shared with atmRenderLine): -448 B static SRAM on every board. Result:
+  render 6.7 -> 3.8 ms/frame; HQ heavy scene cpu 23.2 -> 20.3 ms, 41.7 -> 46.6 FPS.
+  ~19 us/line remains (bitmap + attribute pages both in butter PSRAM, 160 B/line
+  through XIP); not pursued (owner: enough). Same session, ATM/Evo: atmRenderLine
+  rewritten the same way (EGA byte LUT, 512 B heap) — EGA 12 -> 6 us/line, text 14.5
+  -> 8.8 us/line, CP/M cpu 19.0 -> 17.9 ms; a core1 line queue for ATM/16col/GMX was
+  measured and judged not worth it (16col render ~0.25 ms/frame).
 - **Attribute bit 7 = FLASH** (2026-08-31, NOT hw-tested): fg/bg swap on the flash
   phase, MAME's `invert_attrs`. bg is attr bits 3-6 and fg bit 3 is attr bit 6, so
   bit 7 is the only free one. Driven by the renderer's own `flashing` mask (0x80 /
