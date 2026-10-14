@@ -1136,11 +1136,24 @@ void cursor_movement(int8_t x, int8_t y, int8_t wheel)
 // infinity: -1 counted as -1 while +1 counted as nothing, so a slow hand crept left
 // and up. Same trick the serial-mouse packet builder has always used.
 static int32_t mouse_frac_x = 0, mouse_frac_y = 0;
+static int8_t  s_auto_swap = -1;    // Swap buttons = Auto: -1 undecided, 0/1 = swap
 
 static void mouse_apply(bool bl, bool br, bool bm, int32_t dx, int32_t dy, int32_t wheel)
 {
     ESPectrum::mouseSeen = true;
-    if (Config::mouse_swap) { const bool t = bl; bl = br; br = t; }   // Devices > Mouse > Swap buttons
+    // Devices > Mouse > Swap buttons. Auto: the first press of ONE button (L or R
+    // alone) decides — that button becomes left. A file-scope static, so it lives
+    // for the whole power-on session: a machine reset (F11) keeps it, F12 reboots.
+    // "Left" is the D0 button, which is what nearly all software treats as left
+    // (UnrealSpeccy convention — the reason Swap = On is the default): mouseButtonL
+    // lands on D1 (the original Kempston layout), so a first press of the PHYSICAL
+    // left button needs the swap, a first press of the right one does not.
+    if (Config::mouse_swap == 2 && s_auto_swap < 0 && bl != br) {
+        s_auto_swap = bl ? 1 : 0;
+        Debug::log("[MOUSE] Swap buttons auto: %s button is left", bl ? "left" : "right");
+    }
+    const bool swap = Config::mouse_swap == 1 || (Config::mouse_swap == 2 && s_auto_swap == 1);
+    if (swap) { const bool t = bl; bl = br; br = t; }
     ESPectrum::mouseButtonL = bl;
     ESPectrum::mouseButtonR = br;
     ESPectrum::mouseButtonM = bm;

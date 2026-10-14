@@ -1934,6 +1934,14 @@ A5, A8, A9 and A10") — X = A10..A8 011, Y = 111, buttons A9=1 A8=0 with A10 fr
 would steal Kempston-joystick and Beta reads here). Z-Player 5.1 reads only #FADF/#FBDF/
 #FFDF and uses bits 4-7 as a counter (delta vs last read), bit 2 = middle — our model.
 
+**Swap buttons = Auto (2026-10-14, hw-confirmed DVp2):** `Config::mouse_swap` is now a
+u8 0 Off / 1 On / 2 Auto (NVS `mouse_swap` = "false"/"true"/"auto"; older builds read
+"auto" as Off). Auto: the first press of ONE button decides, and that button lands on
+**D0** — the "left" nearly all software expects (`mouseButtonL` drives D1 = the original
+Kempston layout, so a first press of the PHYSICAL left button means swap). The first cut
+decided the other way round and read inverted on hw. `s_auto_swap` (hid_app.cpp) is a
+file static: F11 keeps it, F12 reboots and re-decides.
+
 ### Mouse sensitivity, and the truncation that made a slow hand drift (2026-09-15, NOT hw-tested)
 
 **Devices > "Mouse sensitivity"** — `Config::mouse_sens` (NVS `mouse_sens`,
@@ -4514,6 +4522,29 @@ for good.
   path), a TS-Conf title that flips 16c/256c per screen (Digger's intro is the
   known stripe case), GMX 640x200, and Gigascreen actually working in Profi and
   TS-Conf ZX mode — nothing in that combination has ever run.
+
+## The right pane's Description block (2026-10-14, partly hw-seen)
+
+Under a radio/bool row's options the right pane draws a `Description` block for the
+option under the cursor (left focus: the chosen one, and only if that value is in THIS
+row's list — machine rows share SET_MACHINE). One format: header, then per parameter a
+SUBHEADER (name + "now X" coloured green/red; with no value its NAME is coloured
+instead — red = warning / "Turns off", green = "Turns on") and indented RULES
+(requirement left, condition right, greyed when not in force). Content is
+`src/ui/UiDesc.cpp`, keyed on (setting, value) — the renderer (`drawDescRow`,
+UiRender.cpp) never changes; `sub()`/`rule()` are the API. Width budget 26 glyphs (the
+640x480 pane); max 10 lines, no scrolling (a long option list can push it off the pane —
+the Spectrum row with the +3 variants at 240 lines). A content hash in `flushDirty`
+repaints the pane when the block would change. Covered so far: ZX Evolution/TS-Conf
+(CPU >=504), every machine's "Turns on/off" table (mirrors MachineSwitch /
+resolveConstraints — keep them in step), GS (clock 12-14 / 12-20 by CPU) and NeoGS (CPU
+>=504), V-Sync (50 vs 60 Hz), Timex Gfx mode / SAA1099 (port #FF + machines),
+Overclock (warning on all four rows). Same session: the NeoGS Clock row was removed
+(Config::load forces ngs_clock = 0 = Auto); Timex <-> SAA1099 now switch each other off
+at the PICK (`Stage::set` + `Stage::takeNote` toast) instead of only at Apply; BaseConf
+auto-enables Z-Controller in MachineSwitch; Profi/Karabas keep the ZiFi NIC on boards
+WITH butter PSRAM (boot gate, MachineSwitch, autoDisabledMask). Not hw-confirmed beyond
+the owner reading the screens.
 
 ## The Machine menu is by FAMILY now, and the subheader names both halves (2026-09-11, NOT hw-tested)
 

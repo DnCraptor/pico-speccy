@@ -1041,6 +1041,14 @@ static const Option opt_esxdos[] = {
     { "DivSD",  3 },
 };
 
+// Values ARE Config::mouse_swap. Auto: the first button the user presses this session
+// becomes LEFT (kept until F12 — a machine reset does not forget it).
+static const Option opt_mouse_swap[] = {
+    { "Auto (1st press = left)", 2, "Auto" },
+    { "On",   1 },
+    { "Off",  0 },
+};
+
 // Kempston mouse sensitivity: the value IS Config::mouse_sens, a Q8 multiplier on the
 // raw HID counts (256 = one counter step per count), so the row order is free. x1/4 is
 // what mouse_apply()'s divisor always was — every other entry is new ground.
@@ -1058,7 +1066,7 @@ static const Option opt_mouse_sens[] = {
 // ZEsarUX and the Next put the RIGHT button on D0, UnrealSpeccy and software tested
 // on it (Port Demonstration 3.2) the LEFT one. Karabas-Pro's AVR has the same switch.
 static const Node kMouse[] = {
-    NM_BOOL  (TXT_HW_MOUSE_SWAP, SET_MOUSE_SWAP, nullptr),
+    NM_RADIO (TXT_HW_MOUSE_SWAP, SET_MOUSE_SWAP, opt_mouse_swap, nullptr),
     NM_RADIO (TXT_HW_MOUSE_SENS, SET_MOUSE_SENS, opt_mouse_sens, nullptr),
 };
 
