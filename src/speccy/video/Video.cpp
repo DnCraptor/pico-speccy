@@ -4223,6 +4223,18 @@ static bool prevFBAllocChunked(int lines, int prev_stride, size_t want) {
     return false;
 }
 
+// SRAM before butter for the prev-FB once setup() is over (VIDEO::gigascreenPreferSram).
+// On a butter board the prev-FB used to go to PSRAM unconditionally, served through the
+// uncached scanline window below: ~2 x 52 KB of uncached QMI traffic a frame, which is
+// cheap only while nothing else on core0 needs the XIP port. Since the ZX pages 0-4/6
+// live in butter (2026-10-13) every guest access that misses the cache queues behind
+// that traffic, and Gigascreen at 378 MHz went negative on IDL. The heap the framebuffer
+// no longer takes (it sits in the donated page SRAM) pays for an SRAM prev-FB instead.
+// Not during setup: the boot pre-allocation in VIDEO::Init runs before GS, MIDI and
+// audio have taken their SRAM, so it stays on butter and is moved at the end.
+static bool s_prev_sram_ok = false;
+#define PREV_SRAM_MARGIN (32 * 1024)   // = Buffer's HEAP_SAFETY_MARGIN, checked up front
+
 static bool ensurePrevFB(int lines, int stride) {
     // (There used to be an `arch == A_PROFI -> return true` here, which reported
     // success without allocating anything: GsSubsys::apply() then built the prev-FB
@@ -4252,8 +4264,13 @@ static bool ensurePrevFB(int lines, int stride) {
     // buffer down the chunked path, which is slower AND disables the prev-FB DMA
     // window (pwRefreshGate declines a chunked buffer). palloc's own last-resort
     // heap tier returns NULL rather than panicking, so nothing is lost by asking it.
+    // After setup (s_prev_sram_ok) a butter board asks for the heap first; palloc's heap
+    // tier keeps its 32 KB margin and falls back to butter by itself.
+    const uint32_t prevFlags = (s_prev_sram_ok && butter_psram_size() != 0)
+                             ? (uint32_t)Buffer::NEED_POINTER
+                             : (uint32_t)(Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
     if ((butter_psram_size() != 0 || getLargestAllocatable() >= want + PREV_CHUNK_SLACK) &&
-        sharedFB_prevBuf.alloc(want, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM)) {
+        sharedFB_prevBuf.alloc(want, prevFlags)) {
         uint8_t *p = sharedFB_prevBuf.data();
         memset(p, 0, want);
         sharedFB_prev = p;
@@ -4693,6 +4710,41 @@ void VIDEO::gigascreenRestoreAfterNet() {
     VIDEO::InitPrevBuffer();                     // reseed from the live frame
     VIDEO::gigascreen_enabled = (Config::gigascreen_onoff == 1);  // On=live, Auto=armed
     VIDEO::gigascreen_auto_countdown = 0;
+}
+
+// End of setup(): from here on the prev-FB prefers SRAM (see s_prev_sram_ok), and one
+// already sitting in butter moves there if the heap can spare it plus the margin. The
+// emulator has not run a frame yet, so nothing reads prev-FB while it moves; the blank
+// reseed is what InitPrevBuffer would have produced anyway.
+void VIDEO::gigascreenPreferSram() {
+    s_prev_sram_ok = true;
+    if (!butter_psram_size() || !sharedFB_prev || sharedFB_prev_nchunks || !pwPrevInButter()) return;
+    const size_t want = sharedFB_prev_size;
+    const size_t largest = getLargestAllocatable();
+    if (largest < want + PREV_SRAM_MARGIN) {
+        Debug::log("VIDEO: prevFB stays in butter (largest heap %u < %u + %u)",
+                   (unsigned)largest, (unsigned)want, (unsigned)PREV_SRAM_MARGIN);
+        return;
+    }
+    pwShutdown();
+    prevFBFree();
+    if (!ensurePrevFB(sharedFB_lines, sharedFB_stride)) {
+        // Cannot happen short of a race with nothing; leave Gigascreen off rather than
+        // with a row array pointing at freed memory.
+        VIDEO::vga.prevFrameBuffer = nullptr;
+        Config::gigascreen_enabled = false;
+        VIDEO::gigascreen_enabled = false;
+        return;
+    }
+    if (sharedFB_arr2) {
+        const int prev_stride = sharedFB_stride / 2;
+        for (int i = 0; i < sharedFB_lines; i++) sharedFB_arr2[i] = prevRowPtr(i, prev_stride);
+        for (int i = sharedFB_lines; i < FB_MAX_LINES; i++)
+            sharedFB_arr2[i] = prevRowPtr(sharedFB_lines - 1, prev_stride);
+        VIDEO::vga.prevFrameBuffer = (unsigned char**)sharedFB_arr2;
+    }
+    pwRefreshGate();   // prev-FB left butter: the scanline window closes
+    InitPrevBuffer();
 }
 
 size_t VIDEO::gigascreenPrevFBBytes() {

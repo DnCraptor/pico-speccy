@@ -7620,6 +7620,24 @@ off) keep the static SRAM pages, byte for byte.
   unmeasured), snapshot load/save, .pss, MB-02 / DivMMC page-0 windows, ZipExtract's
   page-5/7 fallback on a tight board, 640x480 (pages 5/7 stay in SRAM there — a
   different layout from 576p), and a Murmuzavr count past the chip (must refuse).
+- **Gigascreen went negative on IDL at 378 MHz after the move — its prev-FB now moves
+  to SRAM at the end of setup (2026-10-14, hw-confirmed: owner, "это пофиксило
+  перфоманс на 378").** On a butter board the prev-FB lived in PSRAM behind the
+  uncached scanline window (~2 x 52 KB of uncached QMI traffic a frame). Cheap while
+  the guest ran from SRAM; once pages 0-4/6 are butter every guest cache miss queues
+  behind it on the one XIP port. `VIDEO::gigascreenPreferSram()` (called right before
+  `setup: COMPLETE`) re-places it on the heap when `largest >= size + 32 KB`, and from
+  then on `ensurePrevFB` asks heap-first on butter boards (palloc's 32 KB margin, butter
+  fallback) — so the mode-gate resume and a menu enable go to SRAM too. The VIDEO::Init
+  boot pre-allocation still lands in butter on purpose (GS/MIDI/audio have not taken
+  their SRAM yet). The heap it uses is what the framebuffer stopped taking. Log:
+  `VIDEO: prevFB 50KB on heap` + `prevFB window OFF`, or `prevFB stays in butter
+  (largest heap ...)` when it does not fit. TS-Conf + NeoGS at 576p FITS (hw log
+  2026-10-14: `prevFB 50KB on heap`, `setup: COMPLETE, freeHeap=94360`) — the heap
+  the framebuffer gave back covers it with room to spare. Test ELF
+  `debug/DVp2-gigsram-1.0.9.elf`. The FTP server runs with it (owner, same day; on a
+  butter board its buffers go heap-first with the 32 KB margin, else butter — lending
+  declines there either way). 480p works too (owner, same day).
 - **Two things the re-test found, both fixed in `zxpsram6` (NOT hw-tested), neither
   caused by the move:**
   1. **"Pentagon 1024 + Gluk sees only 128K" = `MemESP::notMore128` was never cleared

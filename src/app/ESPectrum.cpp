@@ -1676,6 +1676,10 @@ void ESPectrum::setup() {
   // swallow (hw 2026-09-11: it announced itself on every boot and every F12).
   UsbMsc::armHotplug();
 
+  // Last SRAM decision of the boot: everything else has taken its share, so the
+  // Gigascreen prev-FB may now move from butter to the heap if there is room.
+  VIDEO::gigascreenPreferSram();
+
   Debug::log("setup: COMPLETE, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: COMPLETE, freeHeap=%u", (unsigned)getFreeHeap());
 

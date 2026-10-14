@@ -282,6 +282,8 @@ public:
   // Byte size the Gigascreen prev-FB needs in the *current* video mode (4-bit
   // packed). Used by the SRAM budget manager to cost the Gigascreen feature.
   static size_t gigascreenPrevFBBytes();
+  // End of setup(): Gigascreen's prev-FB prefers SRAM from now on (butter boards).
+  static void gigascreenPreferSram();
 
   // Largest SINGLE allocation the prev-FB needs. Smaller than gigascreenPrevFBBytes()
   // because the buffer is only ever addressed row by row (vga.prevFrameBuffer[]) and
