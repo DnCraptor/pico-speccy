@@ -294,7 +294,3 @@ endif ()
 if(DBG_UART_DEFAULT_ON)
     target_compile_definitions(${PROJECT_NAME} PRIVATE DBG_UART_DEFAULT=1)
 endif()
-
-if(WIFI_RADIO_OFF)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE WIFI_RADIO_OFF=1)
-endif()
