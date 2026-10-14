@@ -84,9 +84,12 @@ bool     NextReg::portFFIntDisable = false;
 static uint8_t s_machineType   = 0x03;
 static uint8_t s_machineTiming = 0x03;
 static uint8_t s_userDTLock    = 0;
-static uint8_t s_reg03TopBit   = 1;
+// Read-back (zxnext.vhd 5894): nr_palette_sub_idx & timing & user_dt_lock &
+// machine_type — bit 7 is the 9-bit palette write's "second byte pending"
+// (NR 0x44), not the config-mode bit of the last write (which is what we
+// showed until 2026-10-15: SprBig4b's `[B3:..]` against the board's `[13:..]`).
 static uint8_t reg03Compose() {
-    return (uint8_t)(((s_reg03TopBit & 1) << 7) | ((s_machineTiming & 7) << 4) |
+    return (uint8_t)(((NEXTVID::pal9Pending() ? 1 : 0) << 7) | ((s_machineTiming & 7) << 4) |
                      ((s_userDTLock & 1) << 3) | (s_machineType & 7));
 }
 
@@ -613,7 +616,7 @@ void NextReg::reset(bool hard) {
         MemESP::nextConfigMode = MemESP::nextBootRomActive;
         MemESP::nextConfigPage = 0;
         s_machineType = 0x03; s_machineTiming = 0x03;
-        s_userDTLock = 0; s_reg03TopBit = 1;
+        s_userDTLock = 0;
         reg[0x8C] = 0;                 // power-on: alt-ROM fully off
         MemESP::altrom_rd = MemESP::altrom_wr = false;
         MemESP::altrom_sel = 0;
@@ -963,7 +966,6 @@ void NextReg::write(uint8_t r, uint8_t v) {
                 case 7: MemESP::nextConfigMode = true;  break;
                 default: MemESP::nextConfigMode = false; break;
             }
-            s_reg03TopBit = (v >> 7) & 1;
             // The bootrom read overlay dies on the very first NR 0x03 write
             // of any value (zxnext.vhd:5122)
             if (bootromWasActive) MemESP::nextBootRomActive = false;

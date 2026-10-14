@@ -76,6 +76,7 @@ public:
     static void palValue8(uint8_t v);
     static bool nrHot(uint8_t r, uint8_t v);   // palette NEXTREGs in SRAM; false = not one of them
     static void palValue9(uint8_t v);
+    static bool pal9Pending() { return pal9Second; }   // NR 0x03 read bit 7 (nr_palette_sub_idx)
     static void palControl(uint8_t v);
 
     // clip windows (regs 0x18-0x1B, index reset 0x1C)
