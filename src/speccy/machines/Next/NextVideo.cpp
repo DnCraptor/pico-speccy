@@ -1871,11 +1871,30 @@ void nxErrPoll();   // Z80_JLS.cpp: ERR_NR turning #15 -> dump the RST 8 ring
 // program flips the displayed page through #7FFD bit 3 / NR 0x69 bit 6).
 // The generic Gigascreen (prev-FB + blend slots 17..136) stays suspended on the
 // Next: those slots are NEXTVID's colour lattice.
+// A frame whose paper is the classic ULA and nothing else — the only kind the
+// blend can apply to (RenderUlaLine's per-line rule). While Layer 2, sprites, the
+// tilemap, LoRes, ULANext / ULA+, Timex hi-res or the 640 mode are up the whole
+// Gigascreen path is OFF for the frame: not even the row recording runs, which
+// otherwise cost every ULA line its per-bit loop plus a 128-byte PSRAM row — the
+// Profi DS80 / TS-Conf rule (gigascreenModeIncompatible) applied to the Next's
+// own blend (owner, 2026-10-15: "Gigascreen eats a few FPS" on a Layer 2 title).
 __attribute__((noinline)) void NEXTVID::gigsFrame() {
     const uint8_t mode = Config::gigascreen_onoff;
     if (!mode) {
         if (gigsPrev) { c1Drain(); Buffer::pfree(gigsPrev); gigsPrev = nullptr; }
         s_gigs = 0;
+        return;
+    }
+    const uint8_t* r = NextReg::reg;
+    const bool zxOnly = !(r[0x15] & 0x81)                                // sprites on / LoRes
+                     && !(r[0x6B] & 0x80)                                // tilemap
+                     && !((NextReg::port123B & 0x02) || (r[0x69] & 0x80))   // Layer 2
+                     && !(r[0x68] & 0x88)                                // ULA off / ULA+
+                     && !(palCtrl & 0x01)                                // ULANext
+                     && !VIDEO::timex_hires_live && !p80Live;            // Timex hi-res / 640
+    if (!zxOnly) {
+        s_gigs = 0;
+        s_gigsSeed = true;    // the prev row is stale once a ZX frame returns: record one first
         return;
     }
     if (!gigsPrev) {

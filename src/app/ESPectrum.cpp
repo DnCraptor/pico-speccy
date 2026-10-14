@@ -748,7 +748,21 @@ static void donateZxPagesToFb() {
   // ZX_PSRAM_PAGES (CMake): which blocks go — an A/B switch for the guest-RAM-in-XIP
   // cost (2026-10-13 FPS regression report at 576p). A block left out keeps its pages
   // in SRAM and the framebuffer takes those rows from the heap instead.
-  if ((ZX_PSRAM_PAGES & 0x0F) == 0x0F) VIDEO::fbDonate(p0, 4u * MEM_PG_SZ, 0x0Fu);
+  // Spectrum Next: banks 0/1 are MMU slots 6/7 (0xC000-0xFFFF) in NextZXOS's
+  // default map — the top 16K every .nex / 48K-mapped program keeps its code in
+  // (NXModPlayer: main loop at #E004, CTC ISR at #FA00, the mixer). With them in
+  // butter the player's ~66k instructions a frame fetch through the XIP port
+  // core1's Layer 2 reads already saturate: nxmod8 49-50 FPS / IDL +2200 on
+  // 2026-10-11 became 48 / IDL -1000 after the 10-13 move (owner, 2026-10-14).
+  // So on Next only pages 2/3 of the pages0123 block go (plus 4/6): 204 rows of
+  // the 240 at 480p from the strip, 11.5 KB off the heap — the same budget shape
+  // the ZX machines had before pages 0-3 were added to the donation.
+  const bool next = Config::arch == A_NEXT ||
+                    (Config::ram_file == NO_RAM_FILE && Config::pref_arch == A_NEXT);
+  if ((ZX_PSRAM_PAGES & 0x0F) == 0x0F) {
+    if (next) VIDEO::fbDonate(p0 + 2u * MEM_PG_SZ, 2u * MEM_PG_SZ, 0x0Cu);   // pages 2/3 only
+    else      VIDEO::fbDonate(p0, 4u * MEM_PG_SZ, 0x0Fu);
+  }
   if ((ZX_PSRAM_PAGES & 0x50) == 0x50) VIDEO::fbDonate(p4, 2u * MEM_PG_SZ, 0x50u);   // pages 4/6; pages57 is NOT donated (see above)
 }
 
@@ -3318,8 +3332,19 @@ __not_in_flash("audio") void ESPectrum::BeeperGetSample() {
   }
 }
 
+// The T-state at which audbufpos next exceeds audbufcntCovox depends on
+// (audbufcntCovox, divider, multiplicator) only — (t / d) >> m is
+// floor(t / (d << m)) — so it is cached against those three and a call before
+// it is a no-op without the division. A CTC sample player writes 4 DAC ports
+// per interrupt, ~2500 calls a frame, and nearly all of them land inside one
+// sample (NXModPlayer, 1.7% of core0, 2026-10-14).
+static uint32_t s_cvNextT = 0, s_cvKeyCnt = 0xFFFFFFFFu;
+static uint8_t  s_cvKeyD = 0, s_cvKeyM = 0xFF;
 __not_in_flash("audio") void ESPectrum::CovoxGetSample() {
   if (!audioBufferCovoxL) return;
+  if (audbufcntCovox == s_cvKeyCnt && audioCOVOXDivider == s_cvKeyD && multiplicator == s_cvKeyM &&
+      CPU::tstates < s_cvNextT)
+    return;
   uint32_t audbufpos = CPU::tstates / audioCOVOXDivider;
   if (multiplicator)
     audbufpos >>= multiplicator;
@@ -3333,6 +3358,8 @@ __not_in_flash("audio") void ESPectrum::CovoxGetSample() {
     }
     audbufcntCovox = audbufpos;
   }
+  s_cvKeyCnt = audbufcntCovox; s_cvKeyD = audioCOVOXDivider; s_cvKeyM = multiplicator;
+  s_cvNextT = ((audbufcntCovox + 1) * (uint32_t)audioCOVOXDivider) << multiplicator;
 }
 
 // One-pole DC blocker — the model of a sound card's output coupling cap.

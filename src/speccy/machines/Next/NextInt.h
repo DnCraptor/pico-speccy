@@ -42,6 +42,8 @@ bool intLine();
 // Frame-relative tstates of the next moment /INT can go up, at least
 // CPU::tstates + 1, at most limit.
 uint32_t nextEventT(uint32_t limit);
+// The same, for a caller that called intLine() (which syncs) just before.
+uint32_t nextEventTSynced(uint32_t limit);
 // Interrupt acknowledge: the IM 2 bus byte (0xFF unless a hardware-IM2 source
 // is presented). Moves that source into service.
 uint8_t ack();

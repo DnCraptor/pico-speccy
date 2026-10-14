@@ -73,58 +73,71 @@ __attribute__((always_inline)) inline void poke8(uint16_t address, uint8_t value
 // gate is an invariant and its per-access load + test are not paid.
 // The line-boundary test (peek) and the >= 0x4000 test (poke) stay.
 
-__attribute__((always_inline)) inline void addressOnBus_nx(uint16_t, int32_t cycles) {
-    CPU::tstates += (uint32_t)cycles;
+// `t` is the caller's T-state counter: Z80::exec_nocheck_next keeps CPU::tstates
+// in a register for the whole slice (2026-10-14, NXModPlayer: the global's
+// load/store on every tick and every access was ~10% of the loop) and the fall-
+// back paths (a raster line boundary, an address below 0x4000) publish it to
+// CPU::tstates around the generic accessor, which reads and advances the global.
+__attribute__((always_inline)) inline void addressOnBus_nx(uint32_t& t, uint16_t, int32_t cycles) {
+    t += (uint32_t)cycles;
 }
-__attribute__((always_inline)) inline void addressOnBusIR_nx(int32_t cycles) {
-    CPU::tstates += (uint32_t)cycles;
+__attribute__((always_inline)) inline void addressOnBusIR_nx(uint32_t& t, int32_t cycles) {
+    t += (uint32_t)cycles;
 }
 
-__attribute__((always_inline)) inline uint8_t peek8_nx(uint16_t address) {
-    const uint32_t end = CPU::tstates + 3;
+__attribute__((always_inline)) inline uint8_t peek8_nx(uint32_t& t, uint16_t address) {
+    const uint32_t end = t + 3;
     if (end < VIDEO::ts_line_t) {
-        CPU::tstates = end;
+        t = end;
         return MemESP::ramCurrent[address >> 13][address & 0x1FFF];
     }
-    return Z80Ops::peek8(address);
+    CPU::tstates = t;
+    const uint8_t v = Z80Ops::peek8(address);
+    t = CPU::tstates;
+    return v;
 }
 
 // A word inside one 8K slot is one slot lookup; one straddling two keeps the
 // per-byte form (the slots need not be adjacent in SRAM).
-__attribute__((always_inline)) inline uint16_t peek16_nx(uint16_t address) {
-    const uint32_t end = CPU::tstates + 6;
+__attribute__((always_inline)) inline uint16_t peek16_nx(uint32_t& t, uint16_t address) {
+    const uint32_t end = t + 6;
     if (end < VIDEO::ts_line_t) {
-        CPU::tstates = end;
+        t = end;
         const uint8_t* const p = MemESP::ramCurrent[address >> 13] + (address & 0x1FFF);
         if (__builtin_expect((address & 0x1FFF) != 0x1FFF, 1)) return (uint16_t)(p[0] | (p[1] << 8));
         const uint16_t next = address + 1;
         return (uint16_t)(p[0] | (MemESP::ramCurrent[next >> 13][next & 0x1FFF] << 8));
     }
-    return Z80Ops::peek16(address);
+    CPU::tstates = t;
+    const uint16_t v = Z80Ops::peek16(address);
+    t = CPU::tstates;
+    return v;
 }
 
-__attribute__((always_inline)) inline void poke8_nx(uint16_t address, uint8_t value) {
+__attribute__((always_inline)) inline void poke8_nx(uint32_t& t, uint16_t address, uint8_t value) {
     if (address >= 0x4000) {
-        CPU::tstates += 3;
+        t += 3;
         MemESP::ramCurrent[address >> 13][address & 0x1FFF] = value;
         return;
     }
+    CPU::tstates = t;
     Z80Ops::poke8(address, value);
+    t = CPU::tstates;
 }
 
 // PUSH's two writes as one: low byte at `address`, high at `address + 1`,
 // written HIGH FIRST like the two pokes it replaces (the order is visible only
 // below 0x4000, which takes the per-byte path anyway).
-__attribute__((always_inline)) inline void poke16_nx(uint16_t address, uint16_t value) {
+__attribute__((always_inline)) inline void poke16_nx(uint32_t& t, uint16_t address, uint16_t value) {
     if (address >= 0x4000 && __builtin_expect((address & 0x1FFF) != 0x1FFF, 1)) {
-        CPU::tstates += 6;
+        t += 6;
         uint8_t* const p = MemESP::ramCurrent[address >> 13] + (address & 0x1FFF);
         p[1] = (uint8_t)(value >> 8);
         p[0] = (uint8_t)value;
         return;
     }
-    poke8_nx(address + 1, (uint8_t)(value >> 8));
-    poke8_nx(address, (uint8_t)value);
+    poke8_nx(t, address + 1, (uint8_t)(value >> 8));
+    poke8_nx(t, address, (uint8_t)value);
 }
 
 } // namespace NextMemory

@@ -823,7 +823,8 @@ __attribute__((always_inline)) inline void CPU::frameRest(uint64_t _loop_t0, boo
                     BREAKPOINTS
                     continue;
                 }
-                uint32_t target = Z80::isIFF1() ? NextInt::nextEventT(sliceEnd) : sliceEnd;
+                // intLine() above has synced whenever IFF1 is set
+                uint32_t target = Z80::isIFF1() ? NextInt::nextEventTSynced(sliceEnd) : sliceEnd;
                 if (dmaT < target) target = dmaT;
                 if (Z80::isHalted()) {
                     if (!stamped) { tstates_active = tstates; stamped = true; }

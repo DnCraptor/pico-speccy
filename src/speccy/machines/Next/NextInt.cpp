@@ -433,6 +433,12 @@ NXI_HOT bool intLine() {
 
 NXI_HOT uint32_t nextEventT(uint32_t limit) {
     sync();
+    return nextEventTSynced(limit);
+}
+
+// nextEventT for a caller that has just synced (CPU::loop: intLine() right
+// before it) — the second sync() only re-derived now28() to find nothing to do.
+NXI_HOT uint32_t nextEventTSynced(uint32_t limit) {
     const int64_t now = s_last28;
     int64_t best = kNever;
     if (s_lineEn && s_linePos28 >= 0 && s_base28 + s_linePos28 > now) best = s_base28 + s_linePos28;

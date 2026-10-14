@@ -559,6 +559,50 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   читает `Z80::regR` — нужна синхронизация вокруг `nxCheckTrdos`), объединение теста
   `stFrame` с line-tick. Hw owed: NEXTEST FPS не хуже split17, RAMTEST FPS, любая игра
   на 48K/Pentagon (флаги — общие).
+- **NXModPlayer, сессия 2026-10-14/15 (hw-confirmed на `debug/DVp2-next-opt6-1.0.10`, owner:
+  «работает», IDL вырос).** Четыре шага, каждый с железным вердиктом:
+  (1) **Регрессия 48 FPS / IDL −1000 (было 49-50 / +2200) — перенос ZX-страниц 0-4/6 в butter
+  13-го числа**: на Next это банки MMU 0/1 = слоты 6/7 (`#C000-#FFFF`), где у плеера главный цикл
+  (`#E004`), CTC ISR (`#FA00`) и микшер — ~66k инструкций/кадр через XIP-порт, который core1 и так
+  забивает Layer 2. Улика: `MEMORY SETUP begin, freeHeap=` 75 512 (11-е, FB в куче) против 141 744
+  (FB в полосе). Фикс в `donateZxPagesToFb`: на Next (`arch == A_NEXT`, или `pref_arch == A_NEXT`
+  без ram_file — предикат `CodeOverlay::apply`) из блока pages0123 отдаются только страницы 2/3
+  (+4/6); банки 0/1 в SRAM. 480p: 204 строки из полосы, 11.5 KB из кучи. Hw: 50 FPS, IDL +1500
+  (480p) / +500 (576p). **Правило: Next-банки 0/1 — это верхние 16K каждой .nex-программы; их
+  место в SRAM.**
+  (2) **Профиль opt4 (`DVp2-next-opt4-prof`, PERF_HIST, окно 53248)**: core0 = голова
+  `exec_nocheck_next` ~34% (PERF_HIST раздувает её), idle 10%, NextInt sync/ctc/pulse ~5%,
+  dacWrite+Ports ~2%. Гость: 63.7k ops/fr, 706 INT/fr, ED 8.4% (NEXTREG r,A 1.9% = перемапка
+  MMU слота 5 в микшере `#D83D`/`#C940`, RETI 1.1, TEST n 0.7, SBC HL,DE 0.7, LD DE,(nn) 0.6),
+  OUT (n),A 3.9%, CB 2.6% (SRL A ×3 в `#D675`). Два ложных следа: **`nextLdirBatch` НЕ горяч** —
+  бакет `20071A40` накрывает его эпилог и начало головы цикла (LDIR-ы плеера — инициализация);
+  **«4 вынесенных сравнения CB/DD/ED/FD перед `tbh`» — артефакт prof-сборки**, в обычной их нет.
+  Бинарник плеера: `~/Downloads/zxnext/apps/audio/NXModPlayer/nxmodplayer.nex` (bank 0 = `#C000`,
+  старт `#C004`; дизассемблировать банк через `tools.z80disasm.disasm_bytes_text`).
+  (3) **opt5: `CPU::tstates` (`nx_t`), `regR` (`nx_r`) и `opCode` (`nx_op`) живут в регистрах на
+  весь срез `exec_nocheck_next`**: аксессоры `_nx` в next_memory.h получают `uint32_t& t`,
+  `NextOpcode::fetch_nx`, `nxSync(expr)` публикует/перечитывает глобалы вокруг КАЖДОГО выхода
+  наружу (tsDrawTick, табличные обработчики, decodeED/DDFD, NextIdle::note, nextOpcodeSlow,
+  fallback-пути аксессоров); генератор добавляет `nx_t` первым аргументом и `Z80Ops::poke16` →
+  `poke16_nx` (LD (nn),HL ходил через generic). В ED-switch добавлены TEST n, LD BC/DE,(nn),
+  SBC HL,DE, RETI, NEXTREG n,A / n,n (через nxSync + повторный тест gate — writeHot может уронить
+  его). z80bench (режим Next, база = HEAD через `git stash` объектов): ZEXDOC 300M T 2242.7M →
+  2042.3M ARM-инструкций (**−8.9%**), mix −3.8%, регистры и memcrc бит-в-бит; полный ZEXDOC
+  4 шардами — 0 ошибок (шард 0 добивал aluop на момент записи). **Правило для любого вызова из
+  этого цикла: всё, что читает или двигает `CPU::tstates`/`regR`, обязано идти через `nxSync`.**
+  (4) **opt6: собственный Gigascreen NEXTVID выключен на не-ULA кадрах.** Общий Gigascreen на Next
+  и так подавлен (`gigascreenModeIncompatible`), а `gigsFrame` при On/Auto гнал каждую ULA-строку
+  по побитовой ветке + 128 B prev в PSRAM даже в режиме «только запись». Теперь кадр со
+  спрайтами/LoRes (NR 15), тайлмапом (6B), Layer 2 (69 / 123B), ULA off / ULA+ (68), ULANext
+  (43), Timex hi-res или 640 → `s_gigs = 0`, при возврате в чистый ULA-кадр — seed. Hw: FPS
+  вернулся.
+  Побочное: `.nxovl` 50 648 из AUTO 51 200 (**552 B запаса** — следующее добавление туда требует
+  поднять терм); **NEXT_TRACE-сборка больше не влезает во флеш** (жёсткий пол GM.DLS, 4 KB
+  сверх — opt3-trace стояла ровно на границе); prof-сборка живёт в `build-all/PICO_DV-nxprof`
+  (`-DPERF_TRACE=ON -DPERF_HIST=ON -DNEXT_TRACE=OFF -DNXOVL_WIN_SIZE=53248`). Остаток на core0 —
+  голова цикла ~24 ARM-инструкции на Z80-инструкцию (tick 5, divmmc 2, fetch 4, R 1, PC 3,
+  prefix 3, flagQ/pendingEI 2, dispatch 4); следующий уровень — PC в регистре (переписывание
+  `REG_PC` в телах генератором), дальше только регистровое ядро.
 - **SRAM-проход 2026-10-10 (NOT hw-tested): `.data` DVp2 102 260 -> 93 020 B.** Таблица
   видеорежимов `video_mode` — `static const` во флеше (была 4.4 KB .data): изменяемые поля
   в RAM-массивах `s_div` (pio_clk_div) / `s_vtot` (v_total) в graphics.c, ISR VGA читает
