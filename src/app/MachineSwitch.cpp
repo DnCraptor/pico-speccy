@@ -20,6 +20,7 @@
 #include "Debug.h"
 #include "fs/FileUtils.h"
 #include "speccy/machines/Alf.h"
+#include "speccy/machines/If2.h"
 #include "speccy/devices/storage/DivMMC.h"
 #include "speccy/devices/disk/MB02.h"
 #include "Buffer.h"
@@ -411,6 +412,7 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
         // fine (F12 reboots, and setup() fills RAM). Before requestMachine so the
         // ROM binding and the machine start see the same clean state.
         ESPectrum::powerOnRamFill(arch, romset);
+        If2::onMachineSwitch(arch, romset);   // an IF2 cartridge only fits the stock 48K
         Config::requestMachine(arch, romset);
     }
 

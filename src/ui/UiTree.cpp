@@ -584,6 +584,13 @@ static bool p_tsconfActive() {
 
 // The TC2068 is running or staged — gates its cartridge submenu. (The TC2048 has no
 // cartridge port at all: no EX-ROM, no DOCK, no #F4.)
+// Interface 2 plugs into any 48K; the row follows the staged machine, like DOCK.
+static bool p_48kActive() {
+    const int32_t m = Stage::get(SET_MACHINE);
+    if (m < 0) return Config::arch == A_48K;
+    return (m >> 8) == A_48K;
+}
+
 static bool p_tc2068Active() {
     const int32_t m = Stage::get(SET_MACHINE);
     if (m < 0) return Config::isTc2068();
@@ -836,8 +843,15 @@ static const Node kTimexCart[] = {
     NM_ACTION(TXT_DCK_EJECT,  act_dckEject,  nullptr),
 };
 
+// ZX Interface 2 ROM cartridge: mounted and ejected here, the 48K restarts on it.
+static const Node kIf2Cart[] = {
+    NM_ACTION(TXT_DCK_INSERT, act_if2Insert, p_hasSD),
+    NM_ACTION(TXT_DCK_EJECT,  act_if2Eject,  nullptr),
+};
+
 static const Node kMachine[] = {
     NM_RADIO  (TXT_MACH_SPECTRUM, SET_MACHINE, opt_mach_spectrum, nullptr),
+    NM_SUB    (NM_IND TXT_MACH_IF2_CART, kIf2Cart, p_48kActive),
     NM_RADIO(TXT_MACH_BYTE,  SET_MACHINE, opt_mach_byte,  p_extRam),
     NM_BOOL (NM_IND TXT_MACH_COBMECT, SET_BYTE_COBMECT, p_byteActive),
     NM_RADIO  (TXT_MACH_TIMEX,    SET_MACHINE, opt_mach_timex,    nullptr),

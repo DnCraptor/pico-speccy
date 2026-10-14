@@ -15578,6 +15578,23 @@ speccy4ever.speccy.org/_KA.htm (`curl -sk -A Mozilla`).
   0.2d); a 1 MB memory test on KAY1024 and 2 MB on the Phoenix (UMT); turbo with Alt+F2 on and a program writing
   1FFD D2; Reset Service's Gluk clock detect with CMOS + NVRAM on and off.
 
+## ZX Interface 2 cartridges on the 48K (`src/speccy/machines/If2.*`, 2026-10-15, hw-confirmed DVp2: owner "работает" on `debug/DVp2-if2-1.0.10`, not itemised)
+
+A `.rom`/`.bin` of at most 16 KB (F5, zip, Web catalog, Machine > Interface 2 cartridge)
+is plugged in as an IF2 cartridge: the machine switches to the stock 48K (`A_48K, R_48K`)
+and `rom[0]` points at the ALF cartridge window (`Alf::Cart`, `g_alfWindow`: file kept
+open on SD, 16 KB heap buffer, no flash write). Bigger files stay ALF cartridges.
+`Config::if2CartPath` (NVS `if2cart`) persists it; `If2::bindBoot` mounts it after
+`Alf::bindCart`, `If2::bindRom` binds it at the end of requestMachine's 48K case.
+Writes into the window are dropped by MemESP's existing `g_alfWindow` guard. While a
+cartridge is in: esxDOS is taken off the bus at `CPU::reset` (`If2::onReset`, the Rzx
+suspend; given back when it is out), the 48K TR-DOS `#3Dxx` trap skips the window, and
+`tapeFastMachineOk()` is false. It comes out on F11 (the DOCK rule), on any machine
+switch away from stock 48K, on Eject, and when ZipExtract/quick-start reuses its temp
+path. F1 Info on a `.rom`/`.bin` (`If2::describe`): type (IF2 cartridge / 48K system ROM
+/ ALF cartridge), CRC32, own IM1 handler at #0038, what Enter will do. Test material:
+TOSEC "ZX Spectrum - Cartridges" (Cookie CRC32 7108E9A8: copies itself to #6000).
+
 ## DVp2ws — `PICO_DV_WS`: the W module in a Pico DV base (2026-10-11, NOT hw-tested)
 
 `-DPICO_DV_WS=ON` → `DVp2ws-speccy-<display>-<ver>`, the third carrier for the

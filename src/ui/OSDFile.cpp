@@ -46,6 +46,7 @@ using namespace std;
 #include "fs/FileUtils.h"
 #include "drivers/usbhost/UsbMsc.h"
 #include "speccy/machines/Alf.h"
+#include "speccy/machines/If2.h"
 #include "app/Config.h"
 #include "app/ESPectrum.h"
 #include "speccy/z80/CPU.h"
@@ -515,6 +516,9 @@ static bool rfd_launch_tmp(string path) {
         return OSD::loadDckCart(path);  // Timex DOCK cartridge — mount + boot the TC2068
     }
     if (ext == "rom" || ext == "bin") {
+        FILINFO fi;
+        if (f_stat(path.c_str(), &fi) == FR_OK && fi.fsize <= If2::MAX_SIZE)
+            return If2::insert(path);   // 16 KB: Interface 2 cartridge on the 48K
         return OSD::loadAlfCart(path); // ALF cartridge — lazy-mount from SD + switch into ALF
     }
     OSD::osdCenteredMsg(string(MSG_NET_UNSUPPORTED) + " (." + ext + ")",
@@ -577,6 +581,7 @@ static void rfd_release_tmp(const string& tmpp) {
         Tape::Init();   // closes the open tape FIL
     // An ALF cart mounted lazily from this temp path holds the FIL open; release it
     // so the next quick-start can truncate/rewrite the same /tmp/_run.<ext> file.
+    if (Config::if2CartPath == tmpp) If2::eject(false);   // ROM back before the window goes
     if (Alf::Cart::active() && Alf::Cart::path() == tmpp) Alf::Cart::unmount();
     // A DOCK cartridge read out of the same temp path: the file is closed (mountDck
     // copies it into RAM), but the slot must be emptied so the next quick-start does

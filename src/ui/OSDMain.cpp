@@ -59,6 +59,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/core/Snapshot.h"
 #include "speccy/core/MemESP.h"
 #include "speccy/machines/Alf.h"
+#include "speccy/machines/If2.h"
 #include "app/Buffer.h"
 #include "speccy/devices/tape/Tape.h"
 #include "LEDIndicators.h"
@@ -2980,8 +2981,12 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                     if (loadDckCart(fname)) return;   // clean exit into the running machine
                 }
                 else if (ext == "rom" || ext == "bin") {
-                    // ALF cartridge — lazy-mount from SD (no flash) and switch into ALF in place.
-                    if (loadAlfCart(fname)) return;   // clean exit into the running machine
+                    // Up to 16 KB: a ZX Interface 2 cartridge on the 48K. Bigger: an ALF
+                    // cartridge. Both lazy-mount from SD (no flash) and switch in place.
+                    FILINFO fi;
+                    if (f_stat(fname.c_str(), &fi) == FR_OK && fi.fsize <= If2::MAX_SIZE) {
+                        if (If2::insert(fname)) return;
+                    } else if (loadAlfCart(fname)) return;   // clean exit into the running machine
                 }
                 else if (ext == "mmc" || ext == "hdf" || ext == "vhd" || ext == "hdd" || ext == "img") {
                     const bool ataImage = ext == "vhd" || ext == "hdd" || ext == "img";
@@ -3157,6 +3162,12 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                 Timex::ejectDck();
                 Config::dckCartPath = "";
                 Config::save();          // ...and it must not come back on a reboot
+                OSD::notify(" Cartridge ejected ", LEVEL_INFO, 1200);
+            }
+            // ...and an Interface 2 cartridge the same way: it owns the ROM, so with
+            // it in F11 could only ever restart the cartridge.
+            if (If2::present()) {
+                If2::eject(false);
                 OSD::notify(" Cartridge ejected ", LEVEL_INFO, 1200);
             }
             if (Config::arch == A_PROFI) {
@@ -7289,6 +7300,7 @@ bool OSD::loadAlfCart(const string& fname) {
     // OSD closes cleanly into the running machine. GM.DLS no longer conflicts (the cart
     // does not use the shared flash region), so it is left untouched.
     Config::alfCartBanks = (uint8_t)((size + (16ul << 10) - 1) >> 14);   // ceil to 16K banks
+    Config::if2CartPath  = "";   // the window is the ALF cartridge's now
     Config::alfCartPath  = fname;
     Config::arch = A_ALF; Config::romSet = R_ALF1; Config::pref_arch = A_ALF;
     Config::save();

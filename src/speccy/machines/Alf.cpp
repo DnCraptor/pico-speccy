@@ -1,6 +1,7 @@
 // pico-speccy — ALF TV Game ports. See Alf.h. FLASH-resident on purpose.
 #include "Alf.h"
 #include "app/LastRun.h"
+#include "app/TryAlloc.h"
 
 #include "app/Config.h"
 #include "app/Debug.h"
@@ -124,7 +125,7 @@ bool Alf::Cart::mount(const std::string& p) {
     if (size == 0) { fclose2(g_file); g_file = nullptr; return false; }
     if (size > ALF_MAX_SZ) size = ALF_MAX_SZ;
     g_banks = (int)((size + ALF_BANK_SZ - 1) / ALF_BANK_SZ);
-    g_alfWindow = (uint8_t*)malloc(ALF_BANK_SZ);
+    g_alfWindow = (uint8_t*)tryMalloc(ALF_BANK_SZ);   // NULL, not a panic, on a thin heap
     if (!g_alfWindow) {
         fclose2(g_file); g_file = nullptr; g_banks = 0;
         Debug::log("Alf::Cart: OOM"); return false;

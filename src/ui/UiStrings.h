@@ -223,6 +223,8 @@
 #define TXT_MACH_SPECTRUM   "Spectrum"
 #define TXT_MACH_TIMEX      "Timex"
 #define TXT_MACH_TIMEX_CART "Cartridge (DOCK)"
+#define TXT_MACH_IF2_CART   "Interface 2 cartridge"
+#define TXT_IF2_PICK        "Select IF2 cartridge (16K .rom)"
 #define TXT_DCK_INSERT      "Insert cartridge"
 #define TXT_DCK_EJECT       "Eject cartridge"
 #define TXT_DCK_PICK        "Select cartridge"

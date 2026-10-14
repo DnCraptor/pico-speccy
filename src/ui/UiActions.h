@@ -25,6 +25,8 @@ void act_helpAbout();
 // Storage — actions, because they mount media or restart the machine
 void act_tapeSelect();
 void act_dckInsert();
+void act_if2Insert();
+void act_if2Eject();
 void act_dckEject();
 void act_tapePlayStop();
 void act_tapeBrowser();

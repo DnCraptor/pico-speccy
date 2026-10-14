@@ -64,6 +64,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "ui/UiDialog.h"
 #include "ui/UiGfx.h"
 #include "speccy/machines/Alf.h"
+#include "speccy/machines/If2.h"
 #include "speccy/machines/Atm.h"
 #include "speccy/core/Ports.h"
 #include "speccy/core/Snapshot.h"
@@ -1030,6 +1031,8 @@ void ESPectrum::setup() {
   // ...and the Timex DOCK cartridge, for the same reason: the machine can only find
   // and start it if it is in the slot before the first reset.
   { extern void timexBindCart(); timexBindCart(); }
+  // ...and the Interface 2 cartridge: requestMachine below points rom[0] at it.
+  If2::bindBoot();
   // NOTE: the GM.DLS bank (MidiSynth::provisionAtBoot) is set up later — after
   // Buffer::initPools() so the butter PSRAM arena exists — but still before
   // VIDEO::Init() (flash erase must precede the live HDMI DMA over XIP).

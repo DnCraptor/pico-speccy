@@ -8,6 +8,7 @@
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/core/roms.h"
 #include "speccy/machines/Atm.h"
+#include "speccy/machines/If2.h"
 #include "speccy/roms/atm/atm_banks.h"   // ATM page tables — this TU only (see requestMachine)
 #include "speccy/roms/kay/kay_banks.h"   // Nemo KAY bank tables — this TU only (same reason)
 #include "fs/FileUtils.h"
@@ -169,6 +170,7 @@ uint8_t  Config::trdosBios = 5; // Default: 5.04T — the flash base itself, no 
 uint8_t  Config::alfCartBanks = 0; // 0 = built-in Elf-1; >0 = loaded cart size in 16K banks
 string   Config::alfCartPath = ""; // pending cart to flash into the shared region at boot
 string   Config::dckCartPath = ""; // Timex DOCK cartridge in the TC2068 slot
+string   Config::if2CartPath = ""; // ZX Interface 2 cartridge in the 48K
 bool     Config::driveWP[4] = { true, true, true, true };
 uint8_t  Config::esxdos = 0;
 string   Config::esxdos_hdf_image[2] = {"", ""};
@@ -536,6 +538,7 @@ void Config::requestMachine(ArchIdx newArch, RomsetIdx newRomSet)
             MemESP::registerOverlay(gb_rom_0_sinclair_48k, nullptr);
             break;
         }
+        If2::bindRom();   // an Interface 2 cartridge replaces the whole ROM (stock 48K only)
         break;
     }
     case A_ALF: {
@@ -1495,6 +1498,7 @@ void Config::load() {
         nvs_get_u8("alfCartBanks", alfCartBanks, sts);
         nvs_get_str("alfcart", alfCartPath, sts);
         nvs_get_str("dckcart", dckCartPath, sts);
+        nvs_get_str("if2cart", if2CartPath, sts);
         for (int i = 0; i < 4; i++) {
             char k[12]; snprintf(k, sizeof(k), "drive%d.wp", i);
             nvs_get_b(k, driveWP[i], sts);
@@ -1913,6 +1917,7 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_u8(buf,"alfCartBanks", alfCartBanks);
     nvs_set_str(buf,"alfcart", alfCartPath.c_str());
     nvs_set_str(buf,"dckcart", dckCartPath.c_str());
+    nvs_set_str(buf,"if2cart", if2CartPath.c_str());
     for (int i = 0; i < 4; i++) {
         char k[12]; snprintf(k, sizeof(k), "drive%d.wp", i);
         nvs_set_str(buf, k, driveWP[i] ? "true" : "false");

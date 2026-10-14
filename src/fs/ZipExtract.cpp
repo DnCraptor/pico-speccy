@@ -18,6 +18,7 @@ using namespace std;
 #include "app/NetArena.h"
 #include "speccy/core/MemESP.h"
 #include "speccy/machines/Alf.h"
+#include "speccy/machines/If2.h"
 #include "speccy/machines/Plus3/Plus3Fdc.h"
 #include "speccy/video/Video.h"
 #include "ui/OSDMain.h"
@@ -113,6 +114,7 @@ static void releaseTempOwners(const char* path) {
     if (Tape::tapeFileType != TAPE_FTYPE_EMPTY &&
         FileUtils::TAP_Path + Tape::tapeFileName == p)
         Tape::Init();   // closes the open tape FIL
+    if (Config::if2CartPath == p) If2::eject(false);   // ROM back before the window goes
     if (Alf::Cart::active() && Alf::Cart::path() == p) Alf::Cart::unmount();
 }
 

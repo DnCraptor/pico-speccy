@@ -507,6 +507,9 @@ public:
     // like a mounted disk, so the cartridge is still in the slot after a reboot —
     // which is what makes it start again (the HOME ROM probes the DOCK at reset).
     static string dckCartPath;
+    // ZX Interface 2 ROM cartridge in the 48K (If2.h). Persisted like the DOCK slot,
+    // so the cartridge is still plugged in after a reboot.
+    static string if2CartPath;
     static bool driveWP[4];   // TR-DOS per-slot write protect (Drive A..D)
     static uint8_t esxdos;   // 0=OFF 1=DivMMC 2=DivIDE 3=DivSD
     // Unified hd0/hd1 image slots — [0]=hd0, [1]=hd1.

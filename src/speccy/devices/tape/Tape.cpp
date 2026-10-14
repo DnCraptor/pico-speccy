@@ -46,6 +46,7 @@ using namespace std;
 #include "Tape.h"
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Timex.h"
+#include "speccy/machines/If2.h"
 #include "fs/FileUtils.h"
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
@@ -362,7 +363,7 @@ static inline bool tapeFastMachineOk() {
     // STOPPED after a mount here too, or it spools past the header.
     return Config::arch != A_ALF &&
            Config::romSet != R_ZX81P && Config::romSet != R_48K_CS &&
-           Config::romSet != R_128K_CS;
+           Config::romSet != R_128K_CS && !If2::live();   // a cartridge is not the 48K ROM
 }
 
 // Load tape file (.wav, .tap, .tzx)

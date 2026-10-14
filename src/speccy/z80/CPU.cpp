@@ -50,6 +50,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/devices/storage/DivMMC.h"
 #include "speccy/devices/gs/GS.h"      // g_ngs_zxdma + GS::zxDmaRead/zxDmaWrite (ZX-DMA window)
 #include "speccy/machines/TsConf/TsConf.h"     // g_tsconf_wr + TsConf::cpuWriteGate (FMAddr window, W0_WE)
+#include "speccy/machines/If2.h"
 #include "speccy/machines/Timex.h"      // g_timex_mmu + Timex::rd/wr (TC2068 SCLD horizontal MMU)
 #include "speccy/machines/Atm.h"        // g_atm_ro (ATM-Turbo ROM windows) + Atm::reset/intEnabled
 #include "speccy/machines/EvoBase.h"    // ZX-Evo font RAM, INT ack
@@ -506,6 +507,10 @@ void CPU::reset() {
         // for the same 8 KB slots. Same three-place treatment as Beta on the +3.
         if (Z80Ops::isTc2068 && Config::esxdos) Config::esxdos = 0;
     }
+
+    // Interface 2 cartridge: esxDOS off the bus while it is in (its automap entry
+    // points are the cartridge's own vectors), back once it is out.
+    If2::onReset();
 
     // «Байт»: RESET returns the DD66 map to native state — the built-in test's
     // dispatch (#39F9) must land on DD73's own base test at #3A00, not on the

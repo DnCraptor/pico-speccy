@@ -8,6 +8,7 @@ using namespace std;
 #include "FileInfo.h"
 #include "speccy/core/Pss.h"
 #include "speccy/core/Rzx.h"
+#include "speccy/machines/If2.h"
 
 
 #include "FileUtils.h"
@@ -1157,6 +1158,7 @@ void FileInfo::viewInfo(const string& path) {
     else if (ext == "td0") viewTD0(&f, fileSize, info, lines);
     else if (ext == "hdd" || ext == "img") viewHDD(&f, fileSize, info, lines);
     else if (ext == "vhd") viewVHD(&f, fileSize, info, lines);
+    else if (ext == "rom" || ext == "bin") If2::describe(&f, fileSize, info, lines);
     else if (ext == "mmc") { /* just show filename + size (title) */ }
 
     f_close(&f);

@@ -942,7 +942,7 @@ IRAM_ATTR __attribute__((noinline)) void Z80::check_trdos() {
                 // makes 0x3Dxx ordinary RAM, no trap (same reasoning as Profi's
                 // page0ram guard). Its TR-DOS is the machine's OWN bank 3, like Profi
                 // uses its own bank 1 — not the shared external rom[4].
-                if ((Z80Ops::is48 && MemESP::romInUse == 0) ||
+                if ((Z80Ops::is48 && MemESP::romInUse == 0 && MemESP::ramCurrent[0] != g_alfWindow) ||
                     (Config::arch == A_PROFI && MemESP::romInUse == 3 && !MemESP::newSRAM && !MemESP::page0ram) ||
                     (Config::arch == A_PROFI && MemESP::romInUse == 2 && (Ports::port008B & 0x80) && !MemESP::newSRAM && !MemESP::page0ram) ||
                     (Config::arch == A_SCORP && (MemESP::romInUse & (g_scorp_banked ? 3 : 0xFF)) == 1 && !MemESP::newSRAM && !MemESP::page0ram) ||

@@ -13,6 +13,7 @@
 #include "UiGfx.h"
 #include "OSDMain.h"
 #include "speccy/machines/Timex.h"
+#include "speccy/machines/If2.h"
 #include "app/Config.h"
 #include "app/ESPectrum.h"
 #include "speccy/core/Snapshot.h"
@@ -807,6 +808,28 @@ void act_dckEject() {
     Config::dckCartPath = "";
     Config::save();
     ESPectrum::reset();      // the machine has to come back up without the cartridge
+    uiToast(TXT_DCK_EJECTED, false, 1200);
+    requestClose();
+}
+
+// ZX Interface 2: a 16 KB .rom replaces the 48K ROM; the machine restarts on it.
+void act_if2Insert() {
+    string mFile = nm::browseFile(FileUtils::ROM_Path, TXT_IF2_PICK, DISK_ROMFILE);
+    if (mFile.empty()) return;
+    string fname = FileUtils::ROM_Path + mFile.substr(1);
+    if (FileUtils::getLCaseExt(fname) == "zip") {
+        string zf = ZipExtract::extract(fname, DISK_ROMFILE);
+        if (zf.empty()) { uiToast(TXT_MSG_ZIP_ERR, true, 1500); return; }
+        if (zf == "\x1b") return;
+        fname = zf;
+    }
+    Config::save();          // the remembered browse path
+    if (If2::insert(fname)) requestClose();
+}
+
+void act_if2Eject() {
+    if (!If2::present()) { uiToast(TXT_DCK_NONE, false, 1200); return; }
+    If2::eject(true);        // the 48K ROM back, machine restarted
     uiToast(TXT_DCK_EJECTED, false, 1200);
     requestClose();
 }
