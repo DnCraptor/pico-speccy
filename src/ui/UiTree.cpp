@@ -444,8 +444,8 @@ static const Option opt_dma[] = {
     { "Off",           0 },
     // The value picks the counting behaviour, not the port: both answer on
     // #0B and #6B (Ports.cpp). DATA-GEAR is a real Zilog chip -> value 1.
-    { "Z80 DMA (MB-02+/DATA-GEAR)", 1 },
-    { "zxnDMA (Next)",              2 },
+    { "Z80 DMA", 1 },
+    { "zxnDMA",  2 },
 };
 
 // ── Overclock: every value here is read once at boot ───────────────────────────
