@@ -145,6 +145,7 @@ Raspberry Pi Pico 2 W is not supported.
 - Configurable keyboard hotkeys with hint display in menus.
 - Enhanced debugger: multi-breakpoint (up to 20), memory editor, port read/write breakpoints.
 - Render border (Video → Render border): turn the border off and the paper is scaled to fill the screen — even 3:2 / 5:2 pixel steps through the pair-slot driver and a scan-out line map where available, with the F8 box, notifications and LEDs kept readable (RP2350 only).
+- Screen position (Video → Screen position, 720x576 modes on Pentagon 128/512/1024, TS-Conf and ZX Evolution): picks which 288 of the Pentagon's 304 visible lines are shown — Even 48/192/48, Middle 60/192/36 or Full top 64/192/32 rows of top border / paper / bottom border — so border effects drawn in the top lines (Across the Edge) are no longer cut.
 - Render paper (Video → Render paper): switch off paper rendering so the border effects paint straight through the screen area — a border-timing debugging aid.
 - Debug → UART console: TX-only 115200 8N1 log (Debug::log and printf) on the board's console pin, switchable from the menu instead of a build option (see the build notes for the per-board pin).
 - Debug → Config folders: browse `/.config/pico-speccy` and `/pico-speccy` in the file browser (rename, new folder, delete) with a built-in text viewer for logs and config files — the config tree is hidden from the normal F5 browser.
