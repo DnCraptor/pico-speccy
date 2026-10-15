@@ -318,8 +318,12 @@ void init_sound() {
 #endif
 #ifdef PCM5122_I2S_DATA
     {
-        // Yield I2S DATA pin to ZiFi if it owns it (skip PCM5122 → standard audio).
-        const bool pcm_pins_free = !BoardPins::zifiOwnsPin(PCM5122_I2S_DATA);
+        // Yield I2S DATA pin to ZiFi or the UART console if either owns it
+        // (skip PCM5122 → standard audio).
+        const bool pcm_pins_free = !BoardPins::zifiOwnsPin(PCM5122_I2S_DATA) &&
+                                   !BoardPins::dbgUartOwnsPin(PCM5122_I2S_DATA);
+        if (!pcm_pins_free && BoardPins::dbgUartOwnsPin(PCM5122_I2S_DATA))
+            Debug::log("init_sound: PCM5122 off - GP%u belongs to the UART console", (unsigned)PCM5122_I2S_DATA);
         // Explicit pick always wins; Auto uses the boot-time probe (cached — it
         // must not run again now that the keyboard may be sitting on those pins).
         const bool use_pcm = pcm_pins_free &&
