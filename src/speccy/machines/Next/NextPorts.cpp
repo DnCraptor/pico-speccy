@@ -376,6 +376,8 @@ static int joyRead(uint8_t lo) {
     return (m0 >= 5) ? v : (v & 0x3F);
 }
 
+int NextPorts::joyPortRead(uint8_t lo) { return joyRead(lo); }
+
 // ULA+ (zxnext.vhd 4523-4583): 0xBF3B = mode 7:6 + index 5:0 (index kept in
 // mode 00 only), 0xFF3B = palette entry in mode 00, enable bit 0 in mode 01.
 // The enable is one latch with NR 0x68 bit 3.

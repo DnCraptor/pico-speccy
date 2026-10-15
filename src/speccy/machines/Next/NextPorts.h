@@ -37,4 +37,5 @@ namespace NextPorts {
                                // 4 Kempston 2, 5 MD 1, 6 MD 2, 7 user-defined keys
     uint8_t joyType();         // joy0 as a Config JOY_* type (Config::joyLive)
     uint8_t kempPort();        // 0x1F or 0x37: where joy0's Kempston byte lives
+    int joyPortRead(uint8_t lo);   // IN (#1F/#37/#DF): the byte, or -1 when no joystick decodes there
 }

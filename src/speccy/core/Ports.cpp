@@ -1078,6 +1078,15 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
   if (!PROFI && Z80Ops::isNext && (address & 0xFF) == 0xFE &&
       Tape::tapeFileType == TAPE_FTYPE_EMPTY && Tape::tapeStatus != TAPE_LOADING)
     return nextKeyboardRead(address);
+  // Next Kempston (#1F / #37): a title waiting for a key busy-polls the keyboard
+  // AND the joystick — Alien Neoplasma's intro, ~5600 IN (#1F) a frame at 28 MHz,
+  // each walking the whole decode chain to NextPorts::input (hw 2026-10-15,
+  // IDL -1000). Same answer and the same (early-only) timing as that path; a
+  // mode with no joystick on the port falls through to it as before.
+  if (!PROFI && Z80Ops::isNext && ((address & 0xFF) == 0x1F || (address & 0xFF) == 0x37)) {
+    const int v = NextPorts::joyPortRead((uint8_t)address);
+    if (v >= 0) return (uint8_t)v;
+  }
 
   if (MEM_PG_CNT > 64 && !Z80Ops::isTsconf && address == 0xAFF7) {
     LED::touchR(LED::RAM);

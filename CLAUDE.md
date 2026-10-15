@@ -688,6 +688,19 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   сборки больше не влезают во флеш на 16 KB (жёсткий пол GM.DLS): в их build-dir
   (`PICO_DV-nxtrace`/`-nxprof`) `__gm_bank_hard_min` в СГЕНЕРИРОВАННОМ ld опущен руками до
   1600 KB — только для диагностики на DVp2 (банк в PSRAM), пересоздаётся при reconfigure.
+- **Alien Neoplasma intro: 47 FPS / IDL −1000 → 50 (2026-10-15, hw-confirmed, owner: «теперь
+  50»).** Статичный экран ждёт клавишу busy-wait'ом `IN (#FE) / ... / CALL → IN (#1F) /
+  JR Z` — ~5.6k витков и ~11k `IN` за кадр на 28 MHz. `#FE` на Next уже имел ранний путь
+  (`nextKeyboardRead`, только без вставленной ленты), `#1F` шёл через всю цепочку декода
+  (~40 проверок других машин) до `NextPorts::input` во flash. Теперь ранний путь `IN
+  (#1F/#37)` → `NextPorts::joyPortRead` (обёртка над `joyRead`, тот же ответ/тайминг),
+  сразу после `#EB` и `#FE` в `Ports::input`; RAM +96 B. Дамп читается так: `SP+02 = B936`
+  = адрес возврата в главный цикл, `PC=84C7` внутри Kempston-чтения. Остальное в этом демо:
+  IM2 `85D9` — NEXTREG MMU slot 0 + TurboSound (2 AY, `#FFFD` select FF/FE) + спрайты
+  `#57/#303B`; Layer 2 + ULA + спрайты одновременно (core1). Общий урок трёх правок дня:
+  **на Next любой порт, который программа читает/пишет в цикле, должен иметь ранний путь
+  в `Ports::input/output` (образец `#EB` / `#243B`) — генеральная цепочка стоит ~0.5-1 мкс
+  на доступ.**
 - **SRAM-проход 2026-10-10 (NOT hw-tested): `.data` DVp2 102 260 -> 93 020 B.** Таблица
   видеорежимов `video_mode` — `static const` во флеше (была 4.4 KB .data): изменяемые поля
   в RAM-массивах `s_div` (pio_clk_div) / `s_vtot` (v_total) в graphics.c, ISR VGA читает
