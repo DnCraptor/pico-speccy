@@ -274,6 +274,11 @@ void decay() {
 // Determine where to draw the strip given current video mode.
 // Returns true if drawing surface is available; fills (base_x, base_y).
 static bool resolveLayout(int& base_x, int& base_y) {
+    if (VIDEO::osd_in_paper) {     // big mode: bottom-left of the visible paper
+        base_x = VIDEO::osd_led_x + 4;
+        base_y = VIDEO::osd_bar_y + 8;
+        return true;
+    }
     if (VIDEO::isFullBorder288()) {
         base_x = 4;
         base_y = 278;
@@ -381,13 +386,15 @@ void drawGlyph(Id i, int xpix, int ypix, uint8_t fg, uint8_t bg) {
 // flicker, pile up or drown in the picture.
 static void drawPanel() {
     const int xres = (int)VIDEO::vga.xres, yres = (int)VIDEO::vga.yres;
-    const int y0 = (yres >= 288) ? 268 : 220;
+    const int y0 = VIDEO::osd_bar_y;
     if (!VIDEO::vga.frameBuffer || yres < y0 + 16) { VIDEO::setLedBar(0); return; }
-    const int sx = (xres >= 360) ? 188 : 168;       // where the stats box starts
+    const int sx = VIDEO::osd_bar_x;                // where the stats box starts
+    const int lx = VIDEO::osd_led_x;                // where the panel starts
 
     int n = 0;
     for (uint8_t i = 0; i < COUNT; i++) if (isVisible((Id)i)) n++;
-    const int maxn = ((sx & ~7) - 8) / CELL_W;      // never reach the stats box
+    int maxn = ((sx & ~7) - lx - 8) / CELL_W;       // never reach the stats box
+    if (maxn < 0) maxn = 0;
     if (n > maxn) n = maxn;
     const int w = (n * CELL_W + 8 + 7) & ~7;        // 4 px margin each side, 8-aligned
     VIDEO::setLedBar(w);                            // moves the carve + asks for a repaint on change
@@ -432,15 +439,15 @@ static void drawPanel() {
     }
 
     // With the stats box up the carve runs to it, so the stretch between is ours.
-    const int px1 = VIDEO::osdBoxCarved() ? sx : w;
+    const int px1 = VIDEO::osdBoxCarved() ? sx : lx + w;
     for (int row = 0; row < 16; row++) {
         uint8_t* line = (uint8_t*)VIDEO::vga.frameBuffer[y0 + row];
-        if (line) memset(line, bg, (size_t)px1);
+        if (line && px1 > lx) memset(line + lx, bg, (size_t)(px1 - lx));
     }
     int slot = 0;
     for (uint8_t i = 0; i < COUNT && slot < n; i++) {
         if (!isVisible((Id)i)) continue;
-        drawSprite((Id)i, 4 + slot * CELL_W, y0 + 4, col[actState((Id)i)]);
+        drawSprite((Id)i, lx + 4 + slot * CELL_W, y0 + 4, col[actState((Id)i)]);
         slot++;
     }
 }
@@ -449,7 +456,7 @@ void draw() {
     if (!Config::ledIndicators) return;
 
     if (Config::led_panel) {
-        if (VIDEO::bl_live) VIDEO::blClearCarve(VIDEO::BL_CARVE_LED);   // the panel's carve covers it
+        if (VIDEO::osdCarveLive()) VIDEO::blClearCarve(VIDEO::BL_CARVE_LED);   // the panel's carve covers it
         drawPanel();
         return;
     }
@@ -461,7 +468,7 @@ void draw() {
     // Borderless: the strip sits on the picture, which the scaler repaints every
     // line — reserve it (next frame on) and give it a border-coloured backing so
     // the icons neither blink nor pile up over a frozen scrap of the picture.
-    if (VIDEO::bl_live) {
+    if (VIDEO::osdCarveLive()) {
         int n = 0;
         for (uint8_t i = 0; i < COUNT; i++) if (isVisible((Id)i)) n++;
         const int x0 = base_x & ~3;

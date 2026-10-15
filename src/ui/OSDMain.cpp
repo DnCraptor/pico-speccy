@@ -237,6 +237,12 @@ void OSD::osdInfoRelease() { free(osd_info_buf); osd_info_buf = nullptr; }
 bool OSD::net_launch_close = false;
 
 unsigned short OSD::scrW = 320;
+// Width the classic dialogs may use: the whole row, or the visible window in a big
+// mode that shows only the centre of the framebuffer (centring at scrW/2 already
+// lands in it — the window is centred too).
+static int osdTextW() {
+    return VIDEO::osd_in_paper ? VIDEO::osd_win_x1 - VIDEO::osd_win_x0 : (int)OSD::scrW;
+}
 unsigned short OSD::scrH = 240;
 
 char OSD::stats_lin1[25]; // "CPU: 00000 / IDL: 00000 ";
@@ -1349,18 +1355,10 @@ void OSD::drawOSD(bool bottom_info) {
 
 void OSD::drawStats() {
 
-    unsigned short x,y;
-
-    if (VIDEO::isFullBorder288()) {
-        x = 188;
-        y = 268;
-    } else if (VIDEO::isFullBorder240()) {
-        x = 188;
-        y = 220;
-    } else {
-        x = 168;
-        y = 220;
-    }
+    // VIDEO::osd_bar_*: the border band, or the bottom of the paper in a big mode
+    // that hides the border (the renderer stages those rows around the box).
+    const unsigned short x = (unsigned short)VIDEO::osd_bar_x;
+    const unsigned short y = (unsigned short)VIDEO::osd_bar_y;
 
     // New-skin stats: same geometry and 6x8 face, the UI palette's colours. The
     // background still encodes the speed state (turbo steps / max speed). DS80
@@ -1403,6 +1401,10 @@ void OSD::drawStats() {
 }
 
 void OSD::clearStats() {
+
+    // Big mode: the box sits on the paper, which the renderer repaints by itself
+    // once the box's rows are no longer carved.
+    if (VIDEO::osd_in_paper) return;
 
     uint16_t brd16 = (uint16_t)VIDEO::brd;
 
@@ -1487,7 +1489,11 @@ static constexpr int NOTIFY_BAND_H = OSD_FONT_H + 4;
 
 // Widest banner the mode can take: leaves the corner FDD lamp at x=311 alone and
 // keeps a margin at both ends.
-static int notifyMaxChars() { return ((int)OSD::scrW - 48) / OSD_FONT_W; }
+static int notifyMaxChars() {
+    // Big mode: inside the visible window, clear of the FDD lamp in its corner.
+    if (VIDEO::osd_in_paper) return (VIDEO::osd_win_x1 - VIDEO::osd_win_x0 - 40) / OSD_FONT_W;
+    return ((int)OSD::scrW - 48) / OSD_FONT_W;
+}
 
 // carve = the banner does not fit in a border band and sits on the first content
 // rows instead, which only the TS-Conf renderer can hand back.
@@ -1495,6 +1501,15 @@ static bool notifyGeom(int textw, int& x, int& y, bool* carve = nullptr, bool le
     if (notifyMaxChars() < 8) return false;      // no mode this narrow, but don't index off the row
     bool cv = false;
     int top;
+    if (VIDEO::osd_in_paper) {
+        // A big mode that hides the border: the top rows of the visible paper,
+        // which the beam renderer stages and copies around the banner.
+        const int ww = VIDEO::osd_win_x1 - VIDEO::osd_win_x0;
+        y = VIDEO::osd_win_y0 + 2;
+        x = left ? VIDEO::osd_win_x0 + 8 : VIDEO::osd_win_x0 + (ww - textw) / 2;
+        if (carve) *carve = true;
+        return true;
+    }
     if (VIDEO::bandBorderMode()) {               // GMX 640x200 / TS-Conf non-ZX / VDAC2 (FT812)
         top = VIDEO::gmxTopBandRows();           // = lin_end, authoritative, may be 0
         if (top < NOTIFY_BAND_H) {
@@ -1677,7 +1692,15 @@ static bool notifyPaint(const char* text, uint8_t level, bool nmUi, bool left) {
     // back what it actually reserved — paint exactly that, or the extra carved
     // columns keep a stale border colour.
     int px0 = x - 4, px1 = x + textw + 4;
-    if (VIDEO::bandBorderMode()) {
+    if (VIDEO::osd_in_paper) {
+        // Big mode: the rows are paper; the renderer copies them around this rect.
+        px0 &= ~3;
+        px1 = (px1 + 3) & ~3;
+        if (px0 < VIDEO::osd_win_x0) px0 = VIDEO::osd_win_x0;
+        if (px1 > VIDEO::osd_win_x1) px1 = VIDEO::osd_win_x1;
+        if (px1 - px0 < textw) return false;
+        VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
+    } else if (VIDEO::bandBorderMode()) {
         // The band is repainted only by gmxBorderFrame, which cancelNotify
         // triggers through brdChange/brdnextframe on expiry, and EndFrame paints
         // the bands BEFORE calling drawNotify — so a repaint frame still ends
@@ -1770,17 +1793,8 @@ static bool notifyPaint(const char* text, uint8_t level, bool nmUi, bool left) {
 
 void OSD::drawVolumeBox() {
 
-    unsigned short x, y;
-    if (VIDEO::isFullBorder288()) {
-        x = 188;
-        y = 272;
-    } else if (VIDEO::isFullBorder240()) {
-        x = 188;
-        y = 224;
-    } else {
-        x = 168;
-        y = 224;
-    }
+    const unsigned short x = (unsigned short)VIDEO::osd_bar_x;
+    const unsigned short y = (unsigned short)(VIDEO::osd_bar_y + 4);
     // New-skin styling of the same border band — the palette trick uiPausedBadge
     // uses: UI colours live at 224..239, so the running game keeps its own 16.
     // DS80 stays classic: installing the UI palette would steal the guest's
@@ -3234,7 +3248,7 @@ void OSD::osdCenteredMsg(const string& msg, uint8_t warn_level, uint16_t millisp
     size_t len = msg.length() - prev;
     if (len > maxlen) maxlen = len;
 
-    size_t maxchars = (scrW / 6) - 10;
+    size_t maxchars = (osdTextW() / 6) - 10;
     if (maxlen > maxchars) maxlen = maxchars;
 
     const unsigned short h = OSD_FONT_H * (nlines + 2);
@@ -8089,7 +8103,7 @@ void OSD::progressDialog(const string& title, const string& msg, int percent, in
         string cmsg = cyr ? FileUtils::utf8ToCp1251(msg) : msg;
         string ctitle = cyr ? FileUtils::utf8ToCp1251(title) : title;
 
-        size_t maxchars = (scrW / 6) - 4;
+        size_t maxchars = (osdTextW() / 6) - 4;
         string tmsg = cmsg.length() > maxchars ? cmsg.substr(0, maxchars) : cmsg;
         string ttitle = ctitle.length() > maxchars ? ctitle.substr(0, maxchars) : ctitle;
 
@@ -8169,8 +8183,8 @@ uint8_t OSD::msgDialog(const string& title_, const string& msg_, bool defYes) {
     uint8_t res = defYes ? DLG_YES : DLG_NO;
 
     string msg = msg_, title = title_;
-    if (msg.length() > (scrW / 6) - 4) msg = msg.substr(0,(scrW / 6) - 4);
-    if (title.length() > (scrW / 6) - 4) title = title.substr(0,(scrW / 6) - 4);
+    if (msg.length() > (osdTextW() / 6) - 4) msg = msg.substr(0,(osdTextW() / 6) - 4);
+    if (title.length() > (osdTextW() / 6) - 4) title = title.substr(0,(osdTextW() / 6) - 4);
 
     const unsigned short w = (((msg.length() > title.length() + 6 ? msg.length() : title.length() + 6) + 2) * OSD_FONT_W) + 2;
     const unsigned short x = scrAlignCenterX(w);
