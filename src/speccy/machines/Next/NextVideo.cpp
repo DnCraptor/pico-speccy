@@ -2208,10 +2208,10 @@ extern "C" IRAM_ATTR void next_render_core1_pump(void) { NEXTVID::c1Pump(); }
 // 4-pixel specks on glyph edges of a STATIC picture, one fb row at a time,
 // drifting slowly with the frame/display phase (capture 2026-09-25).
 // The copy also skips the OSD box: the F8 stats / F9-F10 volume box, 144x16 at
-// x 168 (320-wide) / 188 (360-wide), rows 220 (240-row fb) / 268 (288-row fb),
-// which ESPectrum::loop repaints only after EndFrame — tsRenderLine's and
-// Update_Border_DS80's rectangle. The box is word-aligned (168/188 and 144 are
-// multiples of 4), so it is a range of whole words.
+// VIDEO::osd_bar_x/osd_bar_y (168/188 x 220/268 in the border; on the paper in
+// the big HDMI modes, osdGeomRecalc), which ESPectrum::loop repaints only after
+// EndFrame — tsRenderLine's and Update_Border_DS80's rectangle. The box is
+// word-aligned (osd_bar_x and 144 are multiples of 4), so it is a range of whole words.
 // A row the copper re-coloured mid-line (MrKWatkins !Copper: Swedish flags
 // drawn by rewriting PAPER/BORDER 7 every 8 pixels). The palette now holds the
 // line-END values; each recorded write knows its fb x and the value it
@@ -2332,9 +2332,9 @@ static inline __attribute__((always_inline)) void nxCarve(int row, int words, in
         l0 = led_carve_x0 >> 2; l1 = (led_carve_x1 + 3) >> 2;
         if (l1 > words) l1 = words;
     }
-    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    const int cy0 = VIDEO::osd_bar_y;   // osdGeomRecalc: the border, or the paper in big modes
     if ((LS->osd & 0x07) != 0 && row >= cy0 && row < cy0 + 16) {
-        k0 = ((VIDEO::vga.xres >= 360) ? 188 : 168) >> 2;
+        k0 = VIDEO::osd_bar_x >> 2;
         k1 = k0 + 144 / 4;
     } else if (row >= ts_notice_y0 && row < ts_notice_y1) {
         k0 = ts_notice_x0 >> 2;

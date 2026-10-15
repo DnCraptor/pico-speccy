@@ -291,10 +291,7 @@ void uiPausedBadge() {
     const int base = uiPaletteBase();
     const char* txt = " PAUSED ";
     const int w = (int)strlen(txt) * OSD_FONT_W;
-    int x, y;
-    if (VIDEO::isFullBorder288())      { x = 188; y = 268; }
-    else if (VIDEO::isFullBorder240()) { x = 188; y = 220; }
-    else                               { x = 168; y = 220; }
+    int x = VIDEO::osd_bar_x, y = VIDEO::osd_bar_y;
     // Right-aligned to the same 144-px band the stats occupy, first line.
     x += (144 - w) / 2;
     VIDEO::vga.setTextColor((uint8_t)(base + C_WHITE), (uint8_t)(base + C_SEL_BG));

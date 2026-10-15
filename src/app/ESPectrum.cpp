@@ -4764,21 +4764,23 @@ void ESPectrum::loop() {
                     (Z80Ops::isP3 && (Config::trdosSoundLed & 1)) ||
                     (hasFdd && (Config::trdosSoundLed & 1)));
     static bool lamp_was_on = false;
-    if (VIDEO::bl_live) {
-        // Borderless: the lamp sits on the picture. Reserve its cell and back it
-        // with the border colour while lit; hand the cell back when it goes out.
+    const int lx = VIDEO::osd_lamp_x, ly = VIDEO::osd_lamp_y;
+    if (VIDEO::osdCarveLive()) {
+        // Borderless / a big mode that hides the border: the lamp sits on the
+        // picture. Reserve its cell and back it with the border colour while lit;
+        // hand the cell back when it goes out.
         if (lamp_on) {
-            VIDEO::blSetCarve(VIDEO::BL_CARVE_LAMP, 308, 2, 320, 10);
-            for (int row = 2; row < 10; row++) {
+            VIDEO::blSetCarve(VIDEO::BL_CARVE_LAMP, lx - 3, ly, lx + 9, ly + 8);
+            for (int row = ly; row < ly + 8; row++) {
                 uint8_t* line = (uint8_t*)VIDEO::vga.frameBuffer[row];
-                if (line) memset(line + 308, (uint8_t)VIDEO::brd, 12);
+                if (line) memset(line + ((lx - 3) & ~3), (uint8_t)VIDEO::brd, 12);
             }
         } else {
             VIDEO::blClearCarve(VIDEO::BL_CARVE_LAMP);
         }
     }
     if (lamp_on) {
-        LED::drawSpriteFg(LED::FDD, 311, 2,
+        LED::drawSpriteFg(LED::FDD, lx, ly,
                           fdd_write ? zxColor(2, 1)      // red  — write
                                     : zxColor(1, 1));    // blue — read / seek
     } else if (lamp_was_on) {

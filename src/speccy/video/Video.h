@@ -524,7 +524,8 @@ public:
   static void blRecalc();
   static void blExpandLine(uint32_t line);
   // Overlays that live in the border elsewhere sit on content here; the scaler
-  // leaves their rectangles alone while they are up (fb bytes, 4-aligned).
+  // (and the big-mode row staging) leaves their rectangles alone while they are up
+  // (fb bytes, 4-aligned).
   enum { BL_CARVE_LAMP = 0, BL_CARVE_LED, BL_CARVE_N };
   static void blSetCarve(int id, int x0, int y0, int x1, int y1);
   static void blClearCarve(int id);
@@ -610,6 +611,21 @@ public:
   // A big HDMI mode that shows only part of the framebuffer is on screen (1024x768 x4:
   // the centre 256x192; 800x600 x3: the centre 264x200). Returns that window.
   static bool bigWindow(int& fbx, int& w, int& oy, int& h);
+  // Where the OSD overlays go (fb bytes / rows): the F8 stats / volume box and the
+  // LED panel row (osd_bar_*), the LED panel's left edge, the corner FDD lamp, and
+  // the visible area the notify banner and the classic dialogs fit in. Outside the
+  // big modes these are the border positions they always had; in a big mode that
+  // hides the border (osd_in_paper) they move onto the paper, and the beam
+  // renderer stages the rows they cross and copies them around the overlays.
+  // Recomputed by osdGeomRecalc() at every Reset.
+  static int  osd_bar_x, osd_bar_y, osd_led_x, osd_lamp_x, osd_lamp_y;
+  static int  osd_win_x0, osd_win_y0, osd_win_x1, osd_win_y1;
+  static bool osd_in_paper;
+  static void osdGeomRecalc();
+  static void ovRecalc();       // rows the beam renderer must stage (overlay rects changed)
+  // A renderer copies rows around the overlay rectangles: the borderless scaler or a
+  // big mode. Overlays then back themselves and reserve their rect (blSetCarve).
+  static bool osdCarveLive() { return bl_live || osd_in_paper; }
 
   static bool gigascreen_enabled;
   static uint8_t gigascreen_auto_countdown;

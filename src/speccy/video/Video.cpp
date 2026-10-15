@@ -1308,15 +1308,23 @@ int led_strip_y0 = -1;   // LED strip, NEXTVID stamps its glyphs per row
 // range on a row and every carve site below keeps a single (x0, x1) pair.
 static int osd_led_w = 0;
 
-// The bottom OSD carve on rows [220|268, +16): stats/volume box and/or LED panel.
+// OSD overlay geometry (Video.h). Defaults = the 320x240 border positions; the real
+// values come from osdGeomRecalc() at every Reset.
+int  VIDEO::osd_bar_x = 168, VIDEO::osd_bar_y = 220, VIDEO::osd_led_x = 0;
+int  VIDEO::osd_lamp_x = 311, VIDEO::osd_lamp_y = 2;
+int  VIDEO::osd_win_x0 = 0, VIDEO::osd_win_y0 = 0, VIDEO::osd_win_x1 = 320, VIDEO::osd_win_y1 = 240;
+bool VIDEO::osd_in_paper = false;
+
+// The bottom OSD carve on rows [osd_bar_y, +16): stats/volume box and/or LED panel.
 // `stats` is the caller's own "box is up" predicate (they differ per renderer).
 // Everything is 4-byte aligned, the panel's own end 8-aligned (the border
 // machine's columns are 8 px on 48K/128K).
 static inline __attribute__((always_inline)) bool osdBarRange(bool stats, int xres, int& x0, int& x1) {
+    (void)xres;
     if (!stats && !osd_led_w) return false;
-    const int sx = (xres >= 360) ? 188 : 168;
-    x0 = osd_led_w ? 0 : sx;
-    x1 = stats ? sx + 24 * 6 : osd_led_w;
+    const int sx = VIDEO::osd_bar_x;
+    x0 = osd_led_w ? VIDEO::osd_led_x : sx;
+    x1 = stats ? sx + 24 * 6 : VIDEO::osd_led_x + osd_led_w;
     return true;
 }
 static int  ds80_brd_col_off = 0;
@@ -5769,6 +5777,8 @@ void VIDEO::Reset() {
         Draw_OSD169 = &NEXTVID::Tick;
         DrawBorder = &NEXTVID::borderMark;
     }
+
+    osdGeomRecalc();
 }
 
 extern size_t getFreeHeap(void);
@@ -5827,6 +5837,22 @@ static void ftModeSwitch(bool on);      // VDAC2 glue, end of this file
 static bool ftGlueEnsure();
 static uint32_t* bl_stage_ptr = nullptr;
 static bool bl_line_done = false;
+// Big modes that hide the border (osd_in_paper): the OSD overlays sit on the paper,
+// so a paper line crossing one is drawn into ov_stage and copied into its row
+// around the overlay rectangles (ovPutRow, through BL_FLUSH) — the borderless
+// scaler's staging without the scaling. ov_y0..ov_y1 = the fb rows any overlay is
+// on (none: ov_y1 = 0, so the per-line test is one compare); ovRecalc keeps it.
+static uint32_t* ov_stage = nullptr;      // 256 B heap while osd_in_paper
+static int  ov_y0 = 0, ov_y1 = 0;
+static bool ov_staging = false;           // the line being drawn goes to ov_stage
+static inline __attribute__((always_inline)) uint32_t* paperRowPtr() {
+    if (__builtin_expect((int)linedraw_cnt < ov_y1, 0) && (int)linedraw_cnt >= ov_y0) {
+        ov_staging = true;
+        return ov_stage;
+    }
+    ov_staging = false;
+    return (uint32_t *)(VIDEO::vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
+}
 // A line just completed inside this Draw call — scale it once its last columns
 // are in the staging buffer (the completion block runs BEFORE the column loop).
 #define BL_FLUSH() do { if (__builtin_expect(bl_line_done, 0)) { bl_line_done = false; VIDEO::blExpandLine(curline); } } while (0)
@@ -5853,8 +5879,7 @@ IRAM_ATTR __attribute__((noinline)) void VIDEO::MainScreen_Blank(unsigned int st
             return;
         }
 
-        lineptr32 = bl_live ? bl_stage_ptr
-                            : (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
+        lineptr32 = bl_live ? bl_stage_ptr : paperRowPtr();
         prevLineptr16 = vga.prevFrameBuffer
                           ? prevRowContent(linedraw_cnt) + lineptr_offset
                           : (uint16_t *)lineptr32;
@@ -5933,8 +5958,7 @@ IRAM_ATTR void VIDEO::MainScreen_Blank_Snow(unsigned int statestoadd, bool conte
             return;
         }
 
-        lineptr32 = bl_live ? bl_stage_ptr
-                            : (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
+        lineptr32 = bl_live ? bl_stage_ptr : paperRowPtr();
         prevLineptr16 = vga.prevFrameBuffer
                           ? prevRowContent(linedraw_cnt) + lineptr_offset
                           : (uint16_t *)lineptr32;
@@ -6010,8 +6034,7 @@ IRAM_ATTR void VIDEO::MainScreen_Blank_Snow_Opcode(bool contended) {
             return;
         }
 
-        lineptr32 = bl_live ? bl_stage_ptr
-                            : (uint32_t *)(vga.frameBuffer[linedraw_cnt]) + lineptr_offset;
+        lineptr32 = bl_live ? bl_stage_ptr : paperRowPtr();
         prevLineptr16 = vga.prevFrameBuffer
                           ? prevRowContent(linedraw_cnt) + lineptr_offset
                           : (uint16_t *)lineptr32;
@@ -6156,7 +6179,7 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
             Draw_Opcode = &MainScreen_Blank_Opcode;
         }
         loopCount -= coldraw_cnt - 32;
-        bl_line_done = bl_live;
+        bl_line_done = bl_live | ov_staging;
     }
 
     if (__builtin_expect(ts_render_live != 0, 0)) {
@@ -6375,7 +6398,7 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
         // (720×576 keeps stats in the bottom border band, carved out in Update_Border_DS80.)
         // The LED panel, when it is on, extends the same rect to the left.
         int ds80_cx0 = 0, ds80_cx1 = 0;
-        bool skip_stats_row = (ds80_voff == 0) && frow >= 220 && frow < 236
+        bool skip_stats_row = (ds80_voff == 0) && (int)frow >= osd_bar_y && (int)frow < osd_bar_y + 16
                               && osdBarRange((VIDEO::OSD & 0x03) && !(VIDEO::OSD & 0x04), 320, ds80_cx0, ds80_cx1);
         // ... and the OSD::notify banner: 640x480 DS80 has no top border band, so
         // the banner sits on the first content rows and owns them while it is up
@@ -6516,7 +6539,7 @@ IRAM_ATTR void VIDEO::MainScreen_Snow(unsigned int statestoadd, bool contended) 
             Draw_Opcode = &MainScreen_Blank_Snow_Opcode;
         }
         statestoadd -= coldraw_cnt - 128;
-        bl_line_done = bl_live;  
+        bl_line_done = bl_live | ov_staging;  
     }
 
     for (;statestoadd--;) {
@@ -6610,7 +6633,7 @@ IRAM_ATTR void VIDEO::MainScreen_Snow_Opcode(bool contended) {
         }
 
         statestoadd -= coldraw_cnt - 128;
-        bl_line_done = bl_live;
+        bl_line_done = bl_live | ov_staging;
 
     }
 
@@ -6877,7 +6900,7 @@ static IRAM_ATTR void tsBandPaint(uint32_t row, uint8_t slot) {
     if (!fb) return;
     const int xres = (int)VIDEO::vga.xres;
     int cx0 = 0, cx1 = 0;
-    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    const int cy0 = VIDEO::osd_bar_y;
     if ((int)row >= cy0 && (int)row < cy0 + 16
         && osdBarRange((VIDEO::OSD & 0x07) != 0, xres, cx0, cx1)) {
         // stats / volume box and/or the LED panel
@@ -6961,9 +6984,11 @@ struct BlState {
     int8_t   vpub;               // table last handed to the driver, -1 = none
     bool     vsus;               // a menu/dialog owns the fb: no table until EndFrame
     bool     vever;              // a table was ever handed over (free must wait)
-    int16_t  carve[VIDEO::BL_CARVE_N][4];   // x0, y0, x1, y1 (y1 <= y0 = unused)
 };
 static BlState* bl = nullptr;
+// Overlay rects the row writers leave alone: x0, y0, x1, y1 (y1 <= y0 = unused).
+// Outside BlState because the big-mode row staging uses them too.
+static int16_t ov_carve[VIDEO::BL_CARVE_N][4];
 bool VIDEO::bl_pair_live = false;
 
 static bool blGeometryOk() {
@@ -7028,11 +7053,11 @@ static inline uint16_t blBlockRow(int r, bool std, bool tall) {
 // Does fb row range [y0,y1) hold an overlay that must be shown row for row?
 static int blOverlayRows(int rects[][2]) {
     int n = 0;
-    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    const int cy0 = VIDEO::osd_bar_y;
     if ((VIDEO::OSD & 0x07) || osd_led_w) { rects[n][0] = cy0; rects[n][1] = cy0 + 16; n++; }
     if (ts_notice_y1 > ts_notice_y0) { rects[n][0] = ts_notice_y0; rects[n][1] = ts_notice_y1; n++; }
     for (int i = 0; i < VIDEO::BL_CARVE_N; i++) {
-        const int16_t* r = bl->carve[i];
+        const int16_t* r = ov_carve[i];
         if (r[3] > r[1]) { rects[n][0] = r[1]; rects[n][1] = r[3]; n++; }
     }
     return n;
@@ -7146,15 +7171,17 @@ void VIDEO::blPairRefresh() {
 void VIDEO::blPairForceOff() { blPairOff(); }
 
 void VIDEO::blSetCarve(int id, int x0, int y0, int x1, int y1) {
-    if (!bl || id < 0 || id >= BL_CARVE_N) return;
-    int16_t* r = bl->carve[id];
+    if (id < 0 || id >= BL_CARVE_N) return;
+    int16_t* r = ov_carve[id];
     r[0] = (int16_t)(x0 & ~3); r[1] = (int16_t)y0;
     r[2] = (int16_t)((x1 + 3) & ~3); r[3] = (int16_t)y1;
+    ovRecalc();
 }
 
 void VIDEO::blClearCarve(int id) {
-    if (!bl || id < 0 || id >= BL_CARVE_N) return;
-    bl->carve[id][3] = bl->carve[id][1];
+    if (id < 0 || id >= BL_CARVE_N) return;
+    ov_carve[id][3] = ov_carve[id][1];
+    ovRecalc();
 }
 
 bool VIDEO::bigWindow(int& fbx, int& w, int& oy, int& h) {
@@ -7169,6 +7196,47 @@ bool VIDEO::bigWindow(int& fbx, int& w, int& oy, int& h) {
 #endif
     (void)fbx; (void)w; (void)oy; (void)h;
     return false;
+}
+
+void VIDEO::osdGeomRecalc() {
+    const int xr = (int)vga.xres, yr = (int)vga.yres;
+    int fbx = 0, w = 0, oy = 0, h = 0;
+    const bool big = vga.frameBuffer && bigWindow(fbx, w, oy, h) && xr >= 320 && yr >= 240;
+    for (int i = 0; i < BL_CARVE_N; i++) ov_carve[i][3] = ov_carve[i][1];   // nothing reserved
+    ov_y0 = ov_y1 = 0;
+    ov_staging = false;
+    if (big) {
+        // The OSD area = the visible window clipped to the paper: in 1024x768 x4 they
+        // are the same 256x192, in 800x600 x3 the window shows 4 px of border around
+        // it, which only the paper staging can keep an overlay safe on.
+        int x0 = fbx, y0 = oy, x1 = fbx + w, y1 = oy + h;
+        const int px0 = (int)lineptr_offset << 2, py0 = (int)lin_end;
+        if (x0 < px0) x0 = px0;
+        if (x1 > px0 + 256) x1 = px0 + 256;
+        if (y0 < py0) y0 = py0;
+        if (y1 > py0 + 192) y1 = py0 + 192;
+        if (!ov_stage) ov_stage = (uint32_t*)tryMalloc(256);
+        if (ov_stage && x1 - x0 >= 200 && y1 - y0 >= 120) {
+            osd_in_paper = true;
+            osd_win_x0 = x0; osd_win_y0 = y0; osd_win_x1 = x1; osd_win_y1 = y1;
+            osd_bar_x  = (x1 - 24 * 6 - 4) & ~3;    // right-aligned, as in the border
+            osd_bar_y  = y1 - 16 - 2;
+            osd_led_x  = x0;
+            osd_lamp_x = x1 - 9;
+            osd_lamp_y = y0 + 2;
+            Debug::log("[VID] OSD on the paper: window %d,%d..%d,%d", x0, y0, x1, y1);
+            return;
+        }
+        Debug::log("[VID] big mode: no heap for the OSD row stage, overlays stay in the border");
+    }
+    osd_in_paper = false;
+    if (ov_stage) { free(ov_stage); ov_stage = nullptr; }
+    osd_win_x0 = 0; osd_win_y0 = 0; osd_win_x1 = xr; osd_win_y1 = yr;
+    osd_bar_x  = (xr >= 360) ? 188 : 168;
+    osd_bar_y  = (yr >= 288) ? 268 : 220;
+    osd_led_x  = 0;
+    osd_lamp_x = 311;
+    osd_lamp_y = 2;
 }
 
 void VIDEO::blRecalc() {
@@ -7190,6 +7258,7 @@ void VIDEO::blRecalc() {
             }
             memset(st, 0, sizeof(BlState));
             bl = st;
+            for (int i = 0; i < BL_CARVE_N; i++) ov_carve[i][3] = ov_carve[i][1];
             blBuildTables();
             bl_stage_ptr = bl->stage;
             bl_line_done = false;
@@ -7237,14 +7306,14 @@ static __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-
     if (!dst) return;
     const int words = (int)VIDEO::vga.xres >> 2;
     int cx[BL_CARVE_MAX_RECTS][2]; int n = 0;
-    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    const int cy0 = VIDEO::osd_bar_y;
     if (row >= cy0 && row < cy0 + 16                              // F8 stats / F9-F10 volume box, LED panel
         && osdBarRange((VIDEO::OSD & 0x07) != 0, (int)VIDEO::vga.xres, cx[n][0], cx[n][1])) n++;
     if (row >= ts_notice_y0 && row < ts_notice_y1) {              // OSD::notify banner
         cx[n][0] = ts_notice_x0; cx[n][1] = ts_notice_x1; n++;
     }
     for (int i = 0; i < VIDEO::BL_CARVE_N; i++) {
-        const int16_t* r = bl->carve[i];
+        const int16_t* r = ov_carve[i];
         if (row >= r[1] && row < r[3]) { cx[n][0] = r[0]; cx[n][1] = r[2]; n++; }
     }
     // Plain word loops, not memcpy (a libc call per row buys nothing here).
@@ -7257,7 +7326,42 @@ static __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-
     }
 }
 
+// Big mode: copy a staged paper line into its row, leaving the overlays alone.
+static __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void ovPutRow(int row) {
+    if (!ov_stage || row < 0 || row >= (int)VIDEO::vga.yres || !VIDEO::vga.frameBuffer) return;
+    uint32_t* dst = (uint32_t*)VIDEO::vga.frameBuffer[row];
+    if (!dst) return;
+    dst += lineptr_offset;
+    const int xbase = (int)lineptr_offset << 2;            // fb byte of the first paper byte
+    int cx[BL_CARVE_MAX_RECTS][2]; int n = 0;
+    if (row >= VIDEO::osd_bar_y && row < VIDEO::osd_bar_y + 16
+        && osdBarRange((VIDEO::OSD & 0x07) != 0, (int)VIDEO::vga.xres, cx[n][0], cx[n][1])) n++;
+    if (row >= ts_notice_y0 && row < ts_notice_y1) { cx[n][0] = ts_notice_x0; cx[n][1] = ts_notice_x1; n++; }
+    for (int i = 0; i < VIDEO::BL_CARVE_N; i++) {
+        const int16_t* r = ov_carve[i];
+        if (row >= r[1] && row < r[3]) { cx[n][0] = r[0]; cx[n][1] = r[2]; n++; }
+    }
+    for (int w = 0; w < 64; w++) {
+        const int x = xbase + (w << 2);
+        bool skip = false;
+        for (int i = 0; i < n; i++) if (x >= cx[i][0] && x < cx[i][1]) { skip = true; break; }
+        if (!skip) dst[w] = ov_stage[w];
+    }
+}
+
+void VIDEO::ovRecalc() {
+    if (!osd_in_paper || !ov_stage || bl_live) { ov_y0 = ov_y1 = 0; return; }
+    int y0 = 1 << 30, y1 = 0;
+    auto add = [&](int a, int b) { if (b > a) { if (a < y0) y0 = a; if (b > y1) y1 = b; } };
+    if ((OSD & 0x07) || osd_led_w) add(osd_bar_y, osd_bar_y + 16);
+    add(ts_notice_y0, ts_notice_y1);
+    for (int i = 0; i < BL_CARVE_N; i++) add(ov_carve[i][1], ov_carve[i][3]);
+    if (y1 <= y0) { ov_y0 = ov_y1 = 0; return; }
+    ov_y0 = y0; ov_y1 = y1;
+}
+
 __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void VIDEO::blExpandLine(uint32_t line) {
+    if (!bl_live) { ovPutRow((int)(line + lin_end)); return; }
     if (!bl || line >= 192 || !vga.frameBuffer) return;
     const uint8_t* src = (const uint8_t*)bl->stage;
     uint32_t* o = bl->out;
@@ -7691,7 +7795,7 @@ void VIDEO::atmDrawTick() {
 // and RedrawPausedFrame need MainScreen's line hooks, Timex hi-res and Profi take
 // precedence in that branch too.
 bool VIDEO::col16Arm() {
-    if (!mode16col_decode_lut || !Z80Ops::isPentagon || bl_live || paper_off
+    if (!mode16col_decode_lut || !Z80Ops::isPentagon || bl_live || ov_y1 > ov_y0 || paper_off
         || timex_hires_live || (Config::timex_video && timex_mode == 6)
         || profi_ds80_active || gmx_ext_live)
         return false;
@@ -7794,9 +7898,10 @@ int  VIDEO::ds80TopBandRows() { return ds80_border_geom ? (int)lin_end : 0; }
 void VIDEO::setNoticeCarve(int x0, int y0, int x1, int y1) {
     ts_notice_x0 = x0; ts_notice_x1 = x1;
     ts_notice_y0 = y0; ts_notice_y1 = y1;
+    ovRecalc();
 }
 
-void VIDEO::clearNoticeCarve() { ts_notice_y1 = -1; }
+void VIDEO::clearNoticeCarve() { ts_notice_y1 = -1; ovRecalc(); }
 
 void VIDEO::setLedCarve(int x0, int y0, int x1, int y1) {
     led_carve_x0 = x0; led_carve_x1 = x1;
@@ -7818,6 +7923,7 @@ bool VIDEO::osdBoxCarved() {
 void VIDEO::setLedBar(int w) {
     if (w == osd_led_w) return;
     osd_led_w = w;
+    ovRecalc();
     brdChange = true;
     brdnextframe = true;
 }
@@ -8503,7 +8609,7 @@ void TS_RENDER_HOT VIDEO::tsRenderExec(const TsRenderJob& j, const TsuState* st,
     // The LED panel, when on, extends the rect to the left (osdBarRange).
     int cx0 = 0, cx1 = 0;
     const bool osdCarve = osdBarRange((VIDEO::OSD & 0x07) != 0, xres, cx0, cx1);
-    const int cy0 = ((int)vga.yres >= 288) ? 268 : 220;
+    const int cy0 = osd_bar_y;
     bool carveRow = osdCarve && (int)frow >= cy0 && (int)frow < cy0 + 16;
     // ... and the OSD::notify banner, when this mode has no top border band to
     // put it in. The two rects can never share a row (top vs bottom), so one
@@ -8931,7 +9037,7 @@ void VIDEO::gmxBorderFrame(bool skipFrame) {
     // The LED panel extends the same rect to the left (osdBarRange).
     int cx0 = 0, cx1 = 0;
     const bool carve = osdBarRange((OSD & 0x07) != 0, (int)vga.xres, cx0, cx1);
-    const int cy0 = ((int)vga.yres >= 288) ? 268 : 220;
+    const int cy0 = osd_bar_y;
     if (vga.frameBuffer) {
         for (int _y = 0; _y < (int)vga.yres; _y++) {
             if (_y >= lin_end && _y < lin_end2) continue;
@@ -9133,6 +9239,7 @@ IRAM_ATTR void VIDEO::EndFrame() {
         // ── Borderless scaler on/off — after the three above, which decide whether
         // the standard renderer owns the framebuffer at all this frame.
         blRecalc();
+        ovRecalc();          // big mode: rows the paper renderer stages around the overlays
 
         // Every mode that can take the framebuffer away from the standard renderer
         // has just settled (DS80 above, GMX and TS-Conf here) — suspend or resume
@@ -9695,7 +9802,7 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
             && osdBarRange((VIDEO::OSD & 0x03) && !(VIDEO::OSD & 0x04), (int)vga.xres, bx0, bx1);
         ds80_cv_c0 = bx0 >> 1;                 // 640x480: 84..156, 720x576: 94..166
         ds80_cv_c1 = (bx1 + 1) >> 1;           // (from col 0 with the LED panel)
-        ds80_cv_y0 = ((int)vga.yres >= 288) ? 268 : 220;
+        ds80_cv_y0 = osd_bar_y;
     }
 
     if (bl_live) {
@@ -9826,7 +9933,7 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         setLedBar(0);                 // panel gone: its rect goes back to the renderers
         setLedCarve(0, 0, 0, -1);
         setLedStrip(-1);
-        if (bl_live) blClearCarve(BL_CARVE_LED);   // strip gone: the scaler takes its rows back
+        if (osdCarveLive()) blClearCarve(BL_CARVE_LED);   // strip gone: the scaler takes its rows back
     }
 
     // Top-border status banner (OSD::notify). Repainted here, after the border
@@ -10374,7 +10481,7 @@ IRAM_ATTR void VIDEO::BottomBorder() {
 }
 
 IRAM_ATTR void VIDEO::BottomBorder_OSD() {
-    const int osd_y_start = VIDEO::isFullBorder288() ? 268 : 220;
+    const int osd_y_start = osd_bar_y;
     const int osd_y_end = osd_y_start + 15;
     // Stats box (fb x 168 / 188, 144 px) and/or the LED panel to its left. This
     // function also runs for the panel alone, with no box up.
@@ -11137,11 +11244,10 @@ static void ftFrameBegin() {
 #define FT_VID_HOT FT_GLUE_HOT
 #endif
 static FT_VID_HOT int ftCarve(int row, int cx[2][2]) {
-    const int xres = (int)VIDEO::vga.xres;
     int n = 0;
-    const int cy0 = ((int)VIDEO::vga.yres >= 288) ? 268 : 220;
+    const int cy0 = VIDEO::osd_bar_y;
     if ((VIDEO::OSD & 0x07) && row >= cy0 && row < cy0 + 16) {   // F8 stats / F9-F10 volume box
-        cx[n][0] = (xres >= 360) ? 188 : 168; cx[n][1] = cx[n][0] + 24 * 6; n++;
+        cx[n][0] = VIDEO::osd_bar_x; cx[n][1] = cx[n][0] + 24 * 6; n++;
     }
     if (row >= ts_notice_y0 && row < ts_notice_y1) {              // OSD::notify banner (carve path)
         cx[n][0] = ts_notice_x0; cx[n][1] = ts_notice_x1; n++;
