@@ -125,6 +125,7 @@ private:
     static void nxOneByte();
     static bool nxBatch(uint32_t stop, uint8_t ca, uint8_t cb);
     static void nxByteNoDraw(uint8_t ca, uint8_t cb);   // nxOneByte inside a batch (nxRunSync)
+    static void nxByteSlow(uint8_t ca, uint8_t cb);     // nxByteNoDraw out of line, in flash (nxBatch's rare cases)
     static void nxRunSync();
     static bool nxBlockDone();
     static void nxReload();

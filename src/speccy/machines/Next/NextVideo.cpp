@@ -857,6 +857,16 @@ static bool nxMapShadowCover(uint8_t bank, uint16_t o0, uint16_t o1, int paperTo
 // core1 can follow (the batched DMA): wait only for the posted lines that read it
 // — the newest such job — instead of the whole queue (TX-1696 rewrites ~24
 // tilemap rows a frame by DMA; a full drain each cost 2.5-3.4 ms, hw 2026-10-09).
+uint8_t NEXTVID::c1OldestL2Bank() {
+    if (!g_next_c1_live) return 0xFF;
+    const uint32_t r = nx_r;
+    if (nx_w == r) return 0xFF;
+    const uint32_t j = nx_ring[r % NEXT_C1_RING];
+    const NextLineState& st = nx_st[j >> 16];
+    if (!((st.p123B & 0x02) || (st.r69 & 0x80))) return 0xFF;   // Layer 2 off on that line
+    return (uint8_t)(st.r12 & 0x7F);
+}
+
 void NEXTVID::c1DrainRange(uint8_t bank, uint16_t o0, uint16_t o1) {
     if (!g_next_c1_live) return;
     if (nxMapShadowCover(bank, o0, o1, paperTopRow)) {

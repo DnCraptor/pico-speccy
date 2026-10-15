@@ -33,6 +33,11 @@ option(PERF_TRACE "Enable per-60-frame CPU/HDMI/FPS performance logging" OFF)
 # They cost ~5 ms per TMNT frame (a counter on every guest memory access), so they
 # are off unless a profiling session asks for them; PERF_TRACE stays cheap.
 option(PERF_HIST "Per-access Z80/TS-Conf histograms in the PERF log (slow; needs PERF_TRACE)" OFF)
+# PERF_HIST's core0 PC sampler (PcProf.cpp): bucket = 2^PCPROF_SHIFT bytes of code.
+# 6 (64 B) names a loop; 8 (256 B) keeps a 13 KB interpreter switch inside the
+# 56 buckets one dump prints — the Next core spread over 200 x 64 B buckets left
+# 40% of the samples unlisted (STNICCC, 2026-10-15).
+set(PCPROF_SHIFT "6" CACHE STRING "PERF_HIST PC sampler: log2 of the code bucket size (6 = 64 B, 8 = 256 B)")
 option(NEG2_TRACE "Enable Profi negative-IDL attribution ([NEG2] lines)" OFF)
 option(TS_VIDEO_TRACE "TS-Conf: capped trace of VConfig/TSConfig/page/offset register writes with frame line + PC" OFF)
 option(MEM_ACCESS_TRACE "Count Z80 accesses per RAM page between load and eviction (accessor-mode feasibility study; slows readbyte/writebyte)" OFF)

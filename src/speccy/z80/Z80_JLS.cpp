@@ -48,6 +48,7 @@
 #include "speccy/machines/TsConf/TsConf.h"
 #include "speccy/core/Rzx.h"     // Rzx::mode / onIn: RZX playback substitutes every IN
 #include "speccy/machines/Next/NextReg.h"
+#include "ui/LEDIndicators.h"     // nextOtirBatch: the DMA indicator
 #include "app/CodeOverlay.h"   // NX_OVL_CODE
 #include "speccy/machines/Next/NextIdle.h"
 #include "speccy/machines/Next/NextVideo.h"
@@ -4288,6 +4289,7 @@ void Z80::decodeED(void) {
         }
         case 0xB3:
         { /* OTIR */
+            if (Z80Ops::isNext && g_ts_fastmem == 1 && (REG_C == 0x6B || REG_C == 0x0B) && (REG_B == 0 || REG_B > 2)) nextOtirBatch();
             otx(1);
             if (REG_B != 0) {
                 REG_PC = REG_PC - 2;
@@ -4512,6 +4514,55 @@ Z80_COLD void Z80::nextInirBatch() {
     REG_HL = (uint16_t)(hl + n);
     REG_B = (uint8_t)(REG_B - n);
     CPU::tstates = now + T * n;
+    regR += 2 * n;
+}
+
+// OTIR into the zxnDMA (port 0x6B, or 0x0B in Zilog mode): the repeated
+// iterations as one loop, the LAST one left to otx() (flags, WZ, exit timing).
+// STNICCC Filled8bit programs one 13-byte DMA fill per polygon span, ~540 a
+// frame, ~7000 OUTs — each through the dispatcher, otx, the port decode and the
+// repeat's flag fix-up, ~7% of core0 (hw 2026-10-15). Each batched iteration
+// costs what the per-byte path charges: M1 4 + 4, IR 1, the read 3, the OUT 4,
+// the repeat 5 = 21 T, R += 2; the T-states are advanced BEFORE each byte so a
+// LOAD/ENABLE that starts a transfer sizes it from the right time. Same bounds
+// as nextLdirBatch (slice end, one line, the source's 8K slot); the source must
+// be a plain RAM page at 0x4000+ and the port decoded (NR 0x82-0x85).
+NX_OVL_CODE void Z80::nextOtirBatch() {
+    if (!z80_in_nocheck || Config::numPcBP > 0 || Config::numPortWriteBP > 0 || Rzx::mode) return;
+    const bool zilog = REG_C == 0x0B;
+    if (!NextReg::portOn(zilog ? NextReg::PE_DMA0B : NextReg::PE_DMA6B)) return;
+    const uint32_t now = CPU::tstates;
+    if (now >= CPU::stFrame) return;
+    constexpr uint32_t T = 21;
+    uint32_t n = (REG_B ? (uint32_t)REG_B : 256u) - 1;
+    const uint32_t room = (CPU::stFrame - now) / T;
+    if (n > room) n = room;
+    const uint32_t tpl = VIDEO::tStatesPerLine ? VIDEO::tStatesPerLine : 224;
+    const uint32_t line = (tpl << ESPectrum::multiplicator) / T;
+    if (line > 1 && n > line - 1) n = line - 1;
+    const uint16_t hl = REG_HL;
+    const uint32_t srcLeft = 0x2000u - (hl & 0x1FFF);
+    if (n > srcLeft) n = srcLeft;
+    if (n < 2) return;
+    const uint8_t ss = hl >> 13;
+    if (ss < 2) return;
+    const uint8_t* sp = MemESP::ramCurrent[ss];
+    if ((uintptr_t)sp < 0x11000000u) return;          // ROM / accessor
+    Z80DMA::nextZ80Mode = zilog;
+    LED::touchW(LED::DMA);
+    uint32_t o = hl & 0x1FFF;
+    uint32_t i = 0;
+    while (i < n) {
+        CPU::tstates += T;
+        Z80DMA::writePort(sp[o++]);
+        i++;
+        // A LOAD/ENABLE may have run a transfer to the frame end or pulled the
+        // slice end down (NextInt::wake): the rest goes through the dispatcher.
+        if (CPU::tstates >= CPU::stFrame) break;
+    }
+    n = i;
+    REG_HL = (uint16_t)(hl + n);
+    REG_B = (uint8_t)(REG_B - n);
     regR += 2 * n;
 }
 

@@ -150,6 +150,9 @@ public:
     static void c1Drain(uint8_t src = 0);
     // wait only for the posted lines that read guest RAM [o0, o1] of 16K bank `bank`
     static void c1DrainRange(uint8_t bank, uint16_t o0, uint16_t o1);
+    // NR 0x12 (the Layer 2 bank) as the OLDEST queued line captured it, 0xFF with
+    // nothing queued: a bank core1 may still be reading after a flip.
+    static uint8_t c1OldestL2Bank();
     static void c1Pump();      // core1 render_core loop
     // core0 renders queued rows itself while it waits for core1 (640-wide pair
     // frames: its own row scratch, ~8 KB SRAM). Freed when the OSD takes the

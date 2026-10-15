@@ -600,6 +600,9 @@ inline __attribute__((always_inline)) void Z80DMA::nxByteNoDraw(uint8_t ca, uint
     nx_counter++;
 }
 
+// The byte path for the cases nxBatch's SRAM loop does not take (flash, noinline).
+__attribute__((noinline)) void Z80DMA::nxByteSlow(uint8_t ca, uint8_t cb) { nxByteNoDraw(ca, cb); }
+
 // FINISH_DMA with auto-restart: the start addresses and the counter reload;
 // status_endofblock_n stays low (only LOAD / CONTINUE / 0x8B raise it).
 void Z80DMA::nxReload() {
@@ -610,12 +613,19 @@ void Z80DMA::nxReload() {
 
 // Does a memory write to this 8K page feed the picture? ULA screen / tilemap /
 // LoRes (16K banks 5 and 7), the displayed Layer 2 (NR 0x12, 3 or 5 banks).
+// Plus the Layer 2 bank the OLDEST queued line still reads: a program that flips
+// NR 0x12 / 0x13 at the frame start and fills the bank it just took off the
+// screen races core1, which may still be rendering the previous frame from it
+// (STNICCC Filled8bit: a polygon a line early, hw 2026-10-15). c1DrainRange
+// then waits only for those lines; once they are done the test is two compares.
 static bool nxVideoPage(uint8_t pg) {
     const uint8_t bank = pg >> 1;
     if (bank == 5 || bank == 7) return true;
-    const uint8_t l2 = NextReg::reg[0x12] & 0x7F;
     const uint8_t n = (NextReg::reg[0x70] & 0x30) ? 5 : 3;
-    return bank >= l2 && bank < l2 + n;
+    const uint8_t l2 = NextReg::reg[0x12] & 0x7F;
+    if (bank >= l2 && bank < l2 + n) return true;
+    const uint8_t old = NEXTVID::c1OldestL2Bank();
+    return old != 0xFF && bank >= old && bank < old + n;
 }
 
 // A memory block written into guest video RAM: core1 reads that RAM live and
@@ -625,14 +635,27 @@ static bool nxVideoPage(uint8_t pg) {
 // Let core1 catch up first: one wait per such transfer.
 static void nxVideoDrain(uint16_t dest, bool io, int8_t inc, uint16_t len) {
     if (io) return;
-    if (NextReg::port123B & 0x01) { NEXTVID::c1Drain(0); return; }   // Layer 2 write-over
     // the 8K slots the block touches (a wrap past 0xFFFF / 0x0000 takes them all)
     int lo = dest, hi = dest;
     if (inc > 0) hi = dest + len;
     else if (inc < 0) lo = dest - len;
     const int s0 = lo < 0 ? 0 : lo >> 13, s1 = hi > 0xFFFF ? 7 : hi >> 13;
+    // Layer 2 write-over (port 0x123B bit 0): the slots it covers write the
+    // Layer 2 bank the port selects, NOT the MMU page — and with bit 3 that is
+    // the SHADOW Layer 2 (NR 0x13), which nobody displays. It used to drain the
+    // whole core1 queue on every such block: STNICCC Filled8bit double-buffers
+    // through the shadow bank and fills ~540 spans a frame by DMA, i.e. ~540
+    // full drains = 7 ms of core0 a frame waiting for core1 (hw 2026-10-15).
+    const uint8_t p123B = NextReg::port123B;
+    const uint8_t wrSeg = p123B >> 6;
+    const uint8_t wrSlots = (p123B & 0x01) ? ((wrSeg == 3) ? 6 : 2) : 0;
+    const uint8_t wrBank = (p123B & 0x08) ? NextReg::reg[0x13] : NextReg::reg[0x12];
     for (int sl = (lo < 0 || hi > 0xFFFF) ? 0 : s0; sl <= ((lo < 0 || hi > 0xFFFF) ? 7 : s1); sl++) {
-        const uint8_t pg = MemESP::mmu[sl];
+        uint8_t pg = MemESP::mmu[sl];
+        if (sl < wrSlots && ((MemESP::wr_overlay_mask >> sl) & 1)) {
+            const uint8_t pre = (wrSeg == 3) ? (uint8_t)(sl >> 1) : wrSeg;
+            pg = (uint8_t)(((uint8_t)(wrBank + pre + NextReg::l2Offset) & 0x7F) * 2 + (sl & 1));
+        }
         if (pg != 0xFF && nxVideoPage(pg)) {
 #if NEXT_TRACE
             // which video RAM the drained blocks write: 8K page + offset/256 of the start
@@ -658,14 +681,98 @@ static void nxVideoDrain(uint16_t dest, bool io, int8_t inc, uint16_t len) {
 // flash every copied byte cost ~20 XIP fetches, and TX-1696's big memory DMAs
 // (tile rows, sprite patterns) made single frames 25-60 ms — 3.2 ms per million
 // XIP accesses, hw 2026-10-09.
+//
+// Memory-to-memory blocks go as RUNS: the destination resolved once per 8K
+// slot the way MemESP::writebyte resolves it (divMMC window, the Layer 2
+// write-over, ROM, accessor banks — anything but plain RAM falls back to the
+// byte path), then memset (fixed source = a fill) or a copy. STNICCC
+// Filled8bit fills every polygon span with one DMA block (~540 a frame,
+// ~49 KB into Layer 2 through the 0x123B window): byte by byte through
+// writebyte that was 10-24% of core0 (hw 2026-10-15).
+static inline __attribute__((always_inline)) uint8_t* nxWrRun(uint16_t addr, uint32_t& maxlen) {
+    const uint8_t slot = (uint8_t)(addr >> 13);
+    maxlen = 0x2000u - (addr & 0x1FFF);
+    if (slot <= 1 && MemESP::divmmc_mapped) return nullptr;   // (no ALF cartridge on a Next)
+    if ((MemESP::wr_overlay_mask >> slot) & 1) return MemESP::wrOverlay[slot] + (addr & 0x1FFF);
+    if (slot <= 1 && (MemESP::next_rom_mask & (1u << slot))) return nullptr;
+    uint8_t* p = MemESP::ramCurrent[slot];
+    if (p == nullptr || p < (uint8_t*)0x11000000) return nullptr;   // accessor bank / flash ROM
+    *mem_desc_t::bank_dirty[slot] = true;
+    return p + (addr & 0x1FFF);
+}
+static inline __attribute__((always_inline)) const uint8_t* nxRdRun(uint16_t addr, uint32_t& maxlen) {
+    const uint8_t slot = (uint8_t)(addr >> 13);
+    maxlen = 0x2000u - (addr & 0x1FFF);
+    if (slot <= 1 && (MemESP::divmmc_mapped || (MemESP::next_rom_mask & (1u << slot)) ||
+                      MemESP::nextBootRomActive || MemESP::nextConfigMode)) return nullptr;
+    if ((MemESP::l2_rd_mask >> slot) & 1) return nullptr;             // Layer 2 read window: romPeek's business
+    const uint8_t* p = MemESP::ramCurrent[slot];
+    if (p == nullptr || p < (uint8_t*)0x11000000) return nullptr;   // accessor bank / flash ROM (overlays)
+    return p + (addr & 0x1FFF);
+}
+
 __attribute__((section(".nxdma_hot"), noinline)) bool Z80DMA::nxBatch(uint32_t stop, uint8_t ca, uint8_t cb) {
     const uint32_t cyc = (uint32_t)ca + cb;
 #if NEXT_TRACE
     uint32_t n = 0;
 #endif
     bool done = false;
+    // transfer_dir set = A -> B (nxByteNoDraw reads A first), clear = B -> A
+    const bool srcIo = transfer_dir ? port_a_is_io : port_b_is_io;
+    const bool dstIo = transfer_dir ? port_b_is_io : port_a_is_io;
+    const int8_t srcInc = transfer_dir ? port_a_inc : port_b_inc;
+    const int8_t dstInc = transfer_dir ? port_b_inc : port_a_inc;
+    uint16_t& src = transfer_dir ? cur_port_a : cur_port_b;
+    uint16_t& dst = transfer_dir ? cur_port_b : cur_port_a;
+    const bool runs = !srcIo && !dstIo && dstInc == 1 && (srcInc == 0 || srcInc == 1) &&
+                      Config::numMemWriteBP == 0 && Config::numMemReadBP == 0;
     while (CPU::tstates + cyc < stop) {
-        nxByteNoDraw(ca, cb);
+        if (runs) {
+            // Bytes left in the block, in the counter's own 16-bit arithmetic:
+            // Zilog mode (#0B) starts nx_counter at 0xFFFF and moves block_length
+            // + 1 bytes (TX-1696 — a signed test here skipped its blocks whole,
+            // sprites came and went at random, hw 2026-10-15).
+            const uint32_t rem = (uint16_t)(block_length - nx_counter);
+            if (rem == 0) { done = true; break; }
+            uint32_t len = (stop - CPU::tstates - 1u) / cyc;          // bytes that end before stop
+            if (len > rem) len = rem;
+            uint32_t dl, sl;
+            uint8_t* d = nxWrRun(dst, dl);
+            const uint8_t* s = d ? nxRdRun(src, sl) : nullptr;
+            if (s) {
+                if (len > dl) len = dl;
+                if (srcInc == 0) {
+                    memset(d, *s, len);                                // a fill: the fixed source byte
+                } else {
+                    if (len > sl) len = sl;
+                    if (s + len <= d || d + len <= s) memcpy(d, s, len);
+                    else for (uint32_t i = 0; i < len; i++) d[i] = s[i];   // overlapping: byte order as the chip's
+                }
+                dst = (uint16_t)(dst + len);
+                if (srcInc) src = (uint16_t)(src + len);
+                nx_counter = (uint16_t)(nx_counter + len);
+                CPU::tstates += len * cyc;
+#if NEXT_TRACE
+                n += len;
+#endif
+                if (!(nx_counter < block_length)) { done = true; break; }
+                continue;
+            }
+        }
+        // Memory -> port (sprite / pattern uploads: TX-1696, NEXTEST) stays here,
+        // in SRAM; everything else a run could not take (a ROM / divMMC / accessor
+        // destination, a port source, a decrementing block) goes through the
+        // flash byte path — rare, and writebyte's expansion is what the window
+        // has no room for.
+        if (dstIo && !srcIo) {
+            CPU::tstates += cyc;
+            Ports::dmaOutput(dst, MemESP::readbyte(src));
+            src = (uint16_t)(src + srcInc);
+            dst = (uint16_t)(dst + dstInc);
+            nx_counter++;
+        } else {
+            nxByteSlow(ca, cb);
+        }
 #if NEXT_TRACE
         n++;
 #endif

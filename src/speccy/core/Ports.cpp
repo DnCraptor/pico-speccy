@@ -4302,6 +4302,27 @@ IRAM_ATTR void Ports::output(uint16_t address, uint8_t data) {
       ioContentionLate(false);
       return;
     }
+    // zxnDMA port 0x6B: a demo that fills polygon spans with the DMA sends a
+    // 13-byte program per span through OTIR (STNICCC Filled8bit: ~540 spans,
+    // ~7000 OUTs a frame — 11% of core0 in the generic decode chain, hw
+    // 2026-10-15). Same handler and the same I/O timing as the generic block
+    // (which also keeps the late contention of the slot), reached directly.
+    if ((uint8_t)address == 0x6B && NextReg::portOn(NextReg::PE_DMA6B)) {
+      const bool c = MemESP::ramContended[address >> 13];
+      VIDEO::Draw(1, c);
+      p_states = CPU::tstates;
+#if NEXT_TRACE
+      const uint32_t t0 = timer_hw->timerawl;
+#endif
+      Z80DMA::nextZ80Mode = false;
+      LED::touchW(LED::DMA);
+      Z80DMA::writePort(data);
+      ioContentionLate(c);
+#if NEXT_TRACE
+      nxIoNote(address, timer_hw->timerawl - t0, true);
+#endif
+      return;
+    }
   }
 #if NEXT_TRACE
   if (Z80Ops::isNext) {

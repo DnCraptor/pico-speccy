@@ -252,6 +252,9 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # rowClaim / rowRelease / renderJob, the per-core renderer context (NxCtx):
     # content 50 712 B. 128 B left under the ceiling: the next growth here has
     # to move something out (c0Help already lives in flash).
+    # 2026-10-15 (STNICCC): nxBatch's memory-to-memory RUNS (+~300 B) paid for by
+    # its rare per-byte cases going to flash (nxByteSlow); nextOtirBatch (300 B)
+    # for the zxnDMA program OTIRs. Content 51 112 B — 88 B left.
     set(NXOVL_WIN_SIZE_EFFECTIVE 51200)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
