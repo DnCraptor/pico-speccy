@@ -242,9 +242,11 @@ static void uiAboutPage() {
             if (cr < logoRows) {                          // one 12-px logo band
                 const int y0 = cr * lh;
                 const int y1 = (y0 + lh) < UI_LOGO_H ? (y0 + lh) : UI_LOGO_H;
+                // dotFast takes framebuffer coordinates: add the surface's window
+                // offset (the 800x600 x3 / 1024x768 x4 window sits inside the fb).
                 for (int yy = y0; yy < y1; yy++)
                     for (int x = 0; x < UI_LOGO_W; x++)
-                        VIDEO::vga.dotFast(bx + x, y + (yy - y0),
+                        VIDEO::vga.dotFast(Sf.fbx + bx + x, Sf.oy + y + (yy - y0),
                                            ui_logo_slot(ui_logo128[x + yy * UI_LOGO_W]));
             } else if (cr >= logoRows + 1) {              // a credits line
                 const int li = cr - logoRows - 1;
