@@ -142,14 +142,25 @@ static void uiZxKeyboardPage() {
     const int step = zxpal ? 2 : 1;                       // logical px per image px
     const int bx = (Sf.w - KBD_IMG_W * step) / 2;         // logical
     const int by = body_y + (body_h - KBD_IMG_H) / 2;
-    const int fbx = zxpal ? (bx >> 1) : bx;               // byte column
-    VIDEO::vga.fillRect(fbx - 2, by - 2, KBD_IMG_W + 4, KBD_IMG_H + 4, zxColor(0, 0));
+    // The legacy API addresses the whole framebuffer: in the big HDMI modes
+    // (1024x768 x4, 800x600 x3) the menu surface is a window into it, Sf.fbx/Sf.oy
+    // in (0 elsewhere). The black card is clipped to that window: at 256 px it is
+    // 2 px wider than the surface.
+    const int fbx = Sf.fbx + (zxpal ? (bx >> 1) : bx);   // byte column
+    const int fby = Sf.oy + by;
+    {
+        int cx0 = (zxpal ? (bx >> 1) : bx) - 2, cx1 = cx0 + KBD_IMG_W + 4;
+        const int sw = zxpal ? Sf.w / 2 : Sf.w;
+        if (cx0 < 0) cx0 = 0;
+        if (cx1 > sw) cx1 = sw;
+        VIDEO::vga.fillRect(Sf.fbx + cx0, fby - 2, cx1 - cx0, KBD_IMG_H + 4, zxColor(0, 0));
+    }
     for (int y = 0; y < KBD_IMG_H; y++) {
         for (int x = 0; x < KBD_IMG_W; x++) {
             const int i = x + y * KBD_IMG_W;
             const uint8_t idx = (kbd_img[i >> 1] >> ((i & 1) << 2)) & 0x0F;
             if (!idx) continue;
-            VIDEO::vga.dotFast(fbx + x, by + y, zxColor(idx & 7, (idx >> 3) & 1));
+            VIDEO::vga.dotFast(fbx + x, fby + y, zxColor(idx & 7, (idx >> 3) & 1));
         }
     }
 
