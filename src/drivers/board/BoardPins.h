@@ -77,6 +77,9 @@ uint8_t dbgUartKbdClockPin();           // relocated PS/2 clock, PIN_OFF if the 
 // was moved onto. Same contract as zifiOwnsPin — conflicting peripherals (NESPAD,
 // WAV loader, MIDI) call it at boot and skip their own init.
 bool    dbgUartOwnsPin(uint8_t pin);
+// Same, for a whole UART peripheral (0/1): a UART user on another pin of the
+// console's instance must yield too (ZERO2: UART MIDI on GP22 shares UART1).
+bool    dbgUartOwnsUart(int inst);
 // Whether the console can run at all beside the configured ZiFi UART: ZiFi has
 // priority (its pins were chosen by the user and the NIC/WiFi need them), so the
 // console yields when ZiFi's GPIO UART uses the same instance, the console TX pin,

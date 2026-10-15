@@ -4,6 +4,8 @@
 #include "app/Config.h"
 #include "MidiSynth.h"   // mode 4: GM.DLS wavetable synth
 #include "ui/LEDIndicators.h"
+#include "app/Debug.h"
+#include "drivers/board/BoardPins.h"
 #include <hardware/uart.h>
 #include <hardware/gpio.h>
 
@@ -33,6 +35,15 @@ void Midi::init() {
     if (enabled == 4) { MidiSynth::init(); return; }   // GM.DLS wavetable — no UART
 
     if (hw_initialized) return;
+
+    // The UART console may hold the same peripheral on another pin (ZERO2: console
+    // GP20 and MIDI GP22 are both UART1). send() writes the UART regardless of
+    // hw_initialized, so MIDI is switched off for the session, not merely skipped.
+    if (BoardPins::dbgUartOwnsUart((int)uart_get_index(MIDI_UART))) {
+        Debug::log("Midi: off - UART%u belongs to the UART console", (unsigned)uart_get_index(MIDI_UART));
+        enabled = 0;
+        return;
+    }
 
     uart_init(MIDI_UART, MIDI_BAUD);
     gpio_set_function(MIDI_TX_PIN, UART_FUNCSEL_NUM(MIDI_UART, MIDI_TX_PIN));

@@ -288,10 +288,14 @@ ELSEIF(ZERO2)
         CPU_MHZ=${CPU_MHZ}
         ZERO2=1
 
-        # Debug > UART console: TX-only on GP0 (UART0, a FREE pin here). NOT GP20/21
-        # as the old ZERO2_DBG_UART option had it: GP21 is PCM5122_I2S_DATA and UART1
-        # is the instance of the default ZiFi pair (24/25) — both collided.
-        DBG_UART_TX_PIN=0
+        # Debug > UART console: TX on GP20 (UART1), the pair 20/21 the owner's adapter
+        # is wired to. GP21 is PCM5122_I2S_DATA, so while the console is on the DAC
+        # board yields (init_sound falls back to the standard audio path); UART1 is
+        # also the default ZiFi pair's (24/25) and MIDI's (GP22) instance — the console
+        # steps aside for ZiFi (dbgUartBlockedByZifi), UART MIDI steps aside for the
+        # console (Midi::init).
+        DBG_UART_TX_PIN=20
+        DBG_UART_RX_PIN=21
 
         # PS/2 keyboard. GP2/3 is the default pair and is shared with the PCM5122
         # DAC board's control I2C — when that board is detected at boot (or picked

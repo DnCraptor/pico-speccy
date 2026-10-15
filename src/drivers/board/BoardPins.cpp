@@ -192,6 +192,11 @@ const char* zifiActiveNote() {
 #ifndef DBG_UART_KBD_CLOCK_PIN
 #define DBG_UART_KBD_CLOCK_PIN 0xFF
 #endif
+// The console is TX-only; a board may still reserve the RX pad of the pair so a
+// peripheral sharing it yields (ZERO2: GP21 = PCM5122 I2S data).
+#ifndef DBG_UART_RX_PIN
+#define DBG_UART_RX_PIN 0xFF
+#endif
 
 uint8_t dbgUartTxPin()       { return DBG_UART_TX_PIN; }
 int     dbgUartInstance()    { return DBG_UART_TX_PIN == 0xFF ? -1 : uartInstanceForTx(DBG_UART_TX_PIN); }
@@ -211,9 +216,14 @@ static bool dbgUartWanted() {
 bool dbgUartOwnsPin(uint8_t pin) {
     if (!dbgUartWanted()) return false;
     if (pin == DBG_UART_TX_PIN) return true;
+    if (DBG_UART_RX_PIN != 0xFF && pin == DBG_UART_RX_PIN) return true;
     if (DBG_UART_KBD_CLOCK_PIN != 0xFF &&
         (pin == DBG_UART_KBD_CLOCK_PIN || pin == DBG_UART_KBD_CLOCK_PIN + 1)) return true;
     return false;
+}
+
+bool dbgUartOwnsUart(int inst) {
+    return dbgUartWanted() && inst >= 0 && inst == dbgUartInstance();
 }
 
 bool dbgUartBlockedByZifi() {
@@ -226,6 +236,7 @@ bool dbgUartBlockedByZifi() {
     if (!resolveZifiPins(Config::zifi_tx_pin, Config::zifi_rx_pin, tx, rx)) return false;
     if (uartInstanceForTx(tx) == dbgUartInstance()) return true;        // one peripheral, two owners
     if (tx == DBG_UART_TX_PIN || rx == DBG_UART_TX_PIN) return true;
+    if (DBG_UART_RX_PIN != 0xFF && (tx == DBG_UART_RX_PIN || rx == DBG_UART_RX_PIN)) return true;
     if (DBG_UART_KBD_CLOCK_PIN != 0xFF) {
         const uint8_t k0 = DBG_UART_KBD_CLOCK_PIN, k1 = DBG_UART_KBD_CLOCK_PIN + 1;
         if (tx == k0 || tx == k1 || rx == k0 || rx == k1) return true;
@@ -238,7 +249,9 @@ const char* dbgUartNote() {
     return "off: WAV input";
 #elif defined(PICO_PC)
     return "KBD -> GP10/11";
-#elif defined(MURM2) || defined(ZERO2)
+#elif defined(ZERO2)
+    return "off: PCM DAC";
+#elif defined(MURM2)
     return "";
 #else
     return "KBD -> GP16/17, NESPAD off";

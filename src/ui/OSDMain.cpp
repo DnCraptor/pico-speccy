@@ -416,6 +416,7 @@ IRAM_ATTR void OSD::clickNoPause() {
     if (clickAudible()) clickPlay();
 }
 void close_all(void);
+extern "C" __attribute__((noreturn)) void ehr_tail(void);
 void flash_timings(int mhz);                        // main.cpp
 void flash_timings_transition(int from_mhz, int to_mhz);
 void OSD::esp_hard_reset() {
@@ -458,6 +459,27 @@ void OSD::esp_hard_reset() {
     // nothing at all, and the last log line ended mid-format (hw 2026-09-23).
     Debug::log("ehr: core1 parked=%d, close_all", (int)c1parked);
     Debug::uartFlushSync();   // drain ring + FIFO (no-op with the console off)
+    // close_all() zeroes the butter arena and then takes CS1 away from the QMI.
+    // A reboot reached on an ALT stack palloc'd in that arena (the net/zip
+    // alt-stack — e.g. a Web-catalog .rzx whose snapshot needs a machine-layout
+    // reboot) wiped its own return addresses and then faulted on the next push:
+    // SIGBUS PC=0 SP=0x115xxxxx stackOvf=1 (hw 2026-10-15). Never coming back,
+    // so finish on the core0 SRAM stack from its top, guard off.
+    uint32_t sp;
+    __asm volatile ("mov %0, sp" : "=r"(sp));
+    if (sp < SRAM_BASE || sp >= SRAM_END) {
+        extern char __StackTop[];
+        __asm volatile (
+            "movs r1, #0        \n"
+            "msr  msplim, r1    \n"
+            "msr  msp, %0       \n"
+            "bl   ehr_tail      \n"
+            :: "r"(__StackTop) : "r1", "memory");
+    }
+    ehr_tail();
+}
+
+extern "C" __attribute__((noreturn, noinline, used)) void ehr_tail(void) {
     close_all();
     Debug::log("ehr: close_all done, arming watchdog");
     Debug::uartFlushSync();

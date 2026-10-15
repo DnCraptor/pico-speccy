@@ -32,6 +32,18 @@ bool    spinInt = false;
 // spinInt + EI pending: the line outlives the ONE instruction after the EI,
 // whatever its length (23 T is the longest, plus contention); loopRzx clears it.
 static const int32_t SPIN_EI_HOLD = 256;
+// SPIN takes the interrupt AT the boundary even when the frame's last
+// instruction was an EI — the one-instruction delay is not honoured there.
+// cabal.rzx (rzxarchive, SPIN 0.5, 128K, 84718 frames): the main loop ends in
+// EI / HALT (#A16F/#A170) and the IM2 handler reloads R (LD R,A with #FF) as a
+// frame timer. With the boundary between the EI and the HALT the recording
+// returns to the HALT and sleeps the whole next frame (17706 HALT fetches);
+// honouring the delay ran HALT, took the INT and returned past it, a frame of
+// game logic ahead, and the keyboard INs landed in the wrong frames from frame
+// 2708 (tools/rzx_replay_sim.c, SkoolKit rzxplay agrees). rick1, chevychase and
+// continentalcircus replay clean either way. Fuse keeps the delay (its
+// z80_interrupt() retries after an EI) — rainbow.rzx.
+static bool s_spinEiNow = false;
 // Pulse rule: the INT line's length in T-states. The machine's own window,
 // except that Spectaculator holds it for 32 T on every model:
 // abadiadelcrimen.rzx (rzxarchive abadia.zip, 128K) replays clean at 8..32 T,
@@ -572,7 +584,8 @@ bool startPlayback(const std::string& path) {
     s_total = s->rd.totalFrames();
     s_played = s_shortFrames = 0;
     s_desync = s_snapPending = s_rewind = s_hasSnap = s_badSeen = s_badDos = false;
-    spinInt = strncmp(s->rd.creator(), "SPIN", 4) == 0 || strncmp(s->rd.creator(), "Fuse", 4) == 0;
+    s_spinEiNow = strncmp(s->rd.creator(), "SPIN", 4) == 0;
+    spinInt = s_spinEiNow || strncmp(s->rd.creator(), "Fuse", 4) == 0;
     s_intLen = strncmp(s->rd.creator(), "Spectaculator", 13) == 0 ? SPECTACULATOR_INT_LEN : 0;
     Debug::log("[RZX] %s: v%u.%u creator '%s', %u frames, INT rule %s%s", s_name.c_str(),
                (unsigned)s->rd.major(), (unsigned)s->rd.minor(), s->rd.creator(), (unsigned)s_total,
@@ -691,6 +704,7 @@ bool raiseInt() {
         // from an EI the core has not yet honoured (Z80::interrupt drops the
         // line at the acknowledge, loopRzx drops it after the instruction).
         if (!Z80::isIFF1()) { intUntil = 0; return false; }
+        if (s_spinEiNow) Z80::setPendingEI(false);
         const bool defer = Z80::isPendingEI();
         intUntil = t + (defer ? SPIN_EI_HOLD : 1);
         return defer;
