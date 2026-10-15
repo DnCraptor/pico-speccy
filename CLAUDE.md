@@ -15105,3 +15105,17 @@ last column, Alt+T ASCII), and 640x480 + DS80 unchanged.
   register pairs per BYTE (LD A marks A, not F), flags per bit, stack words pushed
   below the old SP or rewritten above it. PC and R are not marked (they move every
   step). Invalidated when the debugger opens.
+
+## Full-screen UI pages in the big HDMI modes' window (2026-10-15, NOT hw-tested)
+
+800x600 x3 shows the centre 264x200 of the fb, 1024x768 x4 the centre 256x192
+(`VIDEO::bigWindow`, `Sf.fbx/Sf.oy`): 44x25 / 42x24 glyphs, the menu's 40-column floor
+holds. Three pages assumed 320x240 and were fixed: **Joystick > Mapping** picks
+`kCellsCompact` (UiJoy.cpp — same cells and neighbours, 242x132 design area, D-pad pills
+58 px) when the surface is < 316 px wide or the body < 184 px; **the debugger** has a
+`narrow` grid (< 51 columns): right panel flush right (`xr = cols - 17`), code lines
+without the opcode-bytes column (mnemonic keeps 15), hex memory rows from `dbgMemBpr`
+starting at 2, 3 memory rows on a 19-row grid (`mem_lines`; the BP-count row is
+dropped), the F2 dump 8 bytes a row, short footers; **Help > ZX keyboard** draws through
+the legacy fb-coordinate API, so it adds `Sf.fbx/Sf.oy` and clips its black card to the
+window. Text pages still clip long lines at ~40 columns (not fixed).
