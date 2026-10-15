@@ -12255,6 +12255,12 @@ repo: chapters 12, 15.6, 23.4, 26, 35, 38 are the ones that pin chip semantics).
   for tslabs' spgbld.exe (same .ini); `debug/ft812-helloworld.spg` is TSLib's
   HelloWorld example (DeadlyKom/TSLib, 1024x768, "Hello world!" in ROM font 31 +
   200 random POINTS a frame) packed with it — the first thing to run on hardware.
+- **.pss snapshots carry the chip (2026-10-15, NOT hw-tested)**: blocks PSFS (state),
+  PSFA (raw areas: regs, the 0x309000 block, RAM_CMD, RAM_DL, the shown list, the tinfl
+  state mid-INFLATE) and PSFG (non-zero 4 KB RAM_G pages) after PSTF; `Ft812::snap*` in
+  Ft812.cpp, framing in Pss.cpp. A load parks the renderer and resets + clears the chip
+  first, so an old file comes back blank rather than with stale state; a PLAYVIDEO in
+  progress is consumed, not resumed. Details: docs/pss-snapshot-plan.md "Phase 4b".
 - **ZUMA itself** assembles here (`sjasmplus Source/ASM/main.asm`, sjasmplus 1.23.1)
   but its .spg needs `Build/level_chain_table.bin` from `make_level_runtime_table.py`
   (openpyxl) and the game streams `ZUMAMAIN/ZUMALVL/ZUMAAUD/ZUMASND.PAK` off the SD

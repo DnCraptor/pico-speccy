@@ -33,6 +33,7 @@
 #include "speccy/machines/Profi/Profi.h"
 #include "speccy/machines/Atm.h"
 #include "speccy/machines/TsConf/TsConf.h"
+#include "speccy/machines/TsConf/Ft812.h"
 #include "speccy/devices/gs/GS.h"
 #include "speccy/devices/gs/NgsSd.h"
 #include "speccy/machines/EvoBase.h"
@@ -157,6 +158,29 @@ static void flushMedia() {
     if (Config::isPlus3()) Plus3Fdc::flush();
     if (IDE::scheme != IDE::OFF) IDE::flush();
     if (DivMMC::enabled) DivMMC::flush();
+}
+
+// VDAC2 (FT812): PSFS = the chip's serialized state, PSFA = one raw area (u8 id +
+// bytes), PSFG = one non-zero 4 KB RAM_G page (u16 index + bytes). Written after
+// PSTS, so the load meets them with the machine already rebuilt.
+static void saveFt812(W& w) {
+    uint8_t* st = (uint8_t*)tryMalloc(Ft812::SNAP_STATE_MAX);
+    if (!st) { w.ok = false; return; }
+    const uint32_t n = Ft812::snapStateSave(st);
+    w.begin("PSFS"); w.raw(st, n); w.end();
+    free(st);
+    static const Ft812::SnapArea kAreas[] = { Ft812::SNAP_REGS, Ft812::SNAP_REGSHI, Ft812::SNAP_CMD,
+                                              Ft812::SNAP_DL, Ft812::SNAP_DLSHOWN, Ft812::SNAP_INFLATE };
+    for (Ft812::SnapArea a : kAreas) {
+        uint32_t sz = 0;
+        const uint8_t* p = Ft812::snapArea(a, &sz);
+        if (!p) continue;
+        w.begin("PSFA"); w.u8((uint8_t)a); w.raw(p, sz); w.end();
+    }
+    for (uint32_t pg = 0; pg < Ft812::SNAP_PAGES && w.ok; pg++) {
+        if (!Ft812::snapPageUsed(pg)) continue;
+        w.begin("PSFG"); w.u16((uint16_t)pg); w.raw(Ft812::snapPage(pg), Ft812::SNAP_PAGE); w.end();
+    }
 }
 
 bool save(const string& path, const string& name) {
@@ -312,6 +336,7 @@ bool save(const string& path, const string& name) {
         w.begin("PSTS"); w.raw(b, n); w.end();
         w.begin("PSTC"); w.raw(TsConf::cram, sizeof(TsConf::cram)); w.end();
         w.begin("PSTF"); w.raw(TsConf::sfile, sizeof(TsConf::sfile)); w.end();
+        if (Ft812::enabled) saveFt812(w);
     }
 
     if (Z80Ops::isALF) {   // PSAL: the ROM-bank select (cart bit 7) + the #FE D3 read-back
@@ -1024,7 +1049,11 @@ bool load(const string& path) {
             p = (uint8_t*)tryMalloc(n);
             if (p) r.raw(p, n); else n = 0;
         }
-    } ide, sdc, ngs;
+    } ide, sdc, ngs, ftState;
+    // VDAC2: a blank, reset chip first, so a file without its blocks (saved before
+    // they existed, or with the board off) does not keep the previous session's.
+    const bool ftOn = Z80Ops::isTsconf && Ft812::enabled;
+    if (ftOn) Ft812::snapLoadBegin();
 
     while (r.ok && r.next(id, sz, at)) {
         if (idIs(id, "Z80R") && sz >= sizeof(z)) { r.raw(z, sizeof(z)); haveZ80 = true; }
@@ -1075,6 +1104,17 @@ bool load(const string& path) {
         else if (idIs(id, "PSTS") && sz >= 1)  { tsSize = sz < sizeof(tsr) ? sz : sizeof(tsr); r.raw(tsr, tsSize); }
         else if (idIs(id, "PSTC") && sz == sizeof(TsConf::cram) && Z80Ops::isTsconf)  r.raw(TsConf::cram, sz);
         else if (idIs(id, "PSTF") && sz == sizeof(TsConf::sfile) && Z80Ops::isTsconf) r.raw(TsConf::sfile, sz);
+        else if (idIs(id, "PSFS") && ftOn && sz <= Ft812::SNAP_STATE_MAX) ftState.take(r, sz, Ft812::SNAP_STATE_MAX);
+        else if (idIs(id, "PSFA") && ftOn && sz >= 1) {
+            const uint8_t a = r.u8();
+            uint32_t want = 0;
+            uint8_t* p = a <= Ft812::SNAP_INFLATE ? Ft812::snapArea((Ft812::SnapArea)a, &want, true) : nullptr;
+            if (p && want == sz - 1) r.raw(p, want);
+        }
+        else if (idIs(id, "PSFG") && ftOn && sz == 2 + Ft812::SNAP_PAGE) {
+            uint8_t* p = Ft812::snapPage(r.u16());
+            if (p) r.raw(p, Ft812::SNAP_PAGE);
+        }
         else if (idIs(id, "PSGS"))             GS::snapLoadState(r, sz);
         else if (idIs(id, "PSGP") || idIs(id, "PSGF")) GS::snapLoadPage(r, id, sz);
         else if (idIs(id, "PSEF") && sz == 2048 && Atm::evo && EvoBase::font) r.raw(EvoBase::font, 2048);
@@ -1104,6 +1144,7 @@ bool load(const string& path) {
     fclose2(f);
     GS::snapLoadEnd(ngs.p, ngs.n);
     if (!haveZ80 || !havePT || ptSize < 16 || (!fileSparse && loadedPages != np)) {
+        if (ftOn) Ft812::snapLoadEnd();   // a reset chip, but the renderer un-parked
         loadFail("PSS: damaged file (missing state)");
         return false;
     }
@@ -1133,6 +1174,11 @@ bool load(const string& path) {
         Atm::snapRemap();
     } else if (Z80Ops::isTsconf) {
         TsConf::snapLoad(tsr, tsSize);   // parses and rebuilds
+        if (ftOn) {
+            if (ftState.n && !Ft812::snapStateLoad(ftState.p, ftState.n))
+                Debug::log("[PSS] VDAC2 state record refused - the chip stays reset");
+            Ft812::snapLoadEnd();
+        }
     } else if (Config::isPlus3()) {
         MemESP::plus3Remap(Ports::port1FFD);
     } else {

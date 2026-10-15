@@ -473,14 +473,43 @@ row (save to a slot first, then convert it). Two entries, one code path:
   `sfileGen++`, `tsCramChanged`. The video mode follows at the next EndFrame from VConfig
   (`tsVideoApplyPending` always folds the live register into vmSeen).
 - No export: SZX / .z80 / .sna have no TS-Conf machine; the converter refuses it.
-- **Not saved**: the FT812 (VDAC2) chip state — a VDAC2 snapshot comes back with a blank
-  chip until the guest re-uploads; the ZX-Evo AVR's PS/2 log and config registers (the CMOS
+- **Not saved**: the ZX-Evo AVR's PS/2 log and config registers (the CMOS
   itself is its own file); NeoGS (phase 5).
 - **Hw check owed**: a slot saved in TS-BIOS Setup (TEXT), in TR-DOS, in a 256c/16c title
   with the TSU (Bruce Lee, TMNT), a raster-split title (Ninja Gaiden — FRAME latch), during
   a DMA-heavy scene, at 14 MHz and with the Alt+F2 override; Wild Commander with a VDOS
   mount; load from another machine (the machine switch reboots into the 4 MB strip and
   resumes through `ram=`).
+
+## Phase 4b: VDAC2 / FT812 (2026-10-15, NOT hw-tested)
+
+With the board fitted (`Ft812::enabled`) a TS-Conf snapshot carries the chip, after PSTF:
+- `PSFS` = `Ft812::snapStateSave` (ver 1, ~830 B): the SPI transaction in flight, the
+  coprocessor (FIFO pointers, fault/halt/wait-swap, the forward matrix, colours, font
+  table, the MEMWRITE/INFLATE stream position, a budget-deferred flag), the pending swap,
+  REG_FRAMES, the media-FIFO pointers + a "PLAYVIDEO was running" flag, the INT line, and
+  the 32 bitmap handles (engine state a display list leaves behind).
+- `PSFA` = one raw area, `u8 id` + bytes: registers (0x600), the 0x309000 block (0x200),
+  RAM_CMD (4 KB), RAM_DL (8 KB, the list being built), the shown list (8 KB), and the
+  tinfl state (~11 KB) only while an INFLATE runs — it is a POD and its dictionary is
+  RAM_G itself (non-wrapping output), so the stream resumes exactly.
+- `PSFG` = one non-zero 4 KB RAM_G page, `u16 index` + bytes (zero pages left out).
+- Load: `Ft812::snapLoadBegin()` before pass 2 parks the renderer (no take, a frame in
+  flight waited out, 300 ms bound), stops a video, clears RAM_G and power-resets the chip
+  — so a file WITHOUT these blocks (older, or saved with the board off) comes back with a
+  blank chip, not the previous session's. The areas and pages are read in place, the
+  state is applied after `TsConf::snapLoad`, `snapLoadEnd()` bumps every RAM_G page
+  generation (the mip cache and palette cache go stale) and asks for a re-render of the
+  shown list. INT edges are not replayed (`intLast` is restored without the hook; the
+  TS-Conf LINE latch is PSTS's).
+- **Not resumed**: CMD_PLAYVIDEO — its command is consumed on load (FTVIEW sees the
+  stream end). The ROM fonts and metrics are rebuilt at init, not saved.
+- Host test: `tools/ft812_test.cpp` ".pss: a snapshot taken mid-INFLATE resumes the
+  stream" (capture half-way, restore, feed the rest; handles; a blank begin+end).
+  Mutations checked: tinfl state zeroed / not restored, handles not restored.
+- **Hw check owed**: ZUMA (a level, the menu) and R-Type saved and loaded in a slot;
+  a slot saved during ZUMA's INFLATE-heavy loading; an FTVIEW AVI (must stop cleanly);
+  a pre-change TS-Conf slot with VDAC2 on (blank chip, no hang); slot size.
 
 ## Phase 5: General Sound / NeoGS (2026-10-04; hw 2026-10-04, owner: "работают", not itemised)
 
