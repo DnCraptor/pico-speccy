@@ -425,6 +425,11 @@ NXI_HOT void wake() {
     if (CPU::stFrame > CPU::tstates + 1) CPU::stFrame = CPU::tstates + 1;
 }
 
+NXI_HOT void wakeNow() {
+    const uint32_t t = CPU::tstates ? CPU::tstates : 1;   // stFrame 0 = HALT to the loop
+    if (CPU::stFrame > t) CPU::stFrame = t;
+}
+
 NXI_HOT bool intLine() {
     sync();
     if (im2Hw()) return cpuIm2() ? presented() >= 0 : classicUla();
@@ -591,7 +596,13 @@ bool nrRead(uint8_t r, uint8_t& out) {
 
 NXI_HOT bool dmaDelay() {
     const uint8_t cc = NextReg::reg[0xCC], cd = NextReg::reg[0xCD], ce = NextReg::reg[0xCE];
-    if ((cc & 0x80) && (NextMf::active() || DivMMC::next_nmi_hold || DivMMC::next_nmi_btn)) return true;
+    // zxnext.vhd 2007: nmi_activated, which drops at S_NMI_END — i.e. once the
+    // divMMC hold (button latched or automap held) is gone. next_nmi_hold alone
+    // stays set until the NEXT request, so testing it held every DMA for good
+    // after the first NMI (Atic Atac Remake: copper NMI every line, NR CC = 80,
+    // the sprite pattern DMA never ran, hw 2026-10-16).
+    if ((cc & 0x80) && (NextMf::active() || DivMMC::next_nmi_btn ||
+                        (DivMMC::next_nmi_hold && DivMMC::automap))) return true;
     if (!im2Hw()) return false;
     // im2_dma_int_en(13:0), zxnext.vhd 1957: 13 UART1 TX, 12 UART0 TX, 11 ULA,
     // 10:3 CTC 7..0, 2 UART1 RX, 1 UART0 RX, 0 line.

@@ -1108,6 +1108,9 @@ void NextReg::write(uint8_t r, uint8_t v) {
         case 0x44: NEXTVID::palValue9(v);  break;
         case 0x50: case 0x51: case 0x52: case 0x53:
         case 0x54: case 0x55: case 0x56: case 0x57:
+#if NEXT_TRACE
+            if (Z80DMA::nxPending) Z80DMA::nxHeldNote('M', r, v);
+#endif
             MemESP::applyMMU(r - 0x50, v);
             break;
         case 0x8C: { // Alt-ROM: bit7 enable, bit6 write-only, bit5 lock ROM1,

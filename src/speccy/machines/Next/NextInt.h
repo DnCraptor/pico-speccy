@@ -52,6 +52,10 @@ void reti();
 // EI / RETN / RETI re-enabled interrupts, or ex was just raised: end the running
 // unchecked slice so CPU::loop re-derives the next event.
 void wake();
+// Same, but the instruction that calls it is already complete (all its T-states
+// counted): the slice must end NOW, not one instruction later. wake() leaves
+// stFrame = tstates + 1, which lets exactly one more instruction run.
+void wakeNow();
 // Called by CPU::loop right before `tstates -= statesInFrame`.
 void frameEnd();
 // NR 0x22 / 0x23 / 0x64 / raster: re-derive the line-interrupt position.

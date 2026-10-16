@@ -23,6 +23,7 @@
 #include "speccy/machines/Next/NextVideo.h"
 #include "app/ESPectrum.h"
 #include "app/TryAlloc.h"
+#include "speccy/devices/storage/DivMMC.h"
 
 #undef IRAM_ATTR
 #define IRAM_ATTR __not_in_flash("z80dma")
@@ -220,6 +221,9 @@ void Z80DMA::freeAttrShadow() {
 
 IRAM_ATTR void Z80DMA::writePort(uint8_t data) {
     if (dma_in_progress) return;
+#if NEXT_TRACE
+    if (nxPending && Z80Ops::isNext) nxHeldNote('W', 0, data);
+#endif
 
     // Read mask byte (after 0xBB command)
     if (read_mask_pending) {
@@ -525,6 +529,25 @@ void Z80DMA::doEnable() {
     // Memory↔memory transfers (spriting, blitting) have no external READY signal
     // and must run immediately on ENABLE, just like a plain Z80-DMA load.
     if (mb02_deferred && (port_a_is_io || port_b_is_io)) return;
+#if NEXT_TRACE
+    // [DMA5]: blocks whose memory destination lands in 16K bank 5 (pages 0A/0B:
+    // the tilemap and the tile definitions) — who wrote what, from where.
+    if (Z80Ops::isNext) {
+        static uint16_t left = 120;
+        const bool dIo = transfer_dir ? port_b_is_io : port_a_is_io;
+        const uint16_t d = transfer_dir ? port_b_addr : port_a_addr;
+        const uint16_t sAd = transfer_dir ? port_a_addr : port_b_addr;
+        const bool sIo = transfer_dir ? port_a_is_io : port_b_is_io;
+        const uint8_t pg = MemESP::mmu[d >> 13];
+        if (left && !dIo && (pg == 0x0A || pg == 0x0B)) {
+            left--;
+            Debug::log("[DMA5] pc=%04X sp=%04X src=%04X%s pg%02X -> dst=%04X pg%02X len=%04X mmu=%02X.%02X.%02X.%02X.%02X.%02X.%02X.%02X t=%lu",
+                       Z80::getRegPC(), Z80::getRegSP(), sAd, sIo ? "io" : "", sIo ? 0 : MemESP::mmu[sAd >> 13],
+                       d, pg, block_length, MemESP::mmu[0], MemESP::mmu[1], MemESP::mmu[2], MemESP::mmu[3],
+                       MemESP::mmu[4], MemESP::mmu[5], MemESP::mmu[6], MemESP::mmu[7], (unsigned long)CPU::tstates);
+        }
+    }
+#endif
     if (Z80Ops::isNext) {
         // dma.vhd: without a prescaler every byte follows the previous one and
         // the DMA keeps the bus for the whole block — the CPU is stopped, so
@@ -932,6 +955,22 @@ bool Z80DMA::nxService(uint32_t limit) {
     }
     return CPU::tstates != start;
 }
+
+#if NEXT_TRACE
+// [DMAHELD]: the guest touching the DMA or the MMU while a block is still held
+// (nxPending). On the FPGA the CPU cannot run main code then — only an interrupt
+// handler while NR 0xCC-0xCE hand it the bus.
+void Z80DMA::nxHeldNote(char what, uint8_t reg, uint8_t v) {
+    static uint16_t left = 80;
+    if (!left) return;
+    left--;
+    Debug::log("[DMAHELD] %c r%02X=%02X pc=%04X sp=%04X cnt=%04X/%04X dst=%04X stall=%d delay=%d nmi=%d hold=%d btn=%d am=%d mmu4=%02X t=%lu",
+               what, reg, v, Z80::getRegPC(), Z80::getRegSP(), nx_counter, block_length,
+               transfer_dir ? cur_port_b : cur_port_a, (int)nxStall, (int)NextInt::dmaDelay(),
+               (int)Z80::isNMI(), (int)DivMMC::next_nmi_hold, (int)DivMMC::next_nmi_btn,
+               (int)DivMMC::automap, MemESP::mmu[4], (unsigned long)CPU::tstates);
+}
+#endif
 
 void Z80DMA::nxFrameEnd(uint32_t statesInFrame) {
     if (!nxPending) return;

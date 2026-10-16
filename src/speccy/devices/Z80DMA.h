@@ -56,6 +56,9 @@ public:
     static bool nxService(uint32_t limit);   // transfer what is due, up to limit; false = nothing moved
     static void nxFrameEnd(uint32_t statesInFrame);
     static void nxClockRescale(uint8_t om, uint8_t nm);
+#if NEXT_TRACE
+    static void nxHeldNote(char what, uint8_t reg, uint8_t v);   // [DMAHELD] trace
+#endif
 
 private:
     // Configured state (from WR0-WR5)

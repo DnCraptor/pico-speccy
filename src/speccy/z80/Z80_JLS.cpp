@@ -4013,8 +4013,13 @@ void Z80::decodeED(void) {
             else if (Z80Ops::isNext && DivMMC::enabled) DivMMC::nextRetn();
             check_trdos();
             if (Z80Ops::isTsconf && ffIFF1) TsConf::intEnableHook();
-            // a zxnDMA paused for the NMI (NR 0xCC bit 7) resumes after RETN
-            if (Z80Ops::isNext && ((ffIFF1 && NextInt::ex) || Z80DMA::nxPending)) NextInt::wake();
+            // a zxnDMA paused for the NMI (NR 0xCC bit 7) resumes after RETN —
+            // BEFORE the next instruction: wake() let one more run, and Atic
+            // Atac Remake's copper NMI (every line) then advanced its page-fill
+            // loop one instruction per NMI while the fill was still held, until
+            // NEXTREG #54 remapped the slot under it and the last 8K landed on
+            // its own code page (hw 2026-10-16, [DMAHELD] trace).
+            if (Z80Ops::isNext && ((ffIFF1 && NextInt::ex) || Z80DMA::nxPending)) NextInt::wakeNow();
             break;
         }
         case 0x46:
@@ -4221,6 +4226,9 @@ void Z80::decodeED(void) {
         }
         case 0xA2:
         { /* INI */
+#if NEXT_TRACE
+            if (Z80Ops::isNext && REG_C == 0xEB) { extern void nxIniBank5Note(uint16_t hl, char k); nxIniBank5Note(REG_HL, 'i'); }
+#endif
             inx(1);
             // Next: an unrolled ED A2 chain from the SD data port (the video
             // player in Adventures in Videoland reads 32 INI a pass, ~74k
@@ -4534,6 +4542,23 @@ Z80_COLD void Z80::nextInirBatch() {
 // early-return 0xEB read 1, the write 3 = 13 T, R += 2; B decrements per byte.
 // Same bounds and preconditions as nextInirBatch (slice end, one raster line,
 // the destination's 8K slot, the code in a plain RAM slot).
+#if NEXT_TRACE
+// [INI5]: SD sectors (INI from #EB) landing in 16K bank 5 — one line per new
+// 512-byte block of the destination, with the card address being read.
+void nxIniBank5Note(uint16_t hl, char k) {
+    static uint16_t left = 160;
+    static uint32_t last = 0xFFFFFFFFu;
+    const uint8_t pg = MemESP::mmu[hl >> 13];
+    if (!left || (pg != 0x0A && pg != 0x0B)) return;
+    const uint32_t key = ((uint32_t)pg << 16) | ((hl & 0x1FFF) >> 9);
+    if (key == last) return;
+    last = key;
+    left--;
+    Debug::log("[INI5] %c pc=%04X hl=%04X pg%02X off=%04X t=%lu", k, Z80::getRegPC(), hl, pg, hl & 0x1FFF,
+               (unsigned long)CPU::tstates);
+}
+#endif
+
 Z80_COLD void Z80::nextIniRunBatch() {
     if (!z80_in_nocheck || Config::numPcBP > 0 || Config::numPortReadBP > 0 || Rzx::mode) return;
     if (!DivMMC::enabled || DivMMC::divide_mode || !NextReg::portOn(NextReg::PE_SPI)) return;
@@ -4547,6 +4572,9 @@ Z80_COLD void Z80::nextIniRunBatch() {
     // (Atic Atac Remake loads into MMU slot 0 with HL = 0: 76% of core0, 300 ms
     // frames, hw 2026-10-16).
     const uint16_t hl = REG_HL;
+#if NEXT_TRACE
+    { extern void nxIniBank5Note(uint16_t hl, char k); nxIniBank5Note(hl, 'b'); }
+#endif
     const uint8_t ds = hl >> 13;
     // The destination resolved the way MemESP::writebyte resolves it (as
     // Z80DMA's nxWrRun): the divMMC window in slots 0/1 and the Next ROM take
