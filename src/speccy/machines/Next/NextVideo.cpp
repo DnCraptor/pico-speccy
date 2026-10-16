@@ -342,6 +342,9 @@ static int16_t  s_bcol = 0;
 // that STARTS at or before the change still shows the old colour
 // (VIDEO::TopBorder paints every cell with lastBrdTstate <= tstates first).
 static uint8_t  s_bstep = 4;
+// T-states of side border a wider fb adds left of the 320-wide one (10 at 360):
+// the cell grid stays aligned to the 320 layout's x 0, i.e. to the raster.
+static int16_t  s_bpad = 0;
 
 void NEXTVID::borderMark() {
     if (s_brdCnt == NX_BRD_N) { s_brdHead = (s_brdHead + 1) % NX_BRD_N; s_brdCnt--; }
@@ -366,7 +369,10 @@ __attribute__((noinline)) static void nxBorderSegs(NextLineState& st, int row, i
         if (t >= t1) break;
         if (n < 15) {
             const int32_t rel = (t - t0) >> m;   // >= 0: earlier changes were dropped
-            st.brd.t[n] = (uint8_t)((rel / s_bstep + 1) * s_bstep);
+            // cell grid of the 320 layout (rel - s_bpad may be negative: +16
+            // keeps the division a floor for both steps, 4 and 1)
+            const int32_t g = rel - s_bpad + 16;
+            st.brd.t[n] = (uint8_t)((g / s_bstep + 1) * s_bstep - 16 + s_bpad);
             st.brd.c[n >> 1] |= (uint8_t)(s_brdC[i] << ((n & 1) * 4));
             n++;
         }
@@ -1894,8 +1900,20 @@ bool NEXTVID::computeGeometry() {
     const bool moved = fv != firstVisibleLine || paper - fv != paperTopRow;
     firstVisibleLine = fv;
     paperTopRow = paper - fv;
-    s_bcol = (int16_t)(VIDEO::tStatesBorder - ((VIDEO::tStatesBorder + tpl / 2) / tpl) * tpl);
-    s_bstep = NextReg::raster().kind == 2 ? 1 : 4;
+    // The column comes from the 320-wide anchor (the hw-verified one) moved left
+    // by the extra side border of a wider fb: the classic 360-wide 48K/128K
+    // anchors are 8 T earlier, fitted to that renderer's 8-px cells, where the
+    // paper really moved 10 T (fb x 52 vs 32) — border effects sat 4 px off at
+    // 720x576 / 720x480 while 640x480 was right (hw 2026-10-16). Pentagon's
+    // anchors already differ by exactly 10.
+    {
+        const int kind = NextReg::raster().kind;
+        const int tb = kind == 0 ? TS_BORDER_320x240
+                     : kind == 2 ? TS_BORDER_320x240_PENTAGON : TS_BORDER_320x240_128;
+        s_bpad = (int16_t)((((int)VIDEO::vga.xres - 256) / 2 - 32) / 2);
+        s_bcol = (int16_t)(tb - ((tb + tpl / 2) / tpl) * tpl - s_bpad);
+        s_bstep = kind == 2 ? 1 : 4;
+    }
     return moved;
 }
 

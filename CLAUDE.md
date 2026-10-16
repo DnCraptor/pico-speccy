@@ -377,6 +377,12 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   TopBorder). Раскраска — `nxPaintBorderRuns` во flash. 7 отрезков было мало: тест
   цветных полос меняет #FE 8 раз за строку. Debug > Paper off работает и на Next
   (paper-строки рисуются как бордюр).
+  **720x576 / 720x480 (fb 360): бордюр 48K/128K был на 2 T (4 px) мимо бумаги** (hw-confirmed
+  2026-10-16, тест цветных полос, `debug/DVp2-next-bcol576b-1.0.10`). Классические якоря
+  `TS_BORDER_360x*` для 48K/128K на 8 T раньше 320-х (подогнаны под 8-px ячейки того
+  рендерера), а бумага сдвигается на 10 T (x 52 vs 32); у Pentagon разница ровно 10. Теперь
+  `s_bcol` = 320-й якорь − `s_bpad` (доп. бордюр в T), и сетка `s_bstep` в `nxBorderSegs`
+  считается от x 0 320-й раскладки (= по растру). 640x480 и Pentagon не изменились.
 - **DivMMC NMI + esxDOS-личности** (2026-10-07, hw-confirmed: esxDOS 0.8.9 NMI-браузер
   и LFN Browser v1.02 из личности Pentagon с `ESXMMC.BIN`). По VHDL (zxnext.vhd 2091-2170,
   divmmc.vhd): кнопка Drive = Alt+F10 / NR 02 b2, гейт NR 06 b4 (+ NR 83 b0 для клавиши) —
