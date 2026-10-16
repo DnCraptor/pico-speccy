@@ -1918,6 +1918,9 @@ uint32_t DivMMC::snapCardSave(uint8_t* out) {
     o.u8(ide_data_write ? 1 : 0);
     o.u8(ib ? 1 : 0);
     if (ib) o.raw(ide_buffer, 512);
+    // Appended later: the byte the FT812 (VDAC2) shifted out on the last ZC exchange
+    // — TSLib reads it with OUT dummy / IN, and a snapshot can fall between the two.
+    o.u8(zc_ft_rd);
     return o.n;
 }
 
@@ -1959,5 +1962,10 @@ bool DivMMC::snapCardLoad(const uint8_t* in, uint32_t n) {
     ide_cylinder_hi = ide[4]; ide_head = ide[5]; ide_status = ide[6]; ide_error = ide[7];
     ide_data_index = (ib && idi < 512) ? idi : -1;
     ide_data_write = idw;
+    // The FT812 chip select follows zc_config bit 2 (zc_write_config detects its
+    // edges against zc_ft_cs): a stale zc_ft_cs would swallow the next edge and
+    // run the chip's next transaction on from the old one's phase.
+    if (!(Z80Ops::isAtm && !Atm::evo)) zc_ft_cs = (zcc & 0x04) != 0;
+    zc_ft_rd = (s.at < s.n) ? s.u8() : 0xFF;   // absent in files saved before it
     return true;
 }

@@ -1179,7 +1179,16 @@ uint8_t* snapArea(SnapArea a, uint32_t* bytes, bool forLoad) {
         case SNAP_REGSHI:  *bytes = sizeof(C->regsHi);     return C->regsHi;
         case SNAP_CMD:     *bytes = RAM_CMD_SIZE;          return C->cmd;
         case SNAP_DL:      *bytes = RAM_DL_SIZE;           return (uint8_t*)C->dl;
-        case SNAP_DLSHOWN: *bytes = RAM_DL_SIZE;           return (uint8_t*)C->dlShadow[C->shadowRender];
+        case SNAP_DLSHOWN: {
+            // The list the chip shows is the newest one frameTick accepted. While the
+            // OSD holds core1 (VIDEO::ftHold) a swap accepted on the last frame is
+            // still untaken in the OTHER buffer — save that one, and load into the
+            // buffer the renderer will read (renderReq is cleared by snapLoadBegin).
+            *bytes = RAM_DL_SIZE;
+            fence();
+            const bool pendingNew = !forLoad && C->renderReq && !C->renderSame;
+            return (uint8_t*)C->dlShadow[C->shadowRender ^ (pendingNew ? 1 : 0)];
+        }
         case SNAP_INFLATE:
             if (forLoad && !C->inf) C->inf = (tinfl_decompressor*)s_alloc(sizeof(tinfl_decompressor), true);
             if (!C->inf || (!forLoad && C->vstate != V_INFLATE)) return nullptr;
@@ -1260,6 +1269,14 @@ bool snapStateLoad(const uint8_t* buf, uint32_t n) {
     }
     s_cpDeferred = deferred;                  // frameTick resumes work the budget had cut short
     return true;
+}
+
+void snapSyncCs(bool cs) {
+    if (!C || C->cs == cs) return;
+    // The Z-Controller's config latch (#77 bit 2) is the chip select's truth; a
+    // record that disagrees with it (no PSSD block, or one refused) cuts the
+    // transaction: the next edge starts a fresh header.
+    C->cs = cs; C->phase = 0; C->mode = 0;
 }
 
 void snapLoadEnd() {

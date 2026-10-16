@@ -338,6 +338,17 @@ int main() {
       CHECK(feed(half, padded) == padded, "and fed again");
       CHECK(memcmp(ramG() + 0x0A0000, src.data(), src.size()) == 0, "same bytes the second time");
       CHECK(renderTake(), "the load asks for a frame");   // core1's part: take the re-render
+      renderDone();
+      // A swap accepted but not yet taken (the OSD holds core1): the NEW list is saved.
+      while (renderTake()) renderDone();
+      wr32s(RAM_DL, 0x26000007u); wr32s(RAM_DL + 4, 0x00000000u);   // CLEAR, DISPLAY
+      wr8s(RAM_REG + REG_DLSWAP, 2);
+      CHECK(frameTick(), "swap accepted");
+      const FtSnap s2 = ftCapture();
+      CHECK(s2.area[SNAP_DLSHOWN].size() == RAM_DL_SIZE && s2.area[SNAP_DLSHOWN][0] == 0x07 && s2.area[SNAP_DLSHOWN][3] == 0x26,
+            "the untaken new list is what the snapshot shows");
+      CHECK(ftRestore(s2), "restore");
+      CHECK(renderTake() && dlShadow()[0] == 0x26000007u, "the loaded list is the one rendered");
       renderDone(); }
 
     // ── matrix commands: SETMATRIX emits the INVERSE, 8.8 ────────────────────

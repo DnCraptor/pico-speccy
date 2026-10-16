@@ -507,6 +507,17 @@ With the board fitted (`Ft812::enabled`) a TS-Conf snapshot carries the chip, af
 - Host test: `tools/ft812_test.cpp` ".pss: a snapshot taken mid-INFLATE resumes the
   stream" (capture half-way, restore, feed the rest; handles; a blank begin+end).
   Mutations checked: tinfl state zeroed / not restored, handles not restored.
+- **Review fixes (2026-10-15; hw 2026-10-16, owner: "работает" on `debug/DVp2-pss-ft`, not itemised):** (1) `SNAP_DLSHOWN` saved
+  `dlShadow[shadowRender]`, but while the OSD holds core1 (`VIDEO::ftHold`) a swap
+  accepted on the last frame sits untaken in the OTHER buffer — the slot came back one
+  list behind, for good on a static screen. It now saves the newest accepted list.
+  (2) `DivMMC::snapCardLoad` restored `zc_config` but not `zc_ft_cs`, the latch
+  `zc_write_config` detects the FT812 CS edges against: a slot saved mid-transaction
+  left the chip's CS and the ZC latch disagreeing, the next edge was swallowed and the
+  following transaction ran on from the old one's phase (garbage into the command FIFO).
+  `zc_ft_cs` follows `zc_config` bit 2 now, `zc_ft_rd` (the byte an OUT dummy / IN read
+  picks up) is appended to PSSD (read only when present), and `Ft812::snapSyncCs` makes
+  the chip agree with the ZC latch after PSSD is applied. Host test: the untaken list.
 - **Hw check owed**: ZUMA (a level, the menu) and R-Type saved and loaded in a slot;
   a slot saved during ZUMA's INFLATE-heavy loading; an FTVIEW AVI (must stop cleanly);
   a pre-change TS-Conf slot with VDAC2 on (blank chip, no hang); slot size.

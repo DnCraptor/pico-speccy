@@ -1201,6 +1201,7 @@ bool load(const string& path) {
     // for another image is refused and the interface keeps its reset state.
     if (ide.n) IDE::snapLoad(ide.p, ide.n);
     if (sdc.n) DivMMC::snapCardLoad(sdc.p, sdc.n);
+    if (ftOn) Ft812::snapSyncCs(DivMMC::zc_ft_cs);   // the ZC latch decides the FT812 CS
 
     // Timex SCLD (DEC first: its bit 7 decides what the HSR window shows).
     if (haveScld && (Config::isTimex() || Config::timex_video)) {

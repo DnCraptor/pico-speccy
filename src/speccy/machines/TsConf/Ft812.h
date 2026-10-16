@@ -177,6 +177,8 @@ uint8_t* snapPage(uint32_t page);                     // its bytes (SNAP_PAGE of
 void snapLoadBegin();
 bool snapStateLoad(const uint8_t* buf, uint32_t n);
 void snapLoadEnd();
+// After the ZC record is in: make the chip's CS agree with DivMMC::zc_ft_cs.
+void snapSyncCs(bool cs);
 
 // ── diagnostics ──────────────────────────────────────────────────────────────
 struct Stats {
