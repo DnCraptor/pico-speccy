@@ -530,11 +530,11 @@ NXP_HOT bool NextPorts::output(uint16_t address, uint8_t data) {
     // Both are frozen by the 0x7FFD bit-5 lock like 0x7FFD itself (zxnext.vhd
     // 3691, 3718) — the decode still consumes the write.
     if ((address & 0xF003) == 0xD001 && NextReg::portOn(NextReg::PE_DFFD)) {
-        if (!MemESP::pagingLock) NextReg::writeDFFD(data);
+        NextReg::writeDFFDPort(data);
         return true;
     }
     if ((address & 0xF003) == 0x1001 && NextReg::portOn(NextReg::PE_1FFD)) {   // 0x1FFD (+3 paging)
-        if (!MemESP::pagingLock) NextReg::write1FFD(data);
+        NextReg::write1FFDPort(data);
         return true;
     }
     // AY #FFFD/#BFFD undecoded (NR 0x84 bit 0 — the 48K personality without

@@ -1440,6 +1440,44 @@ void NextReg::write7FFD(uint8_t v) {
     if (v & 0x20) MemESP::pagingLock = 1;
 }
 
+// zxnext.vhd 4636-4644 + ports.txt: "a write to 0x7ffd/0xdffd/0x1ffd/0xeff7
+// sets mmu0=0xff and mmu1=0xff" (RAM 0/1 instead while #EFF7 bit 3 is set) —
+// the paging ports always reveal the ROM in the bottom 16K. A locked write is
+// dropped and changes nothing (the 7FFD/1FFD/DFFD terms of
+// port_memory_change_dly carry "and not port_7ffd_locked"). Aliens
+// Neoplasma II relies on it: its file loader writes #7FFD and calls RST 8
+// with its own data page still in MMU0 (hw 2026-10-16: hang at start).
+static void lowSlotsFromPorts() {
+    const bool ram0 = NextPorts::eff7() & 0x08;
+    if (NextReg::port1FFD & 0x01) {
+        // +3 all-RAM overlay owns the slots: latch only, write1FFD re-applies
+        // mmu[] when the overlay goes away.
+        MemESP::mmu[0] = ram0 ? 0x00 : 0xFF;
+        MemESP::mmu[1] = ram0 ? 0x01 : 0xFF;
+        return;
+    }
+    NextReg::write(0x50, ram0 ? 0x00 : 0xFF);
+    NextReg::write(0x51, ram0 ? 0x01 : 0xFF);
+}
+
+void NextReg::write7FFDPort(uint8_t v) {
+    if (MemESP::pagingLock) return;
+    write7FFD(v);
+    lowSlotsFromPorts();
+}
+
+void NextReg::writeDFFDPort(uint8_t v) {
+    if (MemESP::pagingLock) return;
+    writeDFFD(v);
+    lowSlotsFromPorts();
+}
+
+void NextReg::write1FFDPort(uint8_t v) {
+    if (MemESP::pagingLock) return;
+    write1FFD(v);
+    lowSlotsFromPorts();
+}
+
 void NextReg::writeDFFD(uint8_t v) {
     NT_EV('D', 0xDF, v);
     portDFFD = v & 0x0F;

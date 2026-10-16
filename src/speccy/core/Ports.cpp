@@ -4078,7 +4078,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     if ((address & 0x8003) == 0x0001 &&
         ((address & 0x4000) || NextReg::machineTiming() != 3) &&
         NextReg::portOn(NextReg::PE_7FFD))
-      NextReg::write7FFD(data);
+      NextReg::write7FFDPort(data);
     return;
   }
   // TS-Conf #7FFD: LCK128-dependent paging into Page3, SCR into VPage —

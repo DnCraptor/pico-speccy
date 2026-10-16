@@ -15885,3 +15885,15 @@ video ~50. Test ELFs `debug/DVp2-nxbulk-{plain,nxtrace}-1.0.10`. What did it, in
   ~51.8 KB of window and is ~20 KB over the GM.DLS hard floor on 4 MB DVp2 — the test ELFs
   were linked with `NXOVL_WIN_SIZE=52224` and the floor temporarily at 1600 KB in the .ld
   (reverted every time). PERF_TRACE now takes NEXT_TRACE's window term (51 208 B measured).
+
+## Next: the paging PORTS reset MMU0/1 to the ROM (2026-10-16, hw-confirmed DVp2: Aliens Neoplasma II starts)
+
+zxnext.vhd 4636-4644 / ports.txt: a guest write to #7FFD/#DFFD/#1FFD/#EFF7 sets MMU0=MMU1=#FF (RAM 0/1
+with #EFF7 bit 3). Only #EFF7 did it here. Aliens Neoplasma II leaves its data page #44 in MMU0
+(`NEXTREG #50,#44` in its SFX routine) and its file loader writes #7FFD then RST 8 — the call ran
+into the data page and the game hung at start. `NextReg::write7FFDPort/writeDFFDPort/write1FFDPort`
+(guest ports only: Ports.cpp, NextPorts.cpp) = latch write + the reset; a locked write changes
+nothing, and under the +3 all-RAM overlay only `mmu[]` is latched. NR 0x8E and the .nex/launch
+paths keep the plain writers (zx_go keeps 8E out because of the NextZXOS trampolines; not checked
+against the VHDL). Test ELF `debug/DVp2-next-anp2-1.0.10`. Owner checked the regression set the same
+day (NextZXOS Browser, .nex/.snx launch, 48K/128K personalities): no problems.

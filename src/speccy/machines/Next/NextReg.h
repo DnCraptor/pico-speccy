@@ -94,6 +94,12 @@ public:
 
     // Legacy paging on Next (called from Ports.cpp with Next decodes)
     static void write7FFD(uint8_t v);
+    // Guest OUT to #7FFD/#DFFD/#1FFD: the latch write plus the MMU0/1 reset
+    // the ports do (zxnext.vhd 4636-4644). NR 0x8E and the loaders call the
+    // plain writers above.
+    static void write7FFDPort(uint8_t v);
+    static void writeDFFDPort(uint8_t v);
+    static void write1FFDPort(uint8_t v);
     static void writeDFFD(uint8_t v);
     static void write1FFD(uint8_t v);
 
