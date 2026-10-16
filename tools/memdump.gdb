@@ -375,8 +375,41 @@ if Config::arch == 11
   printf "divmmc: automap=%d conmem=%d mapram=%d bank=%d mapped=%d armed=%d\n", (int)DivMMC::automap, (int)DivMMC::conmem, (int)DivMMC::mapram, (int)DivMMC::bank, (int)MemESP::divmmc_mapped, (int)g_next_automap_armed
   printf "wr_overlay_mask=%02X multiplicator=%d\n", (unsigned char)MemESP::wr_overlay_mask, (int)ESPectrum::multiplicator
   printf "slots: %08X %08X %08X %08X %08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[1], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[3], (unsigned)MemESP::ramCurrent[4], (unsigned)MemESP::ramCurrent[5], (unsigned)MemESP::ramCurrent[6], (unsigned)MemESP::ramCurrent[7]
+  printf "wrOverlay: %08X %08X %08X %08X %08X %08X l2_rd_mask=%02X l2_wr_mmu_mask=%02X\n", (unsigned)MemESP::wrOverlay[0], (unsigned)MemESP::wrOverlay[1], (unsigned)MemESP::wrOverlay[2], (unsigned)MemESP::wrOverlay[3], (unsigned)MemESP::wrOverlay[4], (unsigned)MemESP::wrOverlay[5], (unsigned char)MemESP::l2_rd_mask, (unsigned char)MemESP::l2_wr_mmu_mask
+  printf "reg70=%02X reg71=%02X reg16=%02X reg17=%02X reg18clip\n", NextReg::reg[0x70], NextReg::reg[0x71], NextReg::reg[0x16], NextReg::reg[0x17]
+  printf "dma: dir=%d A=%04X inc%d io%d B=%04X inc%d io%d len=%04X cnt=%04X curA=%04X curB=%04X\n", (int)Z80DMA::transfer_dir, Z80DMA::port_a_addr, (int)Z80DMA::port_a_inc, (int)Z80DMA::port_a_is_io, Z80DMA::port_b_addr, (int)Z80DMA::port_b_inc, (int)Z80DMA::port_b_is_io, Z80DMA::block_length, Z80DMA::nx_counter, Z80DMA::cur_port_a, Z80DMA::cur_port_b
   set logging enabled off
   set logging redirect off
+  # Both Layer 2 buffers (NR 0x12 and NR 0x13, 6 x 8K each), resolved the way
+  # nextPgPtr does (hot-page pool first), plus the pool's page table.
+  shell rm -f /tmp/picospec_l2a_*.bin /tmp/picospec_l2b_*.bin
+  set $nxk = 0
+  while $nxk < 12
+    set $nxbank = ($nxk < 6) ? (NextReg::reg[0x12] & 0x7F) : (NextReg::reg[0x13] & 0x7F)
+    set $nxpg = $nxbank * 2 + ($nxk % 6)
+    set $nxf = 255
+    if MemESP::nextHotIdx != 0
+      set $nxf = MemESP::nextHotIdx[$nxpg]
+    end
+    if $nxf != 255
+      set $nxp = (unsigned long)MemESP::nextHotFrame[$nxf]
+    else
+      if $nxpg < 16
+        set $nxp = (unsigned long)MemESP::nextPg[$nxpg]
+      else
+        set $nxp = (unsigned long)MemESP::nextStrip + ($nxpg - 16) * 8192
+      end
+    end
+    if $nxk < 6
+      eval "dump binary memory /tmp/picospec_l2a_%d.bin %lu %lu", $nxk, $nxp, $nxp + 8192
+    else
+      eval "dump binary memory /tmp/picospec_l2b_%d.bin %lu %lu", $nxk - 6, $nxp, $nxp + 8192
+    end
+    set $nxk = $nxk + 1
+  end
+  if MemESP::nextHotIdx != 0
+    dump binary memory /tmp/picospec_hotidx.bin MemESP::nextHotIdx (MemESP::nextHotIdx + 224)
+  end
 end
 
 # Where the selected ARM core is: PC / LR / SP only — no backtrace and NO thread

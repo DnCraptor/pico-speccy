@@ -15897,3 +15897,17 @@ nothing, and under the +3 all-RAM overlay only `mmu[]` is latched. NR 0x8E and t
 paths keep the plain writers (zx_go keeps 8E out because of the NextZXOS trampolines; not checked
 against the VHDL). Test ELF `debug/DVp2-next-anp2-1.0.10`. Owner checked the regression set the same
 day (NextZXOS Browser, .nex/.snx launch, 48K/128K personalities): no problems.
+
+## Next: STNICCC WireFrame garbage is the demo's own (2026-10-16, hw-tested DVp2: gone with bank 7 zeroed)
+
+Dotted "data" in the lower half of every other frame of `STNICCC_WireFrame8Bit.nex`, launched
+from the NextZXOS Browser. NOT ours (decided to leave as the hardware would): on frames without
+the "clear" flag (#04, most of them) the demo "clears" the back buffer at #86DF by DMA-copying
+16K from #4000 with `NEXTREG #52/#53 = (#8849)+C` — 16K-bank numbers (9/12, the defaults
+.nexload sets) used as 8K pages, step 1 instead of 2 — i.e. it copies pages #09-#0C or #0C-#0F
+and relies on zeros there. The file carries banks 0-6 only, .nexload never touches bank 7, and
+the Browser leaves its command line (`cls:.nexload STNICC~4.NEX`, from browser.cfg) plus code in
+bank 7 — that is the garbage (L2 pages 3/4 = page #0E, 5 = #0F, byte for byte). A test build
+zeroing bank 7 at .nexload's `NR 0x13 = 12` removed it. tools/memdump.gdb now dumps both Layer 2
+buffers (`/tmp/picospec_l2a_*/l2b_*.bin`, hot pool honoured), zxnDMA state and the L2 window
+masks — read those before blaming the DMA or core1 for Layer 2 garbage.
