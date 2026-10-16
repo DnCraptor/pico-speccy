@@ -259,7 +259,9 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
-    if (NEXT_TRACE)
+    # PERF_TRACE adds its counters to the same code: 51 208 B measured 2026-10-16
+    # (DVp2), 8 B over the plain term — it takes the trace term too.
+    if (NEXT_TRACE OR PERF_TRACE)
         # trace content 51 296 B (2026-10-11): AT the ceiling, nothing left.
         # NEXTEST's one-walk pair text tilemap (+0.3 KB) was paid for by the
         # trace row probe moving to flash and 32-bit layer timer marks:

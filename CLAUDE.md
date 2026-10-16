@@ -15839,3 +15839,49 @@ left, i.e. at 1024x768 x4). Same day: the
 **About** logo went through `vga.dotFast` in fb coordinates without `Sf.fbx/Sf.oy` and
 overlapped the header in the big-window modes — fixed (any raw `dotFast`/fb write from
 a UI page needs those offsets).
+
+## Next: Adventures in Videoland at 576p — five levers (2026-10-16, hw-confirmed DVp2: owner "теперь хорошо")
+
+Layer 2 320x256 + an 80-column text tilemap at 28 MHz, plus a video player that streams
+off the SD card. Start: game 34-37 / 41-44 FPS, video 30 (576p, NeoGS on). End: game 50,
+video ~50. Test ELFs `debug/DVp2-nxbulk-{plain,nxtrace}-1.0.10`. What did it, in order:
+
+- **NextIdle verdict table + global give-up** (NextIdle.cpp): this game rotates through
+  more loops of the right SHAPE than any small table holds, none of which ever repeats,
+  so every switch re-ran `validate()` from flash — ~45% of core0 for zero skips. Now a
+  32-entry direct-mapped VALID/REJECTED table checked in SRAM (`jumpGate`) before the
+  flash `jump()`, a per-target give-up after 32 non-skipping activations/passes, and the
+  whole detector off for the epoch (2^25 T) after 512 validations without one skip. Two
+  weaker first cuts (a bigger reject list; per-validated-loop counter) were hw-refuted.
+- **Layer 2 320x256 row LUT** (`nxL2LutSpan`, NextVideo.cpp): 256 colours per (palette,
+  NR 0x70 offset, NR 0x14) in the band buffer's tail (`NX_L2_BAND` = band + 512 B), rebuilt
+  on `s_palGen[pal]` (every rawPal writer goes through `nxPalDirty`), 4 px per unaligned
+  32-bit band read. The band FILL (8-byte XIP line per column) is ~20% of core1 and at the
+  PSRAM floor; XIP streaming is out (the cache is write-back, a stream reads stale PSRAM).
+- **Adaptive render skip** (`NEXTVID::EndFrame`, now flash): core0 waited > 1 ms for the
+  core1 queue (`g_nx_qwait_us` delta) -> the next frame is emulated, not drawn, never two
+  in a row (`g_nx_autoskip`). Queue occupancy is the WRONG signal: a light frame posts all
+  its rows at once and idles with the ring full. Trace: `fps=` vs `draw=` in `NEXT cpu`.
+- **Hot-page pool on, allocated late and grown** (MemESP.cpp, `NEXT_HOT_FRAMES` 8): first
+  try 150 frames into the session (after the renderer's own SRAM blocks — taking the heap
+  first is why it was off since 10-13), then every 250 frames while an 8K block exists AND
+  total free >= 8K + 16K (asking for 24K contiguous got 1 frame out of 46 KB). At 576p in
+  this game it still gets 1 frame — the in-game heap is ~15-24 KB, not the 46 KB Hardware
+  Info shows before the game switches Layer 2 320 on (menu log: `runInternal heap=15616`).
+- **Unrolled INI runs from the SD port + bulk sector copy** (Z80_JLS.cpp
+  `nextIniRunBatch`, DivMMC `mmc_read_bulk`): the video reads with 32 x `ED A2` (C = #EB,
+  entered mid-run through a self-modified JP at #EE14), 74k instructions a frame. After an
+  INI the rest of the run but the last goes as one loop (13 T, R += 2 each, same bounds as
+  `nextInirBatch`); the data bytes of a CMD17/18 block are memcpy'd from `mmc_sector_buf`
+  (both batches), protocol bytes stay per byte. Video 35 -> ~50.
+- **hw-REFUTED, reverted: stepping core1's async SD read** (sdcard.c `sd_async_pump` as a
+  state machine, polling the token without blocking). core1 was ~35% in that spin, but the
+  stepped read finished later, core0 (the bottleneck) waited for sectors and stepped them
+  itself: FPS and IDL got worse. Leave the read blocking.
+- **Instruments added**: `NEXT hostpc1` (core1 PC sampler, NxFrameProf::initCore1, 100 us
+  alarm on core1's NVIC, 512-sample ring — NEXT_TRACE only). Overlay-window addresses must
+  be resolved against the `.nxovl`/`.gsovl` section symbols, not addr2line (shared VMAs).
+- **Window budget**: `.nxovl` 50 928 of 51 200 B (plain DVp2). The NEXT_TRACE build needs
+  ~51.8 KB of window and is ~20 KB over the GM.DLS hard floor on 4 MB DVp2 — the test ELFs
+  were linked with `NXOVL_WIN_SIZE=52224` and the floor temporarily at 1600 KB in the .ld
+  (reverted every time). PERF_TRACE now takes NEXT_TRACE's window term (51 208 B measured).

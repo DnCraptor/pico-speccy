@@ -4222,6 +4222,10 @@ void Z80::decodeED(void) {
         case 0xA2:
         { /* INI */
             inx(1);
+            // Next: an unrolled ED A2 chain from the SD data port (the video
+            // player in Adventures in Videoland reads 32 INI a pass, ~74k
+            // instructions a frame): the following INIs but the last as one loop
+            if (Z80Ops::isNext && g_ts_fastmem == 1 && REG_C == 0xEB) nextIniRunBatch();
             break;
         }
         case 0xA3:
@@ -4510,9 +4514,66 @@ Z80_COLD void Z80::nextInirBatch() {
     if ((uintptr_t)dp < 0x11000000u) return;          // ROM / accessor
     *mem_desc_t::bank_dirty[ds] = true;
     uint32_t o = hl & 0x1FFF;
-    for (uint32_t i = 0; i < n; i++) dp[o++] = DivMMC::mmc_read();
+    for (uint32_t i = 0; i < n; ) {           // data bytes in runs, the protocol bytes one by one
+        const uint32_t k = DivMMC::mmc_read_bulk(dp + o, n - i);
+        if (k) { o += k; i += k; }
+        else { dp[o++] = DivMMC::mmc_read(); i++; }
+    }
     REG_HL = (uint16_t)(hl + n);
     REG_B = (uint8_t)(REG_B - n);
+    CPU::tstates = now + T * n;
+    regR += 2 * n;
+}
+
+// Spectrum Next, an unrolled run of INI from the SD data port 0xEB (ED A2 x N):
+// called after the INI that started it, executes the following INIs of the run
+// but the LAST one as one loop of DivMMC::mmc_read() into the destination page,
+// and leaves PC on that last INI, which runs through decodeED as before (its
+// flags are the only ones the program can see: each INI overwrites them). Each
+// batched INI costs what the per-instruction path charges: M1 4 + 4, IR 1, the
+// early-return 0xEB read 1, the write 3 = 13 T, R += 2; B decrements per byte.
+// Same bounds and preconditions as nextInirBatch (slice end, one raster line,
+// the destination's 8K slot, the code in a plain RAM slot).
+Z80_COLD void Z80::nextIniRunBatch() {
+    if (!z80_in_nocheck || Config::numPcBP > 0 || Config::numPortReadBP > 0 || Rzx::mode) return;
+    if (!DivMMC::enabled || DivMMC::divide_mode || !NextReg::portOn(NextReg::PE_SPI)) return;
+    const uint16_t pc = REG_PC;
+    const uint8_t cs = pc >> 13;
+    const uint8_t* cp = MemESP::ramCurrent[cs];
+    if (cs < 2 || (uintptr_t)cp < 0x11000000u) return;   // ROM / accessor / divMMC area
+    // the run: consecutive ED A2 from PC, inside the code's 8K slot
+    uint32_t run = 0;
+    uint32_t co = pc & 0x1FFF;
+    while (co + 1 < 0x2000u && cp[co] == 0xED && cp[co + 1] == 0xA2) { run++; co += 2; }
+    if (run < 2) return;
+    const uint32_t now = CPU::tstates;
+    if (now >= CPU::stFrame) return;
+    constexpr uint32_t T = 13;
+    uint32_t n = run - 1;                                  // the last one runs normally
+    const uint32_t room = (CPU::stFrame - now) / T;
+    if (n > room) n = room;
+    const uint32_t tpl = VIDEO::tStatesPerLine ? VIDEO::tStatesPerLine : 224;
+    const uint32_t line = (tpl << ESPectrum::multiplicator) / T;
+    if (line > 1 && n > line - 1) n = line - 1;
+    const uint16_t hl = REG_HL;
+    const uint32_t dstLeft = 0x2000u - (hl & 0x1FFF);
+    if (n > dstLeft) n = dstLeft;
+    if (n < 1) return;
+    const uint8_t ds = hl >> 13;
+    if (ds < 2) return;
+    uint8_t* dp = MemESP::ramCurrent[ds];
+    if ((uintptr_t)dp < 0x11000000u) return;              // ROM / accessor
+    *mem_desc_t::bank_dirty[ds] = true;
+    LED::touchR(LED::SD);
+    uint32_t o = hl & 0x1FFF;
+    for (uint32_t i = 0; i < n; ) {           // data bytes in runs, the protocol bytes one by one
+        const uint32_t k = DivMMC::mmc_read_bulk(dp + o, n - i);
+        if (k) { o += k; i += k; }
+        else { dp[o++] = DivMMC::mmc_read(); i++; }
+    }
+    REG_HL = (uint16_t)(hl + n);
+    REG_B = (uint8_t)(REG_B - n);
+    REG_PC = (uint16_t)(pc + 2 * n);
     CPU::tstates = now + T * n;
     regR += 2 * n;
 }

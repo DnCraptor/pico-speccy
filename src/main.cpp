@@ -1,5 +1,6 @@
 #pragma GCC optimize("Ofast")
 
+#include "app/NxFrameProf.h"
 #include "sdcard.h"   // sdcard_reclock()
 #include "drivers/sound/PinSerialData_595.h"   // ay595_reclock()
 #include "speccy/devices/sound/OplFm.h"
@@ -1103,7 +1104,13 @@ void __not_in_flash_func(render_core)() {
         // The body lives in flash, not the TS overlay, so the gate is only a
         // fast exit — no jump-into-heap hazard here.
         if (g_ft_c1_live) ft812_render_core1_pump();
-        if (g_next_c1_live) next_render_core1_pump(); // Spectrum Next scanlines (NextVideo.cpp)
+        if (g_next_c1_live) {                         // Spectrum Next scanlines (NextVideo.cpp)
+#if NEXT_TRACE
+            static bool s_prof1 = false;              // the core1 PC sampler (NEXT hostpc1)
+            if (!s_prof1) { s_prof1 = true; NxFrameProf::initCore1(); }
+#endif
+            next_render_core1_pump();
+        }
 #ifndef SOFTTV
         // Wall-clock-locked: runs GS-Z80 at exactly 12 MHz off core0.
         // Under SOFTTV, GS::pump() runs in pcm_call_inner (core0) instead,

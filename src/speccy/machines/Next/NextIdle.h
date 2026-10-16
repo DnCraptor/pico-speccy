@@ -29,11 +29,12 @@ namespace NextIdle {
     extern uint16_t tgt, tgt2, tgt3;   // the last three jump targets, newest first
     extern uint16_t rej;               // last target that is not an idle loop
     void jump();                       // flash: tgt came round again, inside exec_nocheck
+    void jumpGate();                   // SRAM: the reject table in front of jump()
 
     void noteNew(uint16_t pc);         // .nxovl: a target other than the last one
     static inline __attribute__((always_inline)) void note(uint16_t pc) {
         if (pc == tgt) {
-            if (z80_in_nocheck && pc != rej) jump();
+            if (z80_in_nocheck && pc != rej) jumpGate();
         } else noteNew(pc);
     }
 #if NEXT_TRACE

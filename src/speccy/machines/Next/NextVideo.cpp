@@ -196,7 +196,11 @@ struct NextLineState {
 // (s_c0Blk, taken while a 640-wide pair frame is live — the mode the split is
 // for). The band cache state belongs to the band buffer, not to the core: core0
 // rendering a copper row on the shared band must see what core1 left in it.
-struct NxBand { uint8_t* buf; uint32_t key; int row, lastRow; };   // buf nullptr = l2Band
+// buf nullptr = l2Band. The buffer is NX_L2_BAND bytes: the 320 x 8 column band,
+// then the 256-entry Layer 2 colour LUT (lutKey = pal | palOfs << 8 | transp << 16,
+// lutGen = s_palGen[pal] when it was built).
+struct NxBand { uint8_t* buf; uint32_t key; int row, lastRow; uint32_t lutKey; uint16_t lutGen; };
+static constexpr unsigned NX_L2_BAND = 320 * 8 + 512;
 struct NxCtx {
     const NextLineState* ls;   // the line being rendered
     // Per-layer RGB line buffers of the compositor (RenderLayers), [384] each.
@@ -214,7 +218,7 @@ struct NxCtx {
     int16_t  sprX0, sprX1;     // fb x span [x0, x1) of this row's opaque sprite pixels (rowSpr)
     bool     sample;           // NEXT_TRACE: this row is timed
 };
-static NxBand s_band[2] = { { nullptr, 0xFFFFFFFFu, -1000, 0 }, { nullptr, 0xFFFFFFFFu, -1000, 0 } };
+static NxBand s_band[2] = { { nullptr, 0xFFFFFFFFu, -1000, 0, 0xFFFFFFFFu, 0 }, { nullptr, 0xFFFFFFFFu, -1000, 0, 0xFFFFFFFFu, 0 } };
 static NxCtx  s_nxc[2];
 static uint16_t* nxUb = nullptr;       // the shared layer lines (Next heap block)
 // The renderer's context: SIO CPUID is 0 / 1. const: one load per function, the
@@ -554,7 +558,7 @@ __attribute__((noinline)) bool NEXTVID::c0Help() {
 // 7.9 KB piece was often not there on a fragmented heap (trace builds, NEXTEST:
 // "no SRAM" and core1 rendered alone). SRAM or nothing (read per pixel).
 static constexpr unsigned NX_C0_LINES = 384 + 4 * 768 + 768 + 768 + 384;
-static constexpr unsigned NX_C0_BAND  = 320 * 8;
+static constexpr unsigned NX_C0_BAND  = NX_L2_BAND;
 static uint8_t* s_c0Band = nullptr;
 static uint32_t s_c0Retry = 0;   // frames until the next allocation attempt
 // Plain heap with a 3 KB margin, not HOT_SRAM's 8 KB: a trace build at NEXTEST
@@ -588,6 +592,7 @@ static void nxHelperAlloc() {
     c.line2 = (uint8_t*)(c.us + 384);
     s_band[1].buf = bb;
     s_band[1].key = 0xFFFFFFFFu; s_band[1].row = -1000; s_band[1].lastRow = 0;
+    s_band[1].lutKey = 0xFFFFFFFFu;
     c.band = &s_band[1];
     s_c0Band = bb;
     s_c0Blk = b;                     // last: c0Help tests it
@@ -638,6 +643,8 @@ IRAM_ATTR void NEXTVID::c1Drain(uint8_t src) {
 }
 
 volatile uint32_t g_nx_qwait_us = 0, g_nx_qwait_max = 0;   // core0 waiting for queue room / a slot
+volatile uint32_t g_nx_autoskip = 0;                        // frames not drawn: the renderer was behind (EndFrame)
+static constexpr uint32_t NX_AUTOSKIP_US = 1000;
 static void __not_in_flash_func(nxWaitUntil)(uint32_t w1) {
     if ((int32_t)(nx_r - w1) >= 0) return;
     const uint64_t t0 = time_us_64();
@@ -1189,7 +1196,7 @@ void NEXTVID::pairPoll() {
     static bool s_bandTried = false;
     if (!l2Band && !s_bandTried && (r[0x70] & 0x30) && ((NextReg::port123B & 0x02) || (r[0x69] & 0x80))) {
         s_bandTried = true;
-        uint8_t* b = nxSramBlock(320 * 8);
+        uint8_t* b = nxSramBlock(NX_L2_BAND);
         c1Drain();
         l2Band = b;
         Debug::log("[NXV] Layer 2 column band %s", b ? "in SRAM" : "not allocated (no SRAM heap)");
@@ -1245,6 +1252,12 @@ void NEXTVID::pairPoll() {
 // through the banks — 192 PSRAM rows a frame (5 ms of the render) for no pixel.
 static uint16_t s_palMono[8] = { 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF };
 static volatile uint8_t s_palMonoDirty[8];
+// Bumped with every rawPal[] write: the Layer 2 320x256 row LUT (RenderL2Line)
+// is rebuilt when its palette's generation moved.
+static volatile uint16_t s_palGen[8];
+static inline __attribute__((always_inline)) void nxPalDirty(uint8_t p) {
+    s_palMonoDirty[p] = 1; s_palGen[p] = (uint16_t)(s_palGen[p] + 1);
+}
 IRAM_ATTR void NEXTVID::palApply(uint32_t upto) {
     uint32_t i = pal_app;
     // A line captured before core0 applied the log ahead (renderRowSegments,
@@ -1259,7 +1272,7 @@ IRAM_ATTR void NEXTVID::palApply(uint32_t upto) {
         const uint32_t e = palLog[i % PAL_LOG];
         const uint8_t p = (e >> 24) & 7, x = (uint8_t)(e >> 16);
         const uint16_t v = (uint16_t)e;
-        rawPal[p][x] = v; s_palMonoDirty[p] = 1;
+        rawPal[p][x] = v; nxPalDirty(p);
         lut[p][x] = remap[v & 0x1FF];
     }
     __dmb();
@@ -1348,7 +1361,7 @@ void NEXTVID::defaultPalettes() {
     for (int pal = 0; pal < 8; pal++) {
         palHasPrio[pal] = false;
         for (int i = 0; i < 256; i++)
-            rawPal[pal][i] = rgb332_to_333((uint8_t)i); s_palMonoDirty[pal] = 1;
+            rawPal[pal][i] = rgb332_to_333((uint8_t)i); nxPalDirty(pal);
     }
     for (int pal = 0; pal < 8; pal += 4) { // both ULA palettes
         for (int c = 0; c < 16; c++) {
@@ -1357,7 +1370,7 @@ void NEXTVID::defaultPalettes() {
             uint16_t v = ((base & 2) ? (l << 6) : 0)   // R
                        | ((base & 4) ? (l << 3) : 0)   // G
                        | ((base & 1) ? l : 0);         // B
-            rawPal[pal][c] = v; s_palMonoDirty[pal] = 1;   // ink
+            rawPal[pal][c] = v; nxPalDirty(pal);   // ink
             rawPal[pal][16 + c] = v;   // paper (same colours)
         }
     }
@@ -1638,14 +1651,14 @@ void NEXTVID::Reset() {
         // sprite row and tolerates PSRAM, these do not. Allocated lazily they
         // found 4 KB of heap left on the NEXT_TRACE build (hw 2026-10-11).
         p80Alloc();
-        if (!l2Band) l2Band = nxSramBlock(320 * 8);
+        if (!l2Band) l2Band = nxSramBlock(NX_L2_BAND);
         Debug::log("[NXV] 640 tables %s, Layer 2 band %s", p80Blk ? "in SRAM" : "none",
                    l2Band ? "in SRAM" : "none");
         // PREFER_PSRAM again (2026-10-11 evening): read per sprite row, 8-16
         // contiguous bytes = one XIP line fill; 19 KB of SRAM heap was what kept
         // F5 and 720x576 out of reach of a Next session.
-        // HOT_SRAM again (2026-10-13): read per sprite row; the hot-page pool is
-        // off (NEXT_HOT_FRAMES 0), its heap pays for this block.
+        // HOT_SRAM again (2026-10-13): read per sprite row. The hot-page pool
+        // takes the heap only ~3 s later (MemESP s_hotWait), after this block.
         uint8_t* cold = (uint8_t*)Buffer::palloc(coldSz, Buffer::NEED_POINTER | Buffer::HOT_SRAM);
         const unsigned sprSz = (sizeof(SprRender) + 3) & ~3u;
         // Two blocks, not one: the renderer state is read per sprite per line
@@ -1944,7 +1957,8 @@ __attribute__((noinline)) void NEXTVID::gigsFrame() {
     s_gigsSeed = false;
 }
 
-IRAM_ATTR void NEXTVID::EndFrame() {
+// Flash: once per frame (it was 300+ B of the full .nxovl window).
+void NEXTVID::EndFrame() {
 #if NEXT_TRACE
     s_frameSeq = (uint8_t)(s_frameSeq + 1);
     nxErrPoll();
@@ -1982,6 +1996,25 @@ IRAM_ATTR void NEXTVID::EndFrame() {
     // managed 50 emulated frames/s. Bound skipping by wall time instead;
     // when emulation is slow, every frame is drawn.
     skipFrame = framePacing.skip(ESPectrum::maxSpeed, time_us_32());
+    // Renderer-bound frames: when core0 spent more than NX_AUTOSKIP_US of this
+    // frame waiting for room in the core1 queue (or rendering rows itself in
+    // that wait), the next frame is emulated but not drawn — never two in a
+    // row, so the picture still updates at >= 25 Hz. The guest then runs at
+    // the speed core0 can give it instead of the speed core1 can draw it
+    // (Adventures in Videoland, Layer 2 320x256 + 80-column tilemap: core1
+    // 24-27 ms a frame, hw 2026-10-16). A light frame never waits: core0
+    // posts the whole frame and idles in the frame pacing with the queue full.
+    {
+        static uint32_t s_qw = 0;
+        static bool s_lastAuto = false;
+        const uint32_t qw = g_nx_qwait_us, waited = qw - s_qw;
+        s_qw = qw;
+        if (!skipFrame && !s_lastAuto && g_next_c1_live && waited > NX_AUTOSKIP_US) {
+            skipFrame = true;
+            s_lastAuto = true;
+            g_nx_autoskip = g_nx_autoskip + 1;
+        } else s_lastAuto = false;
+    }
     lineIdx = 0;
     nextLineTstate = (uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator;
     totalLines = (CPU::statesInFrame >> ESPectrum::multiplicator) / VIDEO::tStatesPerLine;
@@ -2302,14 +2335,14 @@ __attribute__((noinline)) void NEXTVID::segCompose(int row, unsigned start, unsi
     uint8_t acc[400];
     const int xres = VIDEO::vga.xres;
     for (int i = n - 1; i >= 0; i--) {
-        rawPal[D(i).pal][D(i).idx] = D(i).old; s_palMonoDirty[D(i).pal] = 1;
+        rawPal[D(i).pal][D(i).idx] = D(i).old; nxPalDirty(D(i).pal);
         lut[D(i).pal][D(i).idx] = remap[D(i).old & 0x1FF];
     }
     int x0 = 0, i = 0;
     while (x0 < xres) {
         // apply every write that takes effect at or before x0
         while (i < n && D(i).x <= x0) {
-            rawPal[D(i).pal][D(i).idx] = D(i).neu; s_palMonoDirty[D(i).pal] = 1;
+            rawPal[D(i).pal][D(i).idx] = D(i).neu; nxPalDirty(D(i).pal);
             lut[D(i).pal][D(i).idx] = remap[D(i).neu & 0x1FF];
             i++;
         }
@@ -2319,7 +2352,7 @@ __attribute__((noinline)) void NEXTVID::segCompose(int row, unsigned start, unsi
         x0 = x1;
     }
     for (; i < n; i++) {   // writes past the visible line: still the final palette
-        rawPal[D(i).pal][D(i).idx] = D(i).neu; s_palMonoDirty[D(i).pal] = 1;
+        rawPal[D(i).pal][D(i).idx] = D(i).neu; nxPalDirty(D(i).pal);
         lut[D(i).pal][D(i).idx] = remap[D(i).neu & 0x1FF];
     }
 #undef D
@@ -3276,6 +3309,48 @@ __attribute__((noinline)) static bool nxL2SlowRow(uint16_t* o, const uint8_t* br
 // rides along as NX_PRIO for the mixer.
 // Flash: runs once per palette change, not per row (inline it was 244 B of
 // the full .nxovl window).
+// One span of a 320x256 Layer 2 row through the row LUT (RenderL2Line): four
+// source pixels per 32-bit band read (unaligned: SRAM), the
+// pointers in registers (inline, RenderL2Line spilled the band base and
+// reloaded it per pixel). Returns the OR of (colour ^ NX_TR): non-zero = an
+// opaque pixel was written.
+static inline __attribute__((always_inline)) uint32_t nxL2LutSpan(const uint8_t* __restrict sp,
+        uint16_t* __restrict op, int n, const uint16_t* __restrict lt) {
+    uint32_t acc = 0;
+    for (; n >= 4; n -= 4, sp += 4, op += 4) {
+        uint32_t b;
+        __builtin_memcpy(&b, sp, 4);       // the band is SRAM: an unaligned LDR is fine on the M33
+        const uint16_t v0 = lt[b & 0xFF], v1 = lt[(b >> 8) & 0xFF], v2 = lt[(b >> 16) & 0xFF], v3 = lt[b >> 24];
+        op[0] = v0; op[1] = v1; op[2] = v2; op[3] = v3;
+        acc |= (uint32_t)((v0 ^ NX_TR) | (v1 ^ NX_TR) | (v2 ^ NX_TR) | (v3 ^ NX_TR));
+    }
+    while (n-- > 0) { const uint16_t v = lt[*sp++]; *op++ = v; acc |= (uint32_t)(v ^ NX_TR); }
+    return acc;
+}
+
+// Flash: 256x192 with an odd X scroll or clip (rare — the word-aligned run in
+// RenderL2Line is what titles use). True = an opaque pixel was written.
+__attribute__((noinline)) static bool nxL2Mode0Slow(const uint8_t* src, uint16_t* q, uint8_t sx, int count,
+                                                   const uint16_t* raw, uint8_t palOfs, uint8_t transp) {
+    bool any = false;
+    while (count-- > 0) {
+        const uint16_t e = raw[(uint8_t)(src[sx++] + palOfs)];   // uint8 wrap = 256px scroll wrap
+        const uint16_t v = e & 0x1FF;
+        if ((v >> 1) != transp) { *q = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0)); any = true; }
+        q++;
+    }
+    return any;
+}
+
+// Flash: once per palette / offset / NR 0x14 change, not per row.
+__attribute__((noinline)) static void nxL2LutBuild(uint16_t* lt, const uint16_t* raw, uint8_t palOfs, uint8_t transp) {
+    for (int i = 0; i < 256; i++) {
+        const uint16_t e = raw[(uint8_t)(i + palOfs)];
+        const uint16_t v = e & 0x1FF;
+        lt[i] = ((v >> 1) != transp) ? (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0)) : NX_TR;
+    }
+}
+
 __attribute__((noinline)) static void nxPalMono(uint8_t pal, const uint16_t* raw) {
     s_palMonoDirty[pal] = 0;
     const uint16_t c = raw[0] & 0x1FF;
@@ -3336,12 +3411,7 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
             nxRowL2 = any;
             return;
         }
-        while (count-- > 0) {
-            const uint16_t e = raw[(uint8_t)(src[sx++] + palOfs)];   // uint8 wrap = 256px scroll wrap
-            const uint16_t v = e & 0x1FF;
-            if ((v >> 1) != transp) { *q = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0)); nxRowL2 = true; }
-            q++;
-        }
+        if (nxL2Mode0Slow(src, q, sx, count, raw, palOfs, transp)) nxRowL2 = true;
     } else {
         // 320x256 (mode 1) and 640x256x4bpp (modes 2/3), both column-major
         // (byte offset = x*256 + y, layer2.vhd 160) and covering the border.
@@ -3407,18 +3477,27 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
         if (band && !hires) {
             const uint8_t* __restrict src = band + (sy & 7) * 320;
             uint16_t* __restrict o = out + xOrig;
-            const uint16_t* __restrict pr = raw;
+            // The colour each index gives on this row, NX_TR where transparent:
+            // one load and one store per pixel, no compare (the row buffer was
+            // filled NX_TR, so storing NX_TR again is the same value). Built
+            // when the palette, its offset or NR 0x14 move — Adventures in
+            // Videoland, 320x256 at 28 MHz: Layer 2 11-12 ms of core1 a frame.
+            uint16_t* __restrict lt = (uint16_t*)(band + 320 * 8);
+            const uint32_t lk = (uint32_t)pal | ((uint32_t)palOfs << 8) | ((uint32_t)transp << 16);
+            const uint16_t gen = s_palGen[pal];
+            if (bd.lutKey != lk || bd.lutGen != gen) {
+                nxL2LutBuild(lt, raw, palOfs, transp);
+                bd.lutKey = lk; bd.lutGen = gen;
+            }
+            uint32_t acc = 0;
             int sx = t0 + scrollX; if (sx >= 320) sx -= 320;
             for (int tx = t0; tx <= t1; ) {
                 int n = t1 - tx + 1;
                 if (n > 320 - sx) n = 320 - sx;            // up to the scroll wrap
-                for (int k = 0; k < n; k++) {
-                    const uint16_t e = pr[(uint8_t)(src[sx + k] + palOfs)];
-                    const uint16_t v = e & 0x1FF;
-                    if ((v >> 1) != transp) { o[tx + k] = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0)); any = true; }
-                }
+                acc |= nxL2LutSpan(src + sx, o + tx, n, lt);
                 tx += n; sx = 0;
             }
+            any = acc != 0;
         } else {
             any = nxL2SlowRow(out + xOrig, band ? band + (sy & 7) * 320 : nullptr, raw, t0, t1, scrollX,
                               sy, bank, palOfs, transp, hires);

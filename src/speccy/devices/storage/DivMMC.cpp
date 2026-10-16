@@ -1468,6 +1468,22 @@ DIVMMC_HOT uint8_t DivMMC::mmcWriteResponse() {
 }
 
 // Port 0xEB read — SD protocol response
+// Flash: called once per run of data bytes (a sector is at most two calls).
+// Mirrors mmc_read()'s data-phase branch exactly: SDHC, the CMD17/CMD18 data
+// bytes 3..514 (index - 3 into mmc_sector_buf), nothing pending ahead of them.
+uint32_t DivMMC::mmc_read_bulk(uint8_t* dst, uint32_t n) {
+    if (!mmc_file_open[0] && !divsd_mode) return 0;
+    if (!mmc_cs_active || (mmc_r1 & 1) == 0 || mmc_wr_resp >= 0 || !sdhc_mode) return 0;
+    if (mmc_last_command != 0x51 && mmc_last_command != 0x52) return 0;
+    const int idx = mmc_read_index;
+    if (idx < 3 || idx > 514) return 0;
+    uint32_t k = (uint32_t)(515 - idx);
+    if (k > n) k = n;
+    memcpy(dst, mmc_sector_buf + (idx - 3), k);
+    mmc_read_index = idx + (int)k;
+    return k;
+}
+
 DIVMMC_HOT uint8_t DivMMC::mmc_read() {
     if (!mmc_file_open[0] && !divsd_mode) return 0xFF;
     if (!mmc_cs_active) return 0xFF;

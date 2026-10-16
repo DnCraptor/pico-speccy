@@ -959,7 +959,8 @@ bool MemESP::buildNextRam() {
 
 // ===== Next hot-page pool =====
 // NEXT_HOT_FRAMES (CMake, default 8 = "4 x 16K") frames of 8K SRAM from the heap,
-// taken at the first Next frame. Policy, once per frame from VIDEO::EndFrame:
+// taken ~3 s into the Next session and grown while the heap allows (s_hotWait).
+// Policy, once per frame from VIDEO::EndFrame:
 //   * a candidate is a RAM page the CPU has mapped (mmu[0..7]) whose home is in
 //     butter PSRAM, and it must have been mapped at the PREVIOUS tick too — a game
 //     that pages a slot many times a frame must not turn every frame into copies;
@@ -986,7 +987,13 @@ static uint32_t s_hotLast[MemESP::NEXT_HOT_MAX];  // tick the page was last seen
 static uint32_t s_hotFree[MemESP::NEXT_HOT_MAX];  // tick from which a free frame is reusable
 static uint8_t  s_hotPrev[8];                     // mmu[] at the previous tick
 static uint32_t s_hotTick = 0;
-static bool     s_hotTried = false;
+// Frames before the first allocation, then between attempts to add frames.
+// Not at the first Next frame: the renderer takes its SRAM blocks during the
+// first seconds (640 tables, the Layer 2 band, the sprite state, c0Help) and a
+// pool that took the heap first pushed them to PSRAM — the reason the pool
+// was off from 2026-10-13. Late, it gets what the renderer left: 46 KB free at
+// 576p on Adventures in Videoland (hw 2026-10-16).
+static uint16_t s_hotWait = 150;
 static uint32_t s_hotPromos = 0, s_hotEvicts = 0, s_hotLogTick = 0;
 
 static void nextHotSwap(uint8_t* from, uint8_t* to) {
@@ -1009,17 +1016,21 @@ static void nextHotEvict(int f) {
     s_hotEvicts++;
 }
 
-static bool nextHotAlloc() {
-    s_hotTried = true;
-    if (NEXT_HOT_FRAMES <= 0) return false;
-    uint8_t* idx = (uint8_t*)tryMalloc(MemESP::NEXT_PAGES);
-    if (!idx) return false;
-    memset(idx, 0xFF, MemESP::NEXT_PAGES);
-    const int want = NEXT_HOT_FRAMES > MemESP::NEXT_HOT_MAX ? MemESP::NEXT_HOT_MAX : NEXT_HOT_FRAMES;
-    int n = 0;
-    // Each frame its own block (a fragmented heap still yields 8K pieces), and
-    // never the last 16K: the Next allocates more later (NEXTVID, c0Help scratch).
-    while (n < want && getLargestAllocatable() >= 0x2000 + 16384) {
+// Frames are added while the heap has an 8K block and 16K more free besides
+// (the Next allocates more later: menus, the file browser, c0Help scratch).
+static int nextHotWant() {
+    return NEXT_HOT_FRAMES > MemESP::NEXT_HOT_MAX ? MemESP::NEXT_HOT_MAX : NEXT_HOT_FRAMES;
+}
+static void nextHotGrow() {
+    const int want = nextHotWant();
+    const int n0 = s_hotN;
+    int n = s_hotN;
+    // Each frame its own block (a fragmented heap still yields 8K pieces): the
+    // reserve is on the TOTAL free heap, only the frame itself has to be one
+    // block. Asking for 8K + 16K in one piece got 1 frame out of 46 KB free
+    // (hw 2026-10-16).
+    extern size_t getFreeHeap(void);
+    while (n < want && getLargestAllocatable() >= 0x2000 && getFreeHeap() >= 0x2000 + 16384) {
         uint8_t* p = (uint8_t*)tryMalloc(0x2000);
         if (!p) break;
         MemESP::nextHotFrame[n] = p;
@@ -1028,18 +1039,34 @@ static bool nextHotAlloc() {
         s_hotLast[n] = 0;
         n++;
     }
-    if (!n) { free(idx); return false; }
     s_hotN = (uint8_t)n;
+    if (n != n0) Debug::log("Next hot-page pool: %d x 8K SRAM frames", n);
+}
+
+static bool nextHotAlloc() {
+    if (NEXT_HOT_FRAMES <= 0) return false;
+    uint8_t* idx = (uint8_t*)tryMalloc(MemESP::NEXT_PAGES);
+    if (!idx) return false;
+    memset(idx, 0xFF, MemESP::NEXT_PAGES);
+    s_hotN = 0;
+    nextHotGrow();
+    if (!s_hotN) { free(idx); return false; }
     memset(s_hotPrev, 0xFF, sizeof(s_hotPrev));
     MemESP::nextHotIdx = idx;
-    Debug::log("Next hot-page pool: %d x 8K SRAM frames", n);
     return true;
 }
 
 void MemESP::nextHotTick() {
     if (!nextRamReady) return;
-    if (!nextHotIdx) {
-        if (s_hotTried || !nextHotAlloc()) return;
+    if (NEXT_HOT_FRAMES <= 0) return;
+    if (!nextHotIdx || s_hotN < nextHotWant()) {
+        if (s_hotWait) s_hotWait--;
+        else {
+            s_hotWait = 250;
+            if (!nextHotIdx) nextHotAlloc();
+            else nextHotGrow();
+        }
+        if (!nextHotIdx) return;
     }
     if (nextBootRomActive || nextConfigMode) return;   // the TBBLUE boot owns slots 0/1
     ++s_hotTick;

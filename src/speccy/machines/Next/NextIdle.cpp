@@ -14,12 +14,48 @@ namespace NextIdle {
 uint16_t tgt = 0xFFFF, tgt2 = 0xFFFF, tgt3 = 0xFFFF;
 uint16_t rej = 0xFFFF;
 
-static uint16_t s_ok = 0xFFFF;     // validated loop address
+static uint16_t s_ok = 0xFFFF;     // validated loop address (the one being timed)
 static uint32_t s_lastT = 0, s_period = 0;
 static uint32_t s_lastR = 0, s_dR = 0;   // opcode fetches per pass (Z80::regR)
 static uint16_t s_regs[11];              // register file at the last pass start
-static uint16_t s_rej[4] = { 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF };   // recent non-loops
-static uint8_t  s_rejW = 0;
+// Verdicts per jump target, direct-mapped by address: VALID (the shape passed
+// validate()) or REJECTED. A busy game (Adventures in Videoland, 2026-10-16)
+// rotates through more short loops than a 4-entry reject list held, and through
+// several loops of the right SHAPE that never repeat: every switch between them
+// re-ran validate() from flash (dbgPeek ~30% of core0) and the detector took
+// ~45% of core0 without skipping a single pass. `cnt` counts the activations and
+// non-repeating passes of a VALID target since its last skip; at IDLE_GIVEUP it
+// becomes REJECTED. The table is cleared every 2^25 T (~1.2 s at 28 MHz), so
+// code loaded over an address, or a loop that only becomes idle later, gets
+// another look.
+static constexpr unsigned VT_N = 32, IDLE_GIVEUP = 32;
+enum : uint8_t { VT_NONE = 0, VT_VALID = 1, VT_REJ = 2 };
+struct Verdict { uint16_t addr; uint8_t state, cnt; };
+static Verdict s_vt[VT_N];
+static uint32_t s_vtEpoch = 0xFFFFFFFFu;
+// More candidate targets than the table holds evict each other and re-validate
+// for ever (the same game, hw 2026-10-16: validate() still ~30% of core0 with the
+// table). So the detector as a whole gives up too: VALIDATE_GIVEUP validations
+// without one skip turn it off until the next epoch. A game with a real idle
+// loop skips every frame and never gets near the limit.
+static constexpr unsigned VALIDATE_GIVEUP = 512;
+static uint16_t s_noSkip = 0;      // validations since the last skip
+static bool     s_off = false;     // given up for this epoch
+static inline uint32_t vtEpochNow() { return (uint32_t)(CPU::global_tstates >> 25); }
+
+static inline __attribute__((always_inline)) Verdict& vtSlot(uint16_t a) {
+    return s_vt[(a ^ (a >> 5) ^ (a >> 10)) & (VT_N - 1)];
+}
+static void vtReject(Verdict& v, uint16_t a) { v.addr = a; v.state = VT_REJ; v.cnt = 0; rej = a; }
+// one more pass / activation of a valid target that did not skip
+static bool vtGiveUp(uint16_t a) {
+    Verdict& v = vtSlot(a);
+    if (v.addr != a || v.state != VT_VALID) { v.addr = a; v.state = VT_VALID; v.cnt = 0; }
+    if (++v.cnt < IDLE_GIVEUP) return false;
+    vtReject(v, a);
+    s_ok = 0xFFFF;
+    return true;
+}
 
 // Opcodes a pass may contain: they change registers and flags only, or read
 // memory, or push / pop (the stack gets the same bytes every pass once the
@@ -159,15 +195,41 @@ volatile uint32_t g_nx_idle_n = 0, g_nx_idle_t = 0;
 // core0's stack GDB found a TS-Conf function at the return address and died
 // unwinding (-stack-list-frames: "Recursive internal problem", hw 2026-10-11).
 __attribute__((noinline)) __not_in_flash("next") void noteNew(uint16_t pc) {
-    if ((pc == tgt2 || pc == tgt3) && z80_in_nocheck && pc != rej) jump();
+    if ((pc == tgt2 || pc == tgt3) && z80_in_nocheck && pc != rej) jumpGate();
     tgt3 = tgt2; tgt2 = tgt; tgt = pc;
+}
+
+// SRAM, beside noteNew: a rejected target costs a table read here instead of
+// a call into flash.
+__attribute__((noinline)) __not_in_flash("next") void jumpGate() {
+    if (s_off) {
+        if (vtEpochNow() == s_vtEpoch) return;
+        s_off = false;                                 // a new epoch: look again
+    }
+    const uint16_t s = Z80::getRegPC();
+    if (s != s_ok) {
+        const Verdict& v = vtSlot(s);
+        if (v.addr == s && v.state == VT_REJ) { rej = s; return; }
+    }
+    jump();
 }
 
 void jump() {
     const uint16_t s = Z80::getRegPC();
     if (s != s_ok) {
-        for (int i = 0; i < 4; i++) if (s_rej[i] == s) { rej = s; return; }
-        if (!validate(s)) { rej = s; s_rej[s_rejW++ & 3] = s; return; }
+        const uint32_t ep = vtEpochNow();
+        if (ep != s_vtEpoch) {
+            s_vtEpoch = ep;
+            s_noSkip = 0;
+            for (unsigned i = 0; i < VT_N; i++) s_vt[i] = Verdict{ 0xFFFF, VT_NONE, 0 };
+        }
+        Verdict& v = vtSlot(s);
+        if (v.addr != s || v.state != VT_VALID) {
+            if (++s_noSkip >= VALIDATE_GIVEUP) { s_off = true; s_ok = 0xFFFF; return; }
+            if (!validate(s)) { vtReject(v, s); return; }
+            v.addr = s; v.state = VT_VALID; v.cnt = 0;
+        }
+        if (vtGiveUp(s)) return;                       // switching between loops counts too
         s_ok = s;
         s_period = 0;
         s_lastT = CPU::tstates;
@@ -185,14 +247,20 @@ void jump() {
     readRegs(regs);
     bool same = true;
     for (int i = 0; i < 11; i++) { same &= regs[i] == s_regs[i]; s_regs[i] = regs[i]; }
-    if (!same || d != s_period || dR != s_dR) { s_period = d; s_dR = dR; return; }   // two equal passes first
-    if (Rzx::mode || !Z80::isIFF1() || (int32_t)now < CPU::IntEnd || d == 0) return;
+    if (!same || d != s_period || dR != s_dR) {                    // two equal passes first
+        s_period = d; s_dR = dR;
+        // the shape is right but the pass never repeats: a counting / polling
+        // loop that does real work every pass — stop paying for it
+        vtGiveUp(s);
+        return;
+    }
+    if (Rzx::mode || !Z80::isIFF1() || (int32_t)now < CPU::IntEnd || d == 0) { vtGiveUp(s); return; }
     uint32_t lim = CPU::statesInFrame - (uint32_t)CPU::IntEnd;
     if (CPU::stFrame < lim) lim = CPU::stFrame;
-    if (lim <= now) return;
+    if (lim <= now) { vtGiveUp(s); return; }
     const uint32_t k = (lim - now) / d;
-    if (k < 2) return;
-    if (!NEXTVID::idleAdvanceTo(now + k * d)) return;
+    if (k < 2) { vtGiveUp(s); return; }
+    if (!NEXTVID::idleAdvanceTo(now + k * d)) { vtGiveUp(s); return; }
     Z80::incRegR(k * dR);
     s_lastT = CPU::tstates;
     s_lastR = Z80::getFetchCounter();
@@ -200,5 +268,7 @@ void jump() {
     g_nx_idle_n = g_nx_idle_n + 1;
     g_nx_idle_t = g_nx_idle_t + (CPU::tstates - now);
 #endif
+    vtSlot(s).cnt = 0;                                 // it pays: keep it
+    s_noSkip = 0;
 }
 } // namespace NextIdle

@@ -535,6 +535,7 @@ private:
     static void ldx(int d);
     static void nextLdirBatch(int d);   // Spectrum Next: LDIR/LDDR repeats as one copy (.nxovl)
     static void nextInirBatch();        // Spectrum Next: INIR from the SD port 0xEB (.nxovl)
+    static void nextIniRunBatch();      // Spectrum Next: an unrolled ED A2 run from port 0xEB (flash)
     static void nextOtirBatch();        // Spectrum Next: OTIR into the zxnDMA ports 0x6B / 0x0B (.nxovl)
     static void nextSdPollBatch();      // NextZXOS ROM 2: bounded SD-response polling
     static void cpx(int d);

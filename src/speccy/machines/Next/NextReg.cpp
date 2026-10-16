@@ -8,6 +8,7 @@ pico-speccy: ZX Spectrum Next (TBBlue) NextReg register file
 #include "speccy/devices/sound/AySound.h"
 #include "speccy/z80/MemGates.h"
 #include "speccy/machines/Next/NextIdle.h"
+#include "app/NxFrameProf.h"
 #include "speccy/core/MemESP.h"
 #include "speccy/core/Ports.h"
 #include "speccy/z80/CPU.h"
@@ -368,6 +369,28 @@ void next_trace_dump(uint32_t frames) {
                 }
                 for (int part = 0; part < 2; part++) {
                     char pb[220]; int po = snprintf(pb, sizeof pb, part ? "NEXT hostpc+" : "NEXT hostpc %u:", (unsigned)n);
+                    for (int t = 0; t < 8; t++) {
+                        int b = -1; for (int j = 0; j < np; j++) if (pc[j] && (b < 0 || pc[j] > pc[b])) b = j;
+                        if (b < 0) break;
+                        po += snprintf(pb + po, sizeof pb - po, " %08X:%u", (unsigned)pk[b], (unsigned)pc[b]);
+                        pc[b] = 0;
+                    }
+                    Debug::log("%s", pb);
+                }
+            }
+            {
+                // core1 (the renderer): the last NXPROF1_N samples, 64-byte buckets
+                const uint32_t w = g_nxprof1 ? g_nxprof1_w : 0;
+                const uint32_t n = w < NXPROF1_N ? w : NXPROF1_N;
+                uint32_t pk[32]; uint16_t pc[32]; int np = 0;
+                for (uint32_t i = 0; i < n; i++) {
+                    const uint32_t k = g_nxprof1[i] & ~63u;
+                    int j = 0; while (j < np && pk[j] != k) j++;
+                    if (j == np) { if (np == 32) continue; pk[np] = k; pc[np] = 0; np++; }
+                    pc[j]++;
+                }
+                for (int part = 0; part < 2; part++) {
+                    char pb[220]; int po = snprintf(pb, sizeof pb, part ? "NEXT hostpc1+" : "NEXT hostpc1 %u:", (unsigned)n);
                     for (int t = 0; t < 8; t++) {
                         int b = -1; for (int j = 0; j < np; j++) if (pc[j] && (b < 0 || pc[j] > pc[b])) b = j;
                         if (b < 0) break;

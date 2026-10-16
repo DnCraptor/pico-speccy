@@ -84,6 +84,10 @@ public:
     static void mmc_cs(uint8_t value);    // Port 0xE7 write: chip select
     static void mmc_write(uint8_t value); // Port 0xEB write: send command/data byte
     static uint8_t mmc_read();            // Port 0xEB read: receive response/data byte
+    // Up to n bytes of a CMD17/CMD18 data block straight from the sector buffer
+    // (the bytes mmc_read() would return one by one); 0 = not in a plain data
+    // phase, read the next byte with mmc_read(). Next INIR / INI-run batches.
+    static uint32_t mmc_read_bulk(uint8_t* dst, uint32_t n);
 
     // Z-Controller raw SD on ports 0x77 (config/status) / 0x57 (SPI data).
     // Reuses the DivMMC SPI state machine in DivSD/SDHC mode without ROM
