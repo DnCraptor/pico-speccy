@@ -15868,6 +15868,8 @@ video ~50. Test ELFs `debug/DVp2-nxbulk-{plain,nxtrace}-1.0.10`. What did it, in
   total free >= 8K + 16K (asking for 24K contiguous got 1 frame out of 46 KB). At 576p in
   this game it still gets 1 frame — the in-game heap is ~15-24 KB, not the 46 KB Hardware
   Info shows before the game switches Layer 2 320 on (menu log: `runInternal heap=15616`).
+  **Default is 0 again since 2026-10-16** (owner): ~1 frame of gain in this game is not worth
+  the SRAM; the code stays, `-DNEXT_HOT_FRAMES=8` turns it back on.
 - **Unrolled INI runs from the SD port + bulk sector copy** (Z80_JLS.cpp
   `nextIniRunBatch`, DivMMC `mmc_read_bulk`): the video reads with 32 x `ED A2` (C = #EB,
   entered mid-run through a self-modified JP at #EE14), 74k instructions a frame. After an
@@ -15911,3 +15913,16 @@ bank 7 — that is the garbage (L2 pages 3/4 = page #0E, 5 = #0F, byte for byte)
 zeroing bank 7 at .nexload's `NR 0x13 = 12` removed it. tools/memdump.gdb now dumps both Layer 2
 buffers (`/tmp/picospec_l2a_*/l2b_*.bin`, hot pool honoured), zxnDMA state and the L2 window
 masks — read those before blaming the DMA or core1 for Layer 2 garbage.
+
+## Next: F5 launch of a .bas must clear what the Browser clears (2026-10-16, hw-confirmed DVp2)
+
+Crater Crawler (NextBASIC, `TILE` backgrounds) kept its title screen under the game when
+started by F5, never from the NextZXOS Browser. The Browser's BAS line (`browser.cfg`) is
+`clear 65367:sprite clear:palette clear:layer clear:restore:load "|"`; our native launch
+(`NexLaunch::start`) typed only `LOAD "c:/…":RUN`, so the program inherited the menu's
+layer/palette state and `TILE` (AltROM page 1 #10FB: 16 x `LDIX`, A = NR 0x14 read at
+#0A99) skipped every black pixel. The host-tokenised line now carries the same prefix
+(`SPRITE CLEAR:PALETTE CLEAR:LAYER CLEAR:RESTORE:`); `CLEAR 65367` stays the direct
+RAMTOP write. Which of the three state resets the game actually needed was not isolated.
+Diagnosed by rendering the game's map + tiles on the host against the L2 dump: the star
+pixels of tile 3 were drawn over the logo, its zero pixels were not.

@@ -409,6 +409,17 @@ if Config::arch == 11
   end
   if MemESP::nextHotIdx != 0
     dump binary memory /tmp/picospec_hotidx.bin MemESP::nextHotIdx (MemESP::nextHotIdx + 224)
+    # The SRAM frames themselves (frame f holds the page whose hotidx entry is f):
+    # a hot page's home copy in PSRAM is stale until eviction.
+    shell rm -f /tmp/picospec_hotf_*.bin
+    set $nxf = 0
+    while $nxf < 8
+      if MemESP::nextHotFrame[$nxf] != 0
+        set $nxp = (unsigned long)MemESP::nextHotFrame[$nxf]
+        eval "dump binary memory /tmp/picospec_hotf_%d.bin %lu %lu", $nxf, $nxp, $nxp + 8192
+      end
+      set $nxf = $nxf + 1
+    end
   end
 end
 

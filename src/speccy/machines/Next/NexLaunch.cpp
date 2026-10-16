@@ -152,7 +152,7 @@ int start(const std::string& path, Format format) {
     // never reaches the rest of the line.
     const std::string basPath = "c:" + shortName;
     const std::string cmd = format == Format::NEX ? "nexload " + file
-        : bas ? "LOAD \"" + basPath + "\":RUN"
+        : bas ? "SPRITE CLEAR:PALETTE CLEAR:LAYER CLEAR:RESTORE:LOAD \"" + basPath + "\":RUN"
         : file;
     NEXTVID::c1Drain();
     // Do not reset the machine or divMMC: keep the mounted filesystem and
@@ -207,14 +207,26 @@ int start(const std::string& path, Format format) {
         // E_LINE: tokens, #0D, #80; WORKSP = STKBOT = STKEND just after.
         auto w = [sys](unsigned a) { return unsigned(sys[a - 0x4000] | (sys[a - 0x4000 + 1] << 8)); };
         auto put = [sys](unsigned a, unsigned v) { sys[a - 0x4000] = v & 0xFF; sys[a - 0x4000 + 1] = v >> 8; };
+        // The Browser's own prefix (browser.cfg, BAS entry): "sprite clear:
+        // palette clear:layer clear:restore:" before the load. Without it the
+        // program inherits the menu's layer state — Crater Crawler's TILE then
+        // skipped every black pixel and its title stayed under the game (hw
+        // 2026-10-16: F5 broken, the Browser fine).
+        static const uint8_t kPrefix[] = {
+            0x9E, 0xFD, ':',                         // SPRITE CLEAR
+            0x9D, 0xFD, ':',                         // PALETTE CLEAR
+            0x9C, 0xFD, ':',                         // LAYER CLEAR
+            0xE5, ':',                               // RESTORE
+        };
         const unsigned eLine = w(0x5C59);
-        const unsigned end = eLine + 2 + basPath.size() + 1 + 2 + 2;   // EF " path " : F7 0D 80
+        const unsigned end = eLine + sizeof(kPrefix) + 2 + basPath.size() + 1 + 2 + 2;   // prefix EF " path " : F7 0D 80
         if (eLine < 0x5CCB || end >= 0x7F00) {
             Debug::log("BAS native: E_LINE=%04X unusable", eLine);
             OSD::osdCenteredMsg("NextZXOS BASIC workspace is not usable", LEVEL_WARN, 2000);
             return -1;
         }
         unsigned a = eLine;
+        for (uint8_t b : kPrefix) sys[a++ - 0x4000] = b;
         sys[a++ - 0x4000] = 0xEF;                    // LOAD
         sys[a++ - 0x4000] = '"';
         for (char c : basPath) sys[a++ - 0x4000] = (uint8_t)c;

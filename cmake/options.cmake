@@ -99,7 +99,9 @@ option(TSCONF_DRAM_MODEL "TS-Conf: model DRAM contention (CPU/video vs DMA) and 
 # pages the CPU keeps mapped are copied from butter PSRAM into SRAM. 8 = 4 x 16K;
 # 0 = off. Taken from the heap ~3 s into the Next session (after the renderer's
 # own blocks) and grown later while the heap has 8K to spare above a 16K reserve.
-set(NEXT_HOT_FRAMES "8" CACHE STRING "Next: SRAM frames (8K) in the hot-page pool, 0 = off, max 8")
+# Default 0 (owner, 2026-10-16): Adventures in Videoland, the case it was turned
+# on for, gained ~1 frame — not worth the SRAM it takes from the Next session.
+set(NEXT_HOT_FRAMES "0" CACHE STRING "Next: SRAM frames (8K) in the hot-page pool, 0 = off, max 8")
 set(ZX_PSRAM_PAGES "0x5F" CACHE STRING "ZX pages moved to butter PSRAM, block mask (0x0F pages 0-3, 0x50 pages 4/6)")
 option(WD1793_IN_RAM "WD1793: keep the FDC step/read/write/_do code in SRAM (~6.8 KB). OFF since 2026-09-30: flash is fast enough now that the Z80 core is in SRAM" OFF)
 option(DIVMMC_HOT_IN_RAM "DivMMC/DivSD: keep the SD SPI read path (port 0xEB, mmc_read) in SRAM (~0.9 KB; every IN (EB) otherwise fetches flash code through the XIP cache the Next's butter RAM keeps busy)" ON)
