@@ -133,6 +133,11 @@ if $nslots == 8
   if NEXTVID::rawPal != 0
     dump binary memory /tmp/picospec_rawpal.bin (char*)NEXTVID::rawPal ((char*)NEXTVID::rawPal + 4096)
   end
+  # Copper: the 2 KB program (1024 big-endian instructions) + PC / control.
+  if NEXTVID::copperMem != 0
+    dump binary memory /tmp/picospec_copper.bin NEXTVID::copperMem (NEXTVID::copperMem + 2048)
+    printf "copper: pc=%u index=%u ctrl=%02X\n", (unsigned)NEXTVID::copPC, (unsigned)NEXTVID::copIndex, (unsigned)NEXTVID::copCtrl
+  end
   printf "spr: patWrite=%04X attrSlot=%02X nrSlot=%02X reg09=%02X reg43=%02X reg4B=%02X reg75..79: %02X %02X %02X %02X %02X\n", NEXTVID::sprPatWrite, NEXTVID::sprAttrSlot, NEXTVID::sprNrSlot, NextReg::reg[0x09], NextReg::reg[0x43], NextReg::reg[0x4B], NextReg::reg[0x75], NextReg::reg[0x76], NextReg::reg[0x77], NextReg::reg[0x78], NextReg::reg[0x79]
   set logging enabled off
 else
@@ -412,7 +417,15 @@ if Config::arch == 11
   printf "wr_overlay_mask=%02X multiplicator=%d\n", (unsigned char)MemESP::wr_overlay_mask, (int)ESPectrum::multiplicator
   printf "slots: %08X %08X %08X %08X %08X %08X %08X %08X\n", (unsigned)MemESP::ramCurrent[0], (unsigned)MemESP::ramCurrent[1], (unsigned)MemESP::ramCurrent[2], (unsigned)MemESP::ramCurrent[3], (unsigned)MemESP::ramCurrent[4], (unsigned)MemESP::ramCurrent[5], (unsigned)MemESP::ramCurrent[6], (unsigned)MemESP::ramCurrent[7]
   printf "wrOverlay: %08X %08X %08X %08X %08X %08X l2_rd_mask=%02X l2_wr_mmu_mask=%02X\n", (unsigned)MemESP::wrOverlay[0], (unsigned)MemESP::wrOverlay[1], (unsigned)MemESP::wrOverlay[2], (unsigned)MemESP::wrOverlay[3], (unsigned)MemESP::wrOverlay[4], (unsigned)MemESP::wrOverlay[5], (unsigned char)MemESP::l2_rd_mask, (unsigned char)MemESP::l2_wr_mmu_mask
-  printf "reg70=%02X reg71=%02X reg16=%02X reg17=%02X reg18clip\n", NextReg::reg[0x70], NextReg::reg[0x71], NextReg::reg[0x16], NextReg::reg[0x17]
+  printf "reg70=%02X reg71=%02X reg16=%02X reg17=%02X reg69=%02X reg6B=%02X reg6C=%02X reg6E=%02X reg6F=%02X reg4C=%02X\n", NextReg::reg[0x70], NextReg::reg[0x71], NextReg::reg[0x16], NextReg::reg[0x17], NextReg::reg[0x69], NextReg::reg[0x6B], NextReg::reg[0x6C], NextReg::reg[0x6E], NextReg::reg[0x6F], NextReg::reg[0x4C]
+  # Live clip windows (NR 0x18-0x1B x 4 coordinates + the per-window write
+  # index, NR 0x1C).  The register grid above only shows the LAST byte written
+  # to each of 0x18-0x1B, which says nothing: a window is four writes through
+  # its own register and the index decides which coordinate each one lands in.
+  # window 0=Layer2 1=sprites 2=ULA 3=tilemap; x1,x2 are half-columns
+  # (2 px), y1,y2 are LINES.
+  printf "clip L2 %02X %02X %02X %02X | spr %02X %02X %02X %02X\n", NEXTVID::clip[0][0], NEXTVID::clip[0][1], NEXTVID::clip[0][2], NEXTVID::clip[0][3], NEXTVID::clip[1][0], NEXTVID::clip[1][1], NEXTVID::clip[1][2], NEXTVID::clip[1][3]
+  printf "clip ula %02X %02X %02X %02X | tm %02X %02X %02X %02X | idx %d %d %d %d\n", NEXTVID::clip[2][0], NEXTVID::clip[2][1], NEXTVID::clip[2][2], NEXTVID::clip[2][3], NEXTVID::clip[3][0], NEXTVID::clip[3][1], NEXTVID::clip[3][2], NEXTVID::clip[3][3], (int)NEXTVID::clipIdx[0], (int)NEXTVID::clipIdx[1], (int)NEXTVID::clipIdx[2], (int)NEXTVID::clipIdx[3]
   printf "dma: dir=%d A=%04X inc%d io%d B=%04X inc%d io%d len=%04X cnt=%04X curA=%04X curB=%04X\n", (int)Z80DMA::transfer_dir, Z80DMA::port_a_addr, (int)Z80DMA::port_a_inc, (int)Z80DMA::port_a_is_io, Z80DMA::port_b_addr, (int)Z80DMA::port_b_inc, (int)Z80DMA::port_b_is_io, Z80DMA::block_length, Z80DMA::nx_counter, Z80DMA::cur_port_a, Z80DMA::cur_port_b
   set logging enabled off
   set logging redirect off

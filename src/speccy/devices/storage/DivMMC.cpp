@@ -158,6 +158,14 @@ bool DivMMC::mmc_cs_active = false;
 
 int DivMMC::mmc_read_index = -1;
 static bool mmc_read_cont = false;   // CMD18: past the first block (no R1 in the gap)
+// Nac: 0xFF bytes owed between a read command's R1 and its first data token.
+// A real card always sends at least one (SD spec NAC >= 1 byte); a sector we
+// already hold (read-ahead hit, or core1 done fast) used to put the token right
+// after R1. Atic Atac Remake's loader (#D1ED) reads ONE byte past R1 blindly:
+// with no gap that byte was the token, its token wait then skipped the whole
+// first block and asset 4 (the intro map + tiles) landed one sector late —
+// junk in the bottom tilemap rows, striped tiles (hw 2026-10-16).
+static uint8_t mmc_nac = 0;
 // CMD18: the next block has been addressed but not fetched yet. It is loaded
 // when the guest reaches its data token, not when the previous CRC ends: a
 // reader that stops after one block (WC's one-sector FAT lookups) would
@@ -1566,6 +1574,7 @@ DIVMMC_HOT uint8_t DivMMC::mmc_read() {
                 if (mmc_read_index == 0) value = 0xFF;       // NCR
                 if (mmc_read_index == 1) value = 0;           // R1 = OK
                 if (mmc_read_index == 2) {                    // Data token
+                    if (mmc_nac) { mmc_nac--; return 0xFF; }  // Nac (see mmc_nac)
                     if (s_c17) {
                         const int r = c17Ready();
                         if (!r) return 0xFF;                  // the card is still reading (Nac)
@@ -1603,6 +1612,7 @@ DIVMMC_HOT uint8_t DivMMC::mmc_read() {
                 if (mmc_read_index == 0) value = 0xFF;                       // NCR / gap
                 if (mmc_read_index == 1) value = mmc_read_cont ? 0xFF : 0;   // R1 once per command
                 if (mmc_read_index == 2) {                                   // data token
+                    if (mmc_nac) { mmc_nac--; return 0xFF; }                 // Nac (see mmc_nac)
                     if (mmc_cont_pending) {
                         mmc_cont_pending = false;
                         if (Z80Ops::isNext) { if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address); }
@@ -1878,6 +1888,7 @@ void DivMMC::mmc_write(uint8_t value) {
                     mmc_sector_buf_addr = mmc_read_address;
                 }
                 mmc_read_index = 0;
+                mmc_nac = 1;
 #if ZC_PORT_TRACE
                 Debug::log("ZC: CMD17 addr=%lu", (unsigned long)mmc_read_address);
 #endif
@@ -1905,6 +1916,7 @@ void DivMMC::mmc_write(uint8_t value) {
                     mmc_sector_buf_addr = mmc_read_address;
                 }
                 mmc_read_index = 0;
+                mmc_nac = 1;
                 mmc_read_cont = false;
                 mmc_cont_pending = false;
 #if ZC_PORT_TRACE

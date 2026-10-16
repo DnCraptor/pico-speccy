@@ -15933,7 +15933,7 @@ RAMTOP write. Which of the three state resets the game actually needed was not i
 Diagnosed by rendering the game's map + tiles on the host against the L2 dump: the star
 pixels of tile 3 were drawn over the logo, its zero pixels were not.
 
-## Next: Atic Atac Remake — a copper raster NMI plays the sound (2026-10-16; 24 -> 42-43 FPS hw DVp2, screen garbage still OPEN)
+## Next: Atic Atac Remake — a copper raster NMI plays the sound (2026-10-16; 24 -> 42-43 FPS hw DVp2, screen garbage FIXED, FPS still OPEN)
 
 `ATICATAC.NEX` (9bitcolor, 111 MB; the header loads 3 banks, the rest is streamed). The
 game opens its own file, takes `DISK_FILEMAP` (it refuses a fragmented file) and reads raw
@@ -15958,13 +15958,30 @@ Three fixes, all ours:
   memory write. This game pads its list with `MOVE 7F,0`: 2.2M copper writes a second, and
   `copperRun` + `NextReg::write` were ~75% of core0. `.nxovl` 51 072 of 51 200 B.
 
-OPEN: the screen still shows garbage — noise columns at the left of Layer 2 (320x256), junk
-rows at the bottom of the 40x32 tilemap, and 53 visible sprites over the left part whose
-patterns read back ZERO in the dump. The intro uploads them once (`#1064`: asset 3 from the
-card into pages `#56/#57`, then a DMA of `#3500` bytes to port `#5B` from pattern 11), then
-asset 4 into bank 5 (tiles/map). Next step: count DMA bytes into `#5B` (the `NEXT dma` and
-`NEXT io` lines see neither that DMA path nor it) and dump right after the intro starts.
-The box says "Game may glitch on some brands of SD cards".
+The garbage — fixed the same evening (hw-confirmed DVp2, owner: "работает"); three causes in turn:
+- **The DMA was held for good after the first NMI** (`NextInt::dmaDelay`): the NMI term is
+  `next_nmi_btn || (next_nmi_hold && automap)` — zxnext.vhd 2007/2093, `nmi_activated` drops at
+  S_NMI_END. `next_nmi_hold` alone stays set until the next request, so no DMA ever ran again
+  (sprite patterns never uploaded).
+- **One main instruction ran after every RETN while a DMA block was still held**
+  (`NextInt::wakeNow()`, used after RETN/RETI): `wake()` leaves `stFrame = tstates + 1`. With a
+  copper NMI on every line the game's page-fill loop (`#10BA`: `NEXTREG #54,A` + an 8K DMA fill)
+  advanced under its own held fill, the last 8K landed on code page `#0C` and the machine slid into
+  zeros. `[DMAHELD]` (NEXT_TRACE, Z80DMA::nxHeldNote) logs DMA/MMU writes while a block is held —
+  it must print nothing.
+- **SD Nac = 0: the intro asset loaded one sector late** (DivMMC.cpp `mmc_nac`). The game's loader
+  (`#D1ED`) reads ONE byte past R1 blindly; when the sector was already in hand (read-ahead hit,
+  core1 fast) our CMD17/18 put the 0xFE token right after R1, the loader swallowed it, waited for
+  0xFE in the data and caught the NEXT block's token — the first block of the asset was lost, the
+  map shifted 512 bytes (tile definitions in the bottom rows, striped tiles). A real card always
+  sends at least one 0xFF there (SD NAC >= 1 byte); now we do too. Found by deriving the asset base
+  from the game's own table at `#DAC2` (asset 1 = file sector 0): matching a dump against the file
+  WITHOUT a base made the shifted data look "correct" for a whole round.
+- A DeepSeek MMU-freeze per DMA block (frozen slot pointers at ENABLE) was tried and dropped: it
+  treated the symptom and departs from hardware (a handler may remap a slot while the DMA is held).
+  Kept in `debug/deepseek-staged-2026-10-16.patch`.
+- Still open, separate task: **42-43 FPS** in game. `tools/memdump.gdb` now also dumps the copper
+  program (`/tmp/picospec_copper.bin`) and the live clip windows.
 
 Trace-build changes from the same session: guest-raised NMIs no longer re-arm the 1500-line
 `[NMIT]` UART trace (only the hot key does — the trace build ran at 0-1 FPS), copper writes
