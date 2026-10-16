@@ -1140,6 +1140,9 @@ static inline uint8_t gsDmaPeek8(uint16_t address) {
 #endif
     if (__builtin_expect(g_timex_mmu != 0, 0) && Timex::rd[address >> 13])
         return timexPeek8(address);
+    // Spectrum Next slot with no SRAM behind it: the data latch (MemESP.h).
+    if (__builtin_expect(MemESP::next_stale_mask != 0, 0) && ((MemESP::next_stale_mask >> (address >> 13)) & 1))
+        return MemESP::nextStaleByte();
     if (__builtin_expect(g_ngs_zxdma != 0, 0) && address < 0x4000
         && !MemESP::page0ram && !MemESP::newSRAM && !MemESP::divmmc_mapped)
         return GS::zxDmaRead();

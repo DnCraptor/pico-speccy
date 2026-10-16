@@ -1408,8 +1408,8 @@ static void applyRomSelect() {
     // divMMC automap "rom3" entry points: the Alt-ROM stands in for ROM3 when
     // it is the 48K half (sram_divmmc_automap_rom3_en).
     MemESP::next_rom3 = MemESP::altrom_rd ? alt128n : rom3;
-    if (MemESP::mmu[0] == 0xFF) MemESP::applyMMU(0, 0xFF);
-    if (MemESP::mmu[1] == 0xFF) MemESP::applyMMU(1, 0xFF);
+    if (MemESP::mmu[0] >= 0xE0) MemESP::applyMMU(0, MemESP::mmu[0]);
+    if (MemESP::mmu[1] >= 0xE0) MemESP::applyMMU(1, MemESP::mmu[1]);
 }
 
 static void applyBankC000() {

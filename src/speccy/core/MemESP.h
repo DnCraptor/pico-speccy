@@ -473,7 +473,14 @@ public:
     __attribute__((always_inline)) static inline uint8_t* nextRomRegion() {
         return nextStrip + ((size_t)(NEXT_PAGES - 16) << 13);
     }
-    static uint8_t  mmu[8];        // current MMU mapping; 0xFF = ROM (slots 0/1)
+    static uint8_t  mmu[8];        // current MMU mapping; 0xE0-0xFF = ROM (slots 0/1)
+    // Slots 2-7 showing no SRAM (an MMU page >= 0xE0, an unbacked Layer 2 read
+    // page): zxnext.vhd raises no SRAM request there and the CPU reads the
+    // board's port-A data latch, i.e. the LAST byte read from SRAM. Non-zero
+    // only on the Next; it turns the fast paths off (Video.cpp tsFastMemRecalc)
+    // so every read reaches gsDmaPeek8 (CPU.cpp), which returns nextStaleByte().
+    static uint8_t  next_stale_mask;
+    static uint8_t  nextStaleByte();
     static bool     nextRamReady;  // buildNextRam() completed
 
     static bool buildNextRam();    // carve Next RAM out of butter PSRAM

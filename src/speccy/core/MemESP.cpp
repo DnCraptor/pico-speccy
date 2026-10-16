@@ -41,6 +41,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "app/Buffer.h"
 #include "app/TryAlloc.h"
 #include "app/CodeOverlay.h"   // NX_OVL_CODE (applyMMU)
+#include "speccy/video/Video.h" // VIDEO::tsFastMemRecalc (next_stale_mask)
 #include "speccy/machines/Plus3/Plus3Paging.h"
 #include "speccy/machines/Timex.h"   // g_timex_mmu + Timex::rd/read8: the SCLD window the debugger must see
 #include <stddef.h>
@@ -893,6 +894,26 @@ void MemESP::dbgPoke(uint16_t addr, uint8_t data) {
 uint8_t* MemESP::nextPg[16];
 uint8_t* MemESP::nextStrip = nullptr;
 uint8_t  MemESP::mmu[8];
+uint8_t  MemESP::next_stale_mask = 0;
+
+// The byte a read from a no-SRAM slot returns: the last SRAM read, which for
+// a data read is the instruction byte fetched just before it — the opcode of
+// LD r,(HL) / POP, the displacement of (IX+d), the CB/DD CB second byte — so
+// the byte at PC-1. The second half of a 16-bit read gets the same value: a
+// read from such a slot does not update the latch (zxnext_top_issue5.vhd
+// sram_port_a_dat). Not modelled: code running from bank 5/7 (BRAM, which does
+// not reach the latch either) and LD A,(nn)-style forms whose last SRAM byte
+// is an operand already behind PC-1.
+// NextDAW.DRV (Eldritch Force) depends on it: at .install it is called with
+// DE=0, takes the byte at 0x0000 (0xF3) as the song's page and parses the
+// "song" out of MMU page 0xF3 — on the board the counts come back small
+// (LD B,(IX+6) reads 06), with 0xFF its 0x55-byte channel table ran on for 255
+// records and overwrote its own code at 0x9D2E (hw 2026-10-16: the music IM1
+// hook then recursed through RST 38 for ever).
+uint8_t MemESP::nextStaleByte() {
+    const uint16_t a = (uint16_t)(Z80::getRegPC() - 1);
+    return ramCurrent[a >> 13][a & 0x1FFF];
+}
 bool     MemESP::nextRamReady = false;
 uint8_t* MemESP::wrOverlay[8] = {};
 uint8_t  MemESP::wr_overlay_mask = 0;
@@ -1217,7 +1238,9 @@ NX_OVL_CODE void MemESP::applyMMU(uint8_t slot, uint8_t page) {
     // latch updates; applyNextConfigWindow() re-applies mmu[] on window exit.
     if (slot <= 1 && (nextBootRomActive || nextConfigMode)) return;
     uint8_t* p;
-    if (page == 0xFF && slot <= 1) {
+    // zxnext.vhd 2964/3037: mmu_A21_A13(8) = 1 for every page >= 0xE0, and in
+    // slots 0/1 that is the ROM branch — not only for the documented 0xFF.
+    if (page >= 0xE0 && slot <= 1) {
         if (altrom_rd && altRomBase)
             p = altRomBase + (uint32_t)altrom_sel * 0x4000 + slot * 0x2000;
         else if (nextRomBase)
@@ -1255,6 +1278,18 @@ NX_OVL_CODE void MemESP::applyMMU(uint8_t slot, uint8_t page) {
     // ROM and the divMMC window are never contended.
     ramContended[slot] = !(next_rom_mask & (1u << slot)) && !(slot <= 1 && divmmc_mapped) &&
                          NextReg::pageContended(page);
+    // No SRAM behind slots 2-7 (MMU page >= 0xE0, Layer 2 read page past RAM):
+    // reads return the data latch (nextStaleByte), which only the generic
+    // accessors model — a change of the set re-derives the fast-path gates.
+    if (slot >= 2) {
+        const uint8_t bit = (uint8_t)(1u << slot);
+        const uint8_t m = (ramCurrent[slot] == (uint8_t*)open_bus_page.b)
+                          ? (uint8_t)(next_stale_mask | bit) : (uint8_t)(next_stale_mask & ~bit);
+        if (m != next_stale_mask) {
+            next_stale_mask = m;
+            VIDEO::tsFastMemRecalc();
+        }
+    }
     // Next pages are direct pointers (SRAM or butter XIP) — no pool
     // write-back tracking, so the write hooks must not touch a stale
     // pool page's flags through this slot.
