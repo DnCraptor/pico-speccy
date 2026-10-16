@@ -1533,7 +1533,34 @@ void NEXTVID::spriteAttrDirect(uint8_t byteIdx, uint8_t v, bool inc) {
 
 // ===== Copper =====
 
+// Copper NOP runs (MOVE to register 0): the first time the copper reaches a NOP
+// the run's end is found once and remembered until the copper memory changes,
+// so a list padded with NOPs costs one step per run, not one per NOP.
+// Atic Atac Remake runs a short WAIT/MOVE list in mode 01 inside an otherwise
+// empty copper memory: the copper walked ~1800 NOPs on every raster line,
+// copperRun was ~45% of core0 (hw 2026-10-16). Hardware does that for free.
+static uint32_t s_copGen = 1;        // bumped by every copper memory write
+static uint32_t s_runGen[2];          // per kind (NOP, MOVE 7F): s_copGen the cached run belongs to
+static uint16_t s_runFrom[2];         // its first instruction
+static uint16_t s_runLen[2];          // its length (1024 = the whole memory)
+static uint8_t  s_runLo[2];           // MOVE 7F: the value
+
+// Length of the run of `hi lo` instructions starting at pc (flash: called once
+// per run, the scan only when the run is new or the copper memory changed).
+// For a NOP (hi = 0) any lo matches.
+static __attribute__((noinline)) uint32_t copSkipRun(const uint8_t* m, uint16_t pc, uint8_t hi, uint8_t lo) {
+    const int k = hi ? 1 : 0;
+    const uint32_t into = (uint32_t)(pc - s_runFrom[k]) & 0x3FF;   // a run may wrap 0x3FF -> 0
+    if (s_runGen[k] == s_copGen && (!k || s_runLo[k] == lo) && into < s_runLen[k]) return s_runLen[k] - into;
+    uint32_t run = 0;
+    uint16_t q = pc;
+    while (run < 1024 && m[q * 2] == hi && (!k || m[q * 2 + 1] == lo)) { run++; q = (q + 1) & 0x3FF; }
+    s_runGen[k] = s_copGen; s_runFrom[k] = pc; s_runLen[k] = (uint16_t)run; s_runLo[k] = lo;
+    return run;
+}
+
 void NEXTVID::copperDataWrite(uint8_t v) {
+    s_copGen++;
     copperMem[copIndex] = v;
     copIndex = (copIndex + 1) & 0x7FF;
 }
@@ -1558,6 +1585,7 @@ void NEXTVID::copperData16Write(uint8_t v) {
         cop16First = v;
         cop16Second = true;
     } else {
+        s_copGen++;
         copperMem[copIndex & 0x7FE] = cop16First;
         copperMem[(copIndex & 0x7FE) + 1] = v;
         copIndex = (copIndex + 2) & 0x7FF;
@@ -1589,11 +1617,37 @@ IRAM_ATTR void NEXTVID::copperRun(uint16_t cvc, uint16_t from, uint16_t to) {
             if (wl != cvc || tgt >= end) return;   // not due in this span
             if (tgt > s_copT) s_copT = tgt;
             s_copT += 1;
+        } else if (hi == 0x7F) {
+            // MOVE NR 0x7F (the user register, a plain latch): a run of identical
+            // ones is one write. The same game pads its list with MOVE 7F,0 —
+            // 2.2M copper writes a second through NextReg::write (hw 2026-10-16).
+            uint32_t run = copSkipRun(copperMem, copPC, 0x7F, lo);
+            const uint32_t fit = ((uint32_t)(end - s_copT) + 1) / 2;   // 2 clocks each
+            if (run > fit) run = fit;
+            if (run == 0) run = 1;
+            NextReg::reg[0x7F] = lo;
+            s_copT += (int32_t)(2 * run);
+            copPC = (uint16_t)((copPC + run) & 0x3FF);
+            continue;
         } else if (hi & 0x7F) {
+#if NEXT_TRACE
+            extern bool g_nx_copper_wr;   // NextReg::write counts copper writes, does not record them
+            g_nx_copper_wr = true;
             NextReg::write(hi & 0x7F, lo);
+            g_nx_copper_wr = false;
+#else
+            NextReg::write(hi & 0x7F, lo);
+#endif
             s_copT += 2;
         } else {
-            s_copT += 1;
+            // NOP (MOVE to register 0): see copSkipRun
+            uint32_t run = copSkipRun(copperMem, copPC, 0, lo);
+            const uint32_t room = (uint32_t)(end - s_copT);
+            if (run > room) run = room;
+            if (run == 0) run = 1;
+            s_copT += (int32_t)run;
+            copPC = (uint16_t)((copPC + run) & 0x3FF);
+            continue;
         }
         copPC = (copPC + 1) & 0x3FF;
     }

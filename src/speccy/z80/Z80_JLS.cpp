@@ -4541,29 +4541,44 @@ Z80_COLD void Z80::nextIniRunBatch() {
     const uint8_t cs = pc >> 13;
     const uint8_t* cp = MemESP::ramCurrent[cs];
     if (cs < 2 || (uintptr_t)cp < 0x11000000u) return;   // ROM / accessor / divMMC area
-    // the run: consecutive ED A2 from PC, inside the code's 8K slot
-    uint32_t run = 0;
-    uint32_t co = pc & 0x1FFF;
-    while (co + 1 < 0x2000u && cp[co] == 0xED && cp[co + 1] == 0xA2) { run++; co += 2; }
-    if (run < 2) return;
+    // Every refusal that does not depend on the run comes BEFORE the scan: this
+    // runs after EVERY INI from 0xEB, and scanning the rest of a 512-INI block
+    // only to refuse it made a sector cost ~130k byte reads of PSRAM-backed code
+    // (Atic Atac Remake loads into MMU slot 0 with HL = 0: 76% of core0, 300 ms
+    // frames, hw 2026-10-16).
+    const uint16_t hl = REG_HL;
+    const uint8_t ds = hl >> 13;
+    // The destination resolved the way MemESP::writebyte resolves it (as
+    // Z80DMA's nxWrRun): the divMMC window in slots 0/1 and the Next ROM take
+    // the byte path, the Layer 2 write-over writes its own buffer, plain RAM in
+    // any slot is batched — the loader above reads sectors to HL = 0.
+    uint8_t* dp;
+    if (ds <= 1 && MemESP::divmmc_mapped) return;
+    if ((MemESP::wr_overlay_mask >> ds) & 1) dp = MemESP::wrOverlay[ds];
+    else {
+        if (ds <= 1 && (MemESP::next_rom_mask & (1u << ds))) return;
+        dp = MemESP::ramCurrent[ds];
+        if ((uintptr_t)dp < 0x11000000u) return;          // ROM / accessor / open bus
+        *mem_desc_t::bank_dirty[ds] = true;
+    }
     const uint32_t now = CPU::tstates;
     if (now >= CPU::stFrame) return;
     constexpr uint32_t T = 13;
-    uint32_t n = run - 1;                                  // the last one runs normally
-    const uint32_t room = (CPU::stFrame - now) / T;
-    if (n > room) n = room;
+    uint32_t lim = (CPU::stFrame - now) / T;               // batched INIs this call may take
     const uint32_t tpl = VIDEO::tStatesPerLine ? VIDEO::tStatesPerLine : 224;
     const uint32_t line = (tpl << ESPectrum::multiplicator) / T;
-    if (line > 1 && n > line - 1) n = line - 1;
-    const uint16_t hl = REG_HL;
+    if (line > 1 && lim > line - 1) lim = line - 1;
     const uint32_t dstLeft = 0x2000u - (hl & 0x1FFF);
-    if (n > dstLeft) n = dstLeft;
-    if (n < 1) return;
-    const uint8_t ds = hl >> 13;
-    if (ds < 2) return;
-    uint8_t* dp = MemESP::ramCurrent[ds];
-    if ((uintptr_t)dp < 0x11000000u) return;              // ROM / accessor
-    *mem_desc_t::bank_dirty[ds] = true;
+    if (lim > dstLeft) lim = dstLeft;
+    if (lim < 1) return;
+    // the run: consecutive ED A2 from PC, inside the code's 8K slot, counted no
+    // further than lim + 1 (the last one of the run executes normally)
+    uint32_t run = 0;
+    uint32_t co = pc & 0x1FFF;
+    while (run <= lim && co + 1 < 0x2000u && cp[co] == 0xED && cp[co + 1] == 0xA2) { run++; co += 2; }
+    if (run < 2) return;
+    uint32_t n = run - 1;
+    if (n > lim) n = lim;
     LED::touchR(LED::SD);
     uint32_t o = hl & 0x1FFF;
     for (uint32_t i = 0; i < n; ) {           // data bytes in runs, the protocol bytes one by one

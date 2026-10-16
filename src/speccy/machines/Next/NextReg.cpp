@@ -113,6 +113,7 @@ volatile uint32_t g_nx_idle_neg = 0;            // frames with negative idle
 // divMMC bank 0 0x2000-0x2152 (esxDOS's NMI/ISR dispatch), found zeroed in
 // the post-crash dump.
 uint16_t g_nmi_trace_left = 0;
+bool g_nx_copper_wr = false;   // NEXTVID::copperRun: the write in progress is the copper's
 uint16_t next_div0_sum() {
     const uint8_t* b = DivMMC::bank_ptr[0];
     if (!b) return 0xFFFF;
@@ -264,6 +265,7 @@ void next_trace_dump(uint32_t frames) {
                 if (ao >= (int)sizeof ay) ao = sizeof ay - 1;
             }
             const unsigned fr = f ? f : 1;
+            Debug::uartFlushSync();   // the 1 Hz block outruns the 4 KB ring: drain it in parts
             Debug::log("NEXT dac: A %u/%u %02X..%02X B %u/%u %02X..%02X C %u/%u %02X..%02X D %u/%u %02X..%02X off %u | nr08=%02X ay%s",
                 (unsigned)(g_nx_dac_n[0] / fr), (unsigned)(g_nx_dac_jump[0] / fr), g_nx_dac_min[0], g_nx_dac_max[0],
                 (unsigned)(g_nx_dac_n[1] / fr), (unsigned)(g_nx_dac_jump[1] / fr), g_nx_dac_min[1], g_nx_dac_max[1],
@@ -356,6 +358,7 @@ void next_trace_dump(uint32_t frames) {
                 (unsigned)(g_nx_rows / f));
             g_nx_rows = 0;
             {
+                Debug::uartFlushSync();
                 // Host PCs of the worst frame (100 us samples on core0), 64-byte
                 // buckets; resolve against the ELF.
                 extern uint32_t* g_nxprof_worst; extern volatile uint32_t g_nxprof_worst_n;
@@ -876,8 +879,19 @@ uint8_t NextReg::divNmiRequest(bool hotkey) {
     DivMMC::next_nmi_btn = !DivMMC::automap;
     DivMMC::next_nmi_hold = true;
     Z80::triggerNMI();
+    // Take it at the next instruction boundary, not at the end of the running
+    // slice (the next INT/DMA event or the frame tail), as NextMf::request does.
+    // Atic Atac Remake plays its sound from a raster NMI the copper raises with
+    // NR 0x02 = 4 on every line (4 DAC samples, then RETN): with the NMI left
+    // pending until the slice ended, a frame's ~300 requests collapsed into ~2
+    // and the game's sample-driven streaming crawled (the intro "loading" for
+    // minutes over a garbled screen, hw 2026-10-16).
+    NextInt::wake();
 #if NEXT_TRACE
-    { extern uint16_t g_nmi_trace_left; g_nmi_trace_left = 1500;
+    // Only the hot key arms the one-shot UART trace: a guest raising the NMI
+    // itself (NR 0x02 bit 2, a copper raster NMI ~300 times a frame) re-armed
+    // 1500 lines per NMI and the trace build ran at 0-1 FPS.
+    { extern uint16_t g_nmi_trace_left; if (hotkey) g_nmi_trace_left = 1500;
       next_trace_ev('M', DivMMC::next_nmi_btn, reg[0xBB]); }
 #endif
     return 0;
@@ -958,7 +972,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
     // Flood sources are counted, not recorded (palette / copper / sprite
     // streams run thousands of writes a second and would purge the ring).
     if (r == 0x40 || r == 0x41 || r == 0x44) s_nt_pal++;
-    else if (r >= 0x60 && r <= 0x63) s_nt_cop++;
+    else if ((r >= 0x60 && r <= 0x63) || g_nx_copper_wr) s_nt_cop++;   // a copper raster NMI writes NR 02 every line
     else if ((r >= 0x34 && r <= 0x39) || (r >= 0x75 && r <= 0x79)) s_nt_spr++;
     else NT_EV('N', r, v);
     {

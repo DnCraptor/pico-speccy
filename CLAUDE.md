@@ -15926,3 +15926,42 @@ layer/palette state and `TILE` (AltROM page 1 #10FB: 16 x `LDIX`, A = NR 0x14 re
 RAMTOP write. Which of the three state resets the game actually needed was not isolated.
 Diagnosed by rendering the game's map + tiles on the host against the L2 dump: the star
 pixels of tile 3 were drawn over the logo, its zero pixels were not.
+
+## Next: Atic Atac Remake — a copper raster NMI plays the sound (2026-10-16; 24 -> 42-43 FPS hw DVp2, screen garbage still OPEN)
+
+`ATICATAC.NEX` (9bitcolor, 111 MB; the header loads 3 banks, the rest is streamed). The
+game opens its own file, takes `DISK_FILEMAP` (it refuses a fragmented file) and reads raw
+sectors through port `#EB` — CMD12 + CMD18 per chunk, unrolled `INI`. Its sound is a
+**copper raster NMI**: the copper (mode 01, `NR #62 = #40`) writes `NR #02 = 4` on every
+line, enNxtmmc's `#0066` is `JP (IY)`, and the handler in divMMC RAM banks 12-15 outputs 4
+DAC samples (`#0F/#4F/#DF/#FE`), steps IY and `RETN`s. At the end of a bank it moves `#E3`
+to the next one, and the main loop streams the next chunk only when `#E3` bit 1 changes.
+Three fixes, all ours:
+
+- **divMMC NMI is taken at once** (`NextInt::wake()` in `NextReg::divNmiRequest`, as
+  `NextMf::request` always did). Left pending until the slice ended, ~300 requests a frame
+  collapsed into ~2: the intro "loaded" for minutes with the stream at a crawl.
+- **`Z80::nextIniRunBatch`**: every refusal that does not depend on the run is tested BEFORE
+  the scan for `ED A2`, and the scan stops at the limit. It runs after every INI from `#EB`,
+  and the loader reads to `HL = 0` (MMU slot 0 = RAM): rescanning a 512-INI block only to
+  refuse it was quadratic, 76% of core0. The destination is now resolved like Z80DMA's
+  `nxWrRun` (divMMC window / Next ROM -> byte path, Layer 2 write-over -> its buffer — the
+  batch used to write the MMU page under it — any RAM slot batched).
+- **Copper runs** (`copSkipRun`, flash): a run of NOPs or of identical `MOVE NR #7F,v` (a
+  plain latch) costs one step; the run is found once and cached per kind until a copper
+  memory write. This game pads its list with `MOVE 7F,0`: 2.2M copper writes a second, and
+  `copperRun` + `NextReg::write` were ~75% of core0. `.nxovl` 51 072 of 51 200 B.
+
+OPEN: the screen still shows garbage — noise columns at the left of Layer 2 (320x256), junk
+rows at the bottom of the 40x32 tilemap, and 53 visible sprites over the left part whose
+patterns read back ZERO in the dump. The intro uploads them once (`#1064`: asset 3 from the
+card into pages `#56/#57`, then a DMA of `#3500` bytes to port `#5B` from pattern 11), then
+asset 4 into bank 5 (tiles/map). Next step: count DMA bytes into `#5B` (the `NEXT dma` and
+`NEXT io` lines see neither that DMA path nor it) and dump right after the intro starts.
+The box says "Game may glitch on some brands of SD cards".
+
+Trace-build changes from the same session: guest-raised NMIs no longer re-arm the 1500-line
+`[NMIT]` UART trace (only the hot key does — the trace build ran at 0-1 FPS), copper writes
+are counted not recorded, the 1 Hz block drains the UART in parts (the `NEXT hostpc` lines
+were being lost), and `tools/memdump.gdb` dumps all 16 divMMC banks and 10 pages of each
+Layer 2 buffer (320x256 / 640x256 take 80K).

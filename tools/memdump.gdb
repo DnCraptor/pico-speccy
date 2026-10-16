@@ -63,6 +63,42 @@ if $nslots == 8
   if DivMMC::bank_ptr[3] != 0
     dump binary memory /tmp/picospec_divbank3.bin DivMMC::bank_ptr[3] (DivMMC::bank_ptr[3] + 8192)
   end
+  if DivMMC::bank_ptr[4] != 0
+    dump binary memory /tmp/picospec_divbank4.bin DivMMC::bank_ptr[4] (DivMMC::bank_ptr[4] + 8192)
+  end
+  if DivMMC::bank_ptr[5] != 0
+    dump binary memory /tmp/picospec_divbank5.bin DivMMC::bank_ptr[5] (DivMMC::bank_ptr[5] + 8192)
+  end
+  if DivMMC::bank_ptr[6] != 0
+    dump binary memory /tmp/picospec_divbank6.bin DivMMC::bank_ptr[6] (DivMMC::bank_ptr[6] + 8192)
+  end
+  if DivMMC::bank_ptr[7] != 0
+    dump binary memory /tmp/picospec_divbank7.bin DivMMC::bank_ptr[7] (DivMMC::bank_ptr[7] + 8192)
+  end
+  if DivMMC::bank_ptr[8] != 0
+    dump binary memory /tmp/picospec_divbank8.bin DivMMC::bank_ptr[8] (DivMMC::bank_ptr[8] + 8192)
+  end
+  if DivMMC::bank_ptr[9] != 0
+    dump binary memory /tmp/picospec_divbank9.bin DivMMC::bank_ptr[9] (DivMMC::bank_ptr[9] + 8192)
+  end
+  if DivMMC::bank_ptr[10] != 0
+    dump binary memory /tmp/picospec_divbank10.bin DivMMC::bank_ptr[10] (DivMMC::bank_ptr[10] + 8192)
+  end
+  if DivMMC::bank_ptr[11] != 0
+    dump binary memory /tmp/picospec_divbank11.bin DivMMC::bank_ptr[11] (DivMMC::bank_ptr[11] + 8192)
+  end
+  if DivMMC::bank_ptr[12] != 0
+    dump binary memory /tmp/picospec_divbank12.bin DivMMC::bank_ptr[12] (DivMMC::bank_ptr[12] + 8192)
+  end
+  if DivMMC::bank_ptr[13] != 0
+    dump binary memory /tmp/picospec_divbank13.bin DivMMC::bank_ptr[13] (DivMMC::bank_ptr[13] + 8192)
+  end
+  if DivMMC::bank_ptr[14] != 0
+    dump binary memory /tmp/picospec_divbank14.bin DivMMC::bank_ptr[14] (DivMMC::bank_ptr[14] + 8192)
+  end
+  if DivMMC::bank_ptr[15] != 0
+    dump binary memory /tmp/picospec_divbank15.bin DivMMC::bank_ptr[15] (DivMMC::bank_ptr[15] + 8192)
+  end
   if MemESP::altRomBase != 0
     dump binary memory /tmp/picospec_altrom.bin MemESP::altRomBase (MemESP::altRomBase + 32768)
   end
@@ -380,13 +416,14 @@ if Config::arch == 11
   printf "dma: dir=%d A=%04X inc%d io%d B=%04X inc%d io%d len=%04X cnt=%04X curA=%04X curB=%04X\n", (int)Z80DMA::transfer_dir, Z80DMA::port_a_addr, (int)Z80DMA::port_a_inc, (int)Z80DMA::port_a_is_io, Z80DMA::port_b_addr, (int)Z80DMA::port_b_inc, (int)Z80DMA::port_b_is_io, Z80DMA::block_length, Z80DMA::nx_counter, Z80DMA::cur_port_a, Z80DMA::cur_port_b
   set logging enabled off
   set logging redirect off
-  # Both Layer 2 buffers (NR 0x12 and NR 0x13, 6 x 8K each), resolved the way
+  # Both Layer 2 buffers (NR 0x12 and NR 0x13, 10 x 8K each: 320x256 and
+  # 640x256 take 80K, 256x192 the first 6), resolved the way
   # nextPgPtr does (hot-page pool first), plus the pool's page table.
   shell rm -f /tmp/picospec_l2a_*.bin /tmp/picospec_l2b_*.bin
   set $nxk = 0
-  while $nxk < 12
-    set $nxbank = ($nxk < 6) ? (NextReg::reg[0x12] & 0x7F) : (NextReg::reg[0x13] & 0x7F)
-    set $nxpg = $nxbank * 2 + ($nxk % 6)
+  while $nxk < 20
+    set $nxbank = ($nxk < 10) ? (NextReg::reg[0x12] & 0x7F) : (NextReg::reg[0x13] & 0x7F)
+    set $nxpg = ($nxbank * 2 + ($nxk % 10)) & 0xFF
     set $nxf = 255
     if MemESP::nextHotIdx != 0
       set $nxf = MemESP::nextHotIdx[$nxpg]
@@ -400,10 +437,10 @@ if Config::arch == 11
         set $nxp = (unsigned long)MemESP::nextStrip + ($nxpg - 16) * 8192
       end
     end
-    if $nxk < 6
+    if $nxk < 10
       eval "dump binary memory /tmp/picospec_l2a_%d.bin %lu %lu", $nxk, $nxp, $nxp + 8192
     else
-      eval "dump binary memory /tmp/picospec_l2b_%d.bin %lu %lu", $nxk - 6, $nxp, $nxp + 8192
+      eval "dump binary memory /tmp/picospec_l2b_%d.bin %lu %lu", $nxk - 10, $nxp, $nxp + 8192
     end
     set $nxk = $nxk + 1
   end
