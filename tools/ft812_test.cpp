@@ -67,6 +67,39 @@ static uint32_t strWords(const char* s, std::vector<uint32_t>& out) {
     return (uint32_t)(padded / 4);
 }
 
+// ── .pss snapshot helpers: what Pss.cpp writes, kept in memory ──────────────
+struct FtSnap {
+    std::vector<uint8_t> state;
+    std::vector<std::vector<uint8_t>> area;      // by SnapArea; empty = not written
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> pages;
+};
+static FtSnap ftCapture() {
+    FtSnap s;
+    s.state.resize(SNAP_STATE_MAX);
+    s.state.resize(snapStateSave(s.state.data()));
+    s.area.resize(SNAP_INFLATE + 1);
+    for (int a = 0; a <= SNAP_INFLATE; a++) {
+        uint32_t n = 0; const uint8_t* p = snapArea((SnapArea)a, &n);
+        if (p) s.area[a].assign(p, p + n);
+    }
+    for (uint32_t pg = 0; pg < SNAP_PAGES; pg++)
+        if (snapPageUsed(pg)) s.pages.push_back({ pg, std::vector<uint8_t>(snapPage(pg), snapPage(pg) + SNAP_PAGE) });
+    return s;
+}
+static bool ftRestore(const FtSnap& s) {
+    snapLoadBegin();
+    for (int a = 0; a <= SNAP_INFLATE; a++) {
+        if (s.area[a].empty()) continue;
+        uint32_t n = 0; uint8_t* p = snapArea((SnapArea)a, &n, true);
+        if (!p || n != s.area[a].size()) return false;
+        memcpy(p, s.area[a].data(), n);
+    }
+    for (auto& pg : s.pages) memcpy(snapPage(pg.first), pg.second.data(), SNAP_PAGE);
+    const bool ok = snapStateLoad(s.state.data(), (uint32_t)s.state.size());
+    snapLoadEnd();
+    return ok;
+}
+
 // ── a renderer harness ───────────────────────────────────────────────────────
 struct Screen {
     int hs, vs, w, h;
@@ -266,6 +299,57 @@ int main() {
       cmdb({ 0xFFFFFF23u, 0 });
       CHECK(rd32s(RAM_CMD + ((rd16s(RAM_REG + REG_CMD_READ) - 4) & 0xFFF)) == 0x080000 + 40000, "GETPTR = end of the inflated data");
       CHECK(stats().cpFaults == 0, "no coprocessor fault so far"); }
+
+    // ── .pss: a snapshot taken mid-INFLATE resumes the stream ─────────────────
+    { std::vector<uint8_t> src(30000); for (size_t i = 0; i < src.size(); i++) src[i] = (uint8_t)((i * 7) ^ (i >> 5) ^ 0x5A);
+      uLongf clen = compressBound(src.size()); std::vector<uint8_t> comp(clen);
+      compress2(comp.data(), &clen, src.data(), src.size(), 9);
+      comp.resize(clen); const size_t padded = (clen + 3) & ~3u; comp.resize(padded, 0);
+      renderState()->handle[3].source = 0x012345; renderState()->handle[3].sw = 77;
+      cmdb({ 0xFFFFFF22u, 0x0A0000u });
+      auto feed = [&](size_t from, size_t to) {
+          while (from < to) {
+              uint16_t space = rd16s(RAM_REG + REG_CMDB_SPACE);
+              size_t n = to - from; if (n > space) n = space; n &= ~3u; if (!n) break;
+              spiWrite(RAM_REG + REG_CMDB_WRITE, comp.data() + from, n);
+              from += n;
+          }
+          return from;
+      };
+      const size_t half = (padded / 2) & ~3u;
+      CHECK(feed(0, half) == half, "first half of the stream accepted");
+      const uint16_t rdAt = rd16s(RAM_REG + REG_CMD_READ);
+      const FtSnap snap = ftCapture();
+      CHECK(!snap.area[SNAP_INFLATE].empty(), "the tinfl state is written while an INFLATE runs");
+      memset(renderState()->handle, 0, sizeof(renderState()->handle));
+      CHECK(ftRestore(snap), "state record accepted");
+      CHECK(rd16s(RAM_REG + REG_CMD_READ) == rdAt, "CMD_READ restored (%03X vs %03X)", rd16s(RAM_REG + REG_CMD_READ), rdAt);
+      CHECK(renderState()->handle[3].source == 0x012345 && renderState()->handle[3].sw == 77, "bitmap handles restored");
+      CHECK(feed(half, padded) == padded, "second half accepted after the restore");
+      CHECK(rd16s(RAM_REG + REG_CMD_READ) == rd16s(RAM_REG + REG_CMD_WRITE), "the resumed INFLATE finished");
+      CHECK(memcmp(ramG() + 0x0A0000, src.data(), src.size()) == 0, "the resumed INFLATE produced the right bytes");
+      CHECK(stats().cpFaults == 0, "no fault across the snapshot");
+      // a file without the chip's blocks: begin + end alone leave a blank chip
+      snapLoadBegin(); snapLoadEnd();
+      CHECK(!snapPageUsed(0x0A0000 / SNAP_PAGE), "begin clears RAM_G");
+      CHECK(rd8s(ROM_CHIPID) == 0x08, "begin leaves a power-reset chip (CHIPID)");
+      CHECK(ftRestore(snap), "restore again");
+      CHECK(snapPageUsed(0x0A0000 / SNAP_PAGE), "pages restored");
+      CHECK(feed(half, padded) == padded, "and fed again");
+      CHECK(memcmp(ramG() + 0x0A0000, src.data(), src.size()) == 0, "same bytes the second time");
+      CHECK(renderTake(), "the load asks for a frame");   // core1's part: take the re-render
+      renderDone();
+      // A swap accepted but not yet taken (the OSD holds core1): the NEW list is saved.
+      while (renderTake()) renderDone();
+      wr32s(RAM_DL, 0x26000007u); wr32s(RAM_DL + 4, 0x00000000u);   // CLEAR, DISPLAY
+      wr8s(RAM_REG + REG_DLSWAP, 2);
+      CHECK(frameTick(), "swap accepted");
+      const FtSnap s2 = ftCapture();
+      CHECK(s2.area[SNAP_DLSHOWN].size() == RAM_DL_SIZE && s2.area[SNAP_DLSHOWN][0] == 0x07 && s2.area[SNAP_DLSHOWN][3] == 0x26,
+            "the untaken new list is what the snapshot shows");
+      CHECK(ftRestore(s2), "restore");
+      CHECK(renderTake() && dlShadow()[0] == 0x26000007u, "the loaded list is the one rendered");
+      renderDone(); }
 
     // ── matrix commands: SETMATRIX emits the INVERSE, 8.8 ────────────────────
     { cmdb({ 0xFFFFFF00u, 0xFFFFFF26u, 0xFFFFFF28u, 0x1999Au, 0x1999Au, 0xFFFFFF2Au });   // DLSTART, LOADIDENTITY, SCALE 1.6, SETMATRIX

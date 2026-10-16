@@ -98,12 +98,43 @@ static const Cell kCells[J_CELLS] = {
     {   4,  26, -1,      -1,      -1,      J_UP,    "Type",   90 },
 };
 
+// The same pad for a window narrower than 316 px or a body shorter than 184 px —
+// the big HDMI modes show only the centre of the framebuffer (800x600 x3: 264x200,
+// 1024x768 x4: 256x192). Same cells, same neighbours, same order; rows 22 px apart
+// instead of 30, the D-pad pills 58 px instead of 66 (still 9 glyphs of value), the
+// button columns pulled in. Design area 242 x 132.
+static const Cell kCellsCompact[J_CELLS] = {
+    //  x    y   nl      nr       nu       nd       caption   w
+    {   0,  54, -1,      J_RIGHT, J_UP,    J_DOWN,  "Left",   58 },
+    {  62,  54, J_LEFT,  J_X,     J_UP,    J_DOWN,  "Right",  58 },
+    {  31,  32, -1,      J_A,     J_TYPE,  J_LEFT,  "Up",     58 },
+    {  31,  76, -1,      J_C,     J_LEFT,  J_START, "Down",   58 },
+    {   0,  98, -1,      J_MODE,  J_DOWN,  J_OK,    "Start",  58 },
+    {  62,  98, J_START, J_L2,    J_RIGHT, J_DEF,   "Select", 58 },
+    { 128,  32, J_UP,    J_B,     J_TYPE,  J_X,     "A",      54 },
+    { 188,  32, J_A,     -1,      J_TYPE,  J_Y,     "B",      54 },
+    { 128,  76, J_DOWN,  J_Z,     J_X,     J_L2,    "C",      54 },
+    { 128,  54, J_RIGHT, J_Y,     J_A,     J_C,     "X",      54 },
+    { 188,  54, J_X,     -1,      J_B,     J_Z,     "Y",      54 },
+    { 188,  76, J_C,     -1,      J_Y,     J_R2,    "Z",      54 },
+    { 128,  98, J_DOWN,  J_R2,    J_C,     J_TEST,  "L2",     54 },
+    { 188,  98, J_L2,    -1,      J_Z,     J_TEST,  "R2",     54 },
+    {   0, 121, -1,      J_DEF,   J_START, -1,      nullptr,  0  },  // Save
+    { 140, 121, J_DEF,   -1,      J_R2,    -1,      nullptr,  0  },  // Test joystick
+    {  44, 121, J_OK,    J_TEST,  J_MODE,  -1,      nullptr,  0  },  // Load defaults
+    {   0,  10, -1,      -1,      -1,      J_UP,    "Type",   90 },
+};
+static constexpr int kCompactW = 242, kCompactH = 132;
+
+// The table the page is laid out with this time (computeJoyLayout picks it).
+static const Cell* KC = kCells;
+
 // Display names of the JOY_* types (index = value).
 static const char* const kTypeShow[] = { "Cursor", "Kempston", "Sinclair 1", "Sinclair 2", "Fuller" };
 static const char* typeShow(uint8_t t) { return t < 5 ? kTypeShow[t] : "?"; }
 
 // Pill width of a cell, in live pixels.
-static inline int cellW(int i) { return (kCells[i].w ? kCells[i].w : 56) * Sf.glyphScale; }
+static inline int cellW(int i) { return (KC[i].w ? KC[i].w : 56) * Sf.glyphScale; }
 
 // JoyTest: the VK a physical pad control reports -> our cell.
 static int cellForJoyVk(int vk) {
@@ -152,14 +183,25 @@ static void computeJoyLayout() {
     // Centre the 312x190 design area in the body.
     const int body_y = JL.iy + JL.hdr_h;
     const int body_h = JL.iy + JL.ih - JL.foot_h - body_y;
+    // The full pad needs 316 px across and ~184 down; anything smaller (the big HDMI
+    // modes' centre window) gets the compact table.
+    if (Sf.w < 316 * sc || body_h < 184) {
+        KC = kCellsCompact;
+        JL.ox = (Sf.w - kCompactW * sc) / 2;
+        if (JL.ox < JL.ix) JL.ox = JL.ix;
+        JL.oy = body_y + (body_h - kCompactH) / 2;
+        if (JL.oy < body_y) JL.oy = body_y;
+        return;
+    }
+    KC = kCells;
     JL.ox = (Sf.w - 310 * sc) / 2;
     if (JL.ox < JL.ix) JL.ox = JL.ix;
     JL.oy = body_y + (body_h - 190) / 2 - 4;
     if (JL.oy < body_y) JL.oy = body_y;
 }
 
-static inline int cx(int i) { return JL.ox + kCells[i].x * JL.sx; }
-static inline int cy(int i) { return JL.oy + kCells[i].y; }
+static inline int cx(int i) { return JL.ox + KC[i].x * JL.sx; }
+static inline int cy(int i) { return JL.oy + KC[i].y; }
 
 // ── drawing ────────────────────────────────────────────────────────────────────
 
@@ -192,9 +234,9 @@ static void drawCell(int i) {
     // neighbours can never overlap.
     const UiColor capInk = s_test ? ((i < 14 && s_lit[i]) ? C_ACCENT : C_TEXT_DIM)
                                   : (sel ? C_WHITE : C_TEXT_DIM);
-    if (kCells[i].cap) {
+    if (KC[i].cap) {
         fill(x, y - UI_FONT_H - 2, cellW(i), UI_FONT_H + 1, C_PANEL);
-        textClip(x, y - UI_FONT_H - 1, cellW(i), kCells[i].cap, capInk);
+        textClip(x, y - UI_FONT_H - 1, cellW(i), KC[i].cap, capInk);
     }
 
     string kn;
@@ -406,10 +448,10 @@ static void mappingPage() {
 
         int ns = s_sel;
         switch (k.vk) {
-            case fabgl::VK_MENU_LEFT:  ns = kCells[s_sel].nl; break;
-            case fabgl::VK_MENU_RIGHT: ns = kCells[s_sel].nr; break;
-            case fabgl::VK_MENU_UP:    ns = kCells[s_sel].nu; break;
-            case fabgl::VK_MENU_DOWN:  ns = kCells[s_sel].nd; break;
+            case fabgl::VK_MENU_LEFT:  ns = KC[s_sel].nl; break;
+            case fabgl::VK_MENU_RIGHT: ns = KC[s_sel].nr; break;
+            case fabgl::VK_MENU_UP:    ns = KC[s_sel].nu; break;
+            case fabgl::VK_MENU_DOWN:  ns = KC[s_sel].nd; break;
 
             case fabgl::VK_DELETE:
                 if (s_sel < 14) {

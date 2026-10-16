@@ -12,6 +12,7 @@ struct Debug { static void log(const char* fmt, ...); };
 #include "app/Debug.h"
 #endif
 #include "miniz/miniz.h"
+#include "app/SnapPack.h"
 
 // The coprocessor's per-command loop runs from the VDAC2 code overlay window
 // (.ftovl, src/app/CodeOverlay.h): loaded only on a TS-Conf boot with VDAC2 on —
@@ -1134,5 +1135,159 @@ Stats*       statsMut() { return C ? &C->st : nullptr; }
 uint32_t cpRead()  { return C ? (C->cpFault ? 0xFFF : C->cpR) : 0; }
 uint32_t cpWrite() { return C ? C->cpW : 0; }
 uint32_t cpDl()    { return C ? C->cpDl : 0; }
+
+// ── .pss snapshot ────────────────────────────────────────────────────────────
+static constexpr uint8_t SNAP_VER = 1;
+
+uint32_t snapStateSave(uint8_t* buf) {
+    SnapOut o(buf);
+    if (!C) return 0;
+    o.u8(SNAP_VER);
+    // SPI transaction (a snapshot taken between two exchanges of one transaction)
+    o.u8(C->cs); o.u8(C->mode); o.u32(C->phase); o.u32(C->addr); o.u8(C->hc[0]); o.u8(C->hc[1]);
+    o.u32(C->touched); o.u8(C->powered);
+    // coprocessor
+    o.u32(C->cpR); o.u32(C->cpW); o.u32(C->cpDl);
+    o.u8(C->cpFault); o.u8(C->cpHalt); o.u8(C->cpWaitSwap);
+    for (int i = 0; i < 6; i++) o.u32((uint32_t)C->m[i]);
+    o.u32(C->fgcolor); o.u32(C->bgcolor); o.u32(C->gradcolor);
+    for (int i = 0; i < 32; i++) o.u32(C->fontPtr[i]);
+    o.raw(C->fontFirst, 32);
+    o.u32(C->numBase); o.u32(C->inflateEnd);
+    o.u8((uint8_t)C->vstate);
+    o.u32(C->vStart); o.u32(C->vAddr); o.u32(C->vRemain); o.u32(C->vIn);
+    o.u8(s_cpDeferred || s_cpDirty);
+    // display + media
+    o.u8(C->swapReq); o.u32(C->frames); o.u32(C->mediaTicks);
+    o.u32(C->mf.size ? C->mf.base : 0); o.u32(C->mf.size); o.u32(C->mf.rd); o.u32(C->mf.wr);
+    o.u8(C->videoBusy);
+    o.u8(C->intLast);
+    // engine state the display lists leave behind (bitmap handles)
+    for (int i = 0; i < 32; i++) {
+        const BitmapHandle& h = C->rs.handle[i];
+        o.u32(h.source); o.u16(h.stride); o.u16(h.lh); o.u16(h.sw); o.u16(h.sh);
+        o.u8(h.fmt); o.u8(h.filter); o.u8(h.wrapx); o.u8(h.wrapy);
+    }
+    return o.n;
+}
+
+uint8_t* snapArea(SnapArea a, uint32_t* bytes, bool forLoad) {
+    *bytes = 0;
+    if (!C) return nullptr;
+    switch (a) {
+        case SNAP_REGS:    *bytes = RAM_REG_SIZE;          return C->regs;
+        case SNAP_REGSHI:  *bytes = sizeof(C->regsHi);     return C->regsHi;
+        case SNAP_CMD:     *bytes = RAM_CMD_SIZE;          return C->cmd;
+        case SNAP_DL:      *bytes = RAM_DL_SIZE;           return (uint8_t*)C->dl;
+        case SNAP_DLSHOWN: {
+            // The list the chip shows is the newest one frameTick accepted. While the
+            // OSD holds core1 (VIDEO::ftHold) a swap accepted on the last frame is
+            // still untaken in the OTHER buffer — save that one, and load into the
+            // buffer the renderer will read (renderReq is cleared by snapLoadBegin).
+            *bytes = RAM_DL_SIZE;
+            fence();
+            const bool pendingNew = !forLoad && C->renderReq && !C->renderSame;
+            return (uint8_t*)C->dlShadow[C->shadowRender ^ (pendingNew ? 1 : 0)];
+        }
+        case SNAP_INFLATE:
+            if (forLoad && !C->inf) C->inf = (tinfl_decompressor*)s_alloc(sizeof(tinfl_decompressor), true);
+            if (!C->inf || (!forLoad && C->vstate != V_INFLATE)) return nullptr;
+            *bytes = sizeof(tinfl_decompressor);
+            return (uint8_t*)C->inf;
+    }
+    return nullptr;
+}
+
+bool snapPageUsed(uint32_t page) {
+    if (!C || page >= SNAP_PAGES) return false;
+    const uint32_t* p = (const uint32_t*)(C->ramg + page * SNAP_PAGE);
+    for (uint32_t i = 0; i < SNAP_PAGE / 4; i++) if (p[i]) return true;
+    return false;
+}
+uint8_t* snapPage(uint32_t page) { return (C && page < SNAP_PAGES) ? C->ramg + page * SNAP_PAGE : nullptr; }
+
+void snapLoadBegin() {
+    if (!C) return;
+    // Park the renderer: no new take, and wait out a frame in flight (core1).
+    fence();
+    C->renderReq = false;
+    fence();
+    if (clockUs) {
+        const uint64_t t0 = clockUs();
+        while (C->renderBusy && clockUs() - t0 < 300000) fence();
+    }
+    memset(C->ramg, 0, RAM_G_SIZE);
+    powerReset();                            // also stops a video in flight; writes CHIPID into RAM_G
+    memset(C->dl, 0, sizeof(C->dl));
+    memset(C->dlShadow, 0, sizeof(C->dlShadow));
+    memset(C->cmd, 0, sizeof(C->cmd));
+    ft812RenderStateReset(C->rs, romFontHandle);
+    C->rsReset = false;
+    C->renderSame = false;
+    C->touched = 0;
+    C->cs = false; C->phase = 0;
+    s_cpDeferred = false; s_cpDirty = 0;
+}
+
+bool snapStateLoad(const uint8_t* buf, uint32_t n) {
+    if (!C) return false;
+    SnapIn in(buf, n);
+    if (in.u8() != SNAP_VER) return false;
+    C->cs = in.u8() != 0; C->mode = in.u8() & 3; C->phase = in.u32(); C->addr = in.u32() & 0x3FFFFF;
+    C->hc[0] = in.u8(); C->hc[1] = in.u8();
+    C->touched = in.u32() & ((1u << (sizeof(kSide) / sizeof(kSide[0]))) - 1);
+    C->powered = in.u8() != 0;
+    C->cpR = in.u32() & 0xFFC; C->cpW = in.u32() & 0xFFC; C->cpDl = in.u32() & (RAM_DL_SIZE - 4);
+    C->cpFault = in.u8() != 0; C->cpHalt = in.u8() != 0; C->cpWaitSwap = in.u8() != 0;
+    for (int i = 0; i < 6; i++) C->m[i] = (int32_t)in.u32();
+    C->fgcolor = in.u32(); C->bgcolor = in.u32(); C->gradcolor = in.u32();
+    for (int i = 0; i < 32; i++) C->fontPtr[i] = in.u32() & 0x3FFFFF;
+    in.raw(C->fontFirst, 32);
+    C->numBase = in.u32(); C->inflateEnd = in.u32();
+    uint8_t vs = in.u8();
+    C->vStart = in.u32() & 0x3FFFFF; C->vAddr = in.u32() & 0x3FFFFF; C->vRemain = in.u32(); C->vIn = in.u32();
+    if (vs > V_SKIP || (vs == V_INFLATE && C->vStart >= RAM_G_SIZE)) vs = V_NONE;
+    C->vstate = (VState)vs;
+    const bool deferred = in.u8() != 0;
+    C->swapReq = in.u8() & 3; C->frames = in.u32(); C->mediaTicks = in.u32();
+    const uint32_t mb = in.u32(), ms = in.u32(), mr = in.u32(), mw = in.u32();
+    const bool video = in.u8() != 0;
+    C->intLast = in.u8() != 0;
+    for (int i = 0; i < 32; i++) {
+        BitmapHandle& h = C->rs.handle[i];
+        h.source = in.u32() & 0x3FFFFF; h.stride = in.u16(); h.lh = in.u16(); h.sw = in.u16(); h.sh = in.u16();
+        h.fmt = in.u8(); h.filter = in.u8(); h.wrapx = in.u8(); h.wrapy = in.u8();
+    }
+    if (!in.ok) return false;
+    C->mf.ramg = C->ramg;
+    if (ms && mb < RAM_G_SIZE && ms <= RAM_G_SIZE - mb) {
+        C->mf.base = mb; C->mf.size = ms; C->mf.rd = mr % ms; C->mf.wr = mw % ms;
+    } else { C->mf.base = 0; C->mf.size = 0; C->mf.rd = C->mf.wr = 0; }
+    if (video) {   // CMD_PLAYVIDEO was at the FIFO head: the stream does not resume — consume the command
+        C->cpR = (C->cpR + 8) & CMD_MASK;
+        Debug::log("FT812: snapshot taken during CMD_PLAYVIDEO - the video does not resume");
+    }
+    s_cpDeferred = deferred;                  // frameTick resumes work the budget had cut short
+    return true;
+}
+
+void snapSyncCs(bool cs) {
+    if (!C || C->cs == cs) return;
+    // The Z-Controller's config latch (#77 bit 2) is the chip select's truth; a
+    // record that disagrees with it (no PSSD block, or one refused) cuts the
+    // transaction: the next edge starts a fresh header.
+    C->cs = cs; C->phase = 0; C->mode = 0;
+}
+
+void snapLoadEnd() {
+    if (!C) return;
+    if (C->vstate == V_INFLATE && !C->inf) {  // no tinfl block in the file (or no memory): the stream cannot go on
+        C->vstate = V_NONE;
+        fault("snapshot: INFLATE state missing", 0x22);
+    }
+    ramgTouched(0, RAM_G_SIZE);               // every cached tile and palette is stale
+    ft812PalCacheInvalidate(C->rs);
+    renderRequest();
+}
 
 } // namespace Ft812

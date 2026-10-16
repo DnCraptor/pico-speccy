@@ -152,6 +152,34 @@ extern void (*swapPollHook)();
 // Wall clock for REG_CLOCK (60 MHz cycles) — microseconds since boot.
 extern uint64_t (*clockUs)();
 
+// ── .pss snapshot (src/speccy/core/Pss.cpp frames the blocks) ────────────────
+// The chip's state in pieces: a small serialized record (snapStateSave, ver 1:
+// the SPI transaction, the coprocessor, the media FIFO, the bitmap handles) plus
+// raw areas the container writes and reads in place, and RAM_G in 4 KB pages
+// (only the non-zero ones are written). A coprocessor stream in progress — a
+// MEMWRITE or an INFLATE — resumes where it was (the tinfl state is a POD and its
+// dictionary is RAM_G itself); a CMD_PLAYVIDEO in progress does not: the command
+// is consumed on load, as if the stream had ended.
+constexpr uint32_t SNAP_STATE_MAX = 1024;
+constexpr uint32_t SNAP_PAGE      = 4096;
+constexpr uint32_t SNAP_PAGES     = RAM_G_SIZE / SNAP_PAGE;
+enum SnapArea : uint8_t { SNAP_REGS, SNAP_REGSHI, SNAP_CMD, SNAP_DL, SNAP_DLSHOWN, SNAP_INFLATE };
+uint32_t snapStateSave(uint8_t* buf);                 // <= SNAP_STATE_MAX bytes
+// Bytes of an area. SNAP_INFLATE exists on save only while an INFLATE runs; on
+// load (`forLoad`) its state block is allocated if needed. nullptr = none.
+uint8_t* snapArea(SnapArea a, uint32_t* bytes, bool forLoad = false);
+bool     snapPageUsed(uint32_t page);                 // a RAM_G page holding a non-zero byte
+uint8_t* snapPage(uint32_t page);                     // its bytes (SNAP_PAGE of them)
+// Load: begin() parks the renderer, stops a video and power-resets the chip with
+// RAM_G cleared (so a file without the chip's blocks loads a blank chip, not the
+// previous session's); then the state and the areas; end() invalidates the
+// renderer's caches and asks for a frame.
+void snapLoadBegin();
+bool snapStateLoad(const uint8_t* buf, uint32_t n);
+void snapLoadEnd();
+// After the ZC record is in: make the chip's CS agree with DivMMC::zc_ft_cs.
+void snapSyncCs(bool cs);
+
 // ── diagnostics ──────────────────────────────────────────────────────────────
 struct Stats {
     uint32_t swaps, frames, spiBytes, cpCmds, cpDlWords, cpFaults, inflated, rendersReq;

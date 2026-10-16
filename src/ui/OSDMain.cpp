@@ -4536,6 +4536,9 @@ struct DbgSkin {
     int  code_lines;    // disassembly rows
     int  mem_hdr_row;   // content row of the "-Memory-" rule (Flags aligns to it)
     int  regs_hdr_row;  // content row of the "-Regs-" rule
+    int  mem_lines;     // memory dump rows under the rule (4; 3 on a 19-row grid)
+    bool narrow;        // < 51 columns (800x600 x3 / 1024x768 x4 window): no opcode
+                        // bytes column, 8-byte dump rows, short footers
 };
 static DbgSkin s_dbg;
 
@@ -4645,7 +4648,8 @@ static void dbgFrameNu(const char* title, const char* footer) {
 static void dbgFrame(const char* section) {
     char buf[48];
     snprintf(buf, sizeof(buf), "Debugger  [%s]", section);
-    dbgFrameNu(buf, "Tab Sect  Spc Step  Ent Edit  F5 BP  F1 Help");
+    dbgFrameNu(buf, s_dbg.narrow ? "Tab Sect Spc Step Ent Edit F5 BP F1 Help"
+                                 : "Tab Sect  Spc Step  Ent Edit  F5 BP  F1 Help");
 }
 // Grid geometry for this session, measured from the surface with the same
 // arithmetic dbgFrameNu draws with. The base layout is 20 rows x ~50 columns,
@@ -4663,16 +4667,29 @@ static void dbgBegin() {
     const int fy = iy + ih - (UI_FONT_H + 4);
     int rows = (fy - cy) / UI_FONT_H;
     int cols = (nm::Sf.w - 2 * cx) / dbgCellW();
-    if (rows < 20) rows = 20;
+    // 19 rows is the floor: the right column needs Regs to end at row 14 and Flags +
+    // legend + T-states under it (the BP count row is dropped there). The big HDMI
+    // modes' windows (264x200 at 800x600 x3, 256x192 at 1024x768 x4) give 19-20 rows
+    // and 40-41 columns.
+    if (cols < 40) cols = 40;
+    s_dbg.narrow = cols < 51;
+    // The narrow windows hold only 15 (1024x768 x4) / 16 (800x600 x3) rows: never
+    // pad them up to 19, the extra rows would be drawn under the footer.
+    const int minRows = s_dbg.narrow ? 14 : 19;
+    if (rows < minRows) rows = minRows;
     if (rows > DBG_MAX_ROWS) rows = DBG_MAX_ROWS;
-    if (cols < 51) cols = 51;
     s_dbg.rows = rows;
     s_dbg.cols = cols;
-    // Right panel is 17 columns wide; 32 is the hw-proven column on 320 px.
-    s_dbg.xr = cols - 19 > 32 ? cols - 19 : 32;
+    // Right panel is 17 columns wide; 32 is the hw-proven column on 320 px. A narrow
+    // window puts it flush with the right edge and drops the opcode bytes from the
+    // code lines instead, so the mnemonic keeps its 15 columns.
+    s_dbg.xr = s_dbg.narrow ? cols - 17 : (cols - 19 > 32 ? cols - 19 : 32);
     // Base: 15 code + memory rule + 4 dump; the right column packs Pages / Regs /
-    // Flags into the same 20 (T-states and BPs move under Flags).
-    s_dbg.code_lines   = 15 + (rows - 20);
+    // Flags into the same 20 (T-states and BPs move under Flags). The narrow grid
+    // keeps a 2-row memory dump under the code, pairs IX|IY and SP|PC in the right
+    // column (Regs end at row 12) and drops the T-states / BP rows.
+    s_dbg.code_lines   = s_dbg.narrow ? rows - 3 : (rows >= 20 ? 15 + (rows - 20) : 15);
+    s_dbg.mem_lines    = rows - s_dbg.code_lines - 1;
     s_dbg.mem_hdr_row  = s_dbg.code_lines;
     s_dbg.regs_hdr_row = 5;
 }
@@ -4681,9 +4698,21 @@ static void dbgBegin() {
 // bytes ends at column 5 + 2.5n; keep two columns clear of the right panel.
 static int dbgMemBpr(bool ascii) {
     if (ascii) return s_dbg.xr - 12;             // 20 on the base layout
-    int n = 8;
+    int n = 2;
     while (5 + (n + 2) * 5 / 2 <= s_dbg.xr - 3) n += 2;
     return n;
+}
+
+// Register cursor rows: 0-3 the pairs (AF|AF' ..), then IX IY SP PC one per row and
+// IR last (row 8) — or, on the narrow grid, IX|IY and SP|PC two per row with IR at
+// row 6. The alt flag picks the right-hand column of a two-column row.
+static int dbgRegIrRow() { return s_dbg.narrow ? 6 : 8; }
+static bool dbgRegRowPaired(int row) { return row < 4 || (s_dbg.narrow && row < 6); }
+// Index into the AF BC HL DE IX IY SP PC register list for a cursor row + column.
+static int dbgRegIndex(int row, bool alt) {
+    if (row < 4) return row;
+    if (s_dbg.narrow) return 4 + (row - 4) * 2 + (alt ? 1 : 0);
+    return row;
 }
 
 // ── Debugger modals ────────────────────────────────────────────────────────────
@@ -4824,6 +4853,7 @@ static bool dbgDumpRangeNu(uint16_t& from, uint16_t& to) {
 // PgUp/PgDn a page, 0 top, F8 go, Alt+F2 save range, Esc closes.
 void OSD::osdDump() {
     const int rows = s_dbg.rows;                 // full content grid
+    const int bpr  = s_dbg.narrow ? 8 : 16;      // 8 fit a 40-column window
     char buf[52];
     bool alt = false;
     bool redraw_frame = true;
@@ -4832,13 +4862,14 @@ void OSD::osdDump() {
     while (1) {
         if (redraw_frame) {
             dbgFrameNu("Debugger  [Dump]",
-                       "Up/Dn PgUp/Dn Scroll  0 Top  F8 Go  Alt+F2 Save");
+                       s_dbg.narrow ? "Up/Dn PgUp/Dn 0 Top F8 Go Alt+F2 Save"
+                                    : "Up/Dn PgUp/Dn Scroll  0 Top  F8 Go  Alt+F2 Save");
             redraw_frame = false;
         }
         for (int i = 0; i < rows; i++) {
-            const uint16_t pci = (uint16_t)((dump_pc + i * 16) & 0xFFF0);
+            const uint16_t pci = (uint16_t)((dump_pc + i * bpr) & ~(bpr - 1));
             int n = snprintf(buf, sizeof(buf), "%04X  ", pci);
-            for (int b = 0; b < 16; b++)
+            for (int b = 0; b < bpr; b++)
                 n += snprintf(buf + n, sizeof(buf) - n, (b & 1) ? "%02X " : "%02X",
                               MemESP::dbgPeek((uint16_t)(pci + b)));
             dbgText(0, i, buf, DBG_NORM);
@@ -4851,11 +4882,11 @@ void OSD::osdDump() {
             case fabgl::VK_ESCAPE:
                 return;
             case fabgl::VK_KP_MINUS:
-            case fabgl::VK_UP:       dump_pc -= 16;        break;
+            case fabgl::VK_UP:       dump_pc -= bpr;        break;
             case fabgl::VK_KP_PLUS:
-            case fabgl::VK_DOWN:     dump_pc += 16;        break;
-            case fabgl::VK_PAGEUP:   dump_pc -= rows * 16; break;
-            case fabgl::VK_PAGEDOWN: dump_pc += rows * 16; break;
+            case fabgl::VK_DOWN:     dump_pc += bpr;        break;
+            case fabgl::VK_PAGEUP:   dump_pc -= rows * bpr; break;
+            case fabgl::VK_PAGEDOWN: dump_pc += rows * bpr; break;
             case fabgl::VK_0:        dump_pc = 0;          break;
             case fabgl::VK_F8: {
                 const uint32_t a = dbgHexPromptNu(dump_pc, "Go to (hex)");
@@ -4931,7 +4962,7 @@ c:
         ii = (int16_t)(pc - gotoAddr) + cursor_row;
         gotoApplied = true;
     }
-    const int MEM_LINES = 4;
+    const int MEM_LINES = s_dbg.mem_lines;   // 4 (3 on a 19-row grid)
     int i = 0;
     uint16_t line_addr[DBG_MAX_ROWS];   // max code_lines across layouts
     int regStartRow = 0;
@@ -5033,10 +5064,11 @@ c:
                 if (p != string::npos) mem.replace(p, 1, tmp);
             }
         }
-        const int mlen = XR - 17;       // mnemonic room: 15 on the base layout
+        // Mnemonic room: 15 on the base layout. A narrow window has no opcode bytes.
+        const int mlen = s_dbg.narrow ? XR - 8 : XR - 17;
         if ((int)mem.length() > mlen) mem = mem.substr(0, mlen);
-        snprintf(buf, sizeof(buf), "%c%04X %s%-*s", pci == pc ? '*' : ' ', pci, hexbytes,
-                 mlen, mem.c_str());
+        snprintf(buf, sizeof(buf), "%c%04X %s%-*s", pci == pc ? '*' : ' ', pci,
+                 s_dbg.narrow ? "" : hexbytes, mlen, mem.c_str());
         dbgText(0, i, buf, rowInk);
         if (Config::numPcBP > 0 && Config::hasBreakPoint(pci, Config::BP_PC))
             dbgBpDot(i);
@@ -5166,6 +5198,24 @@ c:
         };
         // PC is not marked: it moves on every step.
         const uint16_t snSingle[3] = {sn.ix, sn.iy, sn.sp};
+        if (s_dbg.narrow) {
+            // Two per row: "IX 618E IY  5C3A" / "SP 5FE2 PC  0038", the pairs' columns.
+            for (int r = 0; r < 2; r++) {
+                const int row = 4 + r;
+                const bool cur = (regCursorRow == row && activeSection == 3);
+                const int li = r * 2, ri = li + 1;
+                const uint16_t vl = singles[li].get(), vr = singles[ri].get();
+                snprintf(buf, 10, "%-2s %04X ", singles[li].name, vl);
+                dbgText(XR, i, buf, (cur && !regAltSet) ? DBG_CUR : DBG_NORM);
+                if (sn.valid && vl != snSingle[li] && !(cur && !regAltSet))
+                    dbgMarkWord(XR + 3, i, vl, snSingle[li]);
+                snprintf(buf, 10, "%-3s %04X ", singles[ri].name, vr);
+                dbgText(XR + 8, i, buf, (cur && regAltSet) ? DBG_CUR : DBG_NORM);
+                if (ri < 3 && sn.valid && vr != snSingle[ri] && !(cur && regAltSet))
+                    dbgMarkWord(XR + 12, i, vr, snSingle[ri]);
+                i++;
+            }
+        } else
         for (int r = 0; r < 4; r++) {
             int regIdx = 4 + r;
             bool isCur = (regCursorRow == regIdx && activeSection == 3);
@@ -5179,9 +5229,9 @@ c:
             i++;
         }
 
-        // I, R, IM row (regCursorRow == 8). R is not marked: it moves on every fetch.
+        // I, R, IM row (the last register row). R is not marked: it moves on every fetch.
         {
-            bool isCur = (regCursorRow == 8 && activeSection == 3);
+            bool isCur = (regCursorRow == dbgRegIrRow() && activeSection == 3);
             const uint8_t ri = Z80::getRegI(), im = Z80::getIntMode();
             snprintf(buf, 32, "IR %02X%02X IM %d    ", ri, Z80::getRegR(), im);
             buf[17] = 0;
@@ -5213,8 +5263,9 @@ c:
         }
     }
 
-    // --- FLAGS block, aligned with the Memory rule ---
-    i = s_dbg.mem_hdr_row;
+    // --- FLAGS block, aligned with the Memory rule (or right under Regs when the
+    // narrow 15-row window puts the rule higher than Regs end) ---
+    if (i < s_dbg.mem_hdr_row) i = s_dbg.mem_hdr_row;
     dbgText(XR, i++, "-Flags-----------", DBG_HDR);
     {
         uint8_t f = Z80::getRegAF() & 0xFF;
@@ -5235,9 +5286,10 @@ c:
         }
         i++;
     }
-    dbgText(XR, i++, "SZ-H-PNC SZ-H-PNC", DBG_NORM);
+    if (i < s_dbg.rows) dbgText(XR, i++, "SZ-H-PNC SZ-H-PNC", DBG_NORM);
 
-    // T-states and BP count sit under the Flags block.
+    // T-states and BP count sit under the Flags block (not on the narrow grid).
+    if (!s_dbg.narrow) {
     snprintf(buf, 32, "%dT %dus         ", T2 - T1, t2 - t1);
     buf[17] = 0;
     dbgText(XR, i++, buf, DBG_NORM);
@@ -5246,7 +5298,8 @@ c:
     else
         snprintf(buf, 32, "                 ");
     buf[17] = 0;
-    dbgText(XR, i++, buf, DBG_NORM);
+    if (i < s_dbg.rows) dbgText(XR, i++, buf, DBG_NORM);   // not on a 19-row grid
+    }
   } // redrawRight
 
     // Reset redraw flags (default: redraw all on next goto c)
@@ -5409,7 +5462,7 @@ c:
                     else memViewAddr = (memViewAddr + dbgMemBpr(memAsciiMode)) & 0xFFFF;
                     redrawCode = false; redrawRight = false;
                 } else if (activeSection == 3) {
-                    if (regCursorRow < 8) regCursorRow++;
+                    if (regCursorRow < dbgRegIrRow()) regCursorRow++;
                     redrawCode = false; redrawMem = false;
                 }
                 goto c;
@@ -5645,20 +5698,20 @@ c:
                         {Z80::getRegSP, Z80::setRegSP, false},
                         {(RegGetter)Z80::getRegPC, Z80::setRegPC, false},
                     };
-                    if (regCursorRow < 8) {
-                        RI& ri = (regAltSet && regCursorRow < 4) ? altRegs[regCursorRow] : mainRegs[regCursorRow];
+                    if (regCursorRow < dbgRegIrRow()) {
+                        const bool altCol = regAltSet && dbgRegRowPaired(regCursorRow);
+                        const int  idx    = dbgRegIndex(regCursorRow, regAltSet);
+                        RI& ri = (altCol && regCursorRow < 4) ? altRegs[idx] : mainRegs[idx];
                         char hexbuf[5];
                         snprintf(hexbuf, 5, "%04X", ri.get());
-                        // For paired regs (0-3): main "%-2s %04X " (val at col 3), alt "%-3s %04X " (val at col 8+4=12)
-                        // For singles (4-7): "%-2s %04X" (val at col 3)
-                        const int ecol = (regCursorRow < 4 && regAltSet)
-                                             ? XR + 8 + 4    // after main(8) + "AF' "(4)
-                                             : XR + 3;       // after "AF "(3)
+                        // Two-column rows: left "%-2s %04X " (value at col 3), right
+                        // "%-3s %04X " (value at col 8+4=12); a single row has col 3 only.
+                        const int ecol = altCol ? XR + 8 + 4 : XR + 3;
                         if (inlineHexEdit(ecol, regStartRow + regCursorRow, hexbuf, 4)) {
                             ri.set(parseHex(hexbuf, 4));
                         }
                     }
-                    // IR row (regCursorRow == 8): skip for now, complex
+                    // IR row (the last one): skip for now, complex
                 }
                 goto c;
             } else

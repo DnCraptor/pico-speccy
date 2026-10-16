@@ -12938,6 +12938,12 @@ repo: chapters 12, 15.6, 23.4, 26, 35, 38 are the ones that pin chip semantics).
   for tslabs' spgbld.exe (same .ini); `debug/ft812-helloworld.spg` is TSLib's
   HelloWorld example (DeadlyKom/TSLib, 1024x768, "Hello world!" in ROM font 31 +
   200 random POINTS a frame) packed with it — the first thing to run on hardware.
+- **.pss snapshots carry the chip (2026-10-15, NOT hw-tested)**: blocks PSFS (state),
+  PSFA (raw areas: regs, the 0x309000 block, RAM_CMD, RAM_DL, the shown list, the tinfl
+  state mid-INFLATE) and PSFG (non-zero 4 KB RAM_G pages) after PSTF; `Ft812::snap*` in
+  Ft812.cpp, framing in Pss.cpp. A load parks the renderer and resets + clears the chip
+  first, so an old file comes back blank rather than with stale state; a PLAYVIDEO in
+  progress is consumed, not resumed. Details: docs/pss-snapshot-plan.md "Phase 4b".
 - **ZUMA itself** assembles here (`sjasmplus Source/ASM/main.asm`, sjasmplus 1.23.1)
   but its .spg needs `Build/level_chain_table.bin` from `make_level_runtime_table.py`
   (openpyxl) and the game streams `ZUMAMAIN/ZUMALVL/ZUMAAUD/ZUMASND.PAK` off the SD
@@ -15805,3 +15811,31 @@ last column, Alt+T ASCII), and 640x480 + DS80 unchanged.
   register pairs per BYTE (LD A marks A, not F), flags per bit, stack words pushed
   below the old SP or rewritten above it. PC and R are not marked (they move every
   step). Invalidated when the debugger opens.
+
+## Full-screen UI pages in the big HDMI modes' window (2026-10-15, NOT hw-tested)
+
+800x600 x3 shows the centre 264x200 of the fb, 1024x768 x4 the centre 256x192
+(`VIDEO::bigWindow`, `Sf.fbx/Sf.oy`): 44x25 / 42x24 glyphs, the menu's 40-column floor
+holds. Three pages assumed 320x240 and were fixed: **Joystick > Mapping** picks
+`kCellsCompact` (UiJoy.cpp — same cells and neighbours, 242x132 design area, D-pad pills
+58 px) when the surface is < 316 px wide or the body < 184 px; **the debugger** has a
+`narrow` grid (< 51 columns): right panel flush right (`xr = cols - 17`), code lines
+without the opcode-bytes column (mnemonic keeps 15), hex memory rows from `dbgMemBpr`
+starting at 2, the F2 dump 8 bytes a row, short footers; **Help > ZX keyboard** draws through
+the legacy fb-coordinate API, so it adds `Sf.fbx/Sf.oy` and clips its black card to the
+window. Text pages still clip long lines at ~40 columns (not fixed).
+**Narrow, round 2 (2026-10-15, owner on the 1024x768 x4 screenshot: the bottom rows
+were cut, "code 2 lines fewer, regroup the registers"; hw-confirmed the same day on
+`debug/DVp2-dbg-narrow3`, owner: "теперь отлично", together with the About fix):** the cause
+was the 19-row floor in `dbgBegin` — those windows hold **16 rows (800x600 x3) / 15
+(1024x768 x4)**, so the last rows were drawn under the footer. The narrow grid now
+takes its real height (floor 14): code `rows - 3` (13 / 12), memory rule + **2** dump
+rows, no T-states / BP rows; the right column pairs `IX|IY` and `SP|PC` in the
+two-column format of `AF|AF'` (`dbgRegIrRow` 6, not 8; `dbgRegRowPaired` /
+`dbgRegIndex` map the cursor row + alt column onto the register list, Left/Right picks
+the column on those rows too), so Regs end at row 12 and Flags start on the memory
+rule or right after Regs, whichever is lower (the flag legend drops when no row is
+left, i.e. at 1024x768 x4). Same day: the
+**About** logo went through `vga.dotFast` in fb coordinates without `Sf.fbx/Sf.oy` and
+overlapped the header in the big-window modes — fixed (any raw `dotFast`/fb write from
+a UI page needs those offsets).
