@@ -16110,3 +16110,31 @@ Picking 630 raises the voltage to 1.90 V (the 540 EDGE pattern in resolveConstra
   VGA on HSTX at 540 and 630 (m2p2: monitor locks, Auto Adjust, PWM colours),
   HDMI audio, a heavy TS-Conf / Next scene, SD + PSRAM under load, then 2.00 V if 1.90
   is unstable.
+
+## SD read-ahead: a coherent one-sector tag + retired windows (2026-10-17, NOT hw-tested)
+
+Review of DeepSeek #03 (647ace9) found two defects, both in DivMMC.cpp, fixed here
+(test ELF built from `build-all/DVp2chk`, RAM +64 B):
+- **`s_s1_sec` ("mmc_sector_buf still holds this sector") was set in loadSector
+  only**, while c17Ready, loadSectorStream and the guest's CMD24/CMD25 data bytes
+  (and writeByte, a failed read, the .mmc path) overwrite the buffer. A later read
+  of the remembered sector came back with another sector's data — reachable in the
+  "bounce between two regions" pattern (window at B, hit B+2, jump to C, back to B
+  by burst, read B+2 = B's bytes). It is now a tag on the BUFFER: `s1Set()` after
+  every copy of a known sector, `s1Drop()` before anything else lands there.
+  Any new writer of mmc_sector_buf must do the same.
+- **c17FetchBlocking left `s_c17 = 1` when the post failed**, so the guest's
+  token poll re-posted the sector it had just read synchronously: a second card
+  access per such read.
+Optimisation: **retired read-ahead windows** (`s_old[3]`, `raRotate`/`raOldHit`).
+Every refill used to throw the previous window away, and the miss classifier said
+the guest returns to exactly that one (nm 0/0/58/29: 58 backwards). The outgoing
+window is kept whole (MRU first, LRU evicted), a hit promotes it back to current,
+so prefetch and missNote() still see one window. 16 KB butter buffers, allocated
+lazily only while the butter arena keeps 512 KB free, refused off-butter (then the
+old swap). Invalidation is the write generation they carry. `[SD] ... old H/N` =
+hits served from retired windows / windows held. Host model (session scratch,
+`ra_test.cpp`): 4-region bounce, data checked per hit, no buffer in two places.
+Also noted, NOT changed: DeepSeek #03 raised the SD SCK target to 25.2 MHz, so 504
+MHz runs the card at 25.2 (idiv 5), 0.8% over the SD default-speed limit — if a
+card misbehaves only at 504, that is the first suspect (target 25.0 -> 21 MHz).

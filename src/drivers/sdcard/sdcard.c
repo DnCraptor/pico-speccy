@@ -299,8 +299,8 @@ void init_spi(void)
 	// Re-derived on every call on purpose: clk_sys moves at the Config::cpu_mhz
 	// switch, and re-running pio_spi_init() on the same SM/offset is what puts
 	// the bus back into a known state after a failed probe or a hot swap.
-	// An INTEGER divider, the smallest that keeps SCK <= 25 MHz: 4 at 378 MHz
-	// (23.6 MHz), 3 at 252 and 6 at 504 (21 MHz). The old fractional one
+	// An INTEGER divider, the smallest that keeps SCK <= 25.2 MHz (pio_fast_div):
+	// 4 at 378 MHz (23.6 MHz), 3 at 252 (21 MHz), 5 at 504 (25.2 MHz). The old fractional one
 	// (4.725 at 378 for a nominal 20 MHz) jittered between 4 and 5 sys clocks per
 	// PIO cycle, so its shortest SCK half-period was already the /4 one — this
 	// raises the average rate (+18 % at 378, the bus bounds every sector read)

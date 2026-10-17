@@ -841,6 +841,8 @@ void DivMMC::materialize(uint8_t bank_idx) {
     touch(slot);
 }
 
+static inline void s1Drop();   // the mmc_sector_buf content tag, defined with loadSectorStream
+
 // Read a byte from image/SD, using sector cache
 // address is always a byte offset (even in SDHC mode — converted at CMD level)
 uint8_t DivMMC::readByte(uint32_t address) {
@@ -873,6 +875,7 @@ void DivMMC::writeByte(uint32_t address, uint8_t value) {
 
     mmc_sector_buf[offset] = value;
     mmc_sector_dirty = true;
+    s1Drop();
 }
 
 // Flush dirty sector buffer
@@ -925,6 +928,20 @@ static uint32_t s_ra_next  = 0xFFFFFFFF;   // sector after the last one served
 static uint32_t s_one_sec  = 0xFFFFFFFF;
 static uint32_t s_one_gen  = 0;
 extern "C" volatile uint32_t g_disk_write_gen;
+
+// The sector mmc_sector_buf holds RIGHT NOW, clean, with the write generation it
+// was read under: a FAT or directory cell is read over and over and the copy is
+// already in hand (loadSector's first test). It is a claim about the BUFFER, so
+// EVERY writer of mmc_sector_buf must keep it true — s1Set() after a copy of a
+// known sector, s1Drop() before anything else lands there (guest CMD24/CMD25
+// data bytes, writeByte, a failed read, the .mmc image path). The first cut set
+// it in loadSector only, and c17Ready / loadSectorStream / a guest write block
+// then overwrote the buffer under it: a later read of the remembered sector
+// came back with another sector's data.
+static uint32_t s_s1_sec = 0xFFFFFFFFu;
+static uint32_t s_s1_gen = 0;
+static inline void s1Set(uint32_t sec, uint32_t gen) { s_s1_sec = sec; s_s1_gen = gen; }
+static inline void s1Drop() { s_s1_sec = 0xFFFFFFFFu; }   // declared above readByte
 
 // End of a guest command: remember the run; the buffer itself stays valid.
 static void raEnd() {
@@ -983,6 +1000,7 @@ void DivMMC::loadSectorStream(uint32_t sector) {
     ZS_T0();
     if (held && sector >= s_ra_first && sector - s_ra_first < s_ra_n) {
         memcpy(mmc_sector_buf, s_ra_buf + (sector - s_ra_first) * 512, 512);
+        s1Set(sector, s_ra_gen);
         ZS(ZS_HIT, 0, "hit");
         return;
     }
@@ -996,6 +1014,7 @@ void DivMMC::loadSectorStream(uint32_t sector) {
         uint8_t* one = s_ra_buf + RA_MAX * 512;
         if (sector == s_one_sec && s_one_gen == g_disk_write_gen) {
             memcpy(mmc_sector_buf, one, 512);
+            s1Set(sector, s_one_gen);
             ZS(ZS_HIT, 0, "hit1");
             return;
         }
@@ -1024,6 +1043,7 @@ void DivMMC::loadSectorStream(uint32_t sector) {
     s_ra_n = want;
     s_ra_gen = gen;
     memcpy(mmc_sector_buf, s_ra_buf, 512);
+    s1Set(sector, gen);
     ZS(ZS_REFILL, want, cont ? "fillC" : "fillS");
 }
 
@@ -1124,15 +1144,26 @@ static uint32_t s_sq_base = 0xFFFFFFFFu;       // first cached sector, ~0 = none
 static uint32_t s_sq_count = 0;
 static uint32_t s_sq_last = 0xFFFFFFFFu;       // previous request (sequen. detect)
 static uint32_t s_sq_gen = 0;                  // g_disk_write_gen when filled (host writes)
-// mmc_sector_buf still holds this sector: a FAT / directory cell is read over
-// and over, and re-reading it from the card cost a full access latency each
-// time. Cleared on every write and on reset.
-// The last sector loadSector() put in mmc_sector_buf, with the write generation
-// it was read under: a FAT or directory cell is read over and over and the copy
-// is already in hand. NOT the stream path's s_one_sec (that one lives in
-// s_ra_buf's spare sector); this path uses mmc_sector_buf itself.
-static uint32_t s_s1_sec = 0xFFFFFFFFu;
-static uint32_t s_s1_gen = 0;
+// RETIRED windows (2026-10-17). The read-ahead held ONE window and every refill
+// threw the previous one away, while the [SD] miss classifier showed where the
+// guest goes next: of 87 misses a second, 0 continued past the window, 58 went
+// BACKWARDS and 29 jumped forward — it alternates between a few regions (a FAT /
+// directory area and a data run, or two files), so the region it returns to was
+// always the one just evicted. A retired window is the old current window kept
+// whole, MRU first; a hit there promotes it back to current, so the hit path,
+// the "half in: post the next" prefetch and missNote() keep working on one
+// window as before. Butter PSRAM only (a buffer that lands on the heap is given
+// back), and only while the arena keeps RA_OLD_ARENA_MIN free; no buffer = the
+// old one-window behaviour. Invalidation is free: every write bumps
+// g_disk_write_gen and a retired window carries the gen it was filled under.
+#define RA_OLD_MAX 3
+#define RA_OLD_ARENA_MIN (512u * 1024u)
+struct RaWin { uint8_t* buf; uint32_t base, count, gen; };
+static RaWin    s_old[RA_OLD_MAX];             // [0] = most recently retired
+static uint32_t s_old_n = 0;                   // entries in use (each owns its buf)
+static uint32_t s_old_bufs = 0;                // buffers allocated for retirement
+static bool     s_old_off = false;             // an allocation landed off butter: stop trying
+static uint32_t s_old_hit = 0;                 // [SD] line: misses turned into hits
 static uint32_t s_run_sec = 0;             // sectors served in the CURRENT sequential run
 static uint32_t s_win_max = DIVSD_RA_MIN;  // burst size; read-ahead window, owned by missNote()
 // Diagnostics only since 2026-10-17 (the window no longer follows them): run
@@ -1170,6 +1201,7 @@ static inline bool sq1Ensure() {
 void DivMMC::raInit() {
     s_sq_base = 0xFFFFFFFFu;
     s_sq_count = 0;
+    for (uint32_t i = 0; i < s_old_n; i++) s_old[i].count = 0;
     s_sq_last = 0xFFFFFFFFu;
     s_s1_sec = 0xFFFFFFFFu;
     s_s1_gen = 0;
@@ -1226,6 +1258,71 @@ static bool sq2Ensure() {
                    (unsigned)(uintptr_t)s_sq2);
     }
     return s_sq2 != nullptr;
+}
+
+// A fresh 16 KB buffer for retirement, or nullptr (no butter, arena tight, cap).
+static uint8_t* raOldAlloc() {
+    if (s_old_off || s_old_bufs >= RA_OLD_MAX) return nullptr;
+    if (!butter_psram_size() || !Buffer::butterPoolReady()) return nullptr;
+    if (Buffer::poolStat(Buffer::TIER_BUTTER).free < RA_OLD_ARENA_MIN + DIVSD_RA_STREAM * 512) return nullptr;
+    uint8_t* b = (uint8_t*)Buffer::palloc(DIVSD_RA_STREAM * 512, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+    if (!b) return nullptr;
+    if ((uintptr_t)b < 0x11000000u) {          // landed on the heap: not ours to hold
+        Buffer::pfree(b);
+        s_old_off = true;
+        Debug::log("[divSD] retired windows off: no butter buffer");
+        return nullptr;
+    }
+    s_old_bufs++;
+    if (s_old_bufs == 1) Debug::log("[divSD] retired read-ahead windows on (up to %u)", (unsigned)RA_OLD_MAX);
+    return b;
+}
+
+// The current window is being replaced by `fresh` (already filled, or about to
+// be). Keeps the outgoing window as retired MRU when there is a buffer to spare,
+// and returns the buffer the caller now owns as its spare (the next async
+// target, or the destination of a synchronous refill). Without retirement the
+// outgoing buffer itself comes back: the old swap.
+static uint8_t* raRotate(uint8_t* fresh) {
+    uint8_t* out = s_sq_buf;
+    uint8_t* spare = out;
+    if (out && s_sq_count && s_sq_gen == g_disk_write_gen) {
+        uint8_t* b = nullptr;
+        if (s_old_n < RA_OLD_MAX) b = raOldAlloc();
+        if (!b && s_old_n) b = s_old[--s_old_n].buf;             // evict the LRU one
+        if (b) {
+            for (uint32_t i = s_old_n; i > 0; i--) s_old[i] = s_old[i - 1];
+            s_old[0] = RaWin{ out, s_sq_base, s_sq_count, s_sq_gen };
+            s_old_n++;
+            spare = b;
+        }
+    }
+    s_sq_buf = fresh;
+    return spare;
+}
+
+// A retired window holding `sector` becomes the current one (the current one is
+// retired in its place, even if stale — it ages out). True = it is current now.
+static bool raOldHit(uint32_t sector) {
+    for (uint32_t i = 0; i < s_old_n; i++) {
+        const RaWin w = s_old[i];
+        if (w.count && w.gen == g_disk_write_gen && sector >= w.base && sector < w.base + w.count) {
+            for (uint32_t j = i; j > 0; j--) s_old[j] = s_old[j - 1];
+            s_old[0] = RaWin{ s_sq_buf, s_sq_base, s_sq_count, s_sq_gen };
+            s_sq_buf = w.buf; s_sq_base = w.base; s_sq_count = w.count; s_sq_gen = w.gen;
+            s_old_hit++;
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline bool raCurHit(uint32_t sector) {
+    return s_sq_buf && sector >= s_sq_base && sector < s_sq_base + s_sq_count &&
+           s_sq_gen == g_disk_write_gen;
+}
+static inline bool raAnyHit(uint32_t sector) {
+    return raCurHit(sector) || (s_sq_buf && raOldHit(sector));
 }
 
 static void sqAsyncDiscard() {
@@ -1289,7 +1386,7 @@ static bool sqAsyncTake(uint32_t sector) {
     const bool ok = g_sd_as_state == 3 && s_as_gen == g_disk_write_gen;
     g_sd_as_state = 0;
     if (!ok) return false;
-    uint8_t* t = s_sq_buf; s_sq_buf = s_sq2; s_sq2 = t;
+    s_sq2 = raRotate(s_sq2);
     s_sq_base = sector;
     s_sq_count = g_sd_as_count ? g_sd_as_count : 1;
     s_sq_gen = s_as_gen;
@@ -1407,7 +1504,7 @@ static bool c17Begin(uint32_t sector, bool stream) {
     if (!sdAsyncMachine() || !sq1Ensure() || !sq2Ensure()) return false;
     if (stream) s_stream = true;
     s_c17_t0 = time_us_32();
-    if (s_sq_buf && sector >= s_sq_base && sector < s_sq_base + s_sq_count && s_sq_gen == g_disk_write_gen) {
+    if (raAnyHit(sector)) {
         s_c17_hit++;
         return false;                                         // read-ahead hit
     }
@@ -1447,10 +1544,11 @@ static int c17Ready() {
         // decided from a window's usage fraction cannot tell "this window is
         // bigger than the run" from "the run ended inside this window", and the
         // last window of every run is partial by construction.
-        uint8_t* t = s_sq_buf; s_sq_buf = s_sq2; s_sq2 = t;
+        s_sq2 = raRotate(s_sq2);
         const uint32_t cnt = g_sd_as_count ? g_sd_as_count : 1;
         s_sq_base = sector; s_sq_count = cnt; s_sq_gen = s_as_gen;
         memcpy(DivMMC::mmc_sector_buf, s_sq_buf, 512);
+        s1Set(sector, s_as_gen);
         g_sd_as_state = 0;
         // Prefetch the next window only for a run the guest is in the middle of,
         // and NEVER inside a CMD18: there the guest may stop at the end of the
@@ -1460,6 +1558,7 @@ static int c17Ready() {
         if (!s_stream) sqAsyncRequest(sector + cnt, s_win_max);
     } else if (ok) {
         memcpy(DivMMC::mmc_sector_buf, s_sq2, 512);
+        s1Set(sector, s_as_gen);
         g_sd_as_state = 0;
     } else {
         g_sd_as_state = 0;
@@ -1484,7 +1583,9 @@ static bool c17FetchBlocking(uint32_t sector, uint32_t count) {
     s_c17_sector = sector;
     s_c17_t0 = time_us_32();
     s_c17 = 1;
-    if (!c17TryPost(count)) return false;          // a prefetch is on the card
+    if (!c17TryPost(count)) { s_c17 = 0; return false; }   // a prefetch is on the card
+                                                   // (s_c17 left at 1 made the token poll
+                                                   // re-read the same sector on core1)
     const uint32_t t0 = time_us_32();
     for (;;) {
         const int r = c17Ready();
@@ -1514,21 +1615,21 @@ static bool c17FetchBlocking(uint32_t sector, uint32_t count) {
 extern volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max, g_sd_as_c1_n;   // sdcard.c (globals are unmangled)
 extern volatile uint32_t g_sd_ph[4];   // sdcard.c: select / R1 poll / token wait / block data, us
 void DivMMC::sdStatTick() {
-    static uint32_t t0 = 0, ops0, wr0, st0, n0, c1us0, w0, ok0, fb0, hit0, q0, sk0, k0[5], ph0[4], rh0[6], ms0[4];
+    static uint32_t t0 = 0, ops0, wr0, st0, n0, c1us0, w0, ok0, fb0, hit0, q0, sk0, k0[5], ph0[4], rh0[6], ms0[4], ol0;
     const uint32_t now = time_us_32();
     if ((uint32_t)(now - t0) < 1000000u) return;
     extern volatile uint32_t g_nx_qwait_us, g_nx_autoskip;
     const uint32_t ops = g_sd_ops, wr = g_sd_wr_ops, st = g_sd_stall_us, n = g_sd_as_c1_n, c1us = g_sd_as_c1_us,
                    w = g_sd_as_c0wait_us, q = g_nx_qwait_us, sk = g_nx_autoskip;
     if (t0 && (ops != ops0 || n != n0 || s_c17_ok != ok0 || s_c17_fb != fb0 || s_c17_hit != hit0)) {
-        Debug::log("[SD] sync %lu/%lums %luR/%luW c1 %lu/%lums max %luus wait %lums max %luus c17 ok %lu hit %lu fb %lu win %lu | qwait %lums skip %lu | k %lu/%lu/%lu/%lu/%lu | ph %lu/%lu/%lu/%lu | rh %lu/%lu/%lu/%lu/%lu/%lu | nm %lu/%lu/%lu/%lu",
+        Debug::log("[SD] sync %lu/%lums %luR/%luW c1 %lu/%lums max %luus wait %lums max %luus c17 ok %lu hit %lu fb %lu win %lu old %lu/%lu | qwait %lums skip %lu | k %lu/%lu/%lu/%lu/%lu | ph %lu/%lu/%lu/%lu | rh %lu/%lu/%lu/%lu/%lu/%lu | nm %lu/%lu/%lu/%lu",
                    (unsigned long)(ops - ops0), (unsigned long)((st - st0) / 1000u),
                    (unsigned long)(ops - ops0 > wr - wr0 ? (ops - ops0) - (wr - wr0) : 0),
                    (unsigned long)(wr - wr0),
                    (unsigned long)(n - n0), (unsigned long)((c1us - c1us0) / 1000u), (unsigned long)g_sd_as_c1_max,
                    (unsigned long)((w - w0) / 1000u), (unsigned long)g_sd_as_c0wait_max,
                    (unsigned long)(s_c17_ok - ok0), (unsigned long)(s_c17_hit - hit0), (unsigned long)(s_c17_fb - fb0),
-                   (unsigned long)s_win_max,
+                   (unsigned long)s_win_max, (unsigned long)(s_old_hit - ol0), (unsigned long)s_old_n,
                    (unsigned long)((q - q0) / 1000u), (unsigned long)(sk - sk0),
                    (unsigned long)(s_sdk[0] - k0[0]), (unsigned long)(s_sdk[1] - k0[1]),
                    (unsigned long)(s_sdk[2] - k0[2]), (unsigned long)(s_sdk[3] - k0[3]),
@@ -1547,11 +1648,13 @@ void DivMMC::sdStatTick() {
     for (int i = 0; i < 4; i++) ph0[i] = g_sd_ph[i];
     for (int i = 0; i < 6; i++) rh0[i] = s_rh[i];
     for (int i = 0; i < 4; i++) ms0[i] = s_miss[i];
+    ol0 = s_old_hit;
 }
 
 void DivMMC::raInvalidate() {
     s_sq_base = 0xFFFFFFFFu;
     s_sq_count = 0;
+    for (uint32_t i = 0; i < s_old_n; i++) s_old[i].count = 0;
     s_s1_sec = 0xFFFFFFFFu;
     s_stream = false;
     sqAsyncDiscard();
@@ -1594,8 +1697,7 @@ void DivMMC::loadSector(uint32_t sector) {
             s_run_sec++;
         }
         // Read-ahead hit: no card access at all
-        if (s_sq_buf && sector >= s_sq_base && sector < s_sq_base + s_sq_count &&
-            s_sq_gen == g_disk_write_gen) {
+        if (raAnyHit(sector)) {
             memcpy(mmc_sector_buf, s_sq_buf + (size_t)(sector - s_sq_base) * 512, 512);
             s_sq_last = sector;
             // Half in: post the next window (not inside a CMD18 — see c17Ready).
@@ -1622,12 +1724,14 @@ void DivMMC::loadSector(uint32_t sector) {
             SDK(seq ? 2 : 3, sector);
             return;
         }
+        s1Drop();                       // the buffer is about to be overwritten
         uint64_t t0 = time_us_64();
         DRESULT r;
         if (s_sq_buf && seq) {
             // Core1 is not there: read a small window here rather than one
             // sector, so a sequential walk still gets most of the benefit.
             const uint32_t gen = g_disk_write_gen;
+            s_sq_buf = raRotate(nullptr);          // keep the outgoing window, read into a spare
             r = disk_read(raw_pdrv(), s_sq_buf, sector, DIVSD_RA_MIN);
             if (r == RES_OK) {
                 s_sq_gen = gen;
@@ -1665,6 +1769,7 @@ void DivMMC::loadSector(uint32_t sector) {
         if (r != RES_OK) memset(mmc_sector_buf, 0xFF, 512);
         return;
     }
+    s1Drop();
     if (!mmc_file_open[0]) {
         memset(mmc_sector_buf, 0, 512);
         return;
@@ -2047,6 +2152,7 @@ void DivMMC::mmc_write(uint8_t value) {
         }
         if (mmc_wr25_idx < 512) {
             if (sdhc_mode) {
+                if (mmc_wr25_idx == 0) s1Drop();  // the read copy is being overwritten
                 mmc_sector_buf[mmc_wr25_idx] = value;
             } else {
                 writeByte(mmc_write_address + mmc_wr25_idx, value);
@@ -2243,6 +2349,7 @@ void DivMMC::mmc_write(uint8_t value) {
                 mmc_index_command <= WRITE_BLOCK_OFFSET + 2 + 511) {
                 int byte_idx = mmc_index_command - (WRITE_BLOCK_OFFSET + 2);
                 if (sdhc_mode) {
+                    if (byte_idx == 0) s1Drop();        // the read copy is being overwritten
                     mmc_sector_buf[byte_idx] = value;   // not dirty: only a complete block is stored
                 } else {
                     writeByte(mmc_write_address + byte_idx, value);
