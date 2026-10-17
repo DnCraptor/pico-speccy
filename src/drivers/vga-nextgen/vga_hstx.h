@@ -41,6 +41,8 @@ unsigned vga_hstx_dreq(void);
 // clk_hstx cycles per pixel of the running mode (CSR.N_SHIFTS), 0 when stopped.
 // The PWM phase weights follow from it — see vga_pwm_weights().
 int vga_hstx_cycles_live(void);
+// clk_hstx the VGA serializer uses at the current clk_sys (126 / 135 / 157.5 MHz), 0 = none.
+uint32_t vga_hstx_clk_hz(void);
 
 // Per-boot diagnostics: the engine settings, the eight pads and what is actually
 // driving them.  Built only with -DHDMI_HSTX_TRACE=ON, beside the HDMI one.

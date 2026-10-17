@@ -1055,6 +1055,9 @@ extern "C" volatile bool g_ts_c1_live;       // TS-Conf lines on core1 right now
 extern "C" volatile bool g_ft_c1_live;       // TS-Conf VDAC2: the FT812 frame renderer is live (Video.cpp)
 extern "C" void ft812_render_core1_pump(void);
 extern "C" void next_render_core1_pump(void);
+extern "C" volatile uint8_t g_sd_as_state;     // sdcard.c: a background SD read posted by DivMMC
+extern "C" volatile uint8_t g_sd_c1_live;
+extern "C" void sd_async_pump(void);
 extern "C" volatile bool g_next_c1_live;     // Spectrum Next lines on core1 (NextVideo.cpp)
 #ifdef VGA_HDMI
 extern "C" void hdmi_lut_clear(void);       // zero the .hdmi_lut section (hdmi.c)
@@ -1086,10 +1089,16 @@ void __not_in_flash_func(render_core)() {
     graphics_set_bgcolor(0x000000);
     graphics_set_flashmode(true, false);
     sem_acquire_blocking(&vga_start_semaphore);
+    g_sd_c1_live = 1;
     while (true) {
 #ifdef TFT
         refresh_lcd();
 #endif
+        // A sector read DivMMC posted for the Z-Controller / DivSD (sdcard.c): it
+        // runs here so core0 keeps emulating while the card works; the guest polls
+        // for the data token meanwhile, as it would on a real card. One byte test
+        // when nothing is posted. (NEXTVID::c1Pump pumps it too, between line batches.)
+        if (__builtin_expect(g_sd_as_state == 1, 0)) sd_async_pump();
         // (pcm_call() used to be called here. It has been an empty no-op since
         // audio moved into timer_callback, it lived in FLASH, and core1 spins
         // this loop thousands of times a frame right beside the TS-Conf
@@ -1202,8 +1211,15 @@ static bool psram_disabled_runtime = false;
 uint8_t* PSRAM_DATA = (uint8_t*)0x11000000;
 static int BUTTER_PSRAM_SIZE = -1;
 
+// Hard ceiling on the butter PSRAM SCK, whatever the menu's 166 says: the highest
+// SCK hw-proven on these APS6404s is 135 MHz (540 / 4); 168 (504 / 3) failed. At
+// every other clock the menu limit already lands lower (252/378/504 -> 126, 540 -> 135);
+// it only bites at 630, where /4 would be 157.5 MHz — /5 = 126 instead.
+#define PSRAM_QMI_SCK_HW_MAX_MHZ 135
+
 static void __not_in_flash_func(psram_retiming)() {
-    const int max_psram_freq = Config::max_psram_freq * MHZ;
+    const int max_psram_freq = (Config::max_psram_freq < PSRAM_QMI_SCK_HW_MAX_MHZ
+                                ? Config::max_psram_freq : PSRAM_QMI_SCK_HW_MAX_MHZ) * MHZ;
     const int clock_hz = clock_get_hz(clk_sys);
     int divisor = (clock_hz + max_psram_freq - 1) / max_psram_freq;
     if (divisor == 1 && clock_hz > 100000000) divisor = 2;
@@ -2120,12 +2136,6 @@ int main() {
         // the timing fix-up as one interrupt-disabled critical section, then bring
         // IRQs back only once flash/PSRAM timing matches the new clock. All four
         // helpers below are __not_in_flash so they execute safely with IRQs off.
-#if defined(VGA_HSTX) && VGA_HSTX
-        {   // 540 is HDMI-only on an HSTX build: VGA's clk_hstx is 126 MHz, 540/126 is not whole
-            extern bool SELECT_VGA;
-            if (SELECT_VGA && Config::cpu_mhz == Config::CPU_540_MHZ) Config::cpu_mhz = 504;
-        }
-#endif
         bool clk_changed = (Config::cpu_mhz != running_mhz);
         bool clk_locked  = true;
         {

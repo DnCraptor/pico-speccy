@@ -58,6 +58,7 @@ public:
     // core0 time they took — the FT812_TRACE meter's "sd" field (VIDEO::ftTraceTick).
     static uint32_t zc_rd_sectors, zc_rd_us;
     static uint32_t zc_in_bytes;          // guest IN (#57) data reads (the [FT812] feed line)
+    static bool cardSelected() { return mmc_cs_active; }   // SD CS asserted (Z80::zcInirBatch)
 
     static void init();           // Load ROM, open .mmc/.hdf/.vhd/.hdd/.img image
     static void reset();          // Reset state
@@ -120,6 +121,7 @@ public:
     // Raw-SD adaptive read-ahead (DivSD/ZC): see DivMMC.cpp
     static void raInit();
     static void raInvalidate();
+    static void sdStatTick();       // 1 Hz [SD] UART line while the card is busy (ESPectrum::loop)
 
     // Reopen files after SD remount
     static void reopenFiles();

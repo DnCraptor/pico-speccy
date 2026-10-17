@@ -97,6 +97,21 @@ int graphics_540_mode(int mode)
     return video_mode[t].tmds_mhz == TMDS_540_MHZ ? t : mode;
 }
 
+// The 31.5 MHz twin of a standard mode [0]..[8] for sys_clk 630, or `mode` itself.
+// HSTX only: there clk_hstx cannot be 126 MHz at 630 (630 / 5, a 2-bit divider);
+// the PIO back-end runs the 25.2 MHz modes at divider 2.5 and needs no twin.
+int graphics_630_mode(int mode)
+{
+#if defined(HDMI_HSTX) && HDMI_HSTX
+    const int n = (int)(sizeof(video_mode)/sizeof(video_mode[0]));
+    const int t = mode + VMODE_630_BASE;
+    if (mode < 0 || mode >= VMODE_FAST_OFFSET || t >= n) return mode;
+    return video_mode[t].tmds_mhz == TMDS_630_MHZ ? t : mode;
+#else
+    return mode;
+#endif
+}
+
 int graphics_xga_mode(int x3) { return x3 ? VMODE_XGA3 : VMODE_XGA; }
 
 // The "big" modes (Config::VM_1024x768_59 = 8, ..._59X3 = 9, VM_800x600_X3 = 10,

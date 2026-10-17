@@ -1177,8 +1177,19 @@ static void sqAsyncDiscard() {
     if (g_sd_as_state >= 3) g_sd_as_state = 0;
 }
 
+// The background reads (sqAsyncRequest, c17Begin) run on core1 for the Spectrum
+// Next's divMMC SD and for the Z-Controller (ZX-Evo TS-Conf / BaseConf, ATM,
+// Pentagon / Scorpion with ZC) — both on the raw card, never on an .mmc image
+// or a USB stick. core1 must be pumping (render_core sets g_sd_c1_live once its
+// loop runs): a request nobody takes would otherwise wait for the 3 ms fallback.
+extern "C" volatile uint8_t g_sd_c1_live;
+static inline bool sdAsyncMachine() {
+    return g_sd_c1_live && DivMMC::divsd_mode && raw_pdrv() == 0 &&
+           (Z80Ops::isNext || DivMMC::zc_enabled);
+}
+
 static void sqAsyncRequest(uint32_t next) {
-    if (!Z80Ops::isNext || raw_pdrv() != 0 || g_sd_as_state != 0) return;
+    if (!sdAsyncMachine() || g_sd_as_state != 0) return;
     if (!sq2Ensure()) return;
     s_as_kind = 0;
     g_sd_as_buf = s_sq2;
@@ -1226,11 +1237,11 @@ static bool sqAsyncTake(uint32_t sector) {
 // time: the emulation keeps running instead of core0 standing on the card
 // (TX-1696's FAT / file-open bursts: 60 single reads a second, ~1 ms each, hw
 // 2026-10-09). s_c17: 0 none, 1 waiting for the slot, 2 posted.
-extern "C" volatile bool g_next_c1_live;   // NextVideo.cpp: core1 runs the Next queue
 static uint8_t  s_c17 = 0;
 static uint32_t s_c17_sector = 0;
 static uint32_t s_c17_t0 = 0;      // time_us_32 of the command: the fallback clock
 
+static uint32_t s_c17_ok = 0, s_c17_fb = 0, s_c17_hit = 0;   // [SD] line: served by core1 / 3 ms fallback / read-ahead hit
 static void c17Abandon() { s_c17 = 0; }   // CS edge / new command: a late result is discarded
 
 // Post the request if the slot is free; true once it is.
@@ -1261,10 +1272,12 @@ static bool c17Begin(uint32_t sector) {
     // dead queue (nxQueueDead) would leave the request untaken for ever — the
     // 2 s storage probe used to cancel it as a side effect, and without that
     // TX-1696 never started (hw 2026-10-09).
-    if (!Z80Ops::isNext || !g_next_c1_live || raw_pdrv() != 0 || !s_sq_buf || !sq2Ensure()) return false;
+    if (!sdAsyncMachine() || !sq1Ensure() || !sq2Ensure()) return false;
     s_c17_t0 = time_us_32();
-    if (sector >= s_sq_base && sector < s_sq_base + s_sq_count && s_sq_gen == g_disk_write_gen)
+    if (sector >= s_sq_base && sector < s_sq_base + s_sq_count && s_sq_gen == g_disk_write_gen) {
+        s_c17_hit++;
         return false;                                         // read-ahead hit
+    }
     const uint8_t st = g_sd_as_state;
     if (s_as_kind == 0 && g_sd_as_sector == sector) {
         if (st == 3) return false;                            // prefetched: loadSector takes it
@@ -1284,6 +1297,7 @@ static int c17Ready() {
         uint8_t one = 1;
         if (s_c17 == 1 || __atomic_compare_exchange_n(&g_sd_as_state, &one, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             s_c17 = 0;
+            s_c17_fb++;
             return 2;                       // the caller loadSector()s (waits out a read in flight)
         }
     }
@@ -1309,8 +1323,35 @@ static int c17Ready() {
     }
     s_sq_last = sector;
     s_c17 = 0;
+    s_c17_ok++;
     SDK(1, sector);
     return 1;
+}
+
+// [SD] 1 Hz line (plain builds, printed only for a second with card traffic):
+// sync = card reads/writes core0 did itself and the ms it stood on the card;
+// c1 = background reads core1 ran, their ms and worst us; wait = core0 spinning on
+// a core1 read in flight; c17 = guest sector requests served by core1 / read-ahead
+// hits / given up after 3 ms untaken (core1 busy) and read on core0; Next: qwait =
+// core0 waiting for the render queue, skip = frames not drawn.
+extern volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max, g_sd_as_c1_n;   // sdcard.c (globals are unmangled)
+void DivMMC::sdStatTick() {
+    static uint32_t t0 = 0, ops0, st0, n0, c1us0, w0, ok0, fb0, hit0, q0, sk0;
+    const uint32_t now = time_us_32();
+    if ((uint32_t)(now - t0) < 1000000u) return;
+    extern volatile uint32_t g_nx_qwait_us, g_nx_autoskip;
+    const uint32_t ops = g_sd_ops, st = g_sd_stall_us, n = g_sd_as_c1_n, c1us = g_sd_as_c1_us,
+                   w = g_sd_as_c0wait_us, q = g_nx_qwait_us, sk = g_nx_autoskip;
+    if (t0 && (ops != ops0 || n != n0 || s_c17_ok != ok0 || s_c17_fb != fb0 || s_c17_hit != hit0)) {
+        Debug::log("[SD] sync %lu/%lums c1 %lu/%lums max %luus wait %lums max %luus c17 ok %lu hit %lu fb %lu | qwait %lums skip %lu",
+                   (unsigned long)(ops - ops0), (unsigned long)((st - st0) / 1000u),
+                   (unsigned long)(n - n0), (unsigned long)((c1us - c1us0) / 1000u), (unsigned long)g_sd_as_c1_max,
+                   (unsigned long)((w - w0) / 1000u), (unsigned long)g_sd_as_c0wait_max,
+                   (unsigned long)(s_c17_ok - ok0), (unsigned long)(s_c17_hit - hit0), (unsigned long)(s_c17_fb - fb0),
+                   (unsigned long)((q - q0) / 1000u), (unsigned long)(sk - sk0));
+        g_sd_as_c1_max = g_sd_as_c0wait_max = 0;
+    }
+    t0 = now; ops0 = ops; st0 = st; n0 = n; c1us0 = c1us; w0 = w; ok0 = s_c17_ok; fb0 = s_c17_fb; hit0 = s_c17_hit; q0 = q; sk0 = sk;
 }
 
 void DivMMC::raInvalidate() {
@@ -1615,7 +1656,7 @@ DIVMMC_HOT uint8_t DivMMC::mmc_read() {
                     if (mmc_nac) { mmc_nac--; return 0xFF; }                 // Nac (see mmc_nac)
                     if (mmc_cont_pending) {
                         mmc_cont_pending = false;
-                        if (Z80Ops::isNext) { if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address); }
+                        if (sdAsyncMachine() || Z80Ops::isNext) { if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address); }
                         else if (s_ra_on) loadSectorStream(mmc_read_address);
                         else loadSector(mmc_read_address);
                         mmc_sector_buf_addr = mmc_read_address;
@@ -1907,7 +1948,7 @@ void DivMMC::mmc_write(uint8_t value) {
                 if (sdhc_mode) {
                     flushWriteBuffer();
                     raEnd();                       // a new stream starts
-                    if (Z80Ops::isNext) {          // the 8-sector read-ahead + core1, as CMD17
+                    if (sdAsyncMachine() || Z80Ops::isNext) {   // the 8-sector read-ahead + core1, as CMD17
                         if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address);
                     } else {
                         s_ra_on = true;
@@ -1936,19 +1977,20 @@ void DivMMC::mmc_write(uint8_t value) {
                                     ((uint32_t)mmc_params[2] << 8) |
                                     mmc_params[3];
                 mmc_write_index = 0;
-                if (sdhc_mode) {
-                    // Pre-read sector for partial writes; sector_buf_addr = sector number
-                    loadSector(mmc_write_address);
-                    mmc_sector_buf_addr = mmc_write_address;
-                }
+                // No pre-read: CMD24 always carries the whole 512-byte block, and a
+                // block the host abandons part-way is not written at all (a real card
+                // programs nothing without the complete block + CRC). It used to read
+                // the sector off the card first — a full blocking card read on core0
+                // before every sector write. The buffer holds no sector until the
+                // block is complete (storeSector below).
+                if (sdhc_mode) mmc_sector_buf_addr = 0xFFFFFFFF;
             }
             // After gap byte and data token, receive 512 data bytes
             if (mmc_index_command >= WRITE_BLOCK_OFFSET + 2 &&
                 mmc_index_command <= WRITE_BLOCK_OFFSET + 2 + 511) {
                 int byte_idx = mmc_index_command - (WRITE_BLOCK_OFFSET + 2);
                 if (sdhc_mode) {
-                    mmc_sector_buf[byte_idx] = value;
-                    mmc_sector_dirty = true;
+                    mmc_sector_buf[byte_idx] = value;   // not dirty: only a complete block is stored
                 } else {
                     writeByte(mmc_write_address + byte_idx, value);
                 }
@@ -1961,6 +2003,7 @@ void DivMMC::mmc_write(uint8_t value) {
             if (mmc_index_command == WRITE_BLOCK_OFFSET + 2 + 512) {
                 if (sdhc_mode) {
                     storeSector(mmc_write_address);
+                    mmc_sector_buf_addr = mmc_write_address;
                     mmc_sector_dirty = false;
                 } else {
                     flushWriteBuffer();

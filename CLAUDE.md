@@ -15988,3 +15988,78 @@ Trace-build changes from the same session: guest-raised NMIs no longer re-arm th
 are counted not recorded, the 1 Hz block drains the UART in parts (the `NEXT hostpc` lines
 were being lost), and `tools/memdump.gdb` dumps all 16 divMMC banks and 10 pages of each
 Layer 2 buffer (320x256 / 640x256 take 80K).
+
+## Z-Controller SD: core1 reads, INIR batch for #57, no CMD24 pre-read (2026-10-16, NOT hw-tested)
+
+Every ZC/DivSD sector read used to be a blocking card read on core0 off the Next (FPS
+drop, negative IDL on any load). Test ELF `debug/DVp2-zc-async-1.0.10`.
+- **P0, background reads for every ZC machine**: `render_core` (main.cpp) pumps
+  `sd_async_pump()` each iteration and raises `g_sd_c1_live` (sdcard.c) once its loop
+  runs; `sdAsyncMachine()` (DivMMC.cpp) = c1 live + DivSD raw card (not an .mmc image,
+  not USB) + Next or `zc_enabled` replaces the old `isNext && g_next_c1_live` gate in
+  `c17Begin` / `sqAsyncRequest`. CMD17 and CMD18 (start and continuation) take the
+  Next's c17 path: the guest polls for the token while core1 reads (8-sector bursts on a
+  sequential stream + the next burst posted ahead); 3 ms untaken -> core0 reads itself.
+  Without it (no c1, image mode) ZC keeps the synchronous 16-sector `loadSectorStream`.
+  DivMMC/esxDOS on non-Next machines is deliberately left synchronous.
+- **P1, `Z80::zcInirBatch`** (flash, from INIR when `zc_enabled && C == #57`): all
+  repeats but the last as one loop of `mmc_read_bulk`/`mmc_read`. The per-iteration T is
+  MEASURED: the tstates distance between two consecutive entries of the same INIR that
+  read #57 exactly once (16..40 T), so ATM/Evo's late 3 T and the generic path agree by
+  construction; the first two iterations run normally. Off with any contended slot, the
+  TS-Conf DRAM model (14 MHz), Scorpion even-M1, Timex MMU, FMAddr, ATM read-only window
+  / Evo font write, ROM/accessor destination, slots 0/1, the beam-raced screen page,
+  breakpoints, RZX, Profi, Next. One raster line per call, never past the slice.
+- **P2**: CMD24 no longer reads the sector before the write (a full blocking card read
+  per sector write); a block abandoned part-way is not stored (sdhc bytes no longer mark
+  the buffer dirty), as on a real card.
+- Hw check owed: TS-BIOS SD boot, WC + TGV / BMPV, Dune (BaseConf), NedoOS (ATM3/Evo),
+  esxDOS ZC on Pentagon, a WC save (wc.ini) and a TS-BIOS Setup save; `[FT812]`/PERF
+  `sd N sec` and IDL during loads against the previous build; Next regression (TX-1696,
+  NextZXOS Browser) since its gate changed from the Next queue to core1's loop.
+
+## CPU 630 MHz + core voltage 1.90 / 2.00 V (2026-10-17, NOT hw-tested)
+
+Overclock > CPU clock gained **630 MHz** (PLL VCO 1260 / 2 / 1), Core voltage gained
+**1.90 V** and **2.00 V** (NVS `1_90` / `2_00`; Hardware Info's table already had them).
+Picking 630 raises the voltage to 1.90 V (the 540 EDGE pattern in resolveConstraints).
+- **No twin table needed**: HDMI PIO runs the standard 25.2 MHz modes at divider **2.5**
+  (half-integer, the 1.5-at-378 class), VGA PIO at **25** (25.2) / **30** (21 MHz), PWM
+  6.25 / 7.5, the VGA big modes at 10 (63 MHz) / 15 (42 MHz) — all exact. HDMI big
+  modes and the 90/75 Hz set are not offered at 630 (bigModeClockOk / VM_FAST_CPU_MHZ).
+- **`CPU_630_OFFERED`** (Config.h): VGA_HDMI and NOT ZERO2_PIO_USB_HOST (630/48 and
+  630/96 are not whole). Elsewhere Config::load folds 630 -> 504.
+- **HSTX: 31.5 MHz twins** (`TMDS_630_MHZ` 315, `VMODE_630_BASE` 46, `graphics_630_mode`,
+  HSTX builds only): clk_hstx cannot be 126 at 630 (clk_sys/5, CLK_HSTX DIV_INT is two
+  bits, 1..4), so clk_hstx = 630/4 = 157.5 MHz and each of [0]..[8] has a twin with the
+  SAME line rate and line count as the 25.2 MHz mode — line x1.25 (1000 px for 640 /
+  [8], 1040 px for 720), refresh per machine identical, only the horizontal blanking
+  grows. Those lines are longer than conv_color's `HDMI_TL_MAX_WORDS` (896), so the
+  expander takes two heap line buffers (~8.6 KB, the big-mode path with scale 0); no
+  heap = `hdmi_init` returns false with a log line (no picture, no overrun — the big
+  modes used to overrun conv_color in that case). PIO HDMI does not use the twins
+  (2.5 is cleaner than a wide nonstandard line).
+- **VGA on HSTX at 540 AND 630** (no longer folded to 504): `vga_hstx_clk_for()`
+  (vga_pwm.h) picks clk_hstx = 126 MHz where clk_sys is 126 x 1..4, else clk_sys/4 —
+  135 at 540, 157.5 at 630. The 540 twins [17..24] and 630 twins carry `vga_*` fields
+  under `#if VGA_HSTX`: 27 MHz (k 5, 29 PWM levels) / 26.25 MHz (k 6, 13 levels), the
+  line chosen to keep the current VGA line rate (640@60 856/832, 640@50 1080/1048,
+  720 880/856 px; multiples of 4) and per-machine vga_v_total within 0.07 %. Lines
+  over 896 raise vga.c's templates to the boot mode's line (as the big modes do).
+  Video.cpp / UiTree pick the twin for VGA too when VGA_HSTX. PIO VGA unchanged.
+  `tools/vga_timing_test.c` checks the 540 twins (and the 630 ones when
+  VMODE_630_BASE exists); the old fast-set loop now stops at VMODE_540_OFFSET.
+- **Butter PSRAM SCK is capped at 135 MHz** (`PSRAM_QMI_SCK_HW_MAX_MHZ`, main.cpp
+  psram_retiming): 630/4 would be 157.5. Only 630 is affected (-> /5 = 126).
+- Rest follows clk_sys by itself: flash /10 = 63 MHz SCK, PIO SD 22.5 MHz, CYW43
+  divider 9, SPI PSRAM, I2S/PWM, PS/2, NESPAD, UART, HDMI ACR (TMDS/10).
+- **Latent, not touched**: QMI RXDELAY is a 3-bit field and flash_timing_for() writes
+  `rxdelay = divisor`, so it overflows from 504 MHz up (504: 8 -> 0, 540: 9 -> 1,
+  630: 10 -> 2, the high bit lands in reserved bit 11). 504/540 are hw-proven like that.
+  If 630 crashes in flash code at a voltage that should hold, clamp it to 7 first.
+- Test ELFs `debug/{DVp2,m2p2-hstx,PCp2-hstx}-cpu630-1.0.10`.
+- Hw check owed: boot at 630 + 1.90 V on HDMI (div 2.5, Dell + capture card) and VGA,
+  HSTX twins (sink accepts a 1000/1040-px line; `hdmi: N px line on heap line buffers`),
+  VGA on HSTX at 540 and 630 (m2p2: monitor locks, Auto Adjust, PWM colours),
+  HDMI audio, a heavy TS-Conf / Next scene, SD + PSRAM under load, then 2.00 V if 1.90
+  is unstable.

@@ -714,12 +714,17 @@ static inline void sd_led(int on) { (void)on; }
    SD first cancels a request core1 has not started, or waits for the running
    one (sd_async_quiesce), so the card only ever sees one host at a time. */
 volatile uint8_t g_sd_as_state = 0;
+/* Set by core1's render loop (main.cpp render_core) once it pumps sd_async_pump()
+   every iteration: only then may DivMMC post a request and count on it being
+   taken (it still falls back to reading on core0 after 3 ms). */
+volatile uint8_t g_sd_c1_live = 0;
 BYTE*            g_sd_as_buf = 0;
 LBA_t            g_sd_as_sector = 0;
 UINT             g_sd_as_count = 0;
 static DRESULT disk_read_sd0(BYTE *buff, LBA_t sector, UINT count);
 
 volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max;
+volatile uint32_t g_sd_as_c1_n;     /* background reads run by core1 */
 
 void sd_async_quiesce(void)
 {
@@ -743,6 +748,7 @@ void sd_async_pump(void)		/* core1 */
 	const uint32_t d = time_us_32() - t0;
 	g_sd_as_c1_us += d;
 	if (d > g_sd_as_c1_max) g_sd_as_c1_max = d;
+	g_sd_as_c1_n = g_sd_as_c1_n + 1;
 	__atomic_store_n(&g_sd_as_state, r == RES_OK ? 3 : 4, __ATOMIC_RELEASE);
 }
 

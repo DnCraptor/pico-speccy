@@ -96,7 +96,7 @@ static int vga_pwm_k(void) {
 #if VGA_HSTX
     struct video_mode_t vm = graphics_get_video_mode(get_video_mode());
     const uint32_t px = vm.vga_pixel_clk ? (uint32_t)vm.vga_pixel_clk : (uint32_t)vm.pixel_clk;
-    const int k = vga_hstx_cycles(px);
+    const int k = vga_hstx_cycles_at(vga_hstx_clk_hz(), px);
     return k ? k : 5;
 #else
     return VGA_PWM_PIO_K;

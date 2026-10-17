@@ -1352,6 +1352,8 @@ void Config::load() {
             else if (vv == "1_65") vreq_voltage = VREG_VOLTAGE_1_65;
             else if (vv == "1_70") vreq_voltage = VREG_VOLTAGE_1_70;
             else if (vv == "1_80") vreq_voltage = VREG_VOLTAGE_1_80;
+            else if (vv == "1_90") vreq_voltage = VREG_VOLTAGE_1_90;
+            else if (vv == "2_00") vreq_voltage = VREG_VOLTAGE_2_00;
         }
         nvs_get_b("Issue2", Issue2, sts);
         nvs_get_b("rtc_enabled", rtc_enabled, sts);
@@ -1606,11 +1608,14 @@ void Config::load() {
         // go through it.
         // sys_clk 540 exists only where HDMI can take it: the standard modes switch
         // to their 27 MHz twins there (graphics_540_mode) — PIO divider 2.0, or on
-        // HSTX clk_hstx 135 = 540/4. VGA on HSTX cannot (its clk_hstx is 126 MHz);
-        // main() folds that case once the output is known. SOFTTV/TV/TFT have no use
+        // HSTX clk_hstx 135 = 540/4 (VGA on HSTX: the twins' 27 MHz VGA timing, k 5). SOFTTV/TV/TFT have no use
         // for it — a config from another board falls back to 504.
 #if !defined(VGA_HDMI)
         if (cpu_mhz == CPU_540_MHZ) cpu_mhz = 504;
+#endif
+#if !CPU_630_OFFERED
+        // 630 (Config::CPU_630_MHZ): HSTX, PIO-USB and SOFTTV/TV/TFT cannot take it.
+        if (cpu_mhz == CPU_630_MHZ) cpu_mhz = 504;
 #endif
         if (cpu_mhz != VM_FAST_CPU_MHZ) {
             hdmi_video_mode = baseVideoMode(hdmi_video_mode);
@@ -1790,6 +1795,8 @@ void Config::writeKeys(NvsWriter& buf) {
             case VREG_VOLTAGE_1_65: vv = "1_65"; break;
             case VREG_VOLTAGE_1_70: vv = "1_70"; break;
             case VREG_VOLTAGE_1_80: vv = "1_80"; break;
+            case VREG_VOLTAGE_1_90: vv = "1_90"; break;
+            case VREG_VOLTAGE_2_00: vv = "2_00"; break;
         }
         nvs_set_str(buf, "vreq_voltage", vv);
     }

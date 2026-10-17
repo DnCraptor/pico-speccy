@@ -59,6 +59,13 @@ using namespace std;
 #define JOY_CUSTOM 5
 #define JOY_NONE 6
 
+// sys_clk 630 MHz is offered only on a PIO HDMI/VGA build without PIO-USB (Config::CPU_630_MHZ).
+#if defined(VGA_HDMI) && !defined(ZERO2_PIO_USB_HOST)
+#define CPU_630_OFFERED 1
+#else
+#define CPU_630_OFFERED 0
+#endif
+
 class Config
 {
 public:
@@ -665,6 +672,14 @@ public:
     // sys_clk 540 MHz: every standard mode switches to its 27 MHz twin, and the
     // 1024x768 x4 mode exists only there. Needs ~1.80 V on the boards tried.
     static const uint16_t CPU_540_MHZ = 540;
+    // sys_clk 630 MHz (PLL VCO 1260 / 2 / 1). HDMI on PIO runs the standard 25.2 MHz
+    // modes at divider 2.5 (half-integer, like 1.5 at 378), VGA on PIO at 25 / 30
+    // exactly. HDMI on HSTX cannot make clk_hstx 126 (630 / 5, the field stops at 4):
+    // it runs 31.5 MHz twins at clk_hstx 157.5 = 630 / 4 (graphics_630_mode); VGA on
+    // HSTX the same twins' 26.25 MHz VGA timing (157.5 / 6). Not offered with PIO-USB (630 / 48 is
+    // not whole) nor on SOFTTV / TV / TFT. Needs ~1.90-2.00 V. No big modes and no
+    // 90/75 Hz set at 630.
+    static const uint16_t CPU_630_MHZ = 630;
     static constexpr bool isXgaVideoMode(uint8_t vm) { return vm == VM_1024x768_59 || vm == VM_1024x768_59X3; }
     static constexpr bool isXga3VideoMode(uint8_t vm) { return vm == VM_1024x768_59X3; }
     // The HDMI-only "big" modes and the CPU clocks that run them (a clean PIO divider):

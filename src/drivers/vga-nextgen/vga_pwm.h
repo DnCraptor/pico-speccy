@@ -189,11 +189,24 @@ static inline void vga_pwm_pins(const uint32_t w, const int k, uint8_t *out) {
 // Cycles per pixel for a mode's pixel clock, or 0 when it is not reachable — the
 // caller must refuse rather than run at the nearest, because a wrong video clock is
 // a wrong refresh and, with V-Sync on, a wrong emulated speed.
-static inline int vga_hstx_cycles(const uint32_t pixel_hz) {
-    if (!pixel_hz) return 0;
-    const uint32_t k = (VGA_HSTX_CLK_HZ + pixel_hz / 2) / pixel_hz;
+static inline int vga_hstx_cycles_at(const uint32_t clk_hz, const uint32_t pixel_hz) {
+    if (!pixel_hz || !clk_hz) return 0;
+    const uint32_t k = (clk_hz + pixel_hz / 2) / pixel_hz;
     if (k < 1 || k > 32) return 0;
-    return (k * pixel_hz == VGA_HSTX_CLK_HZ) ? (int)k : 0;
+    return (k * pixel_hz == clk_hz) ? (int)k : 0;
+}
+static inline int vga_hstx_cycles(const uint32_t pixel_hz) {
+    return vga_hstx_cycles_at(VGA_HSTX_CLK_HZ, pixel_hz);
+}
+
+// clk_hstx the VGA serializer runs at for a given clk_sys: 126 MHz wherever clk_sys
+// is 126 MHz x 1..4 (252/378/504), else clk_sys / 4 — 135 MHz at 540 (27 MHz = /5)
+// and 157.5 MHz at 630 (26.25 MHz = /6), the clocks the 540 / 630 twins in
+// video_mode_table.h are built for. 0 = no integer 1..4 divider gives one.
+static inline uint32_t vga_hstx_clk_for(const uint32_t sys_hz) {
+    for (uint32_t d = 1; d <= 4; d++)
+        if (d * VGA_HSTX_CLK_HZ == sys_hz) return VGA_HSTX_CLK_HZ;
+    return (sys_hz % 4u == 0 && sys_hz / 4u > VGA_HSTX_CLK_HZ) ? sys_hz / 4u : 0;
 }
 
 // The PIO path programs sm->clkdiv with (sys/pixel) in 16.16 TRUNCATED to 1/16.

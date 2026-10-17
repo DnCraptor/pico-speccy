@@ -97,6 +97,12 @@ extern "C" uint32_t graphics_frame_count(void);
 // the 37.8 MHz twin of a standard video_mode[] index (the 90/75 Hz set).
 extern "C" int  graphics_fast_mode(int mode);
 extern "C" int  graphics_540_mode(int mode);
+extern "C" int  graphics_630_mode(int mode);
+#if defined(VGA_HSTX) && VGA_HSTX
+static constexpr bool VGA_HSTX_TWINS = true;    // VGA on HSTX uses the 540 / 630 twins
+#else
+static constexpr bool VGA_HSTX_TWINS = false;
+#endif
 extern "C" int  graphics_xga_mode(int x3);
 extern "C" int  graphics_big_mode(int vm, unsigned mhz, int klass);
 extern "C" void graphics_big_mode_fit(int mode, int klass);
@@ -5286,8 +5292,14 @@ void VIDEO::pickMachineVideoMode() {
         const int big = graphics_big_mode(vmSel, SELECT_VGA ? Config::bigModePrefClock(vmSel)
                                                             : Config::cpu_mhz, klass);
         if (big >= 0) { graphics_big_mode_fit(big, klass); video_mode = big; }
-    } else if (!SELECT_VGA && Config::cpu_mhz == Config::CPU_540_MHZ) {
+    } else if ((!SELECT_VGA || VGA_HSTX_TWINS) && Config::cpu_mhz == Config::CPU_540_MHZ) {
+        // VGA on HSTX takes the twin too: its vga_* fields are the 27 MHz VGA timing
+        // (clk_hstx 135 = 540 / 4, k 5). VGA on the PIO keeps its own modes.
         video_mode = graphics_540_mode(video_mode);
+    } else if ((!SELECT_VGA || VGA_HSTX_TWINS) && Config::cpu_mhz == Config::CPU_630_MHZ) {
+        // sys_clk 630: HSTX runs the 31.5 MHz twins (clk_hstx 630 / 4; VGA 26.25 MHz,
+        // k 6); on PIO this returns the mode itself (25.2 MHz at divider 2.5).
+        video_mode = graphics_630_mode(video_mode);
     }
     // The pair table above was built before video_mode was final, and on an x3 mode
     // it has to keep out of slots 245..249 (init_profi_pair_lookup) — rebuild it now.

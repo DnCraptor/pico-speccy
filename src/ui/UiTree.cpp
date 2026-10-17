@@ -36,6 +36,7 @@
 // (vga.h/hdmi.h/tv.h/st7789.h and three fonts) for two prototypes.
 extern "C" int   graphics_fast_mode(int mode);
 extern "C" int   graphics_540_mode(int mode);
+extern "C" int   graphics_630_mode(int mode);
 extern "C" int   graphics_xga_mode(int x3);
 extern "C" int   graphics_big_mode(int vm, unsigned mhz, int klass);
 #ifdef VGA_HDMI
@@ -255,7 +256,13 @@ static int vmGraphicsIndex(int32_t vm, unsigned mhz, int vga) {
         default:                    idx = 0; break;  // VM_640x480_60
     }
     if (Config::isFastVideoMode((uint8_t)vm)) return graphics_fast_mode(idx);
-    return (!vga && mhz == Config::CPU_540_MHZ) ? graphics_540_mode(idx) : idx;
+#if defined(VGA_HSTX) && VGA_HSTX
+    const bool twin = true;           // VGA on HSTX takes the 540 / 630 twins as well
+#else
+    const bool twin = !vga;
+#endif
+    if (twin && mhz == Config::CPU_630_MHZ) return graphics_630_mode(idx);
+    return (twin && mhz == Config::CPU_540_MHZ) ? graphics_540_mode(idx) : idx;
 }
 
 // Three decimals with the trailing zeros stripped: the common (clean) dividers
@@ -402,7 +409,7 @@ static const Option* video_modeOpts(uint8_t& cnt) {
         // k, the clk_hstx cycles per pixel.
     #if VGA_HSTX
         if (vga) {
-            const int k = vga_hstx_cycles(graphics_mode_vga_pixel_hz(gi));
+            const int k = vga_hstx_cycles_at(vga_hstx_clk_for(lm * 1000000u), graphics_mode_vga_pixel_hz(gi));
             if (k > 0) snprintf(dv, sizeof(dv), "K%d", k);
             else       snprintf(dv, sizeof(dv), "K-");
         } else
@@ -482,10 +489,16 @@ static const Option opt_cpu_mhz[] = {
     { "378 MHz", 378 },
     { "504 MHz", 504 },
 #if defined(VGA_HDMI)
-    // HDMI only: every video mode switches to a 27 MHz twin (PIO divider 2.0, or on
-    // HSTX clk_hstx 135 = 540/4). VGA on HSTX cannot take it (resolveConstraints).
+    // Every video mode switches to a 27 MHz twin (PIO divider 2.0, or on
+    // HSTX clk_hstx 135 = 540/4; VGA on HSTX 27 MHz twins, k 5).
     // Needs ~1.80 V — resolveConstraints raises the voltage when 540 is picked.
     { "540 MHz", 540 },
+#endif
+#if CPU_630_OFFERED
+    // HDMI (PIO 2.5, HSTX 31.5 MHz twins), VGA (PIO 25 / 30, HSTX 26.25 MHz twins);
+    // see Config::CPU_630_MHZ. Needs ~1.90-2.00 V —
+    // resolveConstraints raises the voltage to 1.90 V when 630 is picked.
+    { "630 MHz", 630 },
 #endif
 };
 static const Option opt_vreg[] = {               // VREG_VOLTAGE_* enum values
@@ -494,7 +507,8 @@ static const Option opt_vreg[] = {               // VREG_VOLTAGE_* enum values
     { "1.35 V", VREG_VOLTAGE_1_35 }, { "1.40 V", VREG_VOLTAGE_1_40 },
     { "1.50 V", VREG_VOLTAGE_1_50 }, { "1.60 V", VREG_VOLTAGE_1_60 },
     { "1.65 V", VREG_VOLTAGE_1_65 }, { "1.70 V", VREG_VOLTAGE_1_70 },
-    { "1.80 V", VREG_VOLTAGE_1_80 },
+    { "1.80 V", VREG_VOLTAGE_1_80 }, { "1.90 V", VREG_VOLTAGE_1_90 },
+    { "2.00 V", VREG_VOLTAGE_2_00 },
 };
 static const Option opt_flash_freq[] = {
     { "33 MHz", 33 }, { "66 MHz", 66 }, { "84 MHz", 84 },

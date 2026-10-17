@@ -1817,14 +1817,26 @@ static inline bool hdmi_init() {
     dma_lines[1] = &conv_color[HDMI_TL_MAX_WORDS];
     hdmi_tl_cap = HDMI_TL_MAX_WORDS;
     hdmi_big_scale = 0;
-    if (hdmi_mode.x4_offset || hdmi_mode.x3 || hdmi_mode.x2_pad) {
-        // The big modes: their lines (up to 1280 px, a word per pixel even on a
-        // blanking line) do not fit conv_color; two heap buffers, kept for the session.
+    const bool big_mode = hdmi_mode.x4_offset || hdmi_mode.x3 || hdmi_mode.x2_pad;
+    if (big_mode || (uint32_t)hdmi_tl_g.total_px + 64u > HDMI_TL_MAX_WORDS) {
+        // The big modes, and the 630 MHz twins (1000 / 1040-px lines): a line (a word
+        // per pixel even on a blanking line) does not fit conv_color; two heap
+        // buffers, kept for the session (the line length is fixed until a reboot).
         extern void* tryMalloc(size_t n);
         static uint32_t *big_lines = NULL;
+        static uint32_t  big_cap = 0;
         const uint32_t cap = (uint32_t)hdmi_tl_g.total_px + 64u;
-        if (!big_lines) big_lines = (uint32_t *)tryMalloc(2u * cap * sizeof(uint32_t));
-        if (big_lines) {
+        if (!big_lines) {
+            big_lines = (uint32_t *)tryMalloc(2u * cap * sizeof(uint32_t));
+            if (big_lines) big_cap = cap;
+        }
+        if (big_lines && cap > big_cap) big_lines = NULL;   // never overrun a smaller block
+        if (big_lines && !big_mode) {
+            dma_lines[0] = big_lines;
+            dma_lines[1] = big_lines + cap;
+            hdmi_tl_cap = cap;
+            printf("hdmi: %d px line on heap line buffers\n", hdmi_tl_g.total_px);
+        } else if (big_lines) {
             const int scale = hdmi_mode.x4_offset ? 4 : hdmi_mode.x3 ? 3 : 2;
             const int act = hdmi_tl_g.active_px, fbw = hdmi_mode.x2_pad ? 360 : 320;
             int cols = act / scale; if (cols > fbw) cols = fbw; cols &= ~3;
@@ -1838,8 +1850,11 @@ static inline bool hdmi_init() {
             printf("hdmi: big mode x%d, %d px line, fb %d bytes from %d, left %d px\n",
                    scale, hdmi_tl_g.total_px, cols, hdmi_big_fbx, hdmi_big_left);
         } else {
-            printf("hdmi: no heap for the big-mode line buffers (%u B) - no picture\n",
-                   (unsigned)(2u * cap * sizeof(uint32_t)));
+            // conv_color cannot hold this line either: building it there would run
+            // past the buffer. No picture, no overrun.
+            printf("hdmi: no heap for the %d px line buffers (%u B) - no picture\n",
+                   hdmi_tl_g.total_px, (unsigned)(2u * cap * sizeof(uint32_t)));
+            return false;
         }
     }
     // Prime both buffers with a blanking line so the first plays are well-formed.

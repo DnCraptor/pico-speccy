@@ -30,6 +30,9 @@
 // TMDS_XGA_MHZ 540 = 54 MHz pixel: 1024x768 x4 (divider 1.0 at 540 only).
 #define TMDS_540_MHZ   270
 #define TMDS_XGA_MHZ   540
+// TMDS_630_MHZ 315 = 31.5 MHz pixel: the standard set for sys_clk 630 on HSTX
+// (clk_hstx 157.5 = 630 / 4). Same line rate and line count as the 25.2 MHz modes.
+#define TMDS_630_MHZ   315
 #ifndef CPU_MHZ
 // Host builds (tools/vga_timing_test.c) have no board define; the value only seeds
 // pio_clk_div, which graphics_set_sys_clk_mhz() re-derives at boot anyway.
@@ -159,6 +162,8 @@ struct video_mode_t {
 #define VMODE_HD60_378   43   // 1280x720 @60 x3, 75.6 MHz, 1680-px line
 #define VMODE_SD60_504   44   // 1440x480 @60 x3 (360x240 fb), 50.4 MHz (also at 252)
 #define VMODE_SD60_540   45   // ...54 MHz = CEA 1440x480p60
+// The 31.5 MHz (sys_clk 630) twins of [0]..[8], HSTX only, at index + VMODE_630_BASE.
+#define VMODE_630_BASE   46
 #else
 #define VMODE_SVGA3_504  36   // 800x600 x3 / x2, 33.6 MHz (PIO 1.5)
 #define VMODE_SVGA2_504  37

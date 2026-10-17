@@ -45,14 +45,21 @@ void vga_hstx_stop(void) {
 // 1, 2, 3 and 4 are the only dividers that exist (the datasheet's "0 -> max+1" is
 // what makes 4 reachable) — which is the whole reason the VGA pixel clocks had to
 // move onto 126/k in the first place.  Do not "fix" this into a mask-and-clamp.
+// ...and at clk_sys 540 / 630 (no 126 there) clk_sys / 4 = 135 / 157.5 MHz, which the
+// 540 / 630 twins of the standard modes are timed for (vga_hstx_clk_for).
+uint32_t vga_hstx_clk_hz(void) {
+    return vga_hstx_clk_for((uint32_t)clock_get_hz(clk_sys));
+}
+
 static bool vga_hstx_clock(void) {
     const uint32_t sys = (uint32_t)clock_get_hz(clk_sys);
-    const uint32_t div = (sys + VGA_HSTX_CLK_HZ / 2) / VGA_HSTX_CLK_HZ;
-    if (div < 1 || div > 4 || div * VGA_HSTX_CLK_HZ != sys) {
-        printf("vga_hstx: clk_sys %u cannot give %u Hz with an integer 1..4 divider\n",
-               (unsigned)sys, (unsigned)VGA_HSTX_CLK_HZ);
+    const uint32_t clk = vga_hstx_clk_for(sys);
+    if (!clk) {
+        printf("vga_hstx: clk_sys %u has no clk_hstx for VGA (126 MHz x 1..4, 540, 630)\n",
+               (unsigned)sys);
         return false;
     }
+    const uint32_t div = sys / clk;
     // An ODD divider costs the PHASE WEIGHTS, not the picture.  The generator has
     // no DC50 bit (only GPOUT0-3 do), so at /3 the clock is 1/3-2/3 and the DDR
     // half-cycles alternate wide/narrow — and a phase takes every 4th half-cycle,
@@ -88,10 +95,10 @@ static void vga_hstx_engine(const int k) {
 }
 
 bool vga_hstx_set_pixel_clk(const uint32_t pixel_hz) {
-    const int k = vga_hstx_cycles(pixel_hz);
+    const int k = vga_hstx_cycles_at(vga_hstx_clk_hz(), pixel_hz);
     if (!k) {
-        printf("vga_hstx: pixel clock %u Hz is not 126 MHz / k (k = 1..32) - refused\n",
-               (unsigned)pixel_hz);
+        printf("vga_hstx: pixel clock %u Hz is not clk_hstx %u / k (k = 1..32) - refused\n",
+               (unsigned)pixel_hz, (unsigned)vga_hstx_clk_hz());
         return false;
     }
     if (k == s_k) return true;
@@ -103,10 +110,10 @@ bool vga_hstx_set_pixel_clk(const uint32_t pixel_hz) {
 }
 
 bool vga_hstx_start(const uint32_t pixel_hz) {
-    const int k = vga_hstx_cycles(pixel_hz);
+    const int k = vga_hstx_cycles_at(vga_hstx_clk_hz(), pixel_hz);
     if (!k) {
-        printf("vga_hstx: pixel clock %u Hz is not 126 MHz / k (k = 1..32) - staying on the PIO\n",
-               (unsigned)pixel_hz);
+        printf("vga_hstx: pixel clock %u Hz is not clk_hstx %u / k (k = 1..32) - staying on the PIO\n",
+               (unsigned)pixel_hz, (unsigned)vga_hstx_clk_hz());
         return false;
     }
     vga_hstx_stop();

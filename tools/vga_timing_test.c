@@ -156,17 +156,66 @@ int main(void) {
     // The 37.8 MHz "fast" set has no VGA override and is NOT HSTX-reachable
     // (126/37.8 = 3.333); it stays a PIO-only mode.  Assert that it really has no
     // vga_pixel_clk, so nobody "fixes" it into a VGA-HSTX build by accident.
-    for (int i = VMODE_FAST_OFFSET; i < VMODE_XGA4_504; i++) {
+    for (int i = VMODE_FAST_OFFSET; i < VMODE_540_OFFSET; i++) {
         char d[80];
         snprintf(d, sizeof d, "mode %d has a vga_pixel_clk", i);
         chk(video_mode[i].vga_pixel_clk == 0, "fast set", "no VGA override", d);
+    }
+
+    // The 540 (and, with -DHDMI_HSTX=2, 630) twins of [0]..[7]: on a VGA-HSTX build
+    // their vga_* fields are the VGA timing at clk_hstx = clk_sys / 4 (135 / 157.5 MHz).
+    // Same checks as the standard set, against that clock and VGA_MAX_LINE_SIZE_BIG
+    // (vga.c raises its templates to the boot mode's line).
+    {
+        struct { int base; double clk; const char *tag; } fam[] = {
+            { VMODE_540_OFFSET, 135000000.0, "540" },
+#ifdef VMODE_630_BASE
+            { VMODE_630_BASE,   157500000.0, "630" },
+#endif
+        };
+        for (unsigned f = 0; f < sizeof fam / sizeof fam[0]; f++)
+        for (int b = 0; b < 8; b++) {
+            const struct video_mode_t *m = &video_mode[fam[f].base + b];
+            char name[24], d[160];
+            snprintf(name, sizeof name, "[%d] %s twin", fam[f].base + b, fam[f].tag);
+            if (!VGA_HSTX) { chk(m->vga_pixel_clk == 0, name, "VGA fields", "unexpected on PIO"); continue; }
+            chk(m->vga_pixel_clk && m->vga_v_total && m->vga_h_sync_bytes && m->vga_h_bp_bytes
+                && m->vga_h_fp_bytes && m->vga_screen_width, name, "fields", "a vga_* field is 0");
+            const double kf = fam[f].clk / m->vga_pixel_clk;
+            const int k = (int)(kf + 0.5);
+            snprintf(d, sizeof d, "%.1f MHz / %g is not an integer 1..32", fam[f].clk / 1e6, kf);
+            chk(fabs(kf - k) < 1e-9 && k >= 1 && k <= 32, name, "HSTX clock", d);
+            const int hs = m->vga_h_sync_bytes * 2, bp = m->vga_h_bp_bytes * 2;
+            const int h_total = (m->vga_h_sync_bytes + m->vga_h_bp_bytes + m->vga_screen_width
+                                 + m->vga_h_fp_bytes) * 2;
+            const int shift = hs + bp;
+            snprintf(d, sizeof d, "line %d, shift %d, max %d", h_total, shift, VGA_MAX_LINE_SIZE_BIG);
+            chk(h_total % 4 == 0 && shift % 4 == 0 && h_total <= VGA_MAX_LINE_SIZE_BIG, name, "alignment", d);
+            const double hz = (double)m->vga_pixel_clk / h_total / m->vga_v_total;
+            const double err = 100.0 * (hz / targets[b].refresh - 1.0);
+            snprintf(d, sizeof d, "%.3f Hz against %.3f (%+.3f%%)", hz, targets[b].refresh, err);
+            chk(fabs(err) < 0.25, name, "refresh", d);
+            const int vs_end = m->vga_vsync_end ? m->vga_vsync_end : m->vsync_end;
+            const int v_act = m->vga_v_active ? m->vga_v_active : m->v_active;
+            snprintf(d, sizeof d, "v_total %d, v_active %d, vsync_end %d", m->vga_v_total, v_act, vs_end);
+            chk(m->vga_v_total > vs_end && m->vga_v_total >= v_act + 8, name, "vertical", d);
+            const double us_hs = 1e6 * hs / m->vga_pixel_clk, us_bp = 1e6 * bp / m->vga_pixel_clk;
+            snprintf(d, sizeof d, "hsync %.2f us, back porch %.2f us", us_hs, us_bp);
+            chk(us_hs >= 1.20 && us_bp >= 1.20, name, "horizontal", d);
+            printf("%-16s %8.4f %2d %5d %9.3f %8.3f %+6.2f%%\n", name, m->vga_pixel_clk / 1e6, k,
+                   h_total, hz, targets[b].refresh, err);
+        }
     }
 
     // The VGA (PIO) twins of the big HDMI modes, [28]..[39]: an integer PIO divider at
     // 252/378/504, a 32-bit-aligned line inside VGA_MAX_LINE_SIZE_BIG, every vga_*
     // field set (a zero would inherit the HDMI one), and the machine's refresh.
     {
+#ifdef VMODE_630_BASE
+        const int n = VMODE_630_BASE;
+#else
         const int n = (int)(sizeof(video_mode)/sizeof(video_mode[0]));
+#endif
         for (int i = VMODE_XGA4_504; i < n; i++) {
             const struct video_mode_t *m = &video_mode[i];
             char name[24], d[160];

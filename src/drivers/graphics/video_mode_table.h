@@ -10,6 +10,7 @@
 // The 27/54 MHz entries are only ever used at sys_clk 540; graphics_set_sys_clk_mhz()
 // re-derives the divider at boot anyway.
 #define PIO_DIV_540 ((float)CPU_MHZ / (float)TMDS_540_MHZ < 1.0f ? 1.0f : (float)CPU_MHZ / (float)TMDS_540_MHZ)
+#define PIO_DIV_630 ((float)CPU_MHZ / (float)TMDS_630_MHZ < 1.0f ? 1.0f : (float)CPU_MHZ / (float)TMDS_630_MHZ)
 
 #ifndef VGA_HSTX
 #define VGA_HSTX 0
@@ -498,6 +499,16 @@ static const struct video_mode_t video_mode[] = {
         .v_offset = 0,
         .pio_clk_div = PIO_DIV_540,
         .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 856 px
+        ,
+        .vga_v_total = 526,
+        .vga_pixel_clk = 27000000,
+        .vga_h_sync_bytes = 50,
+        .vga_h_bp_bytes = 48,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 320
+#endif
     },
     { // [18] 640x480 50Hz Pentagon @540 — 27MHz/856/646 = 48.83Hz
         .v_total = 645,
@@ -514,6 +525,16 @@ static const struct video_mode_t video_mode[] = {
         .v_offset = 0,
         .pio_clk_div = PIO_DIV_540,
         .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 1080 px
+        ,
+        .vga_v_total = 512,
+        .vga_pixel_clk = 27000000,
+        .vga_h_sync_bytes = 62,
+        .vga_h_bp_bytes = 106,
+        .vga_h_fp_bytes = 52,
+        .vga_screen_width = 320
+#endif
     },
     { // [19] 640x480 50Hz 48K @540 — 27MHz/856/630 = 50.07Hz
         .v_total = 629,
@@ -530,6 +551,16 @@ static const struct video_mode_t video_mode[] = {
         .v_offset = 0,
         .pio_clk_div = PIO_DIV_540,
         .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 1080 px
+        ,
+        .vga_v_total = 499,
+        .vga_pixel_clk = 27000000,
+        .vga_h_sync_bytes = 62,
+        .vga_h_bp_bytes = 106,
+        .vga_h_fp_bytes = 52,
+        .vga_screen_width = 320
+#endif
     },
     { // [20] 640x480 50Hz 128K @540 — 27MHz/856/631 = 49.99Hz
         .v_total = 630,
@@ -546,6 +577,16 @@ static const struct video_mode_t video_mode[] = {
         .v_offset = 0,
         .pio_clk_div = PIO_DIV_540,
         .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 1080 px
+        ,
+        .vga_v_total = 500,
+        .vga_pixel_clk = 27000000,
+        .vga_h_sync_bytes = 62,
+        .vga_h_bp_bytes = 106,
+        .vga_h_fp_bytes = 52,
+        .vga_screen_width = 320
+#endif
     },
     { // [21] 720x576 50Hz Pentagon @540 — 27MHz/864/640 = 48.83Hz
         .v_total = 639,
@@ -562,6 +603,18 @@ static const struct video_mode_t video_mode[] = {
         .v_offset = 0,
         .pio_clk_div = PIO_DIV_540,
         .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 880 px
+        ,
+        .vga_v_total = 628,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 14,
+        .vga_screen_width = 360
+#endif
     },
     { // [22] 720x576 50Hz 48K @540 — 27MHz/864/624 = 50.08Hz
         .v_total = 623,
@@ -578,6 +631,18 @@ static const struct video_mode_t video_mode[] = {
         .v_offset = 0,
         .pio_clk_div = PIO_DIV_540,
         .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 880 px
+        ,
+        .vga_v_total = 613,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 14,
+        .vga_screen_width = 360
+#endif
     },
     { // [23] 720x576 50Hz 128K @540 — CEA 576p50, VIC 17: 27MHz/864/625 = 50.00Hz
         .v_total = 624,
@@ -594,6 +659,18 @@ static const struct video_mode_t video_mode[] = {
         .v_offset = 0,
         .pio_clk_div = PIO_DIV_540,
         .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 880 px
+        ,
+        .vga_v_total = 613,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 14,
+        .vga_screen_width = 360
+#endif
     },
     { // [24] 720x480 60Hz @540 — 27MHz/864/521 = 59.98Hz
         .v_total = 520,
@@ -610,6 +687,18 @@ static const struct video_mode_t video_mode[] = {
         .v_offset = 0,
         .pio_clk_div = PIO_DIV_540,
         .tmds_mhz = TMDS_540_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 135 = 540 / 4, 27 MHz = 135 / 5 (k 5), line 880 px
+        ,
+        .vga_v_total = 511,
+        .vga_pixel_clk = 27000000,
+        .vga_vsync_start = 500,
+        .vga_vsync_end = 502,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 14,
+        .vga_screen_width = 360
+#endif
     },
     { // [25] 720x576 60Hz (v_active > v_total, as [8]) @540 — 27MHz/864/525
         .v_total = 524,
@@ -1098,4 +1187,249 @@ static const struct video_mode_t video_mode[] = {
         .x3 = 10,
         .x2_pad = 1
     }
+#if defined(HDMI_HSTX) && HDMI_HSTX
+    ,
+    // ---------------------------------------------------------------------
+    // sys_clk 630 MHz on HSTX: clk_hstx can only be clk_sys / 1..4 (a two-bit field),
+    // so 126 MHz (the 25.2 MHz pixel) is out of reach. 630 / 4 = 157.5 MHz gives a
+    // 31.5 MHz pixel, and every standard mode has a twin there: SAME line rate and
+    // SAME line count as the 25.2 MHz mode (the line is 1.25x as long: 1000 / 1040 px),
+    // so the refresh is identical per machine; only the horizontal blanking grows.
+    // Indices = twin + VMODE_630_BASE (graphics_630_mode). The PIO back-end does not
+    // use them: it runs the 25.2 MHz modes at divider 2.5. The lines are longer than
+    // conv_color's HDMI_TL_MAX_WORDS, so the expander takes heap line buffers (hdmi.c).
+    // ---------------------------------------------------------------------
+    { // 630 twin of [0] 640x480 60Hz — 31.5MHz/1000/525
+        .v_total = 524,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 60,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 40,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 832 px
+        ,
+        .vga_v_total = 526,
+        .vga_pixel_clk = 26250000,
+        .vga_h_sync_bytes = 48,
+        .vga_h_bp_bytes = 40,
+        .vga_h_fp_bytes = 8,
+        .vga_screen_width = 320
+#endif
+    },
+    { // 630 twin of [1] 640x480 50Hz Pentagon — 31.5MHz/1000/645
+        .v_total = 644,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 60,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 40,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 1048 px
+        ,
+        .vga_v_total = 513,
+        .vga_pixel_clk = 26250000,
+        .vga_h_sync_bytes = 60,
+        .vga_h_bp_bytes = 98,
+        .vga_h_fp_bytes = 46,
+        .vga_screen_width = 320
+#endif
+    },
+    { // 630 twin of [2] 640x480 50Hz 48K — 31.5MHz/1000/629
+        .v_total = 628,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 60,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 40,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 1048 px
+        ,
+        .vga_v_total = 500,
+        .vga_pixel_clk = 26250000,
+        .vga_h_sync_bytes = 60,
+        .vga_h_bp_bytes = 98,
+        .vga_h_fp_bytes = 46,
+        .vga_screen_width = 320
+#endif
+    },
+    { // 630 twin of [3] 640x480 50Hz 128K — 31.5MHz/1000/630
+        .v_total = 629,
+        .v_active = 480,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 320,
+        .h_sync_bytes = 60,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 40,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 1048 px
+        ,
+        .vga_v_total = 501,
+        .vga_pixel_clk = 26250000,
+        .vga_h_sync_bytes = 60,
+        .vga_h_bp_bytes = 98,
+        .vga_h_fp_bytes = 46,
+        .vga_screen_width = 320
+#endif
+    },
+    { // 630 twin of [4] 720x576 50Hz Pentagon — 31.5MHz/1040/620
+        .v_total = 619,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 16,
+        .line_bytes = 520,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 856 px
+        ,
+        .vga_v_total = 628,
+        .vga_pixel_clk = 26250000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 32,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 360
+#endif
+    },
+    { // 630 twin of [5] 720x576 50Hz 48K — 31.5MHz/1040/605
+        .v_total = 604,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 16,
+        .line_bytes = 520,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 856 px
+        ,
+        .vga_v_total = 612,
+        .vga_pixel_clk = 26250000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 32,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 360
+#endif
+    },
+    { // 630 twin of [6] 720x576 50Hz 128K — 31.5MHz/1040/605
+        .v_total = 604,
+        .v_active = 576,
+        .freq = 50,
+        .pixel_clk = 31500000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 16,
+        .line_bytes = 520,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 856 px
+        ,
+        .vga_v_total = 613,
+        .vga_pixel_clk = 26250000,
+        .vga_vsync_start = 580,
+        .vga_vsync_end = 586,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 32,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 360
+#endif
+    },
+    { // 630 twin of [7] 720x480 60Hz — 31.5MHz/1040/505
+        .v_total = 504,
+        .v_active = 480,
+        .freq = 60,
+        .pixel_clk = 31500000,
+        .vsync_start = 490,
+        .vsync_end = 492,
+        .screen_width = 360,
+        .h_sync_bytes = 64,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 16,
+        .line_bytes = 520,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+#if VGA_HSTX
+        // VGA on HSTX: clk_hstx 157.5 = 630 / 4, 26.25 MHz = 157.5 / 6 (k 6), line 856 px
+        ,
+        .vga_v_total = 511,
+        .vga_pixel_clk = 26250000,
+        .vga_vsync_start = 500,
+        .vga_vsync_end = 502,
+        .vga_h_sync_bytes = 26,
+        .vga_h_bp_bytes = 32,
+        .vga_h_fp_bytes = 10,
+        .vga_screen_width = 360
+#endif
+    },
+    { // 630 twin of [8] 720x576 60Hz (v_active > v_total, as [8]) — 31.5MHz/1000/525
+        .v_total = 524,
+        .v_active = 576,
+        .freq = 60,
+        .pixel_clk = 31500000,
+        .vsync_start = 581,
+        .vsync_end = 586,
+        .screen_width = 360,
+        .h_sync_bytes = 40,
+        .h_bp_bytes = 80,
+        .h_fp_bytes = 20,
+        .line_bytes = 500,
+        .v_offset = 0,
+        .pio_clk_div = PIO_DIV_630,
+        .tmds_mhz = TMDS_630_MHZ
+    }
+#endif
 };

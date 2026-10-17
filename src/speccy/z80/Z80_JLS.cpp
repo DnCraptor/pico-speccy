@@ -4290,6 +4290,7 @@ void Z80::decodeED(void) {
         case 0xB2:
         { /* INIR */
             if (Z80Ops::isNext && g_ts_fastmem == 1 && REG_C == 0xEB && (REG_B == 0 || REG_B > 2)) nextInirBatch();
+            else if (__builtin_expect(DivMMC::zc_enabled, 0) && REG_C == 0x57) zcInirBatch();
             inx(1);
             if (REG_B != 0) {
                 REG_PC = REG_PC - 2;
@@ -4531,6 +4532,80 @@ Z80_COLD void Z80::nextInirBatch() {
     REG_B = (uint8_t)(REG_B - n);
     CPU::tstates = now + T * n;
     regR += 2 * n;
+}
+
+// Z-Controller, INIR from the SD data port #57 (ZX-Evo TS-Conf / BaseConf, ATM,
+// Pentagon / Scorpion with ZC): TS-BIOS, esxDOS's ZC driver, NedoOS and most
+// loaders read a sector as INIR x2, i.e. 512 trips through the whole
+// Ports::input decode. Every repeat but the last as one loop of
+// DivMMC::mmc_read() straight into the destination page (mmc_read_bulk for the
+// data bytes); inx() runs the final one, so flags, WZ and the exit timing are
+// the core's own — the nextInirBatch shape.
+// The per-iteration cost is MEASURED, not assumed: it differs by machine (ATM/Evo
+// add the late 3 T of the I/O cycle, the generic decode does not) and it is
+// exactly the CPU::tstates distance between two consecutive entries into this
+// INIR — when the previous iteration was this same instruction (PC, B - 1), it
+// read #57 once (zc_in_bytes + 1) and nothing else ran in between (16..40 T).
+// The first two iterations of every INIR therefore run normally. Only where that
+// cost repeats exactly: no contended memory anywhere, no DRAM wait model (TS-Conf
+// 14 MHz), no even-M1 (Scorpion Yellow); destinations in slots 2..7 without a
+// write gate (ROM, TS-Conf FMAddr, ATM read-only window / Evo font, Timex MMU);
+// one raster line at most per call (Draw handles one line crossing), not past the
+// slice end; not into the beam-raced ZX screen page.
+static uint16_t s_zcPc = 0;
+static uint8_t  s_zcB = 0;
+static uint32_t s_zcT = 0;
+static uint32_t s_zcIn = 0;
+
+Z80_COLD void Z80::zcInirBatch() {
+    const uint32_t now = CPU::tstates;
+    const uint16_t pc = REG_PC;
+    uint32_t T = 0;
+    if (pc == s_zcPc && (uint8_t)(s_zcB - 1) == REG_B && DivMMC::zc_in_bytes == s_zcIn + 1 && now > s_zcT)
+        T = now - s_zcT;
+    do {
+        if (T < 16 || T > 40) break;
+        if (!z80_in_nocheck || Config::numPcBP > 0 || Config::numPortReadBP > 0 ||
+            Config::numMemWriteBP > 0 || Rzx::mode) break;
+        if (!DivMMC::cardSelected() || Z80Ops::isProfi || Z80Ops::isNext) break;
+        if (g_ts_memcyc || g_scorp_even_m1 || g_timex_mmu || (g_tsconf_wr & 0x10)) break;
+        bool cont = false;
+        for (int i = 0; i < 8; i++) cont |= MemESP::ramContended[i];
+        if (cont) break;
+        if (now >= CPU::stFrame) break;
+        uint32_t n = (REG_B ? (uint32_t)REG_B : 256u) - 1;
+        const uint32_t room = (CPU::stFrame - now) / T;
+        if (n > room) n = room;
+        const uint32_t tpl = VIDEO::tStatesPerLine ? VIDEO::tStatesPerLine : 224;
+        const uint32_t line = (tpl << ESPectrum::multiplicator) / T;
+        if (line > 1 && n > line - 1) n = line - 1;
+        const uint16_t hl = REG_HL;
+        const uint32_t dstLeft = 0x2000u - (hl & 0x1FFF);
+        if (n > dstLeft) n = dstLeft;
+        if (n < 2) break;
+        const uint8_t ds = hl >> 13;
+        if (ds < 2) break;
+        if ((g_atm_ro & 0x80) || (g_atm_ro & (1u << (hl >> 14)))) break;
+        uint8_t* dp = MemESP::ramCurrent[ds];
+        if ((uintptr_t)dp < 0x11000000u) break;       // ROM / accessor bank
+        if (!g_ts_fastmem && VIDEO::grmem && dp >= VIDEO::grmem && dp < VIDEO::grmem + 0x4000) break;
+        *mem_desc_t::bank_dirty[ds] = true;
+        uint32_t o = hl & 0x1FFF;
+        for (uint32_t i = 0; i < n; ) {           // data bytes in runs, the protocol bytes one by one
+            const uint32_t k = DivMMC::mmc_read_bulk(dp + o, n - i);
+            if (k) { o += k; i += k; }
+            else { dp[o++] = DivMMC::mmc_read(); i++; }
+        }
+        DivMMC::zc_in_bytes += n;
+        REG_HL = (uint16_t)(hl + n);
+        REG_B = (uint8_t)(REG_B - n);
+        regR += 2 * n;
+        const uint32_t total = T * n;
+        if (g_ts_fastmem) tsFastTick(total);
+        else VIDEO::Draw(total, false);
+    } while (0);
+    // The state the next entry measures against: this one, after any batch.
+    s_zcPc = pc; s_zcB = REG_B; s_zcT = CPU::tstates; s_zcIn = DivMMC::zc_in_bytes;
 }
 
 // Spectrum Next, an unrolled run of INI from the SD data port 0xEB (ED A2 x N):
