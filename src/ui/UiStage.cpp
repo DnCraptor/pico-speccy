@@ -1496,7 +1496,6 @@ static bool want_opl3()  { return Config::opl3 != 0; }
 static bool want_opll()  { return Config::ym2413 != 0; }
 static bool want_cms()   { return Config::cms != 0; }
 static bool want_sn()    { return Config::sn76489 != 0; }
-static bool want_dma()   { return Config::dma_mode != 0; }
 // Gigascreen: while a whole-line video mode is live the prev-FB is deliberately
 // handed back (VIDEO::gigascreenModeGate), so a reconcile must NOT bring it up
 // again — the gate does that itself when the mode returns to standard.
@@ -1517,7 +1516,6 @@ NM_SUBSYS_THUNKS(opl3,  OplSubsys)
 NM_SUBSYS_THUNKS(opll,  OpllSubsys)
 NM_SUBSYS_THUNKS(cms,   CmsSubsys)
 NM_SUBSYS_THUNKS(sn,    SnSubsys)
-NM_SUBSYS_THUNKS(dma,   DmaSubsys)
 NM_SUBSYS_THUNKS(gs,    GsSubsys)
 NM_SUBSYS_THUNKS(divmmc, DivMmcSubsys)
 NM_SUBSYS_THUNKS(mb02,   Mb02Subsys)
@@ -1586,7 +1584,13 @@ static const SubsysBinding kSubsys[] = {
     { -1,              want_opll,  on_opll,  req_opll,  app_opll,  nullptr, nullptr },
     { -1,              want_cms,   on_cms,   req_cms,   app_cms,   nullptr, nullptr },
     { -1,              want_sn,    on_sn,    req_sn,    app_sn,    nullptr, nullptr },
-    { FEAT_DMA,        want_dma,   on_dma,   req_dma,   app_dma,   nullptr, nullptr },
+    // Z80 DMA is deliberately ABSENT here, like DivMMC below and for the same
+    // reason: it is reboot-class (SET_DMA is AC_REBOOT), because its transfer
+    // engine runs from fixed-VMA overlay windows the heap owns when the session
+    // came up with DMA off. A reconcile triggered by an unrelated change must not
+    // try to bring it up — the claim can only fail there, and the failure path
+    // zeroes Config::dma_mode, which would silently undo the pick the reboot was
+    // asked for. setup() + DmaSubsys::request() own it at boot.
     { FEAT_GIGASCREEN, want_gs,    on_gs,    req_gs,    app_gs,    pre_gs,  post_gs },
     // DivMMC is deliberately ABSENT here: esxDOS is reboot-class (see the settings
     // table), so nothing must bring it up mid-session — a reconcile triggered by an

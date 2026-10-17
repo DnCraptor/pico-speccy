@@ -145,9 +145,11 @@ void apply(bool tsconf, bool gs, bool dma, bool dmaClassic, bool ngs, bool vdac2
 // Enabling a feature OUTSIDE that window: load its overlay if the window is
 // still untouched (the heap grows upward and rarely reaches the top tens of KB,
 // so this normally succeeds), false if the heap has already grown into it.
-// TS-Conf's caller then reboots (requestMachine already has that shape); the
-// Z80 DMA caller leaves the feature off, because SET_DMA is a live AC_SUBSYS
-// toggle with no reboot of its own.
+// TS-Conf's caller then reboots (requestMachine already has that shape).
+// The Z80 DMA is REBOOT-CLASS since 2026-10-17 (SET_DMA in UiStage.h), so its
+// windows are loaded by apply() at boot; what still calls claimForDma() live is
+// MB-02+ (MB02::init, which runs its own transfer through the same engine) and
+// the boot backstop in ESPectrum::setup, and a refusal leaves the feature off.
 bool claimForTsconf();
 bool claimForDma();
 // Only the DMA REGISTER window (.dmarovl): what a Next boot runs. claimForDma()

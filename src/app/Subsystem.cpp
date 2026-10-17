@@ -667,15 +667,21 @@ bool DmaSubsys::apply() {
     if (wanted == enabled) return true;
 
     if (wanted) {
-        // The transfer engine's code lives in the `.dmaovl` overlay window, which
-        // the heap owns on a session that came up with DMA off. The menu's live
-        // SET_DMA writes Config::dma_mode BEFORE this apply, and CPU::loop calls
-        // Z80DMA::handleDMA() on every slice while it is non-zero — so the window
-        // must be resident before the guest runs again, or the first slice jumps
-        // into whatever the heap left there (hw 2026-10-13: SIGBUS at the first
-        // instruction of Z80DMA::writePort, PC inside the window, a garbage
-        // literal pool; the only claim used to be the budget gate's). A refused
-        // claim leaves the feature OFF, Config included.
+        // The transfer engine's code lives in the .dmarovl / .dmaovl overlay
+        // windows, and CPU::loop calls Z80DMA::handleDMA() on every slice while
+        // Config::dma_mode is non-zero — so they MUST be resident before the guest
+        // runs, or the first slice jumps into whatever the heap left there (hw
+        // 2026-10-13: SIGBUS at the first instruction of Z80DMA::writePort).
+        // SET_DMA is therefore REBOOT-CLASS (UiStage.h): this apply() runs at boot,
+        // where CodeOverlay::apply() has already loaded the windows from the same
+        // Config value, so the claim below is a no-op. It is kept as the backstop
+        // for the paths that bring the DMA up on their own mid-session — MB-02+ is
+        // the remaining one (MB02::init claims before it sets dma_mode) — and for a
+        // boot where the window could not be loaded at all (TS-Conf + VDAC2 share
+        // .dmaovl's addresses). A refused claim leaves the feature OFF, Config
+        // included: the heap has already grown into the window and can only give
+        // those bytes back at a reboot (hw 2026-10-17, enabling DMA from the Video
+        // page of a session that started with it off).
         if (!CodeOverlay::claimForDma()) {
             Debug::log("DmaSubsys: overlay window unavailable this session - DMA stays off");
             Config::dma_mode = 0;
@@ -945,11 +951,13 @@ void featureSetEnabled(FeatureId f, bool on) {
             break;
         case FEAT_DMA:
             if (!on) Config::dma_mode = 0;
-            // The transfer engine's hot code lives in a fixed-VMA overlay window
-            // (src/app/CodeOverlay.h) that the heap owns on a session that came up with
-            // DMA off. SET_DMA is a live AC_SUBSYS toggle with no reboot of its own,
-            // so if the heap has already grown into the window the feature simply
-            // stays off — better than a wild jump into heap data.
+            // SET_DMA is REBOOT-CLASS (UiStage.h), so the menu never comes through
+            // here to enable it — setup() loads the windows and DmaSubsys::request()
+            // allocates the shadow. What is left is the budget gate's free-list: an
+            // enable there is a live claim on a fixed-VMA overlay window
+            // (src/app/CodeOverlay.h) that the heap owns on a session booted with DMA
+            // off, so it can only fail — and failing leaves the feature off instead of
+            // jumping into heap data. A reboot is the only way to hand the window back.
             else if (!CodeOverlay::claimForDma())
                 Debug::log("DMA: overlay window unavailable this session - stays off");
             else if (Config::dma_mode == 0) Config::dma_mode = 1;       // default Z80 DMA

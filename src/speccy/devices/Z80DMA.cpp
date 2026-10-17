@@ -488,26 +488,24 @@ IRAM_ATTR void Z80DMA::collectParam(uint8_t data) {
     }
 }
 
-static inline bool z80Mode() {
-    return Z80Ops::isNext ? Z80DMA::nextZ80Mode : Config::dma_mode == 1;
-}
-
+// WR3 (the block-length register) holds N-1 on BOTH DMA ports, so a block is
+// block_length + 1 bytes: that is the Z80 DMA's own convention and the Next's
+// zxnDMA keeps it. This used to depend on the port (#0B length+1, #6B only
+// `length`), which cost the last byte of every zxnDMA block — /!4TEST/DMA/'s
+// attribute demo programs 0x1F for a 32-byte attribute row through port #6B and
+// the rightmost cell of each row stayed at its cleared value (hw 2026-10-17).
 void Z80DMA::doLoad() {
     cur_port_a = port_a_addr;
     cur_port_b = port_b_addr;
-    nx_counter = z80Mode() ? 0xFFFF : 0;   // dma.vhd: "z80 dma loads -1"
-    // FPGA: zxn mode counter starts at 0, z80 mode counter starts at 0xFFFF
-    // zxn: transfers block_length bytes; z80: transfers block_length+1 bytes
-    byte_counter = block_length;
-    if (z80Mode()) byte_counter++; // z80 DMA always: length+1
+    nx_counter = 0xFFFF;   // dma.vhd: "z80 dma loads -1"
+    byte_counter = (uint32_t)block_length + 1;
     block_end = false;
 }
 
 void Z80DMA::doContinue() {
     // Reset byte counter but keep current working pointers
-    nx_counter = z80Mode() ? 0xFFFF : 0;
-    byte_counter = block_length;
-    if (z80Mode()) byte_counter++;
+    nx_counter = 0xFFFF;
+    byte_counter = (uint32_t)block_length + 1;
     block_end = false;
 }
 
@@ -631,7 +629,7 @@ __attribute__((noinline)) void Z80DMA::nxByteSlow(uint8_t ca, uint8_t cb) { nxBy
 void Z80DMA::nxReload() {
     cur_port_a = port_a_addr;
     cur_port_b = port_b_addr;
-    nx_counter = z80Mode() ? 0xFFFF : 0;
+    nx_counter = 0xFFFF;
 }
 
 // Does a memory write to this 8K page feed the picture? ULA screen / tilemap /
@@ -752,8 +750,8 @@ __attribute__((section(".nxdma_hot"), noinline)) bool Z80DMA::nxBatch(uint32_t s
     while (CPU::tstates + cyc < stop) {
         if (runs) {
             // Bytes left in the block, in the counter's own 16-bit arithmetic:
-            // Zilog mode (#0B) starts nx_counter at 0xFFFF and moves block_length
-            // + 1 bytes (TX-1696 — a signed test here skipped its blocks whole,
+            // the counter starts at 0xFFFF and the block is block_length + 1
+            // bytes (TX-1696 — a signed test here skipped its blocks whole,
             // sprites came and went at random, hw 2026-10-15).
             const uint32_t rem = (uint16_t)(block_length - nx_counter);
             if (rem == 0) { done = true; break; }
@@ -810,7 +808,8 @@ __attribute__((section(".nxdma_hot"), noinline)) bool Z80DMA::nxBatch(uint32_t s
 void Z80DMA::nxRunSync() {
     const uint16_t dest_start = transfer_dir ? cur_port_b : cur_port_a;
     nxVideoDrain(dest_start, transfer_dir ? port_b_is_io : port_a_is_io,
-                 transfer_dir ? port_b_inc : port_a_inc, block_length);
+                 transfer_dir ? port_b_inc : port_a_inc,
+                 (uint16_t)(block_length + 1));   // the block is length + 1
     // A memory DMA into an attribute area: the per-scanline multicolour shadow
     // (NaPICu and the like), taken on the first such transfer of the session.
     if (!dma_attr_shadow && !(transfer_dir ? port_b_is_io : port_a_is_io) &&

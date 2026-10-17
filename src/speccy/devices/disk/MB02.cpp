@@ -21,6 +21,15 @@ uint8_t MB02::motor_state = 0;
 int MB02::ram_base_idx = -1;
 bool MB02::disk_changed = false;
 
+// MB-02+ needs Z80 DMA on port #0B, so ENABLING the card raises Config::dma_mode when
+// the user had it off — and only THAT raise is undone when the card goes away again.
+// init() also runs for the DISABLED state at every boot (ESPectrum::setup), and zeroing
+// the setting unconditionally there threw away a Z80 DMA pick the user had just made in
+// Video: the reboot loaded both DMA windows ([OVL] "Z80 DMA regs/loop code resident")
+// and then this wiped the flag, so the menu read Off and #0B stayed dead (hw
+// 2026-10-17). Z80 DMA is a card of its own on every machine here, not an MB-02+ part.
+static bool s_dmaForced = false;
+
 void MB02::init() {
     enabled = false;
     MemESP::mb02_write_gate = true;
@@ -46,7 +55,11 @@ void MB02::init() {
     }
 
     if (!Config::mb02) {
-        Config::dma_mode = 0;
+        // Only undo the raise this card made itself (see s_dmaForced above).
+        if (s_dmaForced) {
+            Config::dma_mode = 0;
+            s_dmaForced = false;
+        }
         // Free the 8 KB EPROM composite when disabling.
         free(page0_composite);
         page0_composite = nullptr;
@@ -118,8 +131,11 @@ void MB02::init() {
     // used to write dma_mode = 1 outright). A refused claim leaves the DMA off;
     // BS-DOS then runs its transfers through the plain port path.
     if (!Config::dma_mode) {
-        if (CodeOverlay::claimForDma()) Config::dma_mode = 1;
-        else Debug::log("MB02: Z80 DMA overlay window unavailable this session - DMA stays off");
+        if (CodeOverlay::claimForDma()) {
+            Config::dma_mode = 1;
+            s_dmaForced = true;     // ours to take back when the card is disabled
+        } else
+            Debug::log("MB02: Z80 DMA overlay window unavailable this session - DMA stays off");
     }
     Z80DMA::mb02_deferred = true;
 

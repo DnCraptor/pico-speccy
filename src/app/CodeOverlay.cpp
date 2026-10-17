@@ -202,9 +202,12 @@ bool CodeOverlay::claimDmaRegs() {
     return true;
 }
 
-// ...and the CLASSIC byte-loop window (.dmaovl) on top of it. SET_DMA has no
-// reboot to fall back on, so both have to be claimable: the register file alone
-// is useless, because a classic transfer jumps straight into the loop's window.
+// ...and the CLASSIC byte-loop window (.dmaovl) on top of it. The DMA card is
+// reboot-class (SET_DMA in UiStage.h), so both windows are normally loaded by
+// apply() at boot; what still reaches this mid-session is MB-02+, whose init()
+// claims before it sets Config::dma_mode (the transfers run through the same
+// engine). A refusal leaves the DMA off — the heap has grown into the window and
+// only a reboot can hand it back.
 bool CodeOverlay::claimForDma() {
     if (!claimDmaRegs()) return false;
     if (s_dmal_loaded) return true;

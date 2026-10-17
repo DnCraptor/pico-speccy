@@ -673,10 +673,23 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   accessor → побайтно; memset для фикс. источника, memcpy/байтовый цикл при перекрытии);
   память→порт (паттерны TX-1696/NEXTEST) осталась побайтно в SRAM, редкие случаи (ROM-
   назначение, порт-источник, декремент) — `nxByteSlow` во flash, иначе окно не влезало.
-  **Zilog-режим (#0B) стартует `nx_counter` с 0xFFFF (блок = length+1)** — остаток
+  **Блок = `block_length + 1` НА ОБОИХ портах (hw 2026-10-17)** — остаток
   считать в uint16 (`(uint16_t)(block_length - nx_counter)`); первая версия сравнивала
   в 32 битах и пропускала блоки TX-1696 целиком (спрайты появлялись/исчезали случайно,
-  hw). (3) **`OUT (#6B)` — быстрый декод в `Ports::output`** рядом с 243B/253B/DAC (7000
+  hw). Раньше `nx_counter` стартовал с 0xFFFF только для #0B, а на zxnDMA (#6B) — с 0,
+  т.е. блок шёл ровно `length` байт; это стоило ПОСЛЕДНЕГО байта каждого блока zxnDMA.
+  Нашёл демо атрибутного мультиколора из `/!4TEST/DMA/` на Next: `LD C,#6B` / `OTIR`
+  пишут WR0 A=источник, WR4 B=0x5800+r*32, `CF`(LOAD), `B3`(FORCE READY), `87`(ENABLE),
+  а длину задают один раз в начале кадра — `1F 00`, т.е. 0x1F на 32-байтную строку
+  атрибутов (WR3 = N-1, как у Z80 DMA). У нас 31 байт → последняя клетка каждой из 24
+  строк оставалась очищенной (0x38): дамп подтвердил побайтово — dest 0x5AE0[0..30] ==
+  src 0xFDE0[0..30], dest[31]=0x38 при src[31]=0x08, и в остальных 23 строках так же
+  (`cnt == block_length` при `cur == base+31` — старт с 0). Теперь 0xFFFF для обоих
+  портов (`doLoad`/`doContinue`/`nxReload`), `nextZ80Mode` остался только как метка
+  порта. **hw 2026-10-17, владелец: «фиксед»** — демо из `/!4TEST/DMA/` рисует правую
+  колонку (`debug/DVp2-dma-zxnlen-1.0.10`); не детализировано, так что регрессия
+  owed: STNICCC Filled8bit (#6B, заливки спанов — лишний байт цвета в конце спана),
+  NEXTEST (паттерны через #6B), TX-1696 (#0B — не менялся). (3) **`OUT (#6B)` — быстрый декод в `Ports::output`** рядом с 243B/253B/DAC (7000
   OUT/кадр шли через всю цепочку, 11% core0). (4) **`Z80::nextOtirBatch`** (ED B3, C =
   6B/0B, порт разрешён NR 82-85, B > 2, источник ≥ 0x4000): итерации кроме последней
   одним циклом, 21 T ДО каждого `Z80DMA::writePort` (ENABLE запускает заливку с
@@ -8302,6 +8315,40 @@ off) keep the static SRAM pages, byte for byte.
   two writers (grep `dma_mode = 1`); a boot with `dma_mode` persisted non-zero loads the
   window in `CodeOverlay::apply`. The NeoGS ZX-DMA (`g_ngs_zxdma`, `.ngsovl`) is NOT the
   same hazard: General Sound is reboot-class, so its window is only ever loaded at boot.
+- **SET_DMA is REBOOT-CLASS since 2026-10-17, and that is what actually fixes the
+  report `[OVL] cannot claim the Z80 DMA window: heap grew into it` /
+  `DmaSubsys: overlay window unavailable this session - DMA stays off`** (hw: picking
+  Z80 DMA in Video was silently reverted; the log's cursor 0x20076000 sat 0xA0 bytes
+  inside `.dmarovl` 0x20075F60..0x200769E0). The claim can only succeed while the heap
+  has never grown past the window, and on a session booted with DMA off the heap owns
+  `.dmarovl` + `.dmaovl` — dlmalloc's break, once past the window start, cannot be
+  walked back (`malloc_trim` keeps a top chunk of at least a page, and relaxing
+  `hr_window_touched` from a shrunk sbrk is allocator-internals risk for one setting).
+  So `SET_DMA` is `AC_REBOOT, 0` in UiStage.h and its `FEAT_DMA` row is removed from
+  `kSubsys` — the same call as General Sound and (deliberately, it is commented there)
+  DivMMC/esxDOS. The reboot is the point: `dmaWin`/`dmaClassic` are then true,
+  `CodeOverlay::apply()` loads both windows from a pristine heap, and
+  `DmaSubsys::request()` + `applyPending()` allocate the ~8 KB attribute shadow.
+  Costs nothing when DMA is off, and nothing is left that could SIGBUS: the remaining
+  live `claimForDma()` caller is MB-02+ (`MB02::init`), which claims before it sets
+  `dma_mode`, and the budget gate's `featureSetEnabled(FEAT_DMA, true)`, which just
+  stays off with a log line. **Removing the `kSubsys` row is load-bearing** — the
+  reconcile loops over the BINDINGS, so leaving it would let any unrelated audio/video
+  edit re-run the failing claim after the reboot prompt was armed, and its refusal path
+  zeroes `Config::dma_mode`, silently undoing the pick.
+  **...and the reboot alone was not enough — `MB02::init()` wiped the pick again the
+  same day** (hw: after the reboot that loaded BOTH DMA windows the menu read Off, no
+  claim error anywhere). Its DISABLED branch did `Config::dma_mode = 0` unconditionally,
+  an "undo what I switched on" left over from when it wrote `dma_mode = 1` outright —
+  and `MB02::init()` runs for the disabled state on EVERY boot, ~500 lines after
+  `CodeOverlay::apply()`. So the session came up with `[OVL] Z80 DMA regs/loop code
+  resident` (the claim had seen the user's 1) and then lost the flag: menu Off, #0B
+  dead, and nothing in the log, because the refusal path never ran. The raise is
+  tracked now (`s_dmaForced` in MB02.cpp) and only THAT is undone, so turning MB-02+
+  off leaves a genuine Z80 DMA pick alone — Z80 DMA is an independent card on every
+  machine here, and an MB-02+-imposed one afterwards reads as what it is. **Beware any
+  "teardown" that writes a Config setting: it also runs at boot, on a value the user
+  owns.**
 - **Same session: `[MACH <tag>]` log line** (`ESPectrum::logMachineState`, from
   `ESPectrum::reset` and `MachineSwitch::commit`): arch/romSet/romInUse + pagingLock /
   notMore128 / newSRAM / page0ram / bankLatch / videoLatch / romLatch / MEM_PG_CNT + the

@@ -126,7 +126,13 @@ const char* romsetName(int32_t composite);
     X(SET_SCANLINES,       AC_LIVE,   F_PREVIEW,             get_scanlines,  put_scanlines,  hook_scanlines, -1)          \
     X(SET_VSYNC,           AC_LIVE,   0,                     get_vsync,      put_vsync,      hook_vsync,        -1)          \
     X(SET_HDMI_DITHER,     AC_LIVE,   F_PREVIEW,             get_dither,     put_dither,     hook_dither,    -1)          \
-    X(SET_DMA,             AC_SUBSYS, F_SUBSYS,              get_dma,        put_dma,        nullptr,        FEAT_DMA)    \
+    /* Z80 DMA is REBOOT-CLASS: its engine's code lives in fixed-VMA overlay windows    */ \
+    /* (.dmarovl + .dmaovl) which the HEAP owns on a session booted with DMA off, and   */ \
+    /* the heap only grows up — a live claim cannot be counted on (hw 2026-10-17:       */ \
+    /* "cannot claim the Z80 DMA window: heap grew into it"). Same call as General      */ \
+    /* Sound and esxDOS; `dmaWin` in setup() decides it, its heap part follows Config   */ \
+    /* through DmaSubsys::request().                                                    */ \
+    X(SET_DMA,             AC_REBOOT, 0,                     get_dma,        put_dma,        nullptr,        FEAT_DMA)    \
     X(SET_RENDER,          AC_LIVE,   0,                     get_render,     put_render,     hook_render,    -1)          \
     /* ULA+ and Timex cost 0 SRAM (flash tables only), so their gate always allows; it   */ \
     /* is kept for uniformity. 16col really does allocate a ~0.5 KB decode LUT.          */ \
