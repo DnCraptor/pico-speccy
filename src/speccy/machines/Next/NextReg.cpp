@@ -162,7 +162,7 @@ ring:
 }
 void next_trace_dump(uint32_t frames) {
     extern bool g_next_automap_armed;
-    extern volatile uint32_t g_sd_stall_us, g_sd_ops;   // DivMMC.cpp
+    extern volatile uint32_t g_sd_stall_us, g_sd_ops, g_sd_wr_ops;   // DivMMC.cpp
     extern uint32_t g_nextvid_frames;
     extern volatile uint32_t g_nextvid_us;              // NextVideo.cpp
     extern volatile uint32_t g_nextvid_layer_us[7];     // ula / tilemap / L2 / sprites / mix / out
@@ -565,6 +565,7 @@ void next_trace_dump(uint32_t frames) {
     g_nx_palw = 0;
     g_sd_stall_us = 0;
     g_sd_ops = 0;
+    g_sd_wr_ops = 0;
     g_nextvid_us = 0;
     g_nextvid_frames = 0;
     for (int i = 0; i < 7; i++) g_nextvid_layer_us[i] = 0;

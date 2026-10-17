@@ -116,6 +116,28 @@ static inline uint32_t _millis(void)
 	return to_ms_since_boot(get_absolute_time());
 }
 
+/* Microsecond clock: one register read, no 64-bit divide. The polling loops
+   below run once per SPI byte and used to call _millis() (a divide by 1000) on
+   every iteration — on a 504 MHz core that alone made one token-poll byte cost
+   ~1.2 us against a 0.38 us frame, i.e. a 200 us card latency turned into 600 us
+   of core1 per sector access (meas 2026-10-17: 1.9 ms for a single-sector
+   read). */
+static inline uint32_t _micros(void)
+{
+	return timer_hw->timerawl;
+}
+
+/* Where the time of a card access goes, in microseconds, accumulated:
+     0 = _select()    CS low, the dummy frame and wait_ready()
+     1 = the R1 poll  after the six command frames
+     2 = token wait   rcvr_datablock()'s search for 0xFE, per block
+     3 = block data   a 512-byte block plus its two CRC bytes
+   Read by DivMMC::sdStatTick() for the [SD] line. It exists because the model
+   "0.775 ms of latency + 0.163 ms per sector at 25.2 MHz" left 1-2 ms per
+   command unaccounted for at window 16, while a 32-sector command came out at
+   exactly the model — i.e. some per-command term is not what it looks like. */
+volatile uint32_t g_sd_ph[4];
+
 /*-----------------------------------------------------------------------*/
 /* SPI controls (Platform dependent)                                     */
 /*-----------------------------------------------------------------------*/
@@ -141,11 +163,17 @@ static inline void cs_deselect(uint cs_pin) {
 static float pio_div_fast = 1.0f;
 
 /* The fast divider for the live clk_sys — the ONE formula, shared by init_spi()
- * and sdcard_reclock() (see the comment in init_spi for why it is an integer). */
+ * and sdcard_reclock() (see the comment in init_spi for why it is an integer).
+ * The target is 25.2 MHz, not 25.0: SD's default-speed maximum is 25 MHz and
+ * 25.2 is the roundest way to reach it, which is what lets 504 MHz land exactly
+ * on it (idiv 5) instead of rounding down to 21.0 (idiv 6). A sector is 195 us
+ * of transfer at 21 MHz and 163 us at 25.2, and the read-ahead pays that for
+ * every sector it reads, used or not. 252/378/540/630 cannot reach it and are
+ * unchanged. */
 static float pio_fast_div(void)
 {
     uint32_t sys = clock_get_hz(clk_sys);
-    uint32_t idiv = (sys + 4u * 25000000u - 1u) / (4u * 25000000u);
+    uint32_t idiv = (sys + 4u * 25200000u - 1u) / (4u * 25200000u);
     if (idiv < 1u) idiv = 1u;
     return (float)idiv;
 }
@@ -350,11 +378,12 @@ int wait_ready (	/* 1:Ready, 0:Timeout */
 {
 	BYTE d;
 
-	uint32_t t = _millis();
+	const uint32_t t = _micros();
+	const uint32_t wt_us = wt * 1000u;
 	do {
 		d = xchg_spi(0xFF);
 		/* This loop takes a time. Insert rot_rdq() here for multitask envilonment. */
-	} while (d != 0xFF && _millis() < t + wt);	/* Wait for card goes ready or timeout */
+	} while (d != 0xFF && (uint32_t)(_micros() - t) < wt_us);	/* Wait for card goes ready or timeout */
 
 	return (d == 0xFF) ? 1 : 0;
 }
@@ -381,15 +410,31 @@ void deselect (void)
 static
 int _select (void)	/* 1:OK, 0:Timeout */
 {
+	const uint32_t t = _micros();
 	CS_LOW();		/* Set CS# low */
 	xchg_spi(0xFF);	/* Dummy clock (force DO enabled) */
-	if (wait_ready(500)) return 1;	/* Wait for card ready */
+	if (wait_ready(500)) { g_sd_ph[0] += (uint32_t)(_micros() - t); return 1; }
 
 	deselect();
+	g_sd_ph[0] += (uint32_t)(_micros() - t);
 	return 0;	/* Timeout */
 }
 
 
+
+/*-----------------------------------------------------------------------*/
+/* Receive a data block whose first `haveLen` bytes are already in hand   */
+/*-----------------------------------------------------------------------*/
+
+static void rcvr_spi_rest (BYTE *buff, UINT btr, const BYTE *have, UINT haveLen)
+{
+	if (haveLen > btr) haveLen = btr;
+	for (UINT i = 0; i < haveLen; i++) buff[i] = have[i];
+	buff += haveLen;
+	btr -= haveLen;
+	if (btr & 1u) { *buff++ = xchg_spi(0xFF); btr--; }	/* rcvr_spi_multi wants an even count */
+	if (btr) rcvr_spi_multi(buff, btr);
+}
 
 /*-----------------------------------------------------------------------*/
 /* Receive a data packet from the MMC                                    */
@@ -401,20 +446,32 @@ int rcvr_datablock (	/* 1:OK, 0:Error */
 	UINT btr			/* Data block length (byte) */
 )
 {
-	BYTE token;
+	/* The token search reads the stream in BURSTS, not a byte at a time: each
+	   xchg_spi() is a function call plus a FIFO round trip for one 8-bit frame,
+	   so a byte-wise poll spends most of its time in the code between frames.
+	   Sixteen bytes per transfer is both far cheaper and still exact — whatever
+	   follows the 0xFE inside the burst is the start of the block and is copied
+	   into the caller's buffer. A real card puts >= 1 byte of 0xFF before the
+	   token (the Nac gap), and the rest of the gap is skipped here. */
+	BYTE tok[16];
 
-	const uint32_t timeout = 200;
-	uint32_t t = _millis();
-	do {							/* Wait for DataStart token in timeout of 200ms */
-		token = xchg_spi(0xFF);
-		/* This loop will take a time. Insert rot_rdq() here for multitask envilonment. */
-	} while (token == 0xFF && _millis() < t + timeout);
-	if(token != 0xFE) return 0;		/* Function fails if invalid DataStart token or timeout */
-
-	rcvr_spi_multi(buff, btr);		/* Store trailing data to the buffer */
-	xchg_spi(0xFF); xchg_spi(0xFF);			/* Discard CRC */
-
-	return 1;						/* Function succeeded */
+	const uint32_t t0 = _micros();
+	const uint32_t ts = t0;
+	for (;;) {
+		rcvr_spi_multi(tok, sizeof(tok));
+		int i = 0;
+		while (i < 16 && tok[i] == 0xFF) i++;
+		if (i < 16) {
+			g_sd_ph[2] += (uint32_t)(_micros() - ts);
+			if (tok[i] != 0xFE) return 0;	/* invalid DataStart token */
+			const uint32_t td = _micros();
+			rcvr_spi_rest(buff, btr, tok + i + 1, (UINT)(16 - (i + 1)));
+			xchg_spi(0xFF); xchg_spi(0xFF);			/* Discard CRC */
+			g_sd_ph[3] += (uint32_t)(_micros() - td);
+			return 1;
+		}
+		if ((uint32_t)(_micros() - t0) > 200000u) { g_sd_ph[2] += (uint32_t)(_micros() - ts); return 0; }	/* 200 ms */
+	}
 }
 
 
@@ -455,11 +512,13 @@ BYTE send_cmd (		/* Return value: R1 resp (bit7==1:Failed to send) */
 	xchg_spi(n);
 
 	/* Receive command resp */
+	const uint32_t tr = _micros();
 	if (cmd == CMD12) xchg_spi(0xFF);	/* Diacard following one byte when CMD12 */
 	n = 10;								/* Wait for response (10 bytes max) */
 	do {
 		res = xchg_spi(0xFF);
 	} while ((res & 0x80) && --n);
+	g_sd_ph[1] += (uint32_t)(_micros() - tr);
 
 	return res;							/* Return received response */
 }

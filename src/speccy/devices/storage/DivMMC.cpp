@@ -1058,6 +1058,7 @@ void DivMMC::zc_read_consume(uint32_t words) { mmc_read_index += (int)(2 * words
 // "disable welcome" took minutes at fps=4).
 volatile uint32_t g_sd_stall_us = 0;
 volatile uint32_t g_sd_ops = 0;
+volatile uint32_t g_sd_wr_ops = 0;   // how many of g_sd_ops were writes (the [SD] line's R/W split)
 
 // Adaptive read-ahead for the raw-SD (DivSD/ZC) path. esxDOS/NextZXOS file
 // streaming asks for one 512-byte sector per call, and every call used to be
@@ -1073,8 +1074,32 @@ volatile uint32_t g_sd_ops = 0;
 // (async mailbox fill answering the VBR read with zeroes) cannot happen.
 // Coherency: invalidated on any write and on reset; FatFs writing the card
 // behind our back is out of scope (same assumption as the rest of raw-SD).
-#define DIVSD_RA_SECTORS 8
-// The two 4 KB burst buffers (this one and s_sq2) live in butter PSRAM since
+// The window: a burst of up to DIVSD_RA_SECTORS sectors shares ONE card access
+// latency (~0.85 ms of token polling plus ~0.2 ms per sector at the 21 MHz SPI
+// clock), and that latency — not the data — is what a read at this size costs.
+// Two sizes, because the access pattern decides: a scattered reader pays the
+// latency anyway and throws the rest of a big burst away, while a sequential
+// run (or a CMD18, where the guest itself declares the following blocks) wants
+// the window as large as the buffer allows.
+//
+// The latency is the dominant term and it is measured (hw 2026-10-17, two
+// windows in one capture): 0.775 ms of token polling per card access against
+// 0.163 ms per sector at 25.2 MHz. One access per RUN is therefore the cheapest
+// form the read-ahead can take, and the window is set to the run length the
+// guest itself just demonstrated (s_run_sec + 1, measured at every run end).
+// Anything LONGER over-reads on every access: a load's runs are ~19.6 sectors
+// and a window of 32 left 12 sectors of transfer per access on the floor
+// (61% used, 137 ms/s of core1), while a window of 16 over-read 1.5x because
+// the runs were ~10.7. Anything SHORTER costs an access per partial window.
+// The earlier rule adapted on usage FRACTIONS (grow at 75%, halve below 25%)
+// and could not tell "this window is too big" from "the run ended inside it",
+// which is exactly why a 61%-used window stuck at the maximum for a session.
+#define DIVSD_RA_SECTORS 32     // cap for a detected run: the buffer, and a long
+                                // sequential load really does use it
+#define DIVSD_RA_STREAM 32      // cap inside a CMD18 (the guest said so)
+#define DIVSD_RA_MIN 4          // the window a detected run starts with
+#define DIVSD_RA_FLOOR 2        // ...and the smallest it may converge to
+// The two 16 KB burst buffers (this one and s_sq2) live in butter PSRAM since
 // 2026-10-11 (+8 KB of SRAM heap for a Next session at 720x576). The old rule
 // "plain SRAM the SD driver can DMA into" was never true: both SD paths store
 // with the CPU (spi_read_blocking / the pio_spi FIFO loop, sdcard.c) and so does
@@ -1099,6 +1124,27 @@ static uint32_t s_sq_base = 0xFFFFFFFFu;       // first cached sector, ~0 = none
 static uint32_t s_sq_count = 0;
 static uint32_t s_sq_last = 0xFFFFFFFFu;       // previous request (sequen. detect)
 static uint32_t s_sq_gen = 0;                  // g_disk_write_gen when filled (host writes)
+// mmc_sector_buf still holds this sector: a FAT / directory cell is read over
+// and over, and re-reading it from the card cost a full access latency each
+// time. Cleared on every write and on reset.
+// The last sector loadSector() put in mmc_sector_buf, with the write generation
+// it was read under: a FAT or directory cell is read over and over and the copy
+// is already in hand. NOT the stream path's s_one_sec (that one lives in
+// s_ra_buf's spare sector); this path uses mmc_sector_buf itself.
+static uint32_t s_s1_sec = 0xFFFFFFFFu;
+static uint32_t s_s1_gen = 0;
+static uint32_t s_run_sec = 0;             // sectors served in the CURRENT sequential run
+static uint32_t s_win_max = DIVSD_RA_MIN;  // burst size; read-ahead window, owned by missNote()
+// Diagnostics only since 2026-10-17 (the window no longer follows them): run
+// lengths 1 / 2 / 3 / 4-7 / 8-15 / 16+, printed on the [SD] line. They measure
+// the FatFs-level path, ~18 requests a second; the guest's own port reads, which
+// are the other ~117, never appear here.
+static uint32_t s_rh[6];
+static inline void runHist(uint32_t L) {
+    s_rh[L == 1 ? 0 : L == 2 ? 1 : L == 3 ? 2 : L < 8 ? 3 : L < 16 ? 4 : 5]++;
+}
+static bool     s_stream = false;          // inside a CMD18: the guest declared the run
+static bool     s_c17_force_sync = false;  // the CMD path already fell back: read now
 
 // Taken on the first read, not in raInit(): DivMMC::init runs BEFORE
 // Buffer::initPools, where PREFER_PSRAM has no butter pool yet and quietly lands
@@ -1109,13 +1155,13 @@ static inline bool sq1Ensure() {
     if (s_sq_buf || s_sq_tried) return s_sq_buf != nullptr;
     if (butter_psram_size() && !Buffer::butterPoolReady()) return false;
     s_sq_tried = true;
-    if (s_sqBuf.alloc(DIVSD_RA_SECTORS * 512, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM) &&
+    if (s_sqBuf.alloc(DIVSD_RA_STREAM * 512, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM) &&
         s_sqBuf.data()) {
         s_sq_buf = (uint8_t*)s_sqBuf.data();
     } else {
         s_sqBuf.free();
         Debug::log("[divSD] read-ahead off: no memory for the %u KB burst buffer",
-                   (unsigned)(DIVSD_RA_SECTORS * 512 / 1024));
+                   (unsigned)(DIVSD_RA_STREAM * 512 / 1024));
     }
     Debug::log("[divSD] read-ahead buffer @%08X", (unsigned)(uintptr_t)s_sq_buf);
     return s_sq_buf != nullptr;
@@ -1125,20 +1171,32 @@ void DivMMC::raInit() {
     s_sq_base = 0xFFFFFFFFu;
     s_sq_count = 0;
     s_sq_last = 0xFFFFFFFFu;
+    s_s1_sec = 0xFFFFFFFFu;
+    s_s1_gen = 0;
+    s_run_sec = 0;
+    s_win_max = DIVSD_RA_MIN;
+    s_stream = false;
 }
 
+// How loadSector served each sector: 0 read-ahead hit, 1 async take / core1
+// fetch, 2 burst, 3 single, 4 read-ahead posted. Always on and cheap — the
+// plain build's [SD] line prints them, which is what says whether a title
+// streams (hits + bursts) or scatters (singles and wasted bursts) without
+// needing a NEXT_TRACE build to answer the question.
+static uint32_t s_sdk[5];
 #if NEXT_TRACE
-// NEXT sd: line — how loadSector served each sector, and the last card reads
-volatile uint32_t g_sdk[5];            // hit, async take, burst, single, async posted
+// NEXT sd: line — the same counters plus the last few card reads
+volatile uint32_t g_sdk[5];
 volatile uint32_t g_sd_ring[12];       // sector | kind << 30
 volatile uint32_t g_sd_ring_w = 0;
 static inline void sdNote(int k, uint32_t sector) {
+    s_sdk[k]++;
     g_sdk[k] = g_sdk[k] + 1;
     if (k >= 2) { g_sd_ring[g_sd_ring_w % 12] = sector | ((uint32_t)k << 30); g_sd_ring_w = g_sd_ring_w + 1; }
 }
 #define SDK(k, sec) sdNote(k, sec)
 #else
-#define SDK(k, sec) do {} while (0)
+#define SDK(k, sec) do { s_sdk[k]++; } while (0)
 #endif
 
 // Background read-ahead on core1 (the Next: TX-1696 streams ~480 sectors a
@@ -1163,7 +1221,7 @@ static bool sq2Ensure() {
     if (!s_sq2 && !s_sq2_tried) {
         s_sq2_tried = true;
         // Butter PSRAM, like s_sq_buf (see the note at DIVSD_RA_SECTORS).
-        s_sq2 = (uint8_t*)Buffer::palloc(DIVSD_RA_SECTORS * 512, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        s_sq2 = (uint8_t*)Buffer::palloc(DIVSD_RA_STREAM * 512, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         Debug::log("[divSD] core1 read-ahead %s @%08X", s_sq2 ? "on" : "off (no memory)",
                    (unsigned)(uintptr_t)s_sq2);
     }
@@ -1188,13 +1246,20 @@ static inline bool sdAsyncMachine() {
            (Z80Ops::isNext || DivMMC::zc_enabled);
 }
 
-static void sqAsyncRequest(uint32_t next) {
+// The cap the window may reach right now: inside a CMD18 the guest itself
+// declared that the following blocks belong to this read, so the burst may use
+// the whole buffer; a merely detected run stays at DIVSD_RA_SECTORS.
+static inline uint32_t winCap() { return s_stream ? DIVSD_RA_STREAM : DIVSD_RA_SECTORS; }
+
+static void sqAsyncRequest(uint32_t next, uint32_t count) {
     if (!sdAsyncMachine() || g_sd_as_state != 0) return;
     if (!sq2Ensure()) return;
+    if (count < 1) count = 1;
+    if (count > winCap()) count = winCap();
     s_as_kind = 0;
     g_sd_as_buf = s_sq2;
     g_sd_as_sector = next;
-    g_sd_as_count = DIVSD_RA_SECTORS;
+    g_sd_as_count = count;
     s_as_gen = g_disk_write_gen;
     __dmb();
     g_sd_as_state = 1;
@@ -1226,7 +1291,7 @@ static bool sqAsyncTake(uint32_t sector) {
     if (!ok) return false;
     uint8_t* t = s_sq_buf; s_sq_buf = s_sq2; s_sq2 = t;
     s_sq_base = sector;
-    s_sq_count = DIVSD_RA_SECTORS;
+    s_sq_count = g_sd_as_count ? g_sd_as_count : 1;
     s_sq_gen = s_as_gen;
     return true;
 }
@@ -1239,25 +1304,90 @@ static bool sqAsyncTake(uint32_t sector) {
 // 2026-10-09). s_c17: 0 none, 1 waiting for the slot, 2 posted.
 static uint8_t  s_c17 = 0;
 static uint32_t s_c17_sector = 0;
+static uint32_t s_c17_count = 1;   // sectors the pending request asks for
 static uint32_t s_c17_t0 = 0;      // time_us_32 of the command: the fallback clock
 
 static uint32_t s_c17_ok = 0, s_c17_fb = 0, s_c17_hit = 0;   // [SD] line: served by core1 / 3 ms fallback / read-ahead hit
-static void c17Abandon() { s_c17 = 0; }   // CS edge / new command: a late result is discarded
+// Why a read missed the window, because "the window does not reduce the number
+// of card accesses" (2026-10-17) can only be answered by where the guest went
+// next: 0 = there was no live window at all (never posted, or the write
+// generation moved), 1 = the window was too small (the guest continued just
+// past it), 2 = it went BACKWARDS, 3 = it jumped forward. Case 1 says grow the
+// window, case 0 says the window is being thrown away, 2 and 3 say no window
+// can help.
+static uint32_t s_miss[4];
+static uint32_t s_pf_quiet = 0;            // consecutive misses that were NOT a continuation
+static inline void missNote(uint32_t sector) {
+    if (!s_sq_buf || s_sq_gen != g_disk_write_gen) {
+        s_miss[0]++;
+        s_pf_quiet++;
+    } else if (sector >= s_sq_base + s_sq_count && sector - (s_sq_base + s_sq_count) < 8u) {
+        // The guest went on just past the window: it WAS too small. This is the
+        // only signal that justifies a bigger window, and it is a measurement,
+        // not a guess - a load's CMD18 continuation produces it on every window,
+        // the Atic Atac game produces it exactly never (nm 0/0/58/29, 2026-10-17).
+        s_miss[1]++;
+        s_pf_quiet = 0;
+        uint32_t w = s_win_max + 2u;
+        if (w > winCap()) w = winCap();
+        s_win_max = w;
+    } else {
+        if (sector < s_sq_base + s_sq_count) s_miss[2]++; else s_miss[3]++;
+        // Backwards or a far jump: no contiguous window can cover that, so every
+        // sector in it past the one the guest asked for is pure transfer. Six of
+        // those in a row and the window gives its extra sectors back.
+        if (++s_pf_quiet >= 6u) {
+            s_pf_quiet = 0;
+            if (s_win_max > DIVSD_RA_FLOOR) {
+                s_win_max = s_win_max > 4u ? s_win_max - 2u : s_win_max - 1u;
+                if (s_win_max < DIVSD_RA_FLOOR) s_win_max = DIVSD_RA_FLOOR;
+            }
+        }
+    }
+}
+static void c17Abandon() {                                  // CS edge / new command: a late result is discarded
+    s_c17 = 0;
+    if (s_stream) {
+        // Leaving a CMD18: the stream cap belongs to that command, not to the
+        // scattered reads that follow it.
+        s_stream = false;
+        if (s_win_max > DIVSD_RA_SECTORS) s_win_max = DIVSD_RA_SECTORS;
+    }
+}
+
+// How many sectors to ask the card for. Owned by missNote() now: it grows by two
+// whenever the guest demonstrably continued just past the window, and gives them
+// back when six consecutive misses were backwards or a jump. That replaced every
+// guess-based rule tried on 2026-10-17 (per-run, max-of-last-four, fixed 2/3/4) -
+// all of them agreed on one point, that the number of card accesses does not move
+// with the window in a workload that bounces between two regions.
+static uint32_t c17Win(bool stream, bool seq) {
+    (void)stream; (void)seq;
+    return s_win_max;
+}
 
 // Post the request if the slot is free; true once it is.
-static bool c17TryPost() {
+static bool c17TryPost(uint32_t count) {
     uint8_t st = g_sd_as_state;
     if (st == 1) {
         if (!__atomic_compare_exchange_n(&g_sd_as_state, &st, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return false;
         st = 0;
     }
     if (st == 2) return false;
-    if (st >= 3) { g_sd_as_state = 0; }    // someone's finished result nobody took
-    const bool seq = (s_c17_sector == s_sq_last + 1);
-    s_as_kind = seq ? 2 : 1;
+    if (st >= 3) {
+        // A finished result nobody took. The window is no longer guessed from
+        // this (a prefetch at the end of a run is ALWAYS taken by nobody), it is
+        // measured from the guest's run length — shrinking here as well used to
+        // fight that measurement.
+        g_sd_as_state = 0;
+    }
+    if (count < 1) count = 1;
+    if (count > winCap()) count = winCap();
+    s_as_kind = count > 1 ? 2 : 1;
+    s_c17_count = count;
     g_sd_as_buf = s_sq2;
     g_sd_as_sector = s_c17_sector;
-    g_sd_as_count = seq ? DIVSD_RA_SECTORS : 1;
+    g_sd_as_count = count;
     s_as_gen = g_disk_write_gen;
     __dmb();
     g_sd_as_state = 1;
@@ -1267,14 +1397,17 @@ static bool c17TryPost() {
 
 // Command received: true = the sector is (or will be) served by core1, the
 // data token is deferred; false = the caller loads it now (a read-ahead hit).
-static bool c17Begin(uint32_t sector) {
+// `stream` = inside a CMD18, where the guest itself declared that the next
+// blocks follow: that is what lets one card access cover the whole window.
+static bool c17Begin(uint32_t sector, bool stream) {
     // core1 must be pumping (sd_async_pump runs from its Next renderer loop): a
     // dead queue (nxQueueDead) would leave the request untaken for ever — the
     // 2 s storage probe used to cancel it as a side effect, and without that
     // TX-1696 never started (hw 2026-10-09).
     if (!sdAsyncMachine() || !sq1Ensure() || !sq2Ensure()) return false;
+    if (stream) s_stream = true;
     s_c17_t0 = time_us_32();
-    if (sector >= s_sq_base && sector < s_sq_base + s_sq_count && s_sq_gen == g_disk_write_gen) {
+    if (s_sq_buf && sector >= s_sq_base && sector < s_sq_base + s_sq_count && s_sq_gen == g_disk_write_gen) {
         s_c17_hit++;
         return false;                                         // read-ahead hit
     }
@@ -1285,7 +1418,8 @@ static bool c17Begin(uint32_t sector) {
     }
     s_c17_sector = sector;
     s_c17 = 1;
-    c17TryPost();
+    missNote(sector);
+    c17TryPost(c17Win(stream, false));
     return true;
 }
 
@@ -1301,18 +1435,29 @@ static int c17Ready() {
             return 2;                       // the caller loadSector()s (waits out a read in flight)
         }
     }
-    if (s_c17 == 1 && !c17TryPost()) return 0;
+    if (s_c17 == 1 && !c17TryPost(s_c17_count)) return 0;
     const uint8_t st = g_sd_as_state;
     if (st != 3 && st != 4) return 0;
     __dmb();
     const uint32_t sector = s_c17_sector;
     const bool ok = st == 3 && s_as_gen == g_disk_write_gen && g_sd_as_sector == sector;
     if (ok && (s_as_kind == 0 || s_as_kind == 2)) {           // a burst: becomes the read-ahead
+        // No window adaptation here any more: it is measured from the guest's
+        // own run length in loadSector() (see the DIVSD_RA_* comment). Anything
+        // decided from a window's usage fraction cannot tell "this window is
+        // bigger than the run" from "the run ended inside this window", and the
+        // last window of every run is partial by construction.
         uint8_t* t = s_sq_buf; s_sq_buf = s_sq2; s_sq2 = t;
-        s_sq_base = sector; s_sq_count = DIVSD_RA_SECTORS; s_sq_gen = s_as_gen;
+        const uint32_t cnt = g_sd_as_count ? g_sd_as_count : 1;
+        s_sq_base = sector; s_sq_count = cnt; s_sq_gen = s_as_gen;
         memcpy(DivMMC::mmc_sector_buf, s_sq_buf, 512);
         g_sd_as_state = 0;
-        sqAsyncRequest(sector + DIVSD_RA_SECTORS);
+        // Prefetch the next window only for a run the guest is in the middle of,
+        // and NEVER inside a CMD18: there the guest may stop at the end of the
+        // chunk, and a burst nobody reads is 16 sectors of core1's render time
+        // thrown away. Inside a stream the demand read refills the window
+        // instead — that is still one card access per 16 blocks.
+        if (!s_stream) sqAsyncRequest(sector + cnt, s_win_max);
     } else if (ok) {
         memcpy(DivMMC::mmc_sector_buf, s_sq2, 512);
         g_sd_as_state = 0;
@@ -1328,35 +1473,87 @@ static int c17Ready() {
     return 1;
 }
 
+// Read a sector (or a window) NOW, but on core1. Waiting here is NOT the same
+// as reading here: the emulator's frame clock, the HDMI ISR and the whole
+// renderer keep running, where a blocking disk_read freezes all of it for the
+// ~1 ms a card access takes — and one of those inside a frame is enough to push
+// it past its deadline and lose the refresh. False = the caller must read it
+// itself (core1 is not pumping, the slot is stuck, or the read failed).
+static bool c17FetchBlocking(uint32_t sector, uint32_t count) {
+    if (!sdAsyncMachine() || !sq2Ensure()) return false;
+    s_c17_sector = sector;
+    s_c17_t0 = time_us_32();
+    s_c17 = 1;
+    if (!c17TryPost(count)) return false;          // a prefetch is on the card
+    const uint32_t t0 = time_us_32();
+    for (;;) {
+        const int r = c17Ready();
+        if (r == 1) return true;
+        if (r == 2) return false;
+        // Not even started after 800 us: core1 is busy with the renderer and
+        // waiting for it would cost more than the read. Cancel and read here.
+        if (g_sd_as_state == 1 && (uint32_t)(time_us_32() - t0) > 800u) {
+            uint8_t one = 1;
+            if (__atomic_compare_exchange_n(&g_sd_as_state, &one, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                s_c17 = 0;
+                return false;
+            }
+        }
+        tight_loop_contents();
+    }
+}
+
 // [SD] 1 Hz line (plain builds, printed only for a second with card traffic):
-// sync = card reads/writes core0 did itself and the ms it stood on the card;
-// c1 = background reads core1 ran, their ms and worst us; wait = core0 spinning on
-// a core1 read in flight; c17 = guest sector requests served by core1 / read-ahead
-// hits / given up after 3 ms untaken (core1 busy) and read on core0; Next: qwait =
-// core0 waiting for the render queue, skip = frames not drawn.
+// sync = card reads/writes core0 did itself (R = reads, W = writes) and the ms
+// it stood on the card; c1 = background reads core1 ran, their ms and worst us;
+// wait = core0 spinning on a core1 read in flight; c17 = guest sector requests
+// served by core1 / read-ahead hits / given up after 3 ms untaken (core1 busy)
+// and read on core0; win = the current adaptive burst size; k = how the sectors
+// were served (read-ahead hit / async / burst / single / prefetch posted);
+// Next: qwait = core0 waiting for the render queue, skip = frames not drawn.
 extern volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max, g_sd_as_c1_n;   // sdcard.c (globals are unmangled)
+extern volatile uint32_t g_sd_ph[4];   // sdcard.c: select / R1 poll / token wait / block data, us
 void DivMMC::sdStatTick() {
-    static uint32_t t0 = 0, ops0, st0, n0, c1us0, w0, ok0, fb0, hit0, q0, sk0;
+    static uint32_t t0 = 0, ops0, wr0, st0, n0, c1us0, w0, ok0, fb0, hit0, q0, sk0, k0[5], ph0[4], rh0[6], ms0[4];
     const uint32_t now = time_us_32();
     if ((uint32_t)(now - t0) < 1000000u) return;
     extern volatile uint32_t g_nx_qwait_us, g_nx_autoskip;
-    const uint32_t ops = g_sd_ops, st = g_sd_stall_us, n = g_sd_as_c1_n, c1us = g_sd_as_c1_us,
+    const uint32_t ops = g_sd_ops, wr = g_sd_wr_ops, st = g_sd_stall_us, n = g_sd_as_c1_n, c1us = g_sd_as_c1_us,
                    w = g_sd_as_c0wait_us, q = g_nx_qwait_us, sk = g_nx_autoskip;
     if (t0 && (ops != ops0 || n != n0 || s_c17_ok != ok0 || s_c17_fb != fb0 || s_c17_hit != hit0)) {
-        Debug::log("[SD] sync %lu/%lums c1 %lu/%lums max %luus wait %lums max %luus c17 ok %lu hit %lu fb %lu | qwait %lums skip %lu",
+        Debug::log("[SD] sync %lu/%lums %luR/%luW c1 %lu/%lums max %luus wait %lums max %luus c17 ok %lu hit %lu fb %lu win %lu | qwait %lums skip %lu | k %lu/%lu/%lu/%lu/%lu | ph %lu/%lu/%lu/%lu | rh %lu/%lu/%lu/%lu/%lu/%lu | nm %lu/%lu/%lu/%lu",
                    (unsigned long)(ops - ops0), (unsigned long)((st - st0) / 1000u),
+                   (unsigned long)(ops - ops0 > wr - wr0 ? (ops - ops0) - (wr - wr0) : 0),
+                   (unsigned long)(wr - wr0),
                    (unsigned long)(n - n0), (unsigned long)((c1us - c1us0) / 1000u), (unsigned long)g_sd_as_c1_max,
                    (unsigned long)((w - w0) / 1000u), (unsigned long)g_sd_as_c0wait_max,
                    (unsigned long)(s_c17_ok - ok0), (unsigned long)(s_c17_hit - hit0), (unsigned long)(s_c17_fb - fb0),
-                   (unsigned long)((q - q0) / 1000u), (unsigned long)(sk - sk0));
+                   (unsigned long)s_win_max,
+                   (unsigned long)((q - q0) / 1000u), (unsigned long)(sk - sk0),
+                   (unsigned long)(s_sdk[0] - k0[0]), (unsigned long)(s_sdk[1] - k0[1]),
+                   (unsigned long)(s_sdk[2] - k0[2]), (unsigned long)(s_sdk[3] - k0[3]),
+                   (unsigned long)(s_sdk[4] - k0[4]),
+                   (unsigned long)((g_sd_ph[0] - ph0[0]) / 1000u), (unsigned long)((g_sd_ph[1] - ph0[1]) / 1000u),
+                   (unsigned long)((g_sd_ph[2] - ph0[2]) / 1000u), (unsigned long)((g_sd_ph[3] - ph0[3]) / 1000u),
+                   (unsigned long)(s_rh[0] - rh0[0]), (unsigned long)(s_rh[1] - rh0[1]),
+                   (unsigned long)(s_rh[2] - rh0[2]), (unsigned long)(s_rh[3] - rh0[3]),
+                   (unsigned long)(s_rh[4] - rh0[4]), (unsigned long)(s_rh[5] - rh0[5]),
+                   (unsigned long)(s_miss[0] - ms0[0]), (unsigned long)(s_miss[1] - ms0[1]),
+                   (unsigned long)(s_miss[2] - ms0[2]), (unsigned long)(s_miss[3] - ms0[3]));
         g_sd_as_c1_max = g_sd_as_c0wait_max = 0;
     }
-    t0 = now; ops0 = ops; st0 = st; n0 = n; c1us0 = c1us; w0 = w; ok0 = s_c17_ok; fb0 = s_c17_fb; hit0 = s_c17_hit; q0 = q; sk0 = sk;
+    t0 = now; ops0 = ops; wr0 = wr; st0 = st; n0 = n; c1us0 = c1us; w0 = w; ok0 = s_c17_ok; fb0 = s_c17_fb; hit0 = s_c17_hit; q0 = q; sk0 = sk;
+    for (int i = 0; i < 5; i++) k0[i] = s_sdk[i];
+    for (int i = 0; i < 4; i++) ph0[i] = g_sd_ph[i];
+    for (int i = 0; i < 6; i++) rh0[i] = s_rh[i];
+    for (int i = 0; i < 4; i++) ms0[i] = s_miss[i];
 }
 
 void DivMMC::raInvalidate() {
     s_sq_base = 0xFFFFFFFFu;
     s_sq_count = 0;
+    s_s1_sec = 0xFFFFFFFFu;
+    s_stream = false;
     sqAsyncDiscard();
 }
 
@@ -1370,41 +1567,86 @@ void DivMMC::loadSector(uint32_t sector) {
 #endif
     if (divsd_mode) {
         sq1Ensure();
+        // The same sector again (a FAT / directory cell is read over and over):
+        // mmc_sector_buf still holds it — no card access and not even a copy.
+        if (sector == s_s1_sec && s_s1_gen == g_disk_write_gen) {
+            s_sq_last = sector;
+            return;
+        }
+        const bool seq = (sector == s_sq_last + 1u);
+        // The window is NOT decided here any more — missNote() owns it, from
+        // whether the guest actually continued just past the window. Four rules
+        // were built on run lengths during 2026-10-17 and the hardware rejected
+        // all four the same way: the number of card accesses stayed at 87 a
+        // second at a window of 2, 3 and 4 while the sectors transferred and the
+        // core1 time scaled straight with it (174 / 261 / 298 sectors, data
+        // phase 38 / 61 / 65 ms of a second). The classifier that replaced them
+        // says why: of 87 misses a second, 0 were "continued past the window",
+        // 58 went BACKWARDS and 29 jumped forward — the guest bounces between
+        // two regions, so no contiguous window ever covers the next read. Only
+        // what the counters below still do is report the run pattern, which is
+        // worth keeping as a diagnostic (a run of 1 means the guest re-reads).
+        if (!seq) {
+            const uint32_t L = s_run_sec;
+            runHist(L);
+            s_run_sec = 1;
+        } else if (s_run_sec < 0xFFFFu) {
+            s_run_sec++;
+        }
         // Read-ahead hit: no card access at all
         if (s_sq_buf && sector >= s_sq_base && sector < s_sq_base + s_sq_count &&
             s_sq_gen == g_disk_write_gen) {
             memcpy(mmc_sector_buf, s_sq_buf + (size_t)(sector - s_sq_base) * 512, 512);
             s_sq_last = sector;
-            if (sector - s_sq_base >= 2) sqAsyncRequest(s_sq_base + s_sq_count);   // half in: post the next
+            // Half in: post the next window (not inside a CMD18 — see c17Ready).
+            if (!s_stream && sector - s_sq_base >= 2) sqAsyncRequest(s_sq_base + s_sq_count, s_win_max);
+            s_s1_sec = sector; s_s1_gen = s_sq_gen;
             SDK(0, sector);
             return;
         }
         if (s_sq_buf && sqAsyncTake(sector)) {
             memcpy(mmc_sector_buf, s_sq_buf, 512);
             s_sq_last = sector;
+            s_s1_sec = sector; s_s1_gen = s_sq_gen;
             SDK(1, sector);
+            return;
+        }
+        // A miss: hand the read to core1 and wait for it HERE. Waiting is not
+        // the same as reading: the frame clock, the renderer and the HDMI ISR
+        // keep running, where a disk_read of our own freezes all of them for
+        // the ~1 ms the card takes — one of those inside a frame is what a
+        // dropped frame is made of.
+        if (!s_c17 && !s_c17_force_sync && c17FetchBlocking(sector, c17Win(s_stream, seq))) {
+            s_s1_sec = sector; s_s1_gen = g_disk_write_gen;
+            s_sq_last = sector;
+            SDK(seq ? 2 : 3, sector);
             return;
         }
         uint64_t t0 = time_us_64();
         DRESULT r;
-        if (s_sq_buf && sector == s_sq_last + 1) {
-            // Sequential stream detected: one burst, next 7 reads are free
+        if (s_sq_buf && seq) {
+            // Core1 is not there: read a small window here rather than one
+            // sector, so a sequential walk still gets most of the benefit.
             const uint32_t gen = g_disk_write_gen;
-            r = disk_read(raw_pdrv(), s_sq_buf, sector, DIVSD_RA_SECTORS);
+            r = disk_read(raw_pdrv(), s_sq_buf, sector, DIVSD_RA_MIN);
             if (r == RES_OK) {
                 s_sq_gen = gen;
                 s_sq_base = sector;
-                s_sq_count = DIVSD_RA_SECTORS;
+                s_sq_count = DIVSD_RA_MIN;
+                s_sq_last = sector;
+                s_s1_sec = sector; s_s1_gen = gen;
                 memcpy(mmc_sector_buf, s_sq_buf, 512);
                 SDK(2, sector);
-                sqAsyncRequest(sector + DIVSD_RA_SECTORS);
             } else {
                 // e.g. burst past the end of the card — retry as single
                 raInvalidate();
                 r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
+                if (r == RES_OK) { s_s1_sec = sector; s_s1_gen = gen; }
             }
         } else {
+            const uint32_t gen = g_disk_write_gen;
             r = disk_read(raw_pdrv(), mmc_sector_buf, sector, 1);
+            if (r == RES_OK) { s_s1_sec = sector; s_s1_gen = gen; }
             SDK(3, sector);
         }
         const uint32_t sdUs = (uint32_t)(time_us_64() - t0);
@@ -1441,6 +1683,8 @@ void DivMMC::storeSector(uint32_t sector) {
         // Keep the read-ahead coherent with our own writes
         if (sector >= s_sq_base && sector < s_sq_base + s_sq_count)
             raInvalidate();
+        else
+            s_s1_sec = 0xFFFFFFFFu;      // mmc_sector_buf may not be this sector any more
         uint64_t t0 = time_us_64();
         DRESULT r = disk_write(raw_pdrv(), mmc_sector_buf, sector, 1);
         // The firmware's FatFs has this volume mounted too: drop its cached copy
@@ -1448,6 +1692,7 @@ void DivMMC::storeSector(uint32_t sector) {
         if (r == RES_OK) ff_raw_write_notify(raw_pdrv(), sector, mmc_sector_buf);
         g_sd_stall_us += (uint32_t)(time_us_64() - t0);
         g_sd_ops++;
+        g_sd_wr_ops++;
 #if ZC_PORT_TRACE
         zcTraceWrite(sector, (int)r, mmc_sector_buf);
 #else
@@ -1619,7 +1864,11 @@ DIVMMC_HOT uint8_t DivMMC::mmc_read() {
                     if (s_c17) {
                         const int r = c17Ready();
                         if (!r) return 0xFF;                  // the card is still reading (Nac)
-                        if (r == 2) loadSector(s_c17_sector);
+                        if (r == 2) {                         // core1 gave it up: read it here
+                            s_c17_force_sync = true;
+                            loadSector(s_c17_sector);
+                            s_c17_force_sync = false;
+                        }
                     }
                     value = 0xFE;
                 }
@@ -1656,7 +1905,7 @@ DIVMMC_HOT uint8_t DivMMC::mmc_read() {
                     if (mmc_nac) { mmc_nac--; return 0xFF; }                 // Nac (see mmc_nac)
                     if (mmc_cont_pending) {
                         mmc_cont_pending = false;
-                        if (sdAsyncMachine() || Z80Ops::isNext) { if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address); }
+                        if (sdAsyncMachine() || Z80Ops::isNext) { if (!c17Begin(mmc_read_address, true)) loadSector(mmc_read_address); }
                         else if (s_ra_on) loadSectorStream(mmc_read_address);
                         else loadSector(mmc_read_address);
                         mmc_sector_buf_addr = mmc_read_address;
@@ -1664,7 +1913,11 @@ DIVMMC_HOT uint8_t DivMMC::mmc_read() {
                     if (s_c17) {
                         const int r = c17Ready();
                         if (!r) return 0xFF;                                 // Nac: still reading
-                        if (r == 2) loadSector(s_c17_sector);
+                        if (r == 2) {
+                            s_c17_force_sync = true;
+                            loadSector(s_c17_sector);
+                            s_c17_force_sync = false;
+                        }
                     }
                     value = 0xFE;
                 }
@@ -1924,7 +2177,7 @@ void DivMMC::mmc_write(uint8_t value) {
                     { const uint32_t sector = mmc_read_address; ZS_T0();
                       loadSector(sector); ZS(ZS_C17, 1, "c17"); }
 #else
-                    if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address);
+                    if (!c17Begin(mmc_read_address, false)) loadSector(mmc_read_address);
 #endif
                     mmc_sector_buf_addr = mmc_read_address;
                 }
@@ -1949,7 +2202,7 @@ void DivMMC::mmc_write(uint8_t value) {
                     flushWriteBuffer();
                     raEnd();                       // a new stream starts
                     if (sdAsyncMachine() || Z80Ops::isNext) {   // the 8-sector read-ahead + core1, as CMD17
-                        if (!c17Begin(mmc_read_address)) loadSector(mmc_read_address);
+                        if (!c17Begin(mmc_read_address, true)) loadSector(mmc_read_address);
                     } else {
                         s_ra_on = true;
                         loadSectorStream(mmc_read_address);
