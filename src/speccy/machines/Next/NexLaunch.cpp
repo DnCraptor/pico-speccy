@@ -3,6 +3,7 @@
 #include "NextReg.h"
 #include "NextVideo.h"
 #include "app/ESPectrum.h"
+#include "app/Config.h"
 #include "app/Debug.h"
 #include "app/TryAlloc.h"
 #include "fs/FileUtils.h"
@@ -12,11 +13,14 @@
 #include "ui/OSDMain.h"
 #include <cstring>
 
+
 #if NEXT_TRACE
 void nxJumpArmBas();   // Z80_JLS.cpp: [NXJMP] ring dump when the guest derails
 #endif
 
 namespace NexLaunch {
+static const char* const kTapLoader = "/nextzxos/tapload.bas";
+static const char* const kPendingFile = "/tmp/next/.launch";
 static bool pending = false;
 static const uint8_t* launchCode = NexLaunchCode::code;
 static size_t launchSize = sizeof(NexLaunchCode::code);
@@ -142,9 +146,14 @@ int start(const std::string& path, Format format) {
         OSD::osdCenteredMsg("NextZXOS /dot/NEXLOAD is missing", LEVEL_WARN, 2000);
         return -1;
     }
+    if (format == Format::TAP && f_stat(kTapLoader, &info) != FR_OK) {
+        OSD::osdCenteredMsg("NextZXOS /nextzxos/tapload.bas is missing", LEVEL_WARN, 2000);
+        return -1;
+    }
     const size_t slash = shortName.find_last_of('/');
     const std::string dir = slash ? shortName.substr(0, slash) : "/";
-    const bool bas = format == Format::BAS;
+    const bool tap = format == Format::TAP;
+    const bool bas = format == Format::BAS || tap;   // both run a BASIC line
     const std::string file = shortName.substr(slash + 1);
     // BAS: `LOAD "c:/path":RUN`, tokenised here (both are standard tokens:
     // LOAD #EF, RUN #F7) and written into E_LINE below. The RUN only matters
@@ -152,6 +161,7 @@ int start(const std::string& path, Format format) {
     // never reaches the rest of the line.
     const std::string basPath = "c:" + shortName;
     const std::string cmd = format == Format::NEX ? "nexload " + file
+        : tap ? "LOAD \"c:" + std::string(kTapLoader) + "\":LET f$=\"" + file + "\":LET adj=0:GO TO 1"
         : bas ? "SPRITE CLEAR:PALETTE CLEAR:LAYER CLEAR:RESTORE:LOAD \"" + basPath + "\":RUN"
         : file;
     NEXTVID::c1Drain();
@@ -176,7 +186,7 @@ int start(const std::string& path, Format format) {
     launchCode = snx ? NexLaunchCode::snxCode : bas ? NexLaunchCode::basCode : NexLaunchCode::code;
     launchSize = snx ? sizeof(NexLaunchCode::snxCode) : bas ? sizeof(NexLaunchCode::basCode) : sizeof(NexLaunchCode::code);
     launchStop = snx ? NexLaunchCode::snxStop : bas ? NexLaunchCode::basStop : NexLaunchCode::stop;
-    launchKind = snx ? "SNX" : bas ? "BAS" : "NEX";
+    launchKind = snx ? "SNX" : tap ? "TAP" : bas ? "BAS" : "NEX";
     memcpy(ram, launchCode, launchSize);
     memcpy(ram + NexLaunchCode::directory - NexLaunchCode::entry, dir.c_str(), dir.size() + 1);
     memcpy(ram + NexLaunchCode::command - NexLaunchCode::entry, cmd.c_str(), cmd.size() + 1);
@@ -218,8 +228,29 @@ int start(const std::string& path, Format format) {
             0x9C, 0xFD, ':',                         // LAYER CLEAR
             0xE5, ':',                               // RESTORE
         };
+        // The statement after the prefix, tokenised. BAS: LOAD "path":RUN.
+        // TAP: the Browser's .tap entry (browser.cfg: load "tapload.bas":
+        // f$="|":adj=0:goto 1) — LOAD of a program without an auto-start
+        // line goes on with the rest of the line under NextBASIC. Numbers
+        // carry their hidden 5-byte form (0E 00 00 n 00 00), as the editor
+        // would leave them.
+        std::string body;
+        auto num = [&body](char d) {
+            body += d; body += '\x0E'; body.append(2, '\0');
+            body += (char)(d - '0'); body.append(2, '\0');
+        };
+        body += '\xEF'; body += '"';                 // LOAD "
+        body += tap ? "c:" + std::string(kTapLoader) : basPath;
+        body += '"'; body += ':';
+        if (tap) {
+            body += '\xF1'; body += "f$=\""; body += file; body += "\":";   // LET f$="file":
+            body += '\xF1'; body += "adj="; num('0'); body += ':';         // LET adj=0:
+            body += '\xEC'; num('1');                                     // GO TO 1
+        } else {
+            body += '\xF7';                                               // RUN
+        }
         const unsigned eLine = w(0x5C59);
-        const unsigned end = eLine + sizeof(kPrefix) + 2 + basPath.size() + 1 + 2 + 2;   // prefix EF " path " : F7 0D 80
+        const unsigned end = eLine + sizeof(kPrefix) + body.size() + 2;   // prefix body 0D 80
         if (eLine < 0x5CCB || end >= 0x7F00) {
             Debug::log("BAS native: E_LINE=%04X unusable", eLine);
             OSD::osdCenteredMsg("NextZXOS BASIC workspace is not usable", LEVEL_WARN, 2000);
@@ -227,12 +258,7 @@ int start(const std::string& path, Format format) {
         }
         unsigned a = eLine;
         for (uint8_t b : kPrefix) sys[a++ - 0x4000] = b;
-        sys[a++ - 0x4000] = 0xEF;                    // LOAD
-        sys[a++ - 0x4000] = '"';
-        for (char c : basPath) sys[a++ - 0x4000] = (uint8_t)c;
-        sys[a++ - 0x4000] = '"';
-        sys[a++ - 0x4000] = ':';
-        sys[a++ - 0x4000] = 0xF7;                    // RUN
+        for (char c : body) sys[a++ - 0x4000] = (uint8_t)c;
         sys[a++ - 0x4000] = 0x0D;
         sys[a++ - 0x4000] = 0x80;
         put(0x5C61, a);                              // WORKSP
@@ -261,7 +287,70 @@ int start(const std::string& path, Format format) {
     return 1;
 }
 
+// A launch asked for on another machine: the reboot into the Next left it in
+// kPendingFile ("<format letter>\n<path>"). Picked up once, at the first poll
+// on the Next, and handed to the deferred launch (which waits for the OS).
+static bool pendingFileChecked = false;
+static void pickPendingFile() {
+    pendingFileChecked = true;
+    FIL* f = fopen2(kPendingFile, FA_READ);
+    if (!f) return;
+    char buf[300]; UINT br = 0;
+    f_read(f, buf, sizeof(buf) - 1, &br);
+    fclose2(f);
+    f_unlink(kPendingFile);
+    buf[br] = 0;
+    char* nl = strchr(buf, '\n');
+    if (!nl || nl == buf) return;
+    *nl = 0;
+    const char* p = nl + 1;
+    char* e = (char*)p + strcspn(p, "\r\n"); *e = 0;
+    if (!*p) return;
+    Format fm = buf[0] == 'S' ? Format::SNX : buf[0] == 'B' ? Format::BAS
+              : buf[0] == 'T' ? Format::TAP : Format::NEX;
+    deferred = true;
+    deferredPath = p;
+    deferredFormat = fm;
+    waitFrames = idleFrames = 0;
+    Debug::log("NexLaunch: pending launch '%s' after the reboot into the Next", p);
+}
+
+bool startWhenReady(const std::string& path, Format format) {
+    if (Z80Ops::isNext && MemESP::nextRamReady) {
+        const int r = start(path, format);
+        if (r != 0) return r > 0;
+        // The OS is not up yet (bootrom / config mode): launch once it is.
+        deferred = true;
+        deferredPath = path;
+        deferredFormat = format;
+        waitFrames = idleFrames = 0;
+        Debug::log("NexLaunch: NextZXOS not ready, '%s' deferred", path.c_str());
+        return true;
+    }
+    if (butter_psram_size() < (2u << 20)) {
+        OSD::osdCenteredMsg("Spectrum Next needs 2MB+ PSRAM", LEVEL_WARN, 2000);
+        return false;
+    }
+    FileUtils::mkdirParents("/tmp/next");
+    FIL* f = fopen2(kPendingFile, FA_WRITE | FA_CREATE_ALWAYS);
+    if (!f) return false;
+    const char fc = format == Format::SNX ? 'S' : format == Format::BAS ? 'B'
+                  : format == Format::TAP ? 'T' : 'N';
+    const std::string rec = std::string(1, fc) + "\n" + path + "\n";
+    UINT bw = 0;
+    f_write(f, rec.data(), rec.size(), &bw);
+    fclose2(f);
+    if (bw != rec.size()) return false;
+    Config::arch = A_NEXT;
+    Config::romSet = R_NEXT;
+    Config::ram_file = NO_RAM_FILE;
+    Config::save();
+    OSD::esp_hard_reset();
+    return true; // not reached
+}
+
 void poll() {
+    if (!pendingFileChecked && Z80Ops::isNext && MemESP::nextRamReady) pickPendingFile();
     if (deferred) {
         if (!Z80Ops::isNext) { deferred = false; return; }
         ++waitFrames;
@@ -279,7 +368,8 @@ void poll() {
             deferred = false;
             taken = false;
             const std::string p = deferredPath;
-            start(p, deferredFormat);             // reports its own failures
+            if (start(p, deferredFormat) == 0)     // -1 reports itself
+                OSD::osdCenteredMsg("NextZXOS is not running (TBBLUE.FW on the SD card?)", LEVEL_WARN, 3000);
         }
         return;
     }
@@ -303,7 +393,7 @@ void poll() {
         if (!replacedLogged) {
             replacedLogged = true;
             Debug::log("%s native: bootstrap replaced by LOAD/app — watching stopped", launchKind);
-            if (!strcmp(launchKind, "BAS")) logBasicState("replaced");
+            if (!strcmp(launchKind, "BAS") || !strcmp(launchKind, "TAP")) logBasicState("replaced");
         }
         pending = false;
         return;
@@ -314,7 +404,7 @@ void poll() {
     pending = false;
     const unsigned error = Z80::getRegA();
     const unsigned stage = Z80::getRegD();
-    const std::string kind = launchKind;
+    const std::string kind = !strcmp(launchKind, "TAP") ? std::string("BAS") : std::string(launchKind);
     Debug::log("%s native: OS loader returned, stage=%u error=%u", kind.c_str(), stage, error);
     if (kind == "BAS") logBasicState("returned");
     ESPectrum::reset();

@@ -88,6 +88,15 @@ public:
     // echo the name (FTP/SFTP entry names already carry their extension).
     virtual std::string downloadBasename(const std::string& displayName) { return displayName; }
 
+    // True when entry `displayName` is an ARCHIVE whose program is one member of
+    // it (the itch.io Next games: a zip of the game's files). `id` names the
+    // archive stably (the extraction folder), `member` is the path inside it to
+    // launch. Default false: the entry itself is what runs.
+    virtual bool archiveMember(const std::string& displayName, std::string& id,
+                               std::string& member) {
+        (void)displayName; (void)id; (void)member; return false;
+    }
+
     // Every FILE of the current directory as (display name, real basename), in
     // one pass — the Pico-Zx-Player builds its playlist from this. A per-entry
     // downloadBasename() would re-read the whole listing for each track. Default:

@@ -23,7 +23,9 @@ public:
     static string extractByIndex(const string& zipPath, int fileIndex);
 
     // Extract all files from ZIP to destDir. Returns number of files extracted.
-    static int extractAll(const string& zipPath, const string& destDir);
+    // keepPaths: recreate the archive's folders under destDir (a game whose
+    // files sit in subfolders) instead of flattening every member to destDir.
+    static int extractAll(const string& zipPath, const string& destDir, bool keepPaths = false);
 
     // Extract the member whose basename is `baseName` (case-insensitive) into
     // `outPath`. For a file that refers to a SIBLING in the same archive — an
