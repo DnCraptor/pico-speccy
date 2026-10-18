@@ -104,8 +104,10 @@ bool readLine(Conn& c, char* buf, size_t maxlen, absolute_time_t deadline, bool*
 
 HttpsGet::Result HttpsGet::get(const char* url, SinkCb sink, void* sinkCtx,
                                const char* caPath, ProgressCb progress, void* progCtx,
-                               long rangeStart, long rangeLen, const char* extraHeaders) {
+                               long rangeStart, long rangeLen, const char* extraHeaders,
+                               const char* method) {
     Result res = {}; res.status = -1;
+    const bool post = method && !strcmp(method, "POST");
 
     Buffer httpbuf;  // tiered (heap/butter); RAII frees on every exit path
     if (!httpbuf.alloc(HTTP_BUF_SZ, Buffer::NEED_POINTER)) { Debug::log("HttpsGet: buf alloc failed"); return res; }
@@ -144,9 +146,10 @@ HttpsGet::Result HttpsGet::get(const char* url, SinkCb sink, void* sinkCtx,
     // (e.g. a conditional "If-None-Match: ...\r\n").
     char req[768];
     int rl = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
-        "Accept: */*\r\n%s%sConnection: close\r\n\r\n",
-        path, host, uaFor(host), rangehdr, extraHeaders ? extraHeaders : "");
+        "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
+        "Accept: */*\r\n%s%s%sConnection: close\r\n\r\n",
+        post ? "POST" : "GET", path, host, uaFor(host), rangehdr, extraHeaders ? extraHeaders : "",
+        post ? "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\n" : "");
     if (rl <= 0 || (size_t)rl >= sizeof(req) || c.wr((const uint8_t*)req, rl) != rl) {
         Debug::log("HttpsGet: send request failed");
         goto done;
@@ -324,6 +327,12 @@ bool fileSink(void* ctx, const uint8_t* data, size_t len) {
 
 HttpsGet::Result HttpsGet::getToFile(const char* url, const char* sdPath,
                                      const char* caPath, ProgressCb progress, void* progCtx) {
+    return getToFileFn([](void* ctx, int) { return (const char*)ctx; }, (void*)url,
+                       sdPath, caPath, progress, progCtx);
+}
+
+HttpsGet::Result HttpsGet::getToFileFn(UrlCb urlFor, void* urlCtx, const char* sdPath,
+                                       const char* caPath, ProgressCb progress, void* progCtx) {
     Result res = { false, -1, 0, 0 };
     FIL* f = fopen2(sdPath, FA_WRITE | FA_CREATE_ALWAYS);
     if (!f) { Debug::log("HttpsGet: cannot create %s", sdPath); return res; }
@@ -343,6 +352,8 @@ HttpsGet::Result HttpsGet::getToFile(const char* url, const char* sdPath,
     uint32_t   total     = 0;   // full file size (0 = unknown: chunked/conn-close)
     bool       complete  = false;
     for (int attempt = 0; attempt < MAX_TRIES && fs.ok; attempt++) {
+        const char* url = urlFor(urlCtx, attempt);
+        if (!url || !*url) { fs.ok = false; break; }
         Result r = get(url, fileSink, &fs, caPath, progress, progCtx,
                        attempt == 0 ? -1 : (long)received, -1);
         if (attempt == 0) {

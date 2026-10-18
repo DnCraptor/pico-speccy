@@ -893,7 +893,7 @@ void ZipExtract::viewInfo(const string& zipPath) {
     VIDEO::SaveRect.restore_last();
 }
 
-int ZipExtract::extractAll(const string& zipPath, const string& destDir) {
+int ZipExtract::extractAll(const string& zipPath, const string& destDir, bool keepPaths) {
     s_zip_err = nullptr;
     ScopedHeap fnh(256);
     if (!fnh) return 0;
@@ -940,11 +940,26 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir) {
         if (fn[hdr.nameLen - 1] != '/' && (hdr.compression == 0 || hdr.compression == 8)) {
             // Build destination path: destDir + basename
             const char* base = getBaseName(fn);
+            if (keepPaths) {
+                for (char* q = fn; *q; q++) if (*q == '\\') *q = '/';   // Windows zips
+                base = getBaseName(fn);
+                // The member's own path, minus any leading '/' and never above
+                // destDir ("..": a malformed or hostile archive).
+                const char* rel = fn;
+                while (*rel == '/') rel++;
+                if (strstr(rel, "..")) rel = base;
+                else if (rel != base) {
+                    char sub[300];
+                    snprintf(sub, sizeof(sub), "%s%.*s", destDir.c_str(), (int)(base - rel - 1), rel);
+                    FileUtils::mkdirParents(sub);
+                }
+                base = rel;
+            }
 
             // Extract to a temp on the destination volume, then rename in place
             bool ok = extractFile(&zipFile, hdr.compression, hdr.compressedSize, hdr.uncompressedSize, tmpPath);
             if (ok) {
-                char destPath[160];
+                char destPath[300];
                 snprintf(destPath, sizeof(destPath), "%s%s", destDir.c_str(), base);
                 f_unlink(destPath); // remove if exists
                 FRESULT rr = f_rename(tmpPath, destPath);
