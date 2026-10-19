@@ -74,6 +74,7 @@ using namespace std;
 #include "net/RemoteFs.h"
 #include "player/PicoPlayer.h"
 #include "speccy/core/Snapshot.h"
+#include "speccy/machines/Next/NexLaunch.h"
 #endif
 
 // The index class + SORT_VERSION moved to SortedFiles.h, shared with the new
@@ -838,6 +839,56 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
             if (pp::playableExt(lce)) {
                 OSD::progressDialog("", "", 0, 2);
                 nm::playerRemote(fs, nm);
+                continue;
+            }
+        }
+        // An archive whose program is one of its members (the itch.io Next
+        // games: the program needs the files beside it): unpacked whole into
+        // /tmp/next/<id>/ and the member launched through NextZXOS with that
+        // folder as the current one. An archive already unpacked there this
+        // or an earlier session is launched without downloading it again.
+        {
+            string aid, member;
+            if (fs->archiveMember(nm, aid, member)) {
+                // As extractAll will name it on the card: CP1251, '/' separators.
+                member = FileUtils::utf8ToCp1251(member);
+                std::replace(member.begin(), member.end(), '\\', '/');
+                const string dir = "/tmp/next/" + aid + "/";
+                const string target = dir + member;
+                FILINFO fi;
+                bool ok = f_stat(target.c_str(), &fi) == FR_OK;
+                if (!ok) {
+                    FileUtils::mkdirParents(dir.c_str());
+                    const string zip = "/tmp/next/_dl.zip";
+                    f_unlink(zip.c_str());
+                    ok = fs->get(nm, zip, rfd_progress);
+                    OSD::progressDialog("", "", 0, 2);
+                    if (ok) {
+                        OSD::osdCenteredMsg(MSG_NET_LAUNCHING, LEVEL_INFO, 0);
+                        ok = ZipExtract::extractAll(zip, dir, true) > 0 &&
+                             f_stat(target.c_str(), &fi) == FR_OK;
+                        if (!ok) Debug::log("net: %s has no '%s' after unpacking", zip.c_str(), member.c_str());
+                    }
+                    f_unlink(zip.c_str());
+                    if (!ok) {
+                        OSD::osdCenteredMsg(MSG_NET_XFER_ERR, LEVEL_WARN, 2000);
+                        continue;
+                    }
+                } else {
+                    OSD::progressDialog("", "", 0, 2);
+                    Debug::log("net: %s already unpacked, launching", target.c_str());
+                }
+                const string mext = FileUtils::getLCaseExt(member);
+                const NexLaunch::Format fmt =
+                    mext == "snx" ? NexLaunch::Format::SNX
+                  : mext == "bas" ? NexLaunch::Format::BAS
+                  : (mext == "tap" || mext == "tzx") ? NexLaunch::Format::TAP
+                  : NexLaunch::Format::NEX;
+                if (NexLaunch::startWhenReady(target, fmt)) {
+                    OSD::net_launch_close = true;
+                    filenames.close();
+                    return;
+                }
                 continue;
             }
         }

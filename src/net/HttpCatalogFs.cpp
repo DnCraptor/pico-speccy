@@ -403,6 +403,93 @@ static void locate_line(const char* line, void* arg) {
     lc->found = true;
 }
 
+// ── itch.io locators (the "nextdb" source) ─────────────────────────────────────
+// `itch:<host>/<slug>/<upload id>/<urlquoted filename>[?run=<urlquoted member>]`.
+// The file URL itch.io hands out is signed for 60 s, so it cannot live in the
+// catalog: the device asks for it itself — POST
+// https://<host>/<slug>/file/<uid>?source=game_download (empty body) answers
+// {"url":"https:\/\/...r2.cloudflarestorage.com/...","external":false}.
+static int hexVal(char h) {
+    if (h >= '0' && h <= '9') return h - '0';
+    if (h >= 'a' && h <= 'f') return h - 'a' + 10;
+    if (h >= 'A' && h <= 'F') return h - 'A' + 10;
+    return -1;
+}
+static std::string pctDecode(const std::string& s) {
+    std::string o; o.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int a = hexVal(s[i + 1]), b = hexVal(s[i + 2]);
+            if (a >= 0 && b >= 0) { o += (char)(a * 16 + b); i += 2; continue; }
+        }
+        o += s[i];
+    }
+    return o;
+}
+
+struct ItchLoc { std::string host, slug, uid, fname, run; };
+static bool itchParse(const std::string& loc, ItchLoc& out) {
+    if (loc.rfind("itch:", 0) != 0) return false;
+    std::string r = loc.substr(5);
+    size_t q = r.find('?');
+    std::string query;
+    if (q != std::string::npos) { query = r.substr(q + 1); r.erase(q); }
+    size_t a = r.find('/');                       if (a == std::string::npos) return false;
+    size_t b = r.find('/', a + 1);                if (b == std::string::npos) return false;
+    size_t c = r.find('/', b + 1);                if (c == std::string::npos) return false;
+    out.host = r.substr(0, a);
+    out.slug = r.substr(a + 1, b - a - 1);
+    out.uid  = r.substr(b + 1, c - b - 1);
+    out.fname = pctDecode(r.substr(c + 1));
+    out.run.clear();
+    if (query.rfind("run=", 0) == 0) out.run = pctDecode(query.substr(4));
+    return !out.host.empty() && !out.slug.empty() && !out.uid.empty() && !out.fname.empty();
+}
+
+// Collect up to 2 KB of the POST reply (the JSON is ~600 B).
+struct ItchBody { char buf[2048]; size_t n; };
+static bool itchBodySink(void* ctx, const uint8_t* d, size_t len) {
+    ItchBody* b = (ItchBody*)ctx;
+    size_t room = sizeof(b->buf) - 1 - b->n;
+    if (len > room) len = room;
+    memcpy(b->buf + b->n, d, len); b->n += len; b->buf[b->n] = 0;
+    return true;
+}
+
+// Ask itch.io for a fresh signed URL of upload `uid`. "" on failure.
+static std::string itchSignedUrl(const ItchLoc& L) {
+    std::string post = "https://" + L.host + "/" + L.slug + "/file/" + L.uid + "?source=game_download";
+    std::unique_ptr<ItchBody> body(new (std::nothrow) ItchBody);
+    if (!body) return std::string();
+    body->n = 0; body->buf[0] = 0;
+    HttpsGet::Result r = HttpsGet::post(post.c_str(), itchBodySink, body.get(), CATALOG_CA_PATH);
+    if (!r.ok) { Debug::log("itch: POST %s -> %d", post.c_str(), r.status); return std::string(); }
+    const char* k = strstr(body->buf, "\"url\":\"");
+    if (!k) { Debug::log("itch: no url in reply (%u B)", (unsigned)body->n); return std::string(); }
+    k += 7;
+    std::string u;
+    for (; *k && *k != '"'; k++) {
+        if (*k == '\\' && k[1]) {
+            k++;
+            if (*k == 'u' && k[1] && k[2] && k[3] && k[4]) {
+                char hx[5] = { k[1], k[2], k[3], k[4], 0 };
+                unsigned v = (unsigned)strtoul(hx, nullptr, 16);
+                u += (v < 0x80) ? (char)v : '?';     // URLs are ASCII
+                k += 4;
+            } else u += *k;                           // \/ \" \\ -> the char
+        } else u += *k;
+    }
+    return u;
+}
+
+struct ItchUrlCtx { const ItchLoc* L; std::string cur; };
+static const char* itchUrlFor(void* ctx, int attempt) {
+    ItchUrlCtx* c = (ItchUrlCtx*)ctx;
+    (void)attempt;
+    c->cur = itchSignedUrl(*c->L);                    // a fresh signature every attempt
+    return c->cur.c_str();
+}
+
 bool HttpCatalogFs::get(const std::string& remote, const std::string& localSdPath, XferProgressCb cb) {
     if (isStaticBase()) {
         // Resolve the file's locator from the local .tsv cache (written while browsing)
@@ -411,6 +498,18 @@ bool HttpCatalogFs::get(const std::string& remote, const std::string& localSdPat
         LocateCtx loc = { remote.c_str(), std::string(), 0, false };
         if (!readTsvCachedOrHttp(tsvCachePath(), listUrl, locate_line, &loc)) return false;
         if (!loc.found || loc.url.empty()) return false; // unknown or not mirrored
+        ItchLoc itch;
+        if (itchParse(loc.url, itch)) {
+            g_xfer_cb = cb;
+            g_xfer_total_hint = loc.size;
+            ItchUrlCtx uc = { &itch, std::string() };
+            HttpsGet::Result r = HttpsGet::getToFileFn(itchUrlFor, &uc, localSdPath.c_str(),
+                                                       CATALOG_CA_PATH, httpsProgressThunk, nullptr);
+            g_xfer_cb = nullptr;
+            g_xfer_total_hint = 0;
+            if (!r.ok) { f_unlink(localSdPath.c_str()); return false; }
+            return true;
+        }
         std::string fileUrl =
             (loc.url.rfind("http://", 0) == 0 || loc.url.rfind("https://", 0) == 0)
                 ? loc.url                                   // absolute (direct source)
@@ -484,6 +583,12 @@ static void files_line(const char* line, void* arg) {
     const char* t3 = strchr(t2 + 1, '\t');       if (!t3) return;
     const char* url = t3 + 1;
     if (!*url) return;
+    ItchLoc itch;
+    if (itchParse(url, itch)) {
+        const std::string nm(name, t2 - name);
+        fc->cb(fc->ctx, nm.c_str(), itch.fname.c_str());
+        return;
+    }
     const char* sl = strrchr(url, '/');
     const char* base = sl ? sl + 1 : url;
     if (!*base) return;
@@ -510,12 +615,28 @@ std::string HttpCatalogFs::downloadBasename(const std::string& displayName) {
         LocateCtx loc = { displayName.c_str(), std::string(), 0, false };
         if (!readTsvCachedOrHttp(tsvCachePath(), listUrl, locate_line, &loc) || !loc.found || loc.url.empty())
             return displayName;
+        ItchLoc itch;
+        if (itchParse(loc.url, itch)) return itch.fname;
         std::string fname = loc.url;
         size_t sl = fname.find_last_of('/');
         if (sl != std::string::npos) fname.erase(0, sl + 1);
         return fname.empty() ? displayName : fname;
     }
     return displayName; // dynamic backend saves under the caller-chosen path
+}
+
+bool HttpCatalogFs::archiveMember(const std::string& displayName, std::string& id,
+                                  std::string& member) {
+    if (!isStaticBase()) return false;
+    std::string listUrl = baseUrl() + "/" + site + "/" + slugPath(cur_path) + ".tsv";
+    LocateCtx loc = { displayName.c_str(), std::string(), 0, false };
+    if (!readTsvCachedOrHttp(tsvCachePath(), listUrl, locate_line, &loc) || !loc.found)
+        return false;
+    ItchLoc itch;
+    if (!itchParse(loc.url, itch) || itch.run.empty()) return false;
+    id = itch.uid;
+    member = itch.run;
+    return true;
 }
 
 void HttpCatalogFs::disconnect() {

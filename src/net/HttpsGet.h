@@ -51,12 +51,29 @@ public:
                       const char* caPath = nullptr,
                       ProgressCb progress = nullptr, void* progCtx = nullptr,
                       long rangeStart = -1, long rangeLen = -1,
-                      const char* extraHeaders = nullptr);
+                      const char* extraHeaders = nullptr,
+                      const char* method = nullptr);
+
+    // POST with an EMPTY body (Content-Length: 0), the response streamed to
+    // `sink` like get(). itch.io answers its download requests this way: the
+    // reply is a small JSON carrying a signed, short-lived file URL.
+    static Result post(const char* url, SinkCb sink, void* sinkCtx,
+                       const char* caPath = nullptr) {
+        return get(url, sink, sinkCtx, caPath, nullptr, nullptr, -1, -1, nullptr, "POST");
+    }
 
     // Convenience: download to an SD file (streamed, overwrites).
     static Result getToFile(const char* url, const char* sdPath,
                             const char* caPath = nullptr,
                             ProgressCb progress = nullptr, void* progCtx = nullptr);
+
+    // getToFile for a source whose URL expires (itch.io signs its file URLs for
+    // 60 s): `urlFor` is asked for the URL before EVERY attempt, so a resume
+    // after a broken transfer starts from a fresh signature. nullptr/"" = give up.
+    typedef const char* (*UrlCb)(void* ctx, int attempt);
+    static Result getToFileFn(UrlCb urlFor, void* urlCtx, const char* sdPath,
+                              const char* caPath = nullptr,
+                              ProgressCb progress = nullptr, void* progCtx = nullptr);
 
     // Bring-up spike: GET `url` and log status + Content-Length + first bytes.
     // Returns true on a 2xx response. Use this to validate TLS-over-ESP on hardware.
