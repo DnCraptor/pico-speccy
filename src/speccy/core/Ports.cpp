@@ -1087,6 +1087,21 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     const int v = NextPorts::joyPortRead((uint8_t)address);
     if (v >= 0) return (uint8_t)v;
   }
+  // zxnDMA read-back (#6B / #0B) on the Next: a title streaming a WAV through
+  // the DMA (burst + prescaler into the DAC, auto-restart) refills its buffer
+  // halves by polling the port A address — `IN A,(C) / BIT 2,A / JR Z`, ~18k
+  // reads a frame at 28 MHz (GetOut's title screen, 30 FPS / IDL -1300: the
+  // same chain walk as the #1F case above, hw 2026-10-19). Same answer and the
+  // same late contention as the DMA block further down, which this duplicates.
+  if (!PROFI && Z80Ops::isNext &&
+      (((address & 0xFF) == 0x6B && NextReg::portOn(NextReg::PE_DMA6B)) ||
+       ((address & 0xFF) == 0x0B && NextReg::portOn(NextReg::PE_DMA0B)))) {
+    LED::touchR(LED::DMA);
+    ioContentionLate(MemESP::ramContended[rambank]);
+    const uint8_t v = Z80DMA::readPort();
+    if (Z80DMA::nxPending) NextPorts::dmaPollSkip();   // the poll loop itself: skip to the next byte
+    return v;
+  }
 
   if (MEM_PG_CNT > 64 && !Z80Ops::isTsconf && address == 0xAFF7) {
     LED::touchR(LED::RAM);

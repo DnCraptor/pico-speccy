@@ -727,6 +727,24 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   **на Next любой порт, который программа читает/пишет в цикле, должен иметь ранний путь
   в `Ports::input/output` (образец `#EB` / `#243B`) — генеральная цепочка стоит ~0.5-1 мкс
   на доступ.**
+- **GetOut (Richard "Dicky" Dodds), титульный экран 30 FPS / IDL −1300 — тот же класс
+  (2026-10-19, NOT hw-tested, `debug/DVp2-next-getout-dma6b-1.0.10`).** Дамп: PC=2125 в
+  divMMC RAM bank 2 — WAV-плеер: zxnDMA память→порт #DF (burst + prescaler 26 ≈ 33.6 кГц,
+  auto-restart, 2 КБ с #8000), CPU на 28 МГц крутит `IN A,(#6B) / BIT 2,A / JR Z` — маска
+  чтения 0x10, т.е. старший байт адреса порта A: бит 2 = DMA во второй половине буфера,
+  можно перезаписывать первую. ~18k `IN` за кадр, каждый через всю цепочку до
+  `NextPorts::input` (core0 PC сидел в его veneer). Ранний путь для #6B/#0B (чтение) рядом
+  с #1F в `Ports::inputImpl` — тот же `Z80DMA::readPort` + LED + late contention, что и в
+  блоке ниже. +64 B `.data`. Срезы DMA-байтом уже ограничены (`dmaT` в `CPU::loop`), это
+  не узкое место. Попутно `[SD] sync` ушёл под `PERF_TRACE || NEXT_TRACE` (−128 B `.bss`).
+  **Ранний путь дал только 40 FPS / IDL −5500 (hw)** — сама петля на 28 МГц стоит: 26 витков
+  на каждый DMA-байт. Второй шаг (`debug/DVp2-next-getout-dmapoll-1.0.10`, **hw-confirmed
+  тем же днём — owner: «отлично», IDL +8-10k**; что IDE предлагало на лоадере — не проверялось):
+  `NextPorts::dmaPollSkip` (`.nxovl`, из раннего пути при `nxPending`) — второе чтение DMA-порта
+  с того же PC в пределах `128 << mult` T при burst + prescaler перематывает время целыми
+  витками (арифметика NextIdle: период d, выборки dR, k витков, `idleAdvanceTo` + `incRegR`)
+  до `min(nxNextT, stFrame, frame−IntEnd)`; не при NMI / RZX / в окне ULA INT. Окно `.nxovl`
+  50 848 из 51 200.
 - **SRAM-проход 2026-10-10 (NOT hw-tested): `.data` DVp2 102 260 -> 93 020 B.** Таблица
   видеорежимов `video_mode` — `static const` во флеше (была 4.4 KB .data): изменяемые поля
   в RAM-массивах `s_div` (pio_clk_div) / `s_vtot` (v_total) в graphics.c, ISR VGA читает

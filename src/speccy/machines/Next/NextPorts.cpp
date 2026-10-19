@@ -27,6 +27,9 @@
 #include "speccy/z80/z80.h"
 #include "speccy/core/Ports.h"
 #include "speccy/devices/storage/DivMMC.h"
+#include "speccy/devices/Z80DMA.h"
+#include "speccy/core/Rzx.h"
+#include "NextIdle.h"
 #include "pico.h"
 
 // NextPorts::output + the DAC write: a CTC-driven sample player writes 4 DAC
@@ -377,6 +380,45 @@ static int joyRead(uint8_t lo) {
 }
 
 int NextPorts::joyPortRead(uint8_t lo) { return joyRead(lo); }
+
+// A loop polling the DMA read-back while a burst + prescaler transfer runs
+// (GetOut's WAV player: `IN A,(#6B) / BIT 2,A / JR Z` on the port A address, one
+// pass per 32 T at 28 MHz against a byte every 832 T — 26 passes that return the
+// same byte). Nothing the loop can see moves until the next DMA byte, and the
+// slice already ends there (CPU::loop's dmaT), so the second read from the same
+// PC advances guest time by whole passes to that byte — NextIdle's arithmetic
+// (period d, fetches dR, k passes), without its body check: the port read IS
+// the body here. Bounded by the slice end (interrupt events, IFF1 set or not),
+// the frame tail and the ULA INT window; a pending NMI or RZX playback keep the
+// real passes. The read mask's cycle is untouched: k passes read k times the
+// same register either way only with a single-bit mask, and with more bits the
+// bytes differ pass to pass — the loop then compares different registers, which
+// it does on the hardware too.
+static uint16_t s_dpPc = 0xFFFF;
+static uint32_t s_dpT = 0, s_dpR = 0;
+NXP_HOT void NextPorts::dmaPollSkip() {
+    const uint16_t pc = Z80::getRegPC();
+    const uint32_t t = CPU::tstates, r = Z80::getFetchCounter();
+    const uint32_t d = t - s_dpT, dR = r - s_dpR;
+    const bool same = pc == s_dpPc;
+    s_dpPc = pc; s_dpT = t; s_dpR = r;
+    if (!same || d == 0 || d > (128u << ESPectrum::multiplicator)) return;
+    if (!Z80DMA::nxPaced() || Rzx::mode || Z80::isNMI() || (int32_t)t < CPU::IntEnd) return;
+    uint32_t lim = Z80DMA::nxNextT;
+    if (CPU::stFrame && CPU::stFrame < lim) lim = CPU::stFrame;
+    const uint32_t fe = CPU::statesInFrame - (uint32_t)CPU::IntEnd;
+    if (fe < lim) lim = fe;
+    if (lim <= t) return;
+    const uint32_t k = (lim - t) / d;
+    if (!k) return;
+    if (!NEXTVID::idleAdvanceTo(t + k * d)) return;
+    Z80::incRegR(k * dR);
+    s_dpT = CPU::tstates; s_dpR = Z80::getFetchCounter();
+#if NEXT_TRACE
+    NextIdle::g_nx_idle_n = NextIdle::g_nx_idle_n + 1;
+    NextIdle::g_nx_idle_t = NextIdle::g_nx_idle_t + (CPU::tstates - t);
+#endif
+}
 
 // ULA+ (zxnext.vhd 4523-4583): 0xBF3B = mode 7:6 + index 5:0 (index kept in
 // mode 00 only), 0xFF3B = palette entry in mode 00, enable bit 0 in mode 01.

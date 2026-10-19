@@ -4101,7 +4101,9 @@ void ESPectrum::loop() {
     if (Z80Ops::isNext) { NxFrameProf::init(); NxFrameProf::frameBegin(); }
 #endif
     NexLaunch::poll();
+#if PERF_TRACE || NEXT_TRACE
     DivMMC::sdStatTick();
+#endif
     CPU::loop();
 #if NEXT_TRACE
     const uint32_t wf_c1 = time_us_32();

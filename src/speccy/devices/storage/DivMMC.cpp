@@ -1604,7 +1604,8 @@ static bool c17FetchBlocking(uint32_t sector, uint32_t count) {
     }
 }
 
-// [SD] 1 Hz line (plain builds, printed only for a second with card traffic):
+// [SD] 1 Hz line (PERF_TRACE / NEXT_TRACE builds only since 2026-10-19 — owner's
+// call; it printed in plain builds for a second after any card traffic):
 // sync = card reads/writes core0 did itself (R = reads, W = writes) and the ms
 // it stood on the card; c1 = background reads core1 ran, their ms and worst us;
 // wait = core0 spinning on a core1 read in flight; c17 = guest sector requests
@@ -1615,6 +1616,7 @@ static bool c17FetchBlocking(uint32_t sector, uint32_t count) {
 extern volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max, g_sd_as_c1_n;   // sdcard.c (globals are unmangled)
 extern volatile uint32_t g_sd_ph[4];   // sdcard.c: select / R1 poll / token wait / block data, us
 void DivMMC::sdStatTick() {
+#if PERF_TRACE || NEXT_TRACE
     static uint32_t t0 = 0, ops0, wr0, st0, n0, c1us0, w0, ok0, fb0, hit0, q0, sk0, k0[5], ph0[4], rh0[6], ms0[4], ol0;
     const uint32_t now = time_us_32();
     if ((uint32_t)(now - t0) < 1000000u) return;
@@ -1649,6 +1651,7 @@ void DivMMC::sdStatTick() {
     for (int i = 0; i < 6; i++) rh0[i] = s_rh[i];
     for (int i = 0; i < 4; i++) ms0[i] = s_miss[i];
     ol0 = s_old_hit;
+#endif
 }
 
 void DivMMC::raInvalidate() {

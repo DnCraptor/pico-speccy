@@ -53,6 +53,7 @@ public:
     static bool     nxStall;
     static bool     nxDrainDue;   // paced block not yet checked against core1's queue
     static uint32_t nxNextT;
+    static bool nxPaced() { return prescalar != 0 && !nxStall; }   // burst + prescaler: the CPU runs between bytes
     static bool nxService(uint32_t limit);   // transfer what is due, up to limit; false = nothing moved
     static void nxFrameEnd(uint32_t statesInFrame);
     static void nxClockRescale(uint8_t om, uint8_t nm);
