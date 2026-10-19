@@ -977,8 +977,15 @@ static __attribute__((noinline)) bool atmPortReadEarly(uint16_t address, uint8_t
 // Next's fully decoded keyboard port with no tape inserted. The caller has
 // already applied the early I/O cycle and breakpoint/profiling hooks. No device
 // preceding the ULA decode claims #xxFE on Next (NEMO requires A2:A1 = 00).
+// Flash on purpose (the pc-2 read is MemESP::readbyte, ~500 B inlined into RAM
+// code otherwise); only reached with a tape in the deck.
+static __attribute__((noinline)) bool nextKbdStoppedTapeIdle() {
+  const uint16_t pc = Z80::getRegPC();
+  return Tape::stoppedReadIdle(pc, pc >= 0x4000 ? MemESP::readbyte((uint16_t)(pc - 2)) : 0);
+}
 static inline __attribute__((always_inline)) uint8_t nextKeyboardRead(uint16_t address) {
   VIDEO::Draw(3, g_ula_io_contend);
+  NextPorts::kbdPollSkip(address);   // a no-HALT key wait at 28 MHz ("2048"): whole poll passes at once
   uint8_t data = 0xBF;
   unsigned rows = (~(address >> 8)) & 0xFF;
   while (rows) {
@@ -1075,8 +1082,12 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     return DivMMC::mmc_read();
   }
 
-  if (!PROFI && Z80Ops::isNext && (address & 0xFF) == 0xFE &&
-      Tape::tapeFileType == TAPE_FTYPE_EMPTY && Tape::tapeStatus != TAPE_LOADING)
+  // ...and with a tape STOPPED in the deck as well, unless this read is one
+  // the auto-start logic in Tape::TapePortRead might count (its rules are in
+  // Tape::stoppedReadIdle): "2048" ran its 28 MHz key-wait loop through the
+  // whole chain + that flash function because a .tap was mounted (prof 2026-10-19).
+  if (!PROFI && Z80Ops::isNext && (address & 0xFF) == 0xFE && Tape::tapeStatus != TAPE_LOADING &&
+      (Tape::tapeFileType == TAPE_FTYPE_EMPTY || nextKbdStoppedTapeIdle()))
     return nextKeyboardRead(address);
   // Next Kempston (#1F / #37): a title waiting for a key busy-polls the keyboard
   // AND the joystick — Alien Neoplasma's intro, ~5600 IN (#1F) a frame at 28 MHz,

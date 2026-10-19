@@ -394,17 +394,33 @@ int NextPorts::joyPortRead(uint8_t lo) { return joyRead(lo); }
 // same register either way only with a single-bit mask, and with more bits the
 // bytes differ pass to pass — the loop then compares different registers, which
 // it does on the hardware too.
-static uint16_t s_dpPc = 0xFFFF;
-static uint32_t s_dpT = 0, s_dpR = 0;
-NXP_HOT void NextPorts::dmaPollSkip() {
+//
+// The keyboard takes the same shape (kbdPollSkip): "2048" sits in its game
+// state in a loop with no HALT — `CALL` an input scanner (IN (#1F) + a dozen
+// `IN (C)` rows of #FE), `JP` back — ~800 passes of ~700 T a frame at 28 MHz
+// (hw 2026-10-19, 44-45 FPS; fine at 14). NextIdle rejects it (CALL/RET, the
+// result store), but the matrix cannot move inside a frame (it is copied
+// between frames), so two reads of the same row from the same PC with the
+// border/beeper latch unchanged in between are a poll pass: skip whole passes
+// to the slice end, as above. The latch test keeps a beeper loop that happens
+// to poll a key (OUT (#FE) between the reads) on its real passes. A tape in
+// the deck never reaches this path (the early #FE read is tape-free only).
+//
+// The keyboard memo is a 16-slot table direct-mapped by PC: a scanner reads
+// #FE from a dozen PCs per pass ("2048": 13), and one slot was overwritten by
+// the next read every time, so no PC ever met its own previous pass. A slot
+// evicted by a colliding PC simply misses its pass; one surviving PC is enough.
+struct PollMemo { uint16_t pc, addr; uint32_t t, r; };
+static PollMemo s_dp = { 0xFFFF, 0, 0, 0 };
+static PollMemo s_kp[16];
+static NXP_HOT void pollSkip(PollMemo& m, uint16_t addr, bool ok, uint32_t dmax, uint32_t lim) {
     const uint16_t pc = Z80::getRegPC();
     const uint32_t t = CPU::tstates, r = Z80::getFetchCounter();
-    const uint32_t d = t - s_dpT, dR = r - s_dpR;
-    const bool same = pc == s_dpPc;
-    s_dpPc = pc; s_dpT = t; s_dpR = r;
-    if (!same || d == 0 || d > (128u << ESPectrum::multiplicator)) return;
-    if (!Z80DMA::nxPaced() || Rzx::mode || Z80::isNMI() || (int32_t)t < CPU::IntEnd) return;
-    uint32_t lim = Z80DMA::nxNextT;
+    const uint32_t d = t - m.t, dR = r - m.r;
+    const bool same = pc == m.pc && addr == m.addr;
+    m.pc = pc; m.addr = addr; m.t = t; m.r = r;
+    if (!same || !ok || d == 0 || d > dmax) return;
+    if (Rzx::mode || Z80::isNMI() || (int32_t)t < CPU::IntEnd) return;
     if (CPU::stFrame && CPU::stFrame < lim) lim = CPU::stFrame;
     const uint32_t fe = CPU::statesInFrame - (uint32_t)CPU::IntEnd;
     if (fe < lim) lim = fe;
@@ -413,11 +429,21 @@ NXP_HOT void NextPorts::dmaPollSkip() {
     if (!k) return;
     if (!NEXTVID::idleAdvanceTo(t + k * d)) return;
     Z80::incRegR(k * dR);
-    s_dpT = CPU::tstates; s_dpR = Z80::getFetchCounter();
+    m.t = CPU::tstates; m.r = Z80::getFetchCounter();
 #if NEXT_TRACE
     NextIdle::g_nx_idle_n = NextIdle::g_nx_idle_n + 1;
     NextIdle::g_nx_idle_t = NextIdle::g_nx_idle_t + (CPU::tstates - t);
 #endif
+}
+NXP_HOT void NextPorts::dmaPollSkip() {
+    pollSkip(s_dp, 0, Z80DMA::nxPaced(), 128u << ESPectrum::multiplicator, Z80DMA::nxNextT);
+}
+// The latch rides in `addr`'s memo slot beside the row mask: a changed border
+// or beeper between the reads reads as a different poll.
+NXP_HOT void NextPorts::kbdPollSkip(uint16_t address) {
+    const uint16_t pc = Z80::getRegPC();
+    pollSkip(s_kp[(pc ^ (pc >> 4)) & 15], (uint16_t)((address & 0xFF00) | Ports::feLatch()), true,
+             256u << ESPectrum::multiplicator, 0xFFFFFFFFu);
 }
 
 // ULA+ (zxnext.vhd 4523-4583): 0xBF3B = mode 7:6 + index 5:0 (index kept in

@@ -234,6 +234,21 @@ public:
     static int JJFlashLoad(); // 0=not applicable, 1=in progress, 2=done
     static bool jjScreenAnimating; // true while JJ screen animation in progress
     static bool TapePortRead();
+    // A #FE read that TapePortRead's STOPPED-tape branch could never act on:
+    // every auto-start it arms keys on the same PC polling 200 times and lives
+    // either at 0xFE00+ (Cerikopik / JJ / a turbo loader), in the ROM's LD-EDGE
+    // (0x05E3-0x05F5), or on an `IN A,(n)` edge poll (isTapeEdgePoll: 0xDB at
+    // pc-2, pc >= 0x4000); the two flash-load continuations are the two flags.
+    // Any other read may skip the generic chain (the Next's early keyboard
+    // path): a tape in the deck used to send a 28 MHz key-wait loop's ~7000
+    // `IN (C)` a frame through Ports::input + this function in flash.
+    // `opBefore` = the byte at pc-2 (the caller's memory read, only consulted
+    // for pc >= 0x4000).
+    static inline bool stoppedReadIdle(uint16_t pc, uint8_t opBefore) {
+        if (pzxFlashCont || jjScreenAnimating) return false;
+        if (pc >= 0xFE00 || (pc >= 0x05E3 && pc <= 0x05F5)) return false;
+        return pc < 0x4000 || opBefore != 0xDB;
+    }
     static void Save();
     static void FreeSymDefTable();
 
