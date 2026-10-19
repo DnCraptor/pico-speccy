@@ -92,6 +92,7 @@ void reset() {
         if (font) memcpy(font, gb_rom_atm_font, 2048);
     }
     clockApply();
+    video16Update();
 }
 
 // The plain Spectrum the BASIC rows of Alt+F11 promise — #EFF7 D2 (128K paging, D5
@@ -99,6 +100,26 @@ void reset() {
 void bootPlain() {
     pEFF7 = 0x14;
     clockApply();
+    video16Update();
+}
+
+// #EFF7 D0 = the Pentagon 16-colour mode (AlCo). Unreal init_raster, MM_ATM3 (its
+// BaseConf model): valid only in the ZX mode (#77 D2..D0 = 3), and only with D5
+// (hardware multicolour) clear — both bits, or either one in an ATM mode, give a
+// blank picture there (not modelled: we keep the plain mode). The layout is the
+// Pentagon-1024's (pages 4/5, or 6/7 by #7FFD D3, %IiGRBgrb — draw_p16 = p16c_draw,
+// the same nibbles as ATM EGA), so the Pentagon renderer branch serves it; its 4-bit
+// index lands on hardware slots 0..15, i.e. through the ATM palette like every mode.
+// Found by Still Alive (zxart 605200): OUT (#EFF7),1 then pages 4-7 through #x7F7,
+// flipping #7FFD D3 per frame — without the mode, a blinking ZX screen.
+void video16Update() {
+    const bool want = evo && (p77 & 7) == 3 && (pEFF7 & 0x21) == 0x01;
+    if (want == VIDEO::mode16col_enabled) return;
+    if (want) {
+        VIDEO::ensure16colLut();
+        VIDEO::mode16colUpdatePlanes();
+    }
+    VIDEO::mode16col_enabled = want;
 }
 
 // CPU clock (top.v: turbo = { #xx77 D3, ~#EFF7 D4 }; zclock.v: 1x = 14 MHz,
@@ -126,6 +147,7 @@ void snapLoad(const uint8_t* in, uint32_t n) {
     for (int i = 0; i < 4; i++) s_sav[i] = in[4 + i];
     s_nemoRt = in[8]; s_nemoWt = in[9]; s_nemoW1 = in[10]; s_nemoWlo = in[11];
     g_atm_fnt = (in[12] && font) ? 1 : 0;
+    video16Update();
 }
 
 // 48K/128K raster contention (zclock.v): the 6,5,4,3,2,1,0,0 pattern on #4000-#7FFF,
@@ -220,7 +242,7 @@ static void write77(uint16_t address, uint8_t data) {
     dosRecalc();
     remap();
     clockApply();
-    if ((data & 7) != oldMode) VIDEO::atmVideoModeChanged();
+    if ((data & 7) != oldMode) { VIDEO::atmVideoModeChanged(); video16Update(); }
 }
 
 // #xxF7 with A8 = 1 outside shadow (#EFF7/#DFF7/#BFF7), A8 = 0 inside it (#EEF7 —
@@ -233,6 +255,7 @@ static void f7Write(uint16_t address, uint8_t data, bool sh) {
         pEFF7 = data;
         if ((old ^ data) & 0x0C) remap();                    // D2 128K/1M mode, D3 RAM0
         if ((old ^ data) & 0x10) clockApply();               // D4 turbo off
+        if ((old ^ data) & 0x21) video16Update();            // D0 16c, D5 multicolour
         return;
     }
     if (!(sh || (pEFF7 & 0x80))) return;                     // Gluk ports off

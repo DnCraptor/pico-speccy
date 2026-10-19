@@ -54,6 +54,7 @@ void contendApply();            // 48K/128K raster contention (Atm::remap, CPU::
 void scrollLockRaster();        // Scroll Lock: next raster, saved, machine restarted (flash)
 void bootPlain();               // Atm::bootRom: 128K mode, 3.5 MHz
 void clockApply();              // { #xx77 D3, ~#EFF7 D4 } -> 14 / 7 / 3.5 MHz
+void video16Update();           // #EFF7 D0 in ZX mode -> Pentagon 16c (VIDEO::mode16col_enabled)
 void nmiEnter();                // Z80::doNMI
 void nmiClrApply();             // the deferred OUT (#BE)
 

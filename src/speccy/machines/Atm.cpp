@@ -271,6 +271,7 @@ void remap() {
     for (int w = 0; w < 8; w++) MemESP::ramContended[w] = false;
     EvoBase::contendApply();   // BaseConf 48K/128K raster: #4000 (+#C000 odd page); clears the flag elsewhere
     VIDEO::grmem = MemESP::ram[MemESP::videoLatch ? 7 : 5].direct();
+    if (VIDEO::mode16col_enabled) VIDEO::mode16colUpdatePlanes();   // ZX-Evo #EFF7 D0 16c
 }
 
 bool cpmBootArmed = false;

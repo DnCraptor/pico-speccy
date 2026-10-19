@@ -15480,6 +15480,18 @@ config port there, its CS bit 1 = 1 deselects the card), and on our ATM3 it hung
   zxevo_fw.bin" if ERS dislikes ZxEvoAvr's version string), RS232 #F8EF..#FFEF.
 - Test ELF `debug/DVp2-evo-baseconf-1.0.8.elf`. Hw check owed: ERS boots to its menu,
   14 MHz, the menu's TR-DOS / 128 / 48 rows, SD browse, Dune II (`dune.trd` + DUNE.DAT).
+- **#EFF7 D0 = Pentagon 16c on BaseConf (2026-10-19, NOT hw-tested, `debug/DVp2-evo-p16c-1.0.10`).**
+  Still Alive (zxart 605200, `still_alive.$c` + 62 MB `.zbv`) showed a blinking white paper:
+  `EvoBase::f7Write` stored #EFF7 and ignored D0, so the player's `OUT (#EFF7),1` left the
+  plain ZX screen while it double-buffers through #7FFD D3. Unreal `init_raster` MM_ATM3:
+  ZX mode (#77 = 3) and (#EFF7 & #21) == #01 -> M_P16 (`draw_p16`: pages 4/5 or 6/7, the
+  `p16c_draw` nibbles = our Pentagon LUT). `EvoBase::video16Update()` drives
+  `VIDEO::mode16col_enabled` (from #EFF7 D0/D5, a #77 mode change, reset, bootPlain,
+  snapLoad); `Atm::remap` refreshes the planes on a #7FFD D3 flip. Rendered by MainScreen's
+  16col branch (col16Arm is Pentagon-only); indices 0..15 go through the ATM palette. Not
+  done: D5 hardware multicolour, the "both bits / ATM mode = blank" case. The player runs at
+  7 MHz (#77 D3 = 0, #EFF7 D4 = 0), streams CMD18 by unrolled INI from #57 in shadow mode and
+  plays 8-bit Covox #FB with OUTI between INI runs (~12.5 kHz, ~12.5 fps).
 - **Raster selection (2026-10-05, hw: owner "работает", not itemised per raster)**:
   `Config::evo_raster` (NVS `evo_raster`) = the AVR's MODES_RASTER (`avr/baseconf zx.c`,
   `config0[5:4]` -> `video_sync_v.v` modes_raster): 0 Pentagon 320 x 224 = 71680 T,
