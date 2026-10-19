@@ -3,6 +3,7 @@
 #include "PicoPlayer.h"
 #include "app/Buffer.h"
 #include "app/Config.h"                    // butter_psram_size()
+#include "app/FlashRoms.h"
 
 #include <string.h>
 
@@ -89,7 +90,14 @@ static bool midiExt(const std::string& e) {
     return e == "mid" || e == "midi" || e == "kar" || e == "rmi";
 }
 
-bool bulbaExt(const std::string& e);
+// Here, not in PlayerBulba.cpp: every Player*.cpp lives in .psramroms, which a board
+// with no QSPI PSRAM may have traded for its GM.DLS bank, while playableExt() is
+// asked by the file browser on every board. Nothing this file runs before
+// available() may call into those files.
+bool bulbaExt(const std::string& e) {
+    return e == "psc" || e == "pt1" || e == "asc" || e == "ftc" || e == "fls" ||
+           e == "gtr" || e == "fxm" || e == "psm" || e == "vtx";
+}
 Decoder* createBulbaDecoder(const std::string& e);
 
 bool playableExt(const std::string& e) {
@@ -112,7 +120,9 @@ Decoder* createDecoder(const std::string& e) {
 }
 
 bool available() {
-    return butter_psram_size() > 0 && Buffer::butterPoolReady();
+    // romsUsable(): the decoders live in .psramroms, which a GM.DLS bank may have
+    // overwritten while this board ran without butter PSRAM.
+    return butter_psram_size() > 0 && Buffer::butterPoolReady() && FlashRoms::romsUsable();
 }
 
 // ── text ─────────────────────────────────────────────────────────────────────

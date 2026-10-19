@@ -44,7 +44,7 @@ SECTIONS
          * rest of the object in SRAM: it is a named section, so the object-wide
          * RAM rule below never sees it. */
         *(.z80cold .z80cold.*)
-        *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a: *FtInflate.c.o* @Z80_CORE_TEXT_EXCLUDE@) .text*)
+        *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a: *FtInflate.c.o* @PSRAMROM_CODE_EXCLUDE@ @Z80_CORE_TEXT_EXCLUDE@) .text*)
         *(.fini)
         *crtbegin.o(.ctors)
         *crtbegin?.o(.ctors)
@@ -90,15 +90,20 @@ SECTIONS
         "ERROR: Pico second stage bootloader must be no more than 256 bytes in size")
 
     .rodata : {
+        /* .flashdata FIRST: it holds the 4 KB-aligned arrays the firmware rewrites
+         * in flash (custom ROMs, ALF cart), each a whole number of 4 KB pages, and
+         * SORT_BY_ALIGNMENT puts them at the front. The section starts page-aligned,
+         * so they pack with no fill; placed last they cost up to 4 KB of padding,
+         * which also swallowed every byte saved anywhere above them. */
+        *(SORT_BY_ALIGNMENT(SORT_BY_NAME(.flashdata*)))
+        . = ALIGN(4);
         /* The two EXCLUDE_FILEd ROM objects go to .psramroms at the very top of
          * flash — see that section. They must be excluded HERE and in .data below,
          * because ld assigns an input section to the FIRST output section that
          * matches it in script order, and both of those come earlier. */
         *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a:
-                       *scorpion_gmx_rom.c.o* *scorpion_prof_rom.c.o* *tsconf_roms.c.o* *atm_roms.c.o* *scorpion_evo_rom.c.o* *FtInflate.c.o*) .rodata*)
+                       *scorpion_gmx_rom.c.o* *scorpion_prof_rom.c.o* *tsconf_roms.c.o* *atm_roms.c.o* *scorpion_evo_rom.c.o* *FtInflate.c.o* @PSRAMROM_CODE_EXCLUDE@) .rodata*)
         *(.srodata*)
-        . = ALIGN(4);
-        *(SORT_BY_ALIGNMENT(SORT_BY_NAME(.flashdata*)))
         . = ALIGN(4);
     } > FLASH
 
@@ -183,9 +188,9 @@ SECTIONS
 
         /* FtInflate.c.o (the VDAC2 copy of tinfl) belongs to .ftovl, which comes
          * later in script order — keep it out of this catch-all too. */
-        *(EXCLUDE_FILE(*FtInflate.c.o*) .text*)
+        *(EXCLUDE_FILE(*FtInflate.c.o* @PSRAMROM_CODE_EXCLUDE@) .text*)
         . = ALIGN(4);
-        *(EXCLUDE_FILE(*scorpion_gmx_rom.c.o* *scorpion_prof_rom.c.o* *tsconf_roms.c.o* *atm_roms.c.o* *scorpion_evo_rom.c.o* *FtInflate.c.o*) .rodata*)
+        *(EXCLUDE_FILE(*scorpion_gmx_rom.c.o* *scorpion_prof_rom.c.o* *tsconf_roms.c.o* *atm_roms.c.o* *scorpion_evo_rom.c.o* *FtInflate.c.o* @PSRAMROM_CODE_EXCLUDE@) .rodata*)
         . = ALIGN(4);
 
         *(.data*)
@@ -409,6 +414,15 @@ SECTIONS
         KEEP(*tsconf_roms.c.o*(.rodata*))
         KEEP(*atm_roms.c.o*(.rodata*))
         KEEP(*scorpion_evo_rom.c.o*(.rodata*))
+        /* Pico-Zx-Player code + data (libxmp and src/player, ~177 KB): the player
+         * runs only with butter PSRAM, so it is unreachable on exactly the boards
+         * that trade this range. Its one entry the rest of the firmware calls
+         * unconditionally, PicoPlayer.cpp (pp::available / pp::playableExt), stays
+         * below; pp::available() also requires FlashRoms::romsUsable(). No static
+         * constructors and no RAM sections in these objects (their .data goes to
+         * RAM by the ordinary rule) — keep it that way, a constructor here would
+         * run from a traded range at boot. */
+        @PSRAMROM_CODE_KEEP@
         . = ALIGN(4);
     } > FLASH =0xaa
     __psramrom_start = ADDR(.psramroms);

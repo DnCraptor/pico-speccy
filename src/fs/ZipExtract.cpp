@@ -161,6 +161,151 @@ struct ZipEntry {
 
 #define ZIP_MAX_ENTRIES 16
 
+// ── Member walk ──────────────────────────────────────────────────────────────
+// One walk for every caller, driven by the CENTRAL DIRECTORY. The old walkers
+// stepped from local header to local header by the local csize, which is wrong
+// for any member written with general-purpose bit 3 (a "data descriptor": the
+// local header carries zeros or the sizes, and a 12/16-byte descriptor FOLLOWS
+// the data) — the next signature was not where it was looked for and the walk
+// silently ended after the first member (itch.io's basnake zip: 5 files, "1
+// file(s)"). The central directory always has the real sizes and each member's
+// local header offset. The local walk stays as the fallback for an archive with
+// no readable EOCD (truncated download, ZIP64), with the old stop rules.
+struct ZipMember {
+    char*    name;        // CP1251, the member's full path; the callback may edit it
+    bool     isDir;
+    uint16_t flags;
+    uint16_t compression;
+    uint32_t csz, usz;
+    FSIZE_t  dataStart;   // the file is positioned here when the callback runs
+};
+
+static inline uint16_t le16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static inline uint32_t le32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// EOCD position, or (FSIZE_t)-1. Searches back over the maximum comment length
+// in 1 KB windows (3-byte overlap so a signature on a window edge is found).
+static FSIZE_t zipFindEocd(FIL* f, uint8_t* buf, UINT bufSz) {
+    const FSIZE_t size = f_size(f);
+    if (size < 22) return (FSIZE_t)-1;
+    const FSIZE_t floor = size > 22 + 65535 ? size - (22 + 65535) : 0;
+    FSIZE_t end = size;                        // window is [start, end)
+    while (end > floor) {
+        const FSIZE_t start = end - floor > bufSz ? end - bufSz : floor;
+        const UINT n = (UINT)(end - start);
+        UINT br;
+        if (f_lseek(f, start) != FR_OK || f_read(f, buf, n, &br) != FR_OK || br != n)
+            return (FSIZE_t)-1;
+        for (int i = (int)n - 4; i >= 0; i--)
+            if (buf[i] == 0x50 && buf[i + 1] == 0x4b && buf[i + 2] == 0x05 && buf[i + 3] == 0x06
+                && start + i + 22 <= size)
+                return start + i;
+        if (start == floor) break;
+        end = start + 3;
+    }
+    return (FSIZE_t)-1;
+}
+
+// Calls cb(ZipMember&) per member until it returns false. fn: 256-byte scratch.
+// Returns the number of members offered (directories included), -1 when the
+// archive could not be read at all.
+template <class CB>
+static int zipWalk(FIL* f, char* fn, CB&& cb) {
+    const FSIZE_t size = f_size(f);
+    UINT br;
+    int count = 0;
+    uint8_t h[46];
+
+    // Central directory first.
+    FSIZE_t cdPos = (FSIZE_t)-1, cdEnd = 0;
+    uint32_t total = 0;
+    {
+        ScopedHeap sh(1024);
+        if (sh) {
+            const FSIZE_t eocd = zipFindEocd(f, sh.as<uint8_t>(), 1024);
+            if (eocd != (FSIZE_t)-1 && f_lseek(f, eocd) == FR_OK &&
+                f_read(f, h, 22, &br) == FR_OK && br == 22) {
+                const uint32_t cdSize = le32(h + 12), cdOff = le32(h + 16);
+                total = le16(h + 10);
+                if (cdOff != 0xFFFFFFFFu && (FSIZE_t)cdOff + cdSize <= eocd) {
+                    cdPos = cdOff;
+                    cdEnd = (FSIZE_t)cdOff + cdSize;
+                }
+            }
+        }
+    }
+    if (cdPos != (FSIZE_t)-1) {
+        for (uint32_t i = 0; i < total && cdPos + 46 <= cdEnd; i++) {
+            if (f_lseek(f, cdPos) != FR_OK || f_read(f, h, 46, &br) != FR_OK || br != 46) break;
+            if (le32(h) != 0x02014b50) break;
+            const uint16_t nameLen = le16(h + 28);
+            const FSIZE_t next = cdPos + 46 + nameLen + le16(h + 30) + le16(h + 32);
+            ZipMember m;
+            m.flags = le16(h + 8);
+            m.compression = le16(h + 10);
+            m.csz = le32(h + 20);
+            m.usz = le32(h + 24);
+            const uint32_t lhOff = le32(h + 42);
+            cdPos = next;
+            if (nameLen == 0 || nameLen > 250) continue;
+            if (f_read(f, fn, nameLen, &br) != FR_OK || br != nameLen) break;
+            fn[nameLen] = 0;
+            m.isDir = fn[nameLen - 1] == '/';
+            zipNameToFat(fn, m.flags);
+            m.name = fn;
+            // Data start from the LOCAL header: its name/extra lengths may differ.
+            uint8_t lh[30];
+            if (f_lseek(f, lhOff) != FR_OK || f_read(f, lh, 30, &br) != FR_OK || br != 30 ||
+                le32(lh) != 0x04034b50)
+                continue;
+            m.dataStart = (FSIZE_t)lhOff + 30 + le16(lh + 26) + le16(lh + 28);
+            if (m.dataStart + m.csz > size) continue;
+            f_lseek(f, m.dataStart);
+            count++;
+            if (!cb(m)) break;
+        }
+        return count;
+    }
+
+    // Fallback: local headers in order.
+    Debug::log("ZIP: no central directory, walking local headers");
+    if (f_lseek(f, 0) != FR_OK) return -1;
+    for (;;) {
+        const FSIZE_t pos = f_tell(f);
+        if (pos + 30 > size) break;
+        if (f_read(f, h, 30, &br) != FR_OK || br != 30) break;
+        if (le32(h) != 0x04034b50) break;
+        const uint16_t nameLen = le16(h + 26), extraLen = le16(h + 28);
+        if (nameLen == 0 || nameLen > 250) break;
+        if (f_read(f, fn, nameLen, &br) != FR_OK || br != nameLen) break;
+        fn[nameLen] = 0;
+        ZipMember m;
+        m.flags = le16(h + 6);
+        m.compression = le16(h + 8);
+        m.csz = le32(h + 18);
+        m.usz = le32(h + 22);
+        m.isDir = fn[nameLen - 1] == '/';
+        zipNameToFat(fn, m.flags);
+        m.name = fn;
+        m.dataStart = pos + 30 + nameLen + extraLen;
+        f_lseek(f, m.dataStart);
+        count++;
+        if (!cb(m)) break;
+        if (m.csz == 0 && (m.flags & 0x08)) break;   // size unknown here
+        FSIZE_t nextPos = m.dataStart + m.csz;
+        if (m.flags & 0x08) {                         // skip the data descriptor
+            uint8_t d[4];
+            if (f_lseek(f, nextPos) == FR_OK && f_read(f, d, 4, &br) == FR_OK && br == 4)
+                nextPos += le32(d) == 0x08074b50 ? 16 : 12;
+        }
+        if (nextPos > size || nextPos <= pos) break;
+        f_lseek(f, nextPos);
+    }
+    return count;
+}
+
 // ── Per-operation working set ────────────────────────────────────────────────
 // The two FILs (a FIL carries a 512-byte sector buffer, ~600 B each — far too
 // big for the 4 KB core0 stack, which is why they were static) and the scan
@@ -223,58 +368,26 @@ string ZipExtract::extract(const string& zipPath, uint8_t fileType) {
     if (f_open(&zipFile, zipPath.c_str(), FA_READ) != FR_OK)
         return "";
 
-    FSIZE_t zipSize = f_size(&zipFile);
-
     // Phase 1: single-pass scan, collect matching entries
     ZipEntry* entries = s_work->entries;
     int entryCount = 0;
 
-    LocalFileHeader hdr;
-    UINT br;
-
-    while (entryCount < ZIP_MAX_ENTRIES) {
-        FSIZE_t pos = f_tell(&zipFile);
-        if (pos + sizeof(hdr) > zipSize) break;
-
-        if (f_read(&zipFile, &hdr, sizeof(hdr), &br) != FR_OK || br != sizeof(hdr)) break;
-        if (hdr.signature != ZIP_LOCAL_SIGNATURE) break;
-        if (hdr.nameLen == 0 || hdr.nameLen > 250) break;
-
-        // Read filename — use static buffer to save stack
-        if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
-        fn[hdr.nameLen] = 0;
-        zipNameToFat(fn, hdr.flags);
-
-        // Skip extra field
-        if (hdr.extraLen > 0)
-            f_lseek(&zipFile, f_tell(&zipFile) + hdr.extraLen);
-
-        FSIZE_t dataStart = f_tell(&zipFile);
-
+    zipWalk(&zipFile, fn, [&](ZipMember& m) {
         Debug::log("ZIP: scan '%s' method=%u flags=0x%x csz=%u usz=%u match=%d",
-                   fn, hdr.compression, hdr.flags, hdr.compressedSize,
-                   hdr.uncompressedSize, (int)hasMatchingExt(fn, fileType));
-
-        // Check: not a directory, has matching extension
-        if (fn[hdr.nameLen - 1] != '/' && hasMatchingExt(fn, fileType)) {
+                   m.name, m.compression, m.flags, (unsigned)m.csz, (unsigned)m.usz,
+                   (int)hasMatchingExt(m.name, fileType));
+        if (!m.isDir && hasMatchingExt(m.name, fileType)) {
             ZipEntry& e = entries[entryCount];
-            const char* base = getBaseName(fn);
-            strncpy(e.name, base, sizeof(e.name) - 1);
+            strncpy(e.name, getBaseName(m.name), sizeof(e.name) - 1);
             e.name[sizeof(e.name) - 1] = 0;
-            e.dataOffset = dataStart;
-            e.compressedSize = hdr.compressedSize;
-            e.uncompressedSize = hdr.uncompressedSize;
-            e.compression = hdr.compression;
+            e.dataOffset = m.dataStart;
+            e.compressedSize = m.csz;
+            e.uncompressedSize = m.usz;
+            e.compression = m.compression;
             entryCount++;
         }
-
-        // Skip compressed data to next entry
-        uint32_t dataSize = hdr.compressedSize;
-        if (dataSize == 0 && (hdr.flags & 0x08)) break; // data descriptor — stop
-        FSIZE_t nextPos = dataStart + dataSize;
-        if (nextPos > zipSize || nextPos <= pos) break; // sanity
-        f_lseek(&zipFile, nextPos);
-    }
+        return entryCount < ZIP_MAX_ENTRIES;
+    });
 
     if (entryCount == 0) {
         Debug::log("ZIP: no matching entry for fileType=%u (scanned to first non-match/EOCD)", fileType);
@@ -368,31 +481,12 @@ int ZipExtract::forEachName(const string& zipPath, bool (*cb)(void*, const char*
     if (!zipFile) return -1;
     int n = -1;
     if (f_open(zipFile, zipPath.c_str(), FA_READ) == FR_OK) {
-        const FSIZE_t zipSize = f_size(zipFile);
-        LocalFileHeader hdr;
-        UINT br;
         n = 0;
-        for (;;) {
-            const FSIZE_t pos = f_tell(zipFile);
-            if (pos + sizeof(hdr) > zipSize) break;
-            if (f_read(zipFile, &hdr, sizeof(hdr), &br) != FR_OK || br != sizeof(hdr)) break;
-            if (hdr.signature != ZIP_LOCAL_SIGNATURE) break;
-            if (hdr.nameLen == 0 || hdr.nameLen > 250) break;
-            if (f_read(zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
-            fn[hdr.nameLen] = 0;
-            zipNameToFat(fn, hdr.flags);
-            if (hdr.extraLen > 0) f_lseek(zipFile, f_tell(zipFile) + hdr.extraLen);
-            const FSIZE_t dataStart = f_tell(zipFile);
-            if (fn[hdr.nameLen - 1] != '/') {
-                n++;
-                if (!cb(ctx, getBaseName(fn))) break;
-            }
-            const uint32_t dataSize = hdr.compressedSize;
-            if (dataSize == 0 && (hdr.flags & 0x08)) break;
-            const FSIZE_t nextPos = dataStart + dataSize;
-            if (nextPos > zipSize || nextPos <= pos) break;
-            f_lseek(zipFile, nextPos);
-        }
+        zipWalk(zipFile, fn, [&](ZipMember& m) {
+            if (m.isDir) return true;
+            n++;
+            return cb(ctx, getBaseName(m.name));
+        });
         f_close(zipFile);
     }
     Buffer::pfree(zipFile);
@@ -409,34 +503,15 @@ bool ZipExtract::extractNamed(const string& zipPath, const char* baseName, const
     if (!work.ok()) return false;
     FIL& zipFile = s_work->zip;
     if (f_open(&zipFile, zipPath.c_str(), FA_READ) != FR_OK) return false;
-    const FSIZE_t zipSize = f_size(&zipFile);
-    LocalFileHeader hdr;
-    UINT br;
     bool ok = false;
-    for (;;) {
-        const FSIZE_t pos = f_tell(&zipFile);
-        if (pos + sizeof(hdr) > zipSize) break;
-        if (f_read(&zipFile, &hdr, sizeof(hdr), &br) != FR_OK || br != sizeof(hdr)) break;
-        if (hdr.signature != ZIP_LOCAL_SIGNATURE) break;
-        if (hdr.nameLen == 0 || hdr.nameLen > 250) break;
-        if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
-        fn[hdr.nameLen] = 0;
-        zipNameToFat(fn, hdr.flags);
-        if (hdr.extraLen > 0) f_lseek(&zipFile, f_tell(&zipFile) + hdr.extraLen);
-        const FSIZE_t dataStart = f_tell(&zipFile);
-        if (fn[hdr.nameLen - 1] != '/' && strcasecmp(getBaseName(fn), baseName) == 0) {
-            Debug::log("ZIP: extractNamed '%s' method=%u csz=%u usz=%u -> %s",
-                       fn, hdr.compression, hdr.compressedSize, hdr.uncompressedSize, outPath);
-            if (hdr.compression == 0 || hdr.compression == 8)
-                ok = extractFile(&zipFile, hdr.compression, hdr.compressedSize, hdr.uncompressedSize, outPath);
-            break;
-        }
-        const uint32_t dataSize = hdr.compressedSize;
-        if (dataSize == 0 && (hdr.flags & 0x08)) break;
-        const FSIZE_t nextPos = dataStart + dataSize;
-        if (nextPos > zipSize || nextPos <= pos) break;
-        f_lseek(&zipFile, nextPos);
-    }
+    zipWalk(&zipFile, fn, [&](ZipMember& m) {
+        if (m.isDir || strcasecmp(getBaseName(m.name), baseName) != 0) return true;
+        Debug::log("ZIP: extractNamed '%s' method=%u csz=%u usz=%u -> %s",
+                   m.name, m.compression, (unsigned)m.csz, (unsigned)m.usz, outPath);
+        if (m.compression == 0 || m.compression == 8)
+            ok = extractFile(&zipFile, m.compression, m.csz, m.usz, outPath);
+        return false;
+    });
     f_close(&zipFile);
     return ok;
 }
@@ -767,8 +842,6 @@ void ZipExtract::viewInfo(const string& zipPath) {
         return;
 
     FSIZE_t zipSize = f_size(&zipFile);
-    LocalFileHeader hdr;
-    UINT br;
 
     // Build info string for the info box
     // First line = title (archive name + size)
@@ -784,43 +857,20 @@ void ZipExtract::viewInfo(const string& zipPath) {
     string info = string(zipName) + " (" + sizeBuf + ")\n";
 
     int fileCount = 0;
-    while (fileCount < 32) {
-        FSIZE_t pos = f_tell(&zipFile);
-        if (pos + sizeof(hdr) > zipSize) break;
-        if (f_read(&zipFile, &hdr, sizeof(hdr), &br) != FR_OK || br != sizeof(hdr)) break;
-        if (hdr.signature != ZIP_LOCAL_SIGNATURE) break;
-        if (hdr.nameLen == 0 || hdr.nameLen > 250) break;
-
-        if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
-        fn[hdr.nameLen] = 0;
-        zipNameToFat(fn, hdr.flags);
-
-        if (hdr.extraLen > 0)
-            f_lseek(&zipFile, f_tell(&zipFile) + hdr.extraLen);
-
-        FSIZE_t dataStart = f_tell(&zipFile);
-
-        // Skip directories
-        if (fn[hdr.nameLen - 1] != '/') {
-            const char* base = getBaseName(fn);
-            char line[48];
-            if (hdr.uncompressedSize >= 1024 * 1024)
-                snprintf(line, sizeof(line), "%.30s %luMB", base, (unsigned long)(hdr.uncompressedSize / (1024 * 1024)));
-            else if (hdr.uncompressedSize >= 1024)
-                snprintf(line, sizeof(line), "%.30s %luKB", base, (unsigned long)(hdr.uncompressedSize / 1024));
-            else
-                snprintf(line, sizeof(line), "%.30s %luB", base, (unsigned long)hdr.uncompressedSize);
-            info += line;
-            info += "\n";
-            fileCount++;
-        }
-
-        uint32_t dataSize = hdr.compressedSize;
-        if (dataSize == 0 && (hdr.flags & 0x08)) break;
-        FSIZE_t nextPos = dataStart + dataSize;
-        if (nextPos > zipSize || nextPos <= pos) break;
-        f_lseek(&zipFile, nextPos);
-    }
+    zipWalk(&zipFile, fn, [&](ZipMember& m) {
+        if (m.isDir) return true;
+        const char* base = getBaseName(m.name);
+        char line[48];
+        if (m.usz >= 1024 * 1024)
+            snprintf(line, sizeof(line), "%.30s %luMB", base, (unsigned long)(m.usz / (1024 * 1024)));
+        else if (m.usz >= 1024)
+            snprintf(line, sizeof(line), "%.30s %luKB", base, (unsigned long)(m.usz / 1024));
+        else
+            snprintf(line, sizeof(line), "%.30s %luB", base, (unsigned long)m.usz);
+        info += line;
+        info += "\n";
+        return ++fileCount < 32;
+    });
 
     f_close(&zipFile);
 
@@ -915,29 +965,16 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir, bool ke
     snprintf(tmpPath, sizeof(tmpPath), "%s.zip_extract.tmp", destDir.c_str());
     Debug::log("ZIP: extractAll %s -> %s", zipPath.c_str(), destDir.c_str());
 
-    FSIZE_t zipSize = f_size(&zipFile);
-    LocalFileHeader hdr;
-    UINT br;
     int extracted = 0;
 
-    while (true) {
-        FSIZE_t pos = f_tell(&zipFile);
-        if (pos + sizeof(hdr) > zipSize) break;
-        if (f_read(&zipFile, &hdr, sizeof(hdr), &br) != FR_OK || br != sizeof(hdr)) break;
-        if (hdr.signature != ZIP_LOCAL_SIGNATURE) break;
-        if (hdr.nameLen == 0 || hdr.nameLen > 250) break;
-
-        if (f_read(&zipFile, fn, hdr.nameLen, &br) != FR_OK || br != hdr.nameLen) break;
-        fn[hdr.nameLen] = 0;
-        zipNameToFat(fn, hdr.flags);
-
-        if (hdr.extraLen > 0)
-            f_lseek(&zipFile, f_tell(&zipFile) + hdr.extraLen);
-
-        FSIZE_t dataStart = f_tell(&zipFile);
-
-        // Skip directories
-        if (fn[hdr.nameLen - 1] != '/' && (hdr.compression == 0 || hdr.compression == 8)) {
+    zipWalk(&zipFile, fn, [&](ZipMember& m) {
+        char* const fn = m.name;
+        if (m.isDir) return true;
+        if (m.compression != 0 && m.compression != 8) {
+            Debug::log("ZIP: '%s' skipped: method %u", fn, m.compression);
+            return true;
+        }
+        {
             // Build destination path: destDir + basename
             const char* base = getBaseName(fn);
             if (keepPaths) {
@@ -957,7 +994,7 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir, bool ke
             }
 
             // Extract to a temp on the destination volume, then rename in place
-            bool ok = extractFile(&zipFile, hdr.compression, hdr.compressedSize, hdr.uncompressedSize, tmpPath);
+            bool ok = extractFile(&zipFile, m.compression, m.csz, m.usz, tmpPath);
             if (ok) {
                 char destPath[300];
                 snprintf(destPath, sizeof(destPath), "%s%s", destDir.c_str(), base);
@@ -967,17 +1004,11 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir, bool ke
                 else Debug::log("ZIP: rename %s -> %s failed (%d)", tmpPath, destPath, (int)rr);
             } else {
                 Debug::log("ZIP: extract '%s' failed (comp=%u csz=%lu)",
-                           fn, hdr.compression, (unsigned long)hdr.compressedSize);
+                           fn, m.compression, (unsigned long)m.csz);
             }
-            // Re-seek past data (extractFile consumed it, but be safe)
         }
-
-        // Skip to next entry
-        FSIZE_t nextPos = dataStart + hdr.compressedSize;
-        if (hdr.compressedSize == 0 && (hdr.flags & 0x08)) break;
-        if (nextPos > zipSize || nextPos <= pos) break;
-        f_lseek(&zipFile, nextPos);
-    }
+        return true;
+    });
 
     f_close(&zipFile);
     f_unlink(tmpPath); // clean up temp

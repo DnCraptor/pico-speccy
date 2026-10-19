@@ -378,11 +378,116 @@ bool ZiFiSock::isClosed(int id) {
     return closed[id] && ringFill(id) == 0;
 }
 
+// ── Host-side DNS for names the ESP will not take ───────────────────────────
+// ESP-AT caps the remote host of AT+CIPSTART at 64 bytes and answers ERROR past
+// it without ever resolving (hw 2026-10-19: itch.io's signed download points at
+// itchio-mirror.<32 hex>.r2.cloudflarestorage.com, 71 bytes). TLS runs on the
+// RP2350 with SNI from the caller's own host string, so the ESP only needs an
+// address: ask a public resolver over a UDP link and connect to the dotted IP.
+// UDP data arrives as active "+IPD,<id>,<len>:" frames whatever CIPRECVMODE says
+// (passive mode is TCP/SSL only); sock_recv's pull path handles either.
+static const unsigned AT_HOST_MAX = 64;
+
+static bool isDottedIp(const char* s) {
+    int dots = 0;
+    for (; *s; s++) {
+        if (*s == '.') dots++;
+        else if (*s < '0' || *s > '9') return false;
+    }
+    return dots == 3;
+}
+
+// Skip a (possibly compressed) DNS name; returns the offset after it or -1.
+static int dnsSkipName(const uint8_t* m, int n, int p) {
+    while (p < n) {
+        uint8_t l = m[p];
+        if (l == 0) return p + 1;
+        if ((l & 0xC0) == 0xC0) return (p + 2 <= n) ? p + 2 : -1;
+        p += 1 + l;
+    }
+    return -1;
+}
+
+bool ZiFiSock::resolveHost(const char* host, char* ip, size_t iplen) {
+    uint8_t q[300];
+    size_t hl = strlen(host);
+    if (hl == 0 || hl > 253) return false;
+    static uint16_t s_qid = 0x5043;
+    uint16_t qid = ++s_qid;
+    int n = 0;
+    q[n++] = qid >> 8; q[n++] = qid & 0xFF;
+    q[n++] = 0x01; q[n++] = 0x00;                       // standard query, RD
+    q[n++] = 0; q[n++] = 1; q[n++] = 0; q[n++] = 0;     // QDCOUNT 1, ANCOUNT 0
+    q[n++] = 0; q[n++] = 0; q[n++] = 0; q[n++] = 0;     // NSCOUNT, ARCOUNT
+    for (const char* s = host; *s; ) {
+        const char* dot = strchr(s, '.');
+        size_t ll = dot ? (size_t)(dot - s) : strlen(s);
+        if (ll == 0 || ll > 63) return false;
+        q[n++] = (uint8_t)ll; memcpy(q + n, s, ll); n += (int)ll;
+        s += ll; if (*s == '.') s++;
+    }
+    q[n++] = 0;
+    q[n++] = 0; q[n++] = 1; q[n++] = 0; q[n++] = 1;     // QTYPE A, QCLASS IN
+
+    static const char* const kServers[] = { "8.8.8.8", "1.1.1.1" };
+    uint8_t r[512];
+    for (const char* srv : kServers) {
+        int id = openLink(srv, 53, "UDP", 5000);
+        if (id < 0) { Debug::log("ZiFiSock: DNS link to %s failed (%s)", srv, last_line); continue; }
+        int rn = -1;
+        if (sock_send(id, q, (size_t)n, 3000) == n) {
+            absolute_time_t dl = make_timeout_time_ms(3000);
+            while (!time_reached(dl)) {
+                int got = sock_recv(id, r, sizeof(r), 500);
+                if (got >= 12 && r[0] == q[0] && r[1] == q[1]) { rn = got; break; }
+            }
+        }
+        sock_close(id);
+        if (rn < 12) { Debug::log("ZiFiSock: DNS %s: no answer from %s", host, srv); continue; }
+        if ((r[3] & 0x0F) != 0) { Debug::log("ZiFiSock: DNS %s: rcode %u", host, r[3] & 0x0F); return false; }
+        int an = (r[6] << 8) | r[7];
+        int p = dnsSkipName(r, rn, 12);
+        if (p < 0 || p + 4 > rn) continue;
+        p += 4;                                          // QTYPE + QCLASS
+        for (int i = 0; i < an && p >= 0; i++) {
+            p = dnsSkipName(r, rn, p);
+            if (p < 0 || p + 10 > rn) break;
+            uint16_t type = (r[p] << 8) | r[p + 1], cls = (r[p + 2] << 8) | r[p + 3];
+            uint16_t rdl  = (r[p + 8] << 8) | r[p + 9];
+            p += 10;
+            if (p + rdl > rn) break;
+            if (type == 1 && cls == 1 && rdl == 4) {     // CNAMEs before it are skipped
+                snprintf(ip, iplen, "%u.%u.%u.%u", r[p], r[p + 1], r[p + 2], r[p + 3]);
+                Debug::log("ZiFiSock: DNS %s -> %s (via %s)", host, ip, srv);
+                return true;
+            }
+            p += rdl;
+        }
+        Debug::log("ZiFiSock: DNS %s: no A record", host);
+        return false;
+    }
+    return false;
+}
+
 int ZiFiSock::sock_open(const char* host, uint16_t port, bool tls, uint32_t timeout_ms) {
 #if PICOSPECCY_WIFI
     if (WifiNet::selected()) return WifiSock::sock_open(host, port, tls, timeout_ms);
 #endif
     if (!is_ready) return -1;
+    char ip[16];
+    if (strlen(host) > AT_HOST_MAX && !isDottedIp(host)) {
+        if (!resolveHost(host, ip, sizeof(ip))) {
+            Debug::log("ZiFiSock: cannot resolve %u-byte host %s", (unsigned)strlen(host), host);
+            return -1;
+        }
+        host = ip;
+    }
+    int id = openLink(host, port, tls ? "SSL" : "TCP", timeout_ms);
+    if (id < 0) Debug::log("ZiFiSock: CIPSTART %s:%u failed (%s)", host, (unsigned)port, last_line);
+    return id;
+}
+
+int ZiFiSock::openLink(const char* host, uint16_t port, const char* proto, uint32_t timeout_ms) {
     int id = 0;
     if (mux_mode) {
         for (id = 0; id < N_LINKS; id++) if (!opened[id]) break;
@@ -408,7 +513,6 @@ int ZiFiSock::sock_open(const char* host, uint16_t port, bool tls, uint32_t time
     g_drained[id] = false;
 
     char cmd[160];
-    const char* proto = tls ? "SSL" : "TCP";
     if (mux_mode)
         snprintf(cmd, sizeof(cmd), "AT+CIPSTART=%d,\"%s\",\"%s\",%u", id, proto, host, (unsigned)port);
     else

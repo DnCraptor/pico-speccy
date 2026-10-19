@@ -528,6 +528,18 @@ message(STATUS "Code overlays: .nxovl ${NXOVL_WIN_SIZE_EFFECTIVE} B, .ftovl ${FT
 set(GM_BANK_MIN_KB 0 CACHE STRING "Minimum GM.DLS bank region, KB (rp2350-memmap.ld __gm_bank_min)")
 message(STATUS "GM.DLS bank region: >= ${GM_BANK_MIN_KB} KB (dynamic: firmware end .. top of flash)")
 
+# Pico-Zx-Player code (src/player/Player* + libxmp, ~177 KB) lives in .psramroms with the
+# butter-only ROMs: the player needs butter PSRAM, so a board that trades that range can
+# never reach it, and the hard GM.DLS floor counts only from __psramrom_start up. The
+# patterns match by path ('*' crosses '/' in ld file patterns); PicoPlayer.cpp, which the
+# browser and menu call unconditionally, does NOT match "Player*".
+set(PSRAMROM_CODE_OBJECTS "*/src/player/Player* */external/libxmp/*")
+set(PSRAMROM_CODE_EXCLUDE "${PSRAMROM_CODE_OBJECTS}")
+set(PSRAMROM_CODE_KEEP "")
+foreach(_pat IN ITEMS "*/src/player/Player*" "*/external/libxmp/*")
+    string(APPEND PSRAMROM_CODE_KEEP "${_pat}(.text* .rodata*) ")   # no KEEP: gc-sections must still drop dead libxmp code
+endforeach()
+
 configure_file("${CMAKE_SOURCE_DIR}/rp2350-memmap.ld" "${CMAKE_BINARY_DIR}/rp2350-memmap.ld" @ONLY)
 pico_set_linker_script(${PROJECT_NAME} "${CMAKE_BINARY_DIR}/rp2350-memmap.ld")
 

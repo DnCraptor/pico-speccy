@@ -2702,10 +2702,8 @@ void BulbaDecoder::levels(uint8_t* out) {
 
 } // namespace
 
-bool bulbaExt(const std::string& e) {
-    return e == "psc" || e == "pt1" || e == "asc" || e == "ftc" || e == "fls" ||
-           e == "gtr" || e == "fxm" || e == "psm" || e == "vtx";
-}
+// bulbaExt() lives in PicoPlayer.cpp: this file is in .psramroms (see
+// cmake/memory-layout.cmake) and the browser asks playableExt() unconditionally.
 
 Decoder* createBulbaDecoder(const std::string& e) {
     const Fmt f = e == "psc" ? F_PSC : e == "pt1" ? F_PT1 : e == "asc" ? F_ASC : e == "ftc" ? F_FTC :

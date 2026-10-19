@@ -110,6 +110,12 @@ private:
     // Pumps for up to budget_ms (0 = just drain what's already buffered).
     static void pump(uint32_t budget_ms);
 
+    // AT+CIPSTART on a free link; proto = "TCP" / "SSL" / "UDP". -1 on failure.
+    static int  openLink(const char* host, uint16_t port, const char* proto, uint32_t timeout_ms);
+    // A-record lookup over a UDP link to a public resolver, for hosts longer
+    // than ESP-AT's 64-byte CIPSTART limit. Writes a dotted IPv4 into ip.
+    static bool resolveHost(const char* host, char* ip, size_t iplen);
+
     // Drain the per-link ring into buf; returns bytes copied (0 if empty).
     static int  ringPop(int id, uint8_t* buf, size_t maxlen);
     static int  ringFill(int id);
