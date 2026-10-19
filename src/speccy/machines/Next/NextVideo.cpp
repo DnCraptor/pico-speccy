@@ -1152,9 +1152,11 @@ static void p80BuildTables(uint32_t pal[16]) {
 // almost every frame and the whole screen flickered).
 // The pair table folds (ink 0..5, paper 8) into (ink, 0) and, with HDMI audio
 // on, (bright ink, other bright paper) into paper - 8 (init_profi_pair_lookup's
-// slot budget). So the first pick goes out as 8 families of the two closest
-// colours, family f in pair colours f and f + 8, the more shown one at f: a
-// folded pair then shows a near colour instead of an arbitrary one.
+// slot budget). So the first pick goes out as 8 families, family f in pair
+// colours f and f + 8: the 8 most shown colours at 0..7 (exact among
+// themselves), the rest as partners of the nearest head at f + 8, so a
+// folded pair shows a near colour instead of an arbitrary one. Up to 8
+// colours on screen never fold at all — a two-colour text screen must not.
 // Afterwards a colour stays in its slot for as long as it is picked (a current
 // colour counts double), and a newcomer takes the slot of an evicted one whose
 // family partner is nearest to it — the rest of the screen does not change.
@@ -1212,25 +1214,31 @@ static bool p80Choose() {
         }
         return changed;
     }
-    // families: greedily the closest pair left; pick[] is in count order, so a
-    // family's first member is the more shown one. An odd one out shares
-    // nothing (its partner slot repeats it).
-    bool used[16] = {};
+    // families: the 8 most shown colours are the family heads (pair colours
+    // 0..7 — every combination among them has its own slot, so up to 8
+    // colours on screen are EXACT); only the picks past the 8th become
+    // partners (f + 8), each of the nearest head without one. A head without
+    // a partner repeats itself in f + 8.
+    // The first cut paired every head with its closest colour, most shown
+    // first: on a two-colour screen that put the TEXT colour at 8, the
+    // partner of the paper at 0, and the (ink 0..5, paper 8) -> (ink, 0) fold
+    // erased every "paper left, ink right" pair — half the ink pixels of every
+    // glyph (ZXZVM's 80-column text, hw 2026-10-19).
     uint8_t out[16]; for (int k = 0; k < 16; k++) out[k] = 0xFF;
-    for (int f = 0; f < 8; f++) {
-        int a = -1;
-        for (int k = 0; k < n; k++) if (!used[k]) { a = k; break; }
-        if (a < 0) break;
-        used[a] = true;
-        int b = -1; uint32_t bd = 0xFFFFFFFFu;
-        const uint32_t ca = nxIdxRgb(pick[a]);
-        for (int k = 0; k < n; k++) {
-            if (used[k]) continue;
-            const uint32_t d = nxRgbDist(ca, nxIdxRgb(pick[k]));
-            if (d < bd) { bd = d; b = k; }
+    const int heads = n < 8 ? n : 8;
+    for (int f = 0; f < heads; f++) { out[f] = pick[f]; out[f + 8] = pick[f]; }
+    bool hasPartner[8] = {};
+    for (int j = 8; j < n; j++) {
+        const uint32_t c = nxIdxRgb(pick[j]);
+        int best = -1; uint32_t bd = 0xFFFFFFFFu;
+        for (int f = 0; f < heads; f++) {
+            if (hasPartner[f]) continue;
+            const uint32_t d = nxRgbDist(c, nxIdxRgb(out[f]));
+            if (d < bd) { bd = d; best = f; }
         }
-        out[f] = pick[a];
-        if (b >= 0) { used[b] = true; out[f + 8] = pick[b]; } else out[f + 8] = pick[a];
+        if (best < 0) break;
+        hasPartner[best] = true;
+        out[best + 8] = pick[j];
     }
     for (int k = 0; k < 16; k++) p80Cur[k] = out[k];
     s_p80Full = false;

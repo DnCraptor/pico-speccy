@@ -16147,6 +16147,24 @@ ns/m1`. Six changes, every one measured:
   ~13 ms, DMA 2.4 ms, NR 1F polls 2.2 ms. Left: the full mixer path (~22 us/row), the
   Layer 2 band fill (PSRAM floor), SD reads blocking core1 during room loads.
 
+## Next 640 pair frame: a two-colour screen lost half its glyph pixels (2026-10-19, hw-confirmed DVp2: ZXZVM readable, NEXTEST unchanged)
+
+ZXZVM v1.17 (Garry Lancaster's Next module, 80-column 4bpp tilemap with attributes,
+NR 6B=C3) came up with every other half of each letter missing at 576p, while the
+log said `[NXV] 640-wide pair frame on` / `2 colours on screen, 16 picked`. The fb
+dump had pair slots (8,0) and (8,8) and NOT ONE (0,8): `p80Choose`'s first pick laid
+the 16 colours out as families f/f+8 with the most shown colour at f and its nearest
+colour at f+8 — on a two-colour screen the text colour landed at pair index 8, and the
+DS80 pair table folds `(ink 0..5, paper 8) -> (ink, 0)` (`init_profi_pair_lookup`'s
+slot budget; harmless on a Profi, where 8 is bright black), so every "paper left, ink
+right" pair went black. NEXTEST never showed it: with 16 colours the partner of black
+is another dark colour. Now the 8 most shown colours are the family HEADS in 0..7
+(every combination among them exact — up to 8 colours never fold), and only the picks
+past the 8th become partners of the nearest head at f+8. Reading a Next 640 fb dump:
+`profi_lut.bin` + the (ink,paper) reverse of each slot, counted per slot, names a fold
+in one line — a missing mirror pair is the signature. Test ELF
+`debug/DVp2-next-p80fam-1.0.10`.
+
 ## Z-Controller SD: core1 reads, INIR batch for #57, no CMD24 pre-read (2026-10-16, NOT hw-tested)
 
 Every ZC/DivSD sector read used to be a blocking card read on core0 off the Next (FPS
