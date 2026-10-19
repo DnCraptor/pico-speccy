@@ -2840,10 +2840,7 @@ bool Tape::TapePortRead() {
         // restarted, so a multi-block TAP stalls after the first block.
         const bool exromHere = g_timex_mmu && Timex::exromSel && Timex::rd[pc >> 13];
         if ((pc < 0x4000 && !exromHere) || MemESP::readbyte(pc - 2) != 0xDB) return false;
-        uint8_t nextOp = MemESP::readbyte(pc);
-        return (nextOp == 0x1F) || (nextOp == 0x07) ||
-               (nextOp == 0xE6 && (MemESP::readbyte(pc + 1) & 0x60)) ||
-               (nextOp == 0xCB && MemESP::readbyte(pc + 1) == 0x77);
+        return edgeTestOps(MemESP::readbyte(pc), MemESP::readbyte(pc + 1));
     };
 
     // Signature check for Cerikopik/JJ turbo loaders installed at 0xFE00.

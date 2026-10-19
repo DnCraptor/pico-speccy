@@ -727,6 +727,19 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   **на Next любой порт, который программа читает/пишет в цикле, должен иметь ранний путь
   в `Ports::input/output` (образец `#EB` / `#243B`) — генеральная цепочка стоит ~0.5-1 мкс
   на доступ.**
+  **2026-10-19, повтор с лентой в деке (hw-confirmed DVp2 `debug/DVp2-next-tapekbd4-1.0.10`):**
+  заставка — `DI` + `IN A,(#FE) / CPL` + `CALL` Kempston, `JR Z` назад. Без ленты `kbdPollSkip`
+  её перематывал, с лентой `Tape::stoppedReadIdle` отказывал любому `IN A,(n)` (`0xDB` по pc-2).
+  Теперь отказ только если следом проверка фронта — `Tape::edgeTestOps`, общая с
+  `isTapeEdgePoll` автостарта. Это открыло перемотке TBBLUE.FW: его меню (6B6D-6C3B) опрашивает
+  клавиши 65535 проходов со счётчиком в ПАМЯТИ (`(#CCE7)`), каждый проход стал срезом —
+  загрузка ползла минутами. `pollSkip` теперь (а) сравнивает хеш BC/DE/HL/SP/IX/IY/альт.
+  набора между чтениями (счётчик в регистре = не опрос), (б) не перематывает в config mode
+  (`MemESP::nextConfigMode`; счётчик в памяти не виден — хука на быстрой записи нет).
+  Там же: **F11 в config mode = жёсткий сброс цепочки** (`NextReg::reset(true)` +
+  `applyNextConfigWindow()` в `ESPectrum::reset`): мягкий оставлял config mode без bootrom,
+  прошивка висла. Hw: TBBLUE с лентой и без, заставка с лентой 50, «2048», F11 в меню
+  TBBLUE — «всё работает».
 - **GetOut (Richard "Dicky" Dodds), титульный экран 30 FPS / IDL −1300 — тот же класс
   (2026-10-19, NOT hw-tested, `debug/DVp2-next-getout-dma6b-1.0.10`).** Дамп: PC=2125 в
   divMMC RAM bank 2 — WAV-плеер: zxnDMA память→порт #DF (burst + prescaler 26 ≈ 33.6 кГц,

@@ -404,22 +404,43 @@ int NextPorts::joyPortRead(uint8_t lo) { return joyRead(lo); }
 // border/beeper latch unchanged in between are a poll pass: skip whole passes
 // to the slice end, as above. The latch test keeps a beeper loop that happens
 // to poll a key (OUT (#FE) between the reads) on its real passes. A tape in
-// the deck never reaches this path (the early #FE read is tape-free only).
+// the deck reaches this path only for reads TapePortRead's auto-start could
+// never count (Tape::stoppedReadIdle).
+//
+// Both shapes skip TIME, not the loop's own state, so a loop that COUNTS its
+// passes must keep its real passes: TBBLUE.FW waits for a key a fixed number
+// of passes (`DEC BC` / `DJNZ` around the #FE read), and each skipped pass
+// made one count take a whole slice. `regs` is a hash of every register pair a
+// pass may count in (A/F excluded: the read lands in A); a pass that changed
+// one is not a poll. A counter kept in MEMORY is not seen (the fast write path
+// has no hook to watch), and TBBLUE.FW's boot menu is exactly that: 65535
+// passes of key reads (`LD HL,(#CCE7) / INC HL / LD (#CCE7),HL`, 6B6D-6C3B),
+// each skipped to a whole slice — the boot crawled for minutes (hw 2026-10-19,
+// once a mounted tape no longer kept its `IN A,(#FE)` off this path). The
+// firmware runs in config mode (NR 03) and nothing else does, so no skip there.
 //
 // The keyboard memo is a 16-slot table direct-mapped by PC: a scanner reads
 // #FE from a dozen PCs per pass ("2048": 13), and one slot was overwritten by
 // the next read every time, so no PC ever met its own previous pass. A slot
 // evicted by a colliding PC simply misses its pass; one surviving PC is enough.
-struct PollMemo { uint16_t pc, addr; uint32_t t, r; };
-static PollMemo s_dp = { 0xFFFF, 0, 0, 0 };
+struct PollMemo { uint16_t pc, addr; uint32_t t, r, regs; };
+static PollMemo s_dp = { 0xFFFF, 0, 0, 0, 0 };
 static PollMemo s_kp[16];
+static inline uint32_t pollRegs() {
+    const uint32_t a = Z80::getRegBC() | ((uint32_t)Z80::getRegDE() << 16);
+    const uint32_t b = Z80::getRegHL() | ((uint32_t)Z80::getRegSP() << 16);
+    const uint32_t c = Z80::getRegIX() | ((uint32_t)Z80::getRegIY() << 16);
+    const uint32_t x = Z80::getRegBCx() ^ ((uint32_t)Z80::getRegDEx() << 8) ^
+                       ((uint32_t)Z80::getRegHLx() << 16);
+    return a ^ ((b << 7) | (b >> 25)) ^ ((c << 13) | (c >> 19)) ^ (x * 0x9E3779B1u);
+}
 static NXP_HOT void pollSkip(PollMemo& m, uint16_t addr, bool ok, uint32_t dmax, uint32_t lim) {
     const uint16_t pc = Z80::getRegPC();
-    const uint32_t t = CPU::tstates, r = Z80::getFetchCounter();
+    const uint32_t t = CPU::tstates, r = Z80::getFetchCounter(), regs = pollRegs();
     const uint32_t d = t - m.t, dR = r - m.r;
-    const bool same = pc == m.pc && addr == m.addr;
-    m.pc = pc; m.addr = addr; m.t = t; m.r = r;
-    if (!same || !ok || d == 0 || d > dmax) return;
+    const bool same = pc == m.pc && addr == m.addr && regs == m.regs;
+    m.pc = pc; m.addr = addr; m.t = t; m.r = r; m.regs = regs;
+    if (!same || !ok || d == 0 || d > dmax || MemESP::nextConfigMode) return;
     if (Rzx::mode || Z80::isNMI() || (int32_t)t < CPU::IntEnd) return;
     if (CPU::stFrame && CPU::stFrame < lim) lim = CPU::stFrame;
     const uint32_t fe = CPU::statesInFrame - (uint32_t)CPU::IntEnd;

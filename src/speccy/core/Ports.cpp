@@ -981,7 +981,9 @@ static __attribute__((noinline)) bool atmPortReadEarly(uint16_t address, uint8_t
 // code otherwise); only reached with a tape in the deck.
 static __attribute__((noinline)) bool nextKbdStoppedTapeIdle() {
   const uint16_t pc = Z80::getRegPC();
-  return Tape::stoppedReadIdle(pc, pc >= 0x4000 ? MemESP::readbyte((uint16_t)(pc - 2)) : 0);
+  if (pc < 0x4000) return Tape::stoppedReadIdle(pc, 0, 0, 0);
+  return Tape::stoppedReadIdle(pc, MemESP::readbyte((uint16_t)(pc - 2)),
+                               MemESP::readbyte(pc), MemESP::readbyte((uint16_t)(pc + 1)));
 }
 static inline __attribute__((always_inline)) uint8_t nextKeyboardRead(uint16_t address) {
   VIDEO::Draw(3, g_ula_io_contend);

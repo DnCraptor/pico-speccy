@@ -238,16 +238,28 @@ public:
     // every auto-start it arms keys on the same PC polling 200 times and lives
     // either at 0xFE00+ (Cerikopik / JJ / a turbo loader), in the ROM's LD-EDGE
     // (0x05E3-0x05F5), or on an `IN A,(n)` edge poll (isTapeEdgePoll: 0xDB at
-    // pc-2, pc >= 0x4000); the two flash-load continuations are the two flags.
+    // pc-2, pc >= 0x4000, followed by an edge test — edgeTestOps); the two
+    // flash-load continuations are the two flags.
     // Any other read may skip the generic chain (the Next's early keyboard
     // path): a tape in the deck used to send a 28 MHz key-wait loop's ~7000
-    // `IN (C)` a frame through Ports::input + this function in flash.
-    // `opBefore` = the byte at pc-2 (the caller's memory read, only consulted
-    // for pc >= 0x4000).
-    static inline bool stoppedReadIdle(uint16_t pc, uint8_t opBefore) {
+    // `IN (C)` a frame through Ports::input + this function in flash, and an
+    // `IN A,(#FE) / CPL` key wait (Alien Neoplasma's intro, hw 2026-10-19,
+    // IDL negative only with a tape mounted) the same way.
+    // `opBefore` = the byte at pc-2, `op0`/`op1` = the bytes at pc / pc+1 (the
+    // caller's memory reads, only consulted for pc >= 0x4000).
+    //
+    // The edge test after an `IN A,(n)`: RRA / RLCA / AND n with bit 5 or 6 /
+    // BIT 6,A. Keyboard scans (XOR / CPL / AND 0x1F) do not match. One
+    // definition for TapePortRead's auto-start and for stoppedReadIdle, so the
+    // early path can never skip a read the auto-start would have counted.
+    static inline bool edgeTestOps(uint8_t op0, uint8_t op1) {
+        return op0 == 0x1F || op0 == 0x07 || (op0 == 0xE6 && (op1 & 0x60)) ||
+               (op0 == 0xCB && op1 == 0x77);
+    }
+    static inline bool stoppedReadIdle(uint16_t pc, uint8_t opBefore, uint8_t op0, uint8_t op1) {
         if (pzxFlashCont || jjScreenAnimating) return false;
         if (pc >= 0xFE00 || (pc >= 0x05E3 && pc <= 0x05F5)) return false;
-        return pc < 0x4000 || opBefore != 0xDB;
+        return pc < 0x4000 || opBefore != 0xDB || !edgeTestOps(op0, op1);
     }
     static void Save();
     static void FreeSymDefTable();

@@ -2173,8 +2173,18 @@ void ESPectrum::reset(uint8_t romInUse) {
     // immediately requested another reset — 630ms restart loop)
     MemESP::romInUse = 0;
     MemESP::romLatch = 0;
+    // A machine reset (F11) taken while TBBLUE.FW runs (config mode) is a
+    // POWER-ON of the boot chain: the soft reset keeps config mode but not the
+    // bootrom, so the firmware restarted at 0 over the config window with
+    // nothing to boot from and hung (hw 2026-10-19). Re-arm it the way a cold
+    // boot does; reset(false) below keeps the flags the hard reset sets.
+    const bool cfgBoot = MemESP::nextConfigMode;
+    if (cfgBoot) NextReg::reset(true);
     NextReg::reset(false);
     MemESP::resetNextMapping();
+    // applyMMU only latches slots 0/1 while the bootrom is live; plug it (the
+    // cold boot does this from MB02::init, which F11 does not run).
+    if (cfgBoot) MemESP::applyNextConfigWindow();
     // divMMC restarts with the machine: automap off, $0000 boot trap
     // disarmed until the CPU leaves the reset vector (divMMC RAM survives —
     // NextZXOS keeps boot-stage state there across its soft resets)
