@@ -15929,7 +15929,9 @@ video ~50. Test ELFs `debug/DVp2-nxbulk-{plain,nxtrace}-1.0.10`. What did it, in
   this game it still gets 1 frame — the in-game heap is ~15-24 KB, not the 46 KB Hardware
   Info shows before the game switches Layer 2 320 on (menu log: `runInternal heap=15616`).
   **Default is 0 again since 2026-10-16** (owner): ~1 frame of gain in this game is not worth
-  the SRAM; the code stays, `-DNEXT_HOT_FRAMES=8` turns it back on.
+  the SRAM; the code stays, `-DNEXT_HOT_FRAMES=8` turns it back on. **Default 1 since
+  2026-10-19** — see the game-stage subsection below (the 16 KB heap reserve was what had
+  kept it from ever taking a frame in the game).
 - **Unrolled INI runs from the SD port + bulk sector copy** (Z80_JLS.cpp
   `nextIniRunBatch`, DivMMC `mmc_read_bulk`): the video reads with 32 x `ED A2` (C = #EB,
   entered mid-run through a self-modified JP at #EE14), 74k instructions a frame. After an
@@ -16042,6 +16044,90 @@ Trace-build changes from the same session: guest-raised NMIs no longer re-arm th
 are counted not recorded, the 1 Hz block drains the UART in parts (the `NEXT hostpc` lines
 were being lost), and `tools/memdump.gdb` dumps all 16 divMMC banks and 10 pages of each
 Layer 2 buffer (320x256 / 640x256 take 80K).
+
+### Intro at a stable 50 FPS, no jitter, IDL ~+3000 (2026-10-19, hw-confirmed DVp2 on `debug/DVp2-next-aticatac-plain15-1.0.10`; the game is the next stage)
+
+Start of the day: 42-44 FPS with dips, and "подергивания" that looked like a core hand-off
+bug. A five-build bisect (every change of the day off, one at a time, then all) showed
+none of them caused it: **the jitter was TEARING** — single-buffered fb, both cores at
+render capacity (vid ~25 ms/frame split over two cores at 576p), so rows were drawn
+beside the beam. With core0's help off (`c0Help` returning false) IDL rose to 10000 but
+core1 alone dropped frames and the text flickered. Every lever is render cost:
+
+- **JR C / JR NC taken backward now call the idle hook** (decodeOpcode30/38 + the
+  generator): the intro pause is `LD HL,(nn) / XOR A / SBC HL,BC / JR C` — the old
+  JR NZ/Z-only hook never saw it (`idle loop ... skipped 46%` afterwards). The earlier
+  "the copper NMI blocks the skip" reading was wrong (cop/s=0 in that scene).
+- **Layer 2 band sharing between cores** (`nxL2BandLoad`): core0 takes the OLDEST row,
+  so both cores needed the same 8-row band and each filled it (320 PSRAM line fills).
+  A band the other core filled for the same block within ±7 queue positions is copied
+  (seqlock `gen`, `pendKey/pendRow/pendJob`, 2 ms wait cap). `NEXT l2band: fill N
+  borrowed M`.
+- **`nxMixL`**: Layer 2 on, no opaque sprite pixel — the six orders collapse to two
+  loops (UOVER), read through `kNxMixNoSpr`; the full `nxMixT` runs over the sprite
+  span only. **`c1Drain` in `applyTimexMode` only on a real ink/mode change** (it ran
+  on every NR 0x69 write).
+- **Tilemap 4bpp whole tile**: a 16-entry colour table per tile palette (transparent
+  = NX_TR and the NX_BELOW mark folded in, rebuilt only when `palHi | below` changes),
+  two pixels per word store — 12 -> 5.5 instructions a pixel, no branch
+  (`tm=` 5.2 ms/fr before). **Layer 2 LUT span**: the "any opaque" accumulator is
+  two ANDs on the packed words instead of 8 XOR/OR ops per 4 pixels.
+- **Adaptive render skip** stays (`fps=` vs `draw=` in `NEXT cpu`).
+- **SD DMA: tried and REVERTED** (owner: no visible gain). The stepped core1 burst +
+  PIO-SPI DMA data phase cost two bugs (a DMA TX source in flash starving the HDMI
+  feeders; a DMA write into the cached PSRAM alias = stale reads, blank assets) and the
+  card is read 2-4 times a second for 1-3 ms in this game. core1 reads the burst in
+  one blocking call, as committed on 2026-10-16.
+- Scene numbers (trace13, 576p, the 11A0 raster-wait scene): `vid: ula=0.5 tm=5.2
+  l2=9.0 spr=3.2 mix=6.5 out=0.6 ms/fr`, `rows: core0 90/fr 7 ms, core1 197/fr`,
+  cpu 12 ms/fr. Config: NR 6B=82 (40-col 4bpp, attrs, 512 tiles), 70=17 (320x256),
+  15=0B (sprites, order S U L), 68=90 (ULA off), 14=E3. Next levers for the game:
+  the full mixer path, the Layer 2 band fill (PSRAM floor), ~47 sprite tests a row.
+
+### The game: ~50 FPS, rooms included (2026-10-19 evening, hw-confirmed DVp2 on `debug/DVp2-next-aticatac-plain26-1.0.10`)
+
+Start: 42-47 FPS with IDL swinging -8000..+5000 on one screen (the autoskip alternating
+drawn and skipped frames), rooms 43. Read in this order from the trace build, each one
+a round: `NEXT perf: drain=`, `NEXT rows: core0`, `NEXT vidpre: sprlog=`, `NEXT z80:
+ns/m1`. Six changes, every one measured:
+
+- **Sprite log 1024 -> 32768 entries** (128 KB PSRAM, `SPR_LOG`): the game streams its
+  sprite PATTERNS by DMA into port 0x5B, ~5-6k log entries a frame (`vidpre: sprlog=`), so
+  1024 overflowed 19 times a second and 4096 still every frame — each a full `c1Drain`
+  of up to 7 ms (3.5 ms of core0 a frame).
+- **Tilemap map-row shadows 32 -> 192**, headers 8 B each in the hot SRAM block (core1
+  scanned 32 of them 172 B apart in PSRAM per tilemap line), scan bounded by a
+  high-water mark; and **the cover test honours 512-tile mode**: `nxLineReads` calls the
+  definitions "the whole bank" there, so every queued line read a map-row DMA as a
+  definitions write and the copy was taken only with an EMPTY queue (340 waits/s, 2.5 ms
+  a frame; the 1024-log drains had been emptying the queue and hiding it). Per-STATE
+  verdict cache in `nxMapShadowCover` (the full test ran on all ~300 queued rows per
+  DMA block: 27 us per `OUT (6B)`, 8 ms a frame -> 2.2).
+- **core0's OWN sprite render state** (`s_sprR0`, in the helper's SRAM block): the one
+  shared copy meant core0 could take a row beside core1 only when it needed nothing
+  applied, and this game writes attributes all frame long — core0 rendered 0-5 rows a
+  frame. Taken from core1's copy at core1's log position (`applying` flag + position
+  re-check), then replayed to each row's own position; `res[]` zeroed at the sync or
+  `resolveSprites` (which rebuilds the visible list only on a VIS flag CHANGE) left it
+  empty — striped sprites, two hw rounds. **Pattern bytes are ONE memory**: a core may
+  take a row only if no pattern entry lies between the other core's position and the
+  row's (`nxSprPatClear`, `s_sprPatW`), else it waits as before — without that the intro's
+  ticker (scrolled by rewriting patterns every frame) jumped a frame ahead for one frame
+  (hw, video at 50 fps: the text 200 px left for one frame).
+- **The row helper's block**: retry every 50 frames (was 250), and the queue waits
+  (`nxWaitUntil`, `c1Drain`) do not call the flash `c0Help` while there is no helper —
+  core0 spinning through flash cost core1's PSRAM stream (XIP 5M accesses a frame).
+- **Hot-page pool ON by default, 1 frame** (`NEXT_HOT_FRAMES` 1, `NEXT_HOT_RESERVE` 4 KB
+  in MemESP.cpp): the 16 KB reserve never let it take a frame in the game (~20 KB free),
+  which is why the 10-16 verdict read "~1 frame of gain". With page 06 (80% of PC
+  samples) in SRAM: ns per M1 380-430 -> 285-300, core0 22-24 -> 15.7 ms a frame, and the
+  room transitions (core1 reading the SD ~250 ms/s) no longer dip. **The UI gets the
+  frame back**: `MemESP::nextHotRelease()` from `nm::gfxBegin` beside the queue drain
+  (F5 PANICKED on the 11 KB left), re-taken ~2 s later by `nextHotTick`. Churn in play:
+  1-4 promotions a second.
+- What the game is now: render ~19 ms/frame on core1 + 40-46 rows on core0, Z80
+  ~13 ms, DMA 2.4 ms, NR 1F polls 2.2 ms. Left: the full mixer path (~22 us/row), the
+  Layer 2 band fill (PSRAM floor), SD reads blocking core1 during room loads.
 
 ## Z-Controller SD: core1 reads, INIR batch for #57, no CMD24 pre-read (2026-10-16, NOT hw-tested)
 

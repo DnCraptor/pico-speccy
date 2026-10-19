@@ -2073,6 +2073,10 @@ NX_DISP_INL void Z80::decodeOpcode30()
         Z80Ops::addressOnBus(REG_PC, 5);
         REG_PC += offset;
         REG_WZ = REG_PC + 1;
+        REG_PC++;
+        // Atic Atac Remake's intro pause: LD HL,(nn) / XOR A / SBC HL,BC / JR C
+        if (Z80Ops::isNext && offset < 0) nextIdleNote();
+        return;
     }
     REG_PC++;
 }
@@ -2123,6 +2127,10 @@ NX_DISP_INL void Z80::decodeOpcode38()
         Z80Ops::addressOnBus(REG_PC, 5);
         REG_PC += offset;
         REG_WZ = REG_PC + 1;
+        REG_PC++;
+        // Atic Atac Remake's intro pause: LD HL,(nn) / XOR A / SBC HL,BC / JR C
+        if (Z80Ops::isNext && offset < 0) nextIdleNote();
+        return;
     }
     REG_PC++;
 }

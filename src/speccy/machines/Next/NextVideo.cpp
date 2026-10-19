@@ -132,8 +132,38 @@ uint8_t  NEXTVID::sprNrSlot = 0;
 NEXTVID::SprRender* NEXTVID::sprR = nullptr;
 uint32_t* NEXTVID::sprLog = nullptr;
 // sprLog positions, free-running: core0 writes spr_w, the renderer spr_app.
-static constexpr uint32_t SPR_LOG = 1024;
+// 4096 (was 1024): Atic Atac Remake writes ~500 attribute bytes a frame and the
+// renderer applies the log a line at a time, so with core0 a frame ahead the
+// log held two frames at most and overflowed 19 times a second — each a full
+// c1Drain of up to 7 ms (3.5 ms of core0 a frame, hw 2026-10-19). Then 32768: the
+// game streams sprite PATTERNS through port 0x5B by DMA, 5-6k log entries a
+// frame, and 4096 overflowed every frame (15 drains/s). PSRAM, 128 KB.
+static constexpr uint32_t SPR_LOG = 32768;
 static volatile uint32_t spr_w = 0, spr_app = 0;
+// core0's OWN copy of the sprite render state, with its own log position
+// (the row helper, c0Help): the state is composed per row from the log applied
+// up to the row's position, so with one shared copy core0 could take a row
+// beside core1 only when it needed nothing applied. Atic Atac Remake writes
+// sprite attributes all through the frame: every queued row needed the log,
+// core0 rendered 0-5 rows a frame and core1 did 25 ms of render alone (hw
+// 2026-10-19; the 1024-entry log's full drains had hidden it). Lives in the
+// helper's SRAM block; (re)built from sprAttr (the log at spr_w) when it is
+// taken and after a log overflow. Pattern bytes are applied by both cores.
+static NEXTVID::SprRender* s_sprR0 = nullptr;
+static volatile uint32_t   spr_app0 = 0;
+static volatile uint8_t    s_sprR0Valid = 0;
+// Log position just past the last PATTERN byte written. Patterns are ONE
+// memory for both cores, so a core may take a row only if no pattern entry
+// lies between the other core's log position and the row's own (else the
+// other core's rows in flight would show the newer patterns: Atic Atac
+// Remake scrolls its ticker by rewriting the sprite patterns every frame
+// and the text jumped a frame ahead for one frame, hw 2026-10-19).
+static volatile uint32_t   s_sprPatW = 0;
+static inline bool nxSprPatClear(uint32_t otherPos, uint32_t seq) {
+    const uint32_t pw = s_sprPatW;
+    return (int32_t)(pw - otherPos) <= 0 || (int32_t)(pw - seq) > 0;
+}
+static inline bool nxOnCore0() { return (*(const uint32_t*)SIO_BASE & 1) == 0; }
 
 uint8_t* NEXTVID::copperMem = nullptr;
 uint16_t NEXTVID::copIndex = 0;
@@ -199,7 +229,11 @@ struct NextLineState {
 // buf nullptr = l2Band. The buffer is NX_L2_BAND bytes: the 320 x 8 column band,
 // then the 256-entry Layer 2 colour LUT (lutKey = pal | palOfs << 8 | transp << 16,
 // lutGen = s_palGen[pal] when it was built).
-struct NxBand { uint8_t* buf; uint32_t key; int row, lastRow; uint32_t lutKey; uint16_t lutGen; };
+// gen / fillJob / pend*: the two cores' bands are shared read-only (see
+// nxL2BandLoad): gen is odd while the band is being written, fillJob is the
+// queue position of the row that filled it, pend* say what is being written.
+struct NxBand { uint8_t* buf; uint32_t key; int row, lastRow; uint32_t lutKey; uint16_t lutGen;
+                volatile uint32_t gen; uint32_t fillJob; uint32_t pendKey; int pendRow; uint32_t pendJob; };
 static constexpr unsigned NX_L2_BAND = 320 * 8 + 512;
 struct NxCtx {
     const NextLineState* ls;   // the line being rendered
@@ -483,10 +517,13 @@ __attribute__((noinline)) IRAM_ATTR bool NEXTVID::rowClaim(unsigned core, uint32
         } else if (!nx_busy[core ^ 1]) {
             sprApply(st.sprSeq);              // nobody renders: move the logs on
             palApply(st.palSeq);
-            if (sprR->dirty) resolveSprites();
+            if (sprCur()->dirty) resolveSprites();
             ok = true;
         } else {
-            ok = !seg && (int32_t)(st.sprSeq - spr_app) <= 0 && (int32_t)(st.palSeq - pal_app) <= 0 && !sprR->dirty;
+            // the sprite ATTRIBUTES are per core (core0's copy must exist), the
+            // palette and the sprite PATTERNS are shared: see nxSprPatClear
+            ok = !seg && (int32_t)(st.palSeq - pal_app) <= 0 && (core == 1 || s_sprR0Valid) &&
+                 nxSprPatClear(core == 0 ? spr_app : spr_app0, st.sprSeq);
         }
         if (ok) {
             s_jobSeg[core] = seg;
@@ -545,6 +582,7 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::renderJob(uint32_t j) {
 // wait paths (a shared-VMA frame there has crashed GDB's unwinder).
 __attribute__((noinline)) bool NEXTVID::c0Help() {
     if (!s_c0Blk || !g_next_c1_live) return false;
+    if (!s_sprR0Valid) sprR0Sync();
     uint32_t j;
     if (!rowClaim(0, j)) return false;
 #if NEXT_TRACE
@@ -565,6 +603,7 @@ __attribute__((noinline)) bool NEXTVID::c0Help() {
 // "no SRAM" and core1 rendered alone). SRAM or nothing (read per pixel).
 static constexpr unsigned NX_C0_LINES = 384 + 4 * 768 + 768 + 768 + 384;
 static constexpr unsigned NX_C0_BAND  = NX_L2_BAND;
+static constexpr unsigned NX_C0_SPR   = (sizeof(NEXTVID::SprRender) + 3) & ~3u;   // core0's sprite state copy
 static uint8_t* s_c0Band = nullptr;
 static uint32_t s_c0Retry = 0;   // frames until the next allocation attempt
 // Plain heap with a 3 KB margin, not HOT_SRAM's 8 KB: a trace build at NEXTEST
@@ -581,12 +620,12 @@ static uint8_t* nxC0Sram(unsigned n) {
 static void nxHelperAlloc() {
     if (s_c0Blk || !g_next_c1_live) return;
     if (s_c0Retry) { s_c0Retry--; return; }
-    uint8_t* b = nxC0Sram(NX_C0_LINES);
+    uint8_t* b = nxC0Sram(NX_C0_LINES + NX_C0_SPR);
     uint8_t* bb = b ? nxC0Sram(NX_C0_BAND) : nullptr;
     if (!bb) {
         free(b);
-        s_c0Retry = 250;
-        Debug::log("[NXC1] core0 row helper: no SRAM (%u + %u B)", NX_C0_LINES, NX_C0_BAND);
+        s_c0Retry = 50;                  // ~1 s: the first try after a menu visit often finds a fragmented heap
+        Debug::log("[NXC1] core0 row helper: no SRAM (%u + %u B)", NX_C0_LINES + NX_C0_SPR, NX_C0_BAND);
         return;
     }
     NxCtx& c = s_nxc[0];
@@ -601,8 +640,10 @@ static void nxHelperAlloc() {
     s_band[1].lutKey = 0xFFFFFFFFu;
     c.band = &s_band[1];
     s_c0Band = bb;
+    s_sprR0 = (NEXTVID::SprRender*)(b + NX_C0_LINES);
+    s_sprR0Valid = 0;                // built from sprAttr at the first row
     s_c0Blk = b;                     // last: c0Help tests it
-    Debug::log("[NXC1] core0 row helper on, %u B @%08X + %u B @%08X", NX_C0_LINES,
+    Debug::log("[NXC1] core0 row helper on, %u B @%08X + %u B @%08X", NX_C0_LINES + NX_C0_SPR,
                (unsigned)(uintptr_t)b, NX_C0_BAND, (unsigned)(uintptr_t)bb);
 }
 
@@ -611,6 +652,7 @@ void NEXTVID::helperFree() {
     c1Drain();                       // core0 renders nothing outside c0Help: free to swap
     uint8_t* b = s_c0Blk;
     s_c0Blk = nullptr;
+    s_sprR0Valid = 0; s_sprR0 = nullptr;
     nxCtxShared(s_nxc[0]);
     s_band[1].buf = nullptr;
     free(b);
@@ -630,6 +672,7 @@ volatile uint32_t g_nx_drain_n = 0, g_nx_drain_us = 0, g_nx_c1_us = 0;
 // lines waited for; and the 4 commonest DMA targets (bank << 16 | o0 hi | o1 hi).
 volatile uint32_t g_nx_dmaw[4][3] = {}, g_nx_dmaw_key[4][2] = {}, g_nx_dmaw_sh = 0;
 volatile uint32_t g_nx_drain_src[8] = {};    // waits per source: c1Drain's src, 4 = DMA range, 5 = sprite log full
+volatile uint32_t g_nx_drain_ra = 0, g_nx_drain_ra_us = 0, g_nx_drain_ra_n = 0;   // caller of the longest wait
 #endif
 IRAM_ATTR void NEXTVID::c1Drain(uint8_t src) {
     (void)src;
@@ -637,14 +680,20 @@ IRAM_ATTR void NEXTVID::c1Drain(uint8_t src) {
     const uint64_t t0 = time_us_64();
     uint64_t tw = t0;
     while (nx_r != nx_w) {
-        if (c0Help()) { tw = time_us_64(); continue; }   // a row done here is a row core1 does not owe
+        if (s_c0Blk && c0Help()) { tw = time_us_64(); continue; }   // c0Help is flash: no call without a helper   // a row done here is a row core1 does not owe
         if (time_us_64() - tw > 100000) { nxQueueDead("stuck"); return; }
         tight_loop_contents();
     }
 #if NEXT_TRACE
     g_nx_drain_n = g_nx_drain_n + 1;
     g_nx_drain_src[src & 7] = g_nx_drain_src[src & 7] + 1;
-    g_nx_drain_us = g_nx_drain_us + (uint32_t)(time_us_64() - t0);
+    const uint32_t dt = (uint32_t)(time_us_64() - t0);
+    g_nx_drain_us = g_nx_drain_us + dt;
+    {
+        const uint32_t ra = (uint32_t)(uintptr_t)__builtin_return_address(0);
+        if (ra == g_nx_drain_ra) g_nx_drain_ra_n = g_nx_drain_ra_n + 1;
+        if (dt > g_nx_drain_ra_us) { g_nx_drain_ra_us = dt; if (ra != g_nx_drain_ra) g_nx_drain_ra_n = 1; g_nx_drain_ra = ra; }
+    }
 #endif
 }
 
@@ -656,7 +705,7 @@ static void __not_in_flash_func(nxWaitUntil)(uint32_t w1) {
     const uint64_t t0 = time_us_64();
     uint64_t tw = t0;
     while ((int32_t)(nx_r - w1) < 0) {
-        if (NEXTVID::c0Help()) { tw = time_us_64(); continue; }
+        if (s_c0Blk && NEXTVID::c0Help()) { tw = time_us_64(); continue; }
         if (time_us_64() - tw > 100000) { nxQueueDead("stuck"); return; }
         tight_loop_contents();
     }
@@ -728,16 +777,28 @@ static int nxLineReads(const NextLineState& st, int row, int paperTop, uint8_t b
 // read guest RAM. An entry is free once nx_r has passed `until`. Writer core0,
 // readers both renderers (renderJob only: nx_busy set). Publication order:
 // live = 0, fields + data, live = 1; a reader reads key/until, then live.
-struct NxMapShadow {
+// Headers and row data apart: the renderer scans every header per tilemap line,
+// and 32 of them 172 B apart in PSRAM were 32 XIP line fills a line; the data
+// (160 B a row, PSRAM) is read once per hit. 128 entries: Atic Atac Remake
+// rewrites 3-4 map rows per DMA, ~36 DMAs a frame, and the copies live until
+// the last queued line that reads them is rendered — 32 ran out and the DMA
+// then waited for core1 (158 waits/s, 1.1 ms of core0 a frame, hw 2026-10-19).
+struct NxMapShadow {           // 8 B: 192 of them in the hot SRAM block
     volatile uint32_t until;      // newest job index that reads this copy
-    volatile uint32_t key;        // bank << 16 | offset in the bank
+    volatile uint16_t key;        // nxMapKey: bank 7 << 15 | offset in the bank (< 0x4000)
     volatile uint8_t  live;
     uint8_t  n;                   // row bytes (<= 160)
-    uint8_t  data[160];
 };
-static constexpr int NX_MAP_SH = 32;
-static NxMapShadow* s_mapSh = nullptr;            // [NX_MAP_SH] (queue heap block)
+static_assert(sizeof(NxMapShadow) == 8, "map shadow header packs to 8 bytes");
+static inline uint16_t nxMapKey(uint8_t bank, uint32_t off) {
+    return (uint16_t)(((uint32_t)(bank & 2) << 14) | (off & 0x3FFF));   // bank 5 -> 0, 7 -> 0x8000
+}
+static constexpr int NX_MAP_SH = 192;
+static constexpr int NX_MAP_SH_ROW = 160;
+static NxMapShadow* s_mapSh = nullptr;            // [NX_MAP_SH] headers (the hot SRAM block, Reset)
+static uint8_t (*s_mapShData)[NX_MAP_SH_ROW] = nullptr;   // [NX_MAP_SH] row copies (queue heap block)
 static volatile uint8_t s_mapShLive = 0;          // any entry possibly live (renderer fast test)
+static volatile int     s_mapShTop = 0;           // entries ever used (Take fills from the bottom): scan bound
 
 // the tilemap map row a posted line reads: false = none (tilemap off / out of range)
 static bool nxLineMapRow(const NextLineState& st, int row, int paperTop, uint8_t& bank, uint32_t& m0, int& rowBytes) {
@@ -754,33 +815,35 @@ static bool nxLineMapRow(const NextLineState& st, int row, int paperTop, uint8_t
 // renderer: the copy of this map row the current job must read, or `live`
 __attribute__((noinline)) static const uint8_t* nxMapRowFor(uint8_t bank, uint32_t off, const uint8_t* live) {
     const unsigned core = *(const uint32_t*)SIO_BASE & 1;
-    if (!nx_busy[core] || !s_mapSh) return live;
+    if (!nx_busy[core] || !s_mapShData) return live;
     const uint32_t job = nx_jobAt[core];
-    const uint32_t key = ((uint32_t)bank << 16) | off;
+    const uint16_t key = nxMapKey(bank, off);
     const NxMapShadow* best = nullptr;
     uint32_t bestUntil = 0;
-    for (int k = 0; k < NX_MAP_SH; k++) {
+    const int top = s_mapShTop;
+    for (int k = 0; k < top; k++) {
         const NxMapShadow& e = s_mapSh[k];
         const uint32_t u = e.until, kk = e.key;
         __dmb();
         if (!e.live || kk != key || (int32_t)(u - job) < 0) continue;
         if (!best || (int32_t)(u - bestUntil) < 0) { best = &e; bestUntil = u; }
     }
-    return best ? best->data : live;
+    return best ? s_mapShData[best - s_mapSh] : live;
 }
 
 // core0: the copy of map row (bank, off) posted job `job` will read, or `live`
 static const uint8_t* nxMapRowForJob(uint8_t bank, uint32_t off, const uint8_t* live, uint32_t job) {
-    if (!s_mapSh || !s_mapShLive) return live;
-    const uint32_t key = ((uint32_t)bank << 16) | off;
+    if (!s_mapShData || !s_mapShLive) return live;
+    const uint16_t key = nxMapKey(bank, off);
     const NxMapShadow* best = nullptr;
     uint32_t bestUntil = 0;
-    for (int k = 0; k < NX_MAP_SH; k++) {
+    const int top = s_mapShTop;
+    for (int k = 0; k < top; k++) {
         const NxMapShadow& e = s_mapSh[k];
         if (!e.live || e.key != key || (int32_t)(e.until - job) < 0) continue;
         if (!best || (int32_t)(e.until - bestUntil) < 0) { best = &e; bestUntil = e.until; }
     }
-    return best ? best->data : live;
+    return best ? s_mapShData[best - s_mapSh] : live;
 }
 
 // core0: does posted line (st, row, job) draw a tile whose definition lies in
@@ -814,7 +877,7 @@ static bool nxLineUsesTiles(const NextLineState& st, int row, int paperTop, uint
 // core0: copy map row (bank, m0) for the posted jobs up to `until`. false = no
 // free entry (the caller waits instead).
 static bool nxMapShadowTake(uint8_t bank, uint32_t m0, int n, uint32_t until) {
-    const uint32_t key = ((uint32_t)bank << 16) | m0;
+    const uint16_t key = nxMapKey(bank, m0);
     int freeK = -1;
     for (int k = 0; k < NX_MAP_SH; k++) {
         NxMapShadow& e = s_mapSh[k];
@@ -824,10 +887,11 @@ static bool nxMapShadowTake(uint8_t bank, uint32_t m0, int n, uint32_t until) {
     }
     if (freeK < 0) return false;
     NxMapShadow& e = s_mapSh[freeK];
+    if (freeK >= s_mapShTop) s_mapShTop = freeK + 1;
     e.live = 0;
     __dmb();
     e.key = key; e.until = until; e.n = (uint8_t)n;
-    memcpy(e.data, MemESP::ram[bank].direct() + m0, n);
+    memcpy(s_mapShData[freeK], MemESP::ram[bank].direct() + m0, n);
     __dmb();
     e.live = 1;
     s_mapShLive = 1;
@@ -839,18 +903,55 @@ static bool nxMapShadowTake(uint8_t bank, uint32_t m0, int n, uint32_t until) {
 // (no wait). Anything else (Layer 2, tile definitions, ULA, no free entry):
 // false, the caller waits as before.
 static bool nxMapShadowCover(uint8_t bank, uint16_t o0, uint16_t o1, int paperTop) {
-    if (!s_mapSh) return false;
+    if (!s_mapShData) return false;
     const uint32_t r = nx_r;
     // pass 1: is every hit a map-row hit? (newest job first, as c1DrainRange)
     struct { uint32_t m0, until; int n; } rows[16];
     int nr = 0;
+    // Per line STATE (a few per queue), once per call: can a row of this state
+    // read [o0, o1] as anything but its map row? 0 = no (Layer 2 elsewhere,
+    // definitions out of range, ULA off or in another bank), 1 = maybe (the
+    // full per-row test). The queue holds up to 300 rows and this ran the full
+    // test on each for every DMA block (Atic Atac Remake: ~36 blocks a frame,
+    // ~25 us each, hw 2026-10-19).
+    uint8_t sv[NEXT_C1_STATES];
+    for (int k = 0; k < NEXT_C1_STATES; k++) sv[k] = 0xFF;
     for (uint32_t i = nx_w; i != r; ) {
         i--;
         if ((int32_t)(nx_r - i) > 0) break;
         const uint32_t j = nx_ring[i % NEXT_C1_RING];
         const NextLineState& st = nx_st[j >> 16];
         const int row = (int)(j & 0xFFFF);
-        if (nxLineReads(st, row, paperTop, bank, o0, o1, false)) return false;
+        uint8_t& v = sv[j >> 16];
+        if (v == 0xFF) {
+            v = 0;
+            if ((st.p123B & 0x02) || (st.r69 & 0x80)) {
+                const uint8_t l2 = st.r12 & 0x7F, nb = (st.r70 & 0x30) ? 5 : 3;
+                if (bank >= l2 && bank < l2 + nb) v = 1;
+            }
+            if (st.r6B & 0x80) {
+                const uint8_t db = (st.r6F & 0x80) ? 7 : 5;
+                const uint32_t d0 = (uint32_t)(st.r6F & 0x3F) << 8;
+                const uint32_t dl = (st.r6B & 0x08) ? 0x800 : (st.r6B & 0x02) ? 0x4000 : 0x2000;
+                const bool defsHit = (d0 + dl > 0x4000) ? (db == bank) : nxRangeHit(db, d0, d0 + dl - 1, bank, o0, o1);
+                if (defsHit && !(o1 < d0)) v = 1;   // o1 < d0: nxLineUsesTiles says no for every row
+            }
+            if (!(st.r68 & 0x80)) {
+                const uint8_t ub = (st.grmem == MemESP::ram[7].direct()) ? 7 : 5;
+                if (ub == bank) v = 1;
+            }
+        }
+        if (v) {
+            // 512-tile mode makes the definitions "the whole bank" (nxLineReads), so
+            // every line read a map-row DMA as a definitions write and the copy was
+            // taken only with an empty queue (Atic Atac Remake: 340 waits/s, 2.5 ms
+            // of core0 a frame, hw 2026-10-19) — ask which tiles the line draws, as
+            // c1DrainRange does (o1 < d0 answers at once).
+            int why = nxLineReads(st, row, paperTop, bank, o0, o1, false);
+            if (why == 3 && !nxLineUsesTiles(st, row, paperTop, i, bank, o0, o1))
+                why = nxLineReads(st, row, paperTop, bank, o0, o1, false, true);
+            if (why) return false;
+        }
         uint8_t mb; uint32_t m0; int n;
         if (!nxLineMapRow(st, row, paperTop, mb, m0, n)) continue;
         if (mb != bank || !nxRangeHit(mb, m0, m0 + n - 1, bank, o0, o1)) continue;
@@ -1703,7 +1804,9 @@ void NEXTVID::Reset() {
         //   = PSRAM, 0x20... = SRAM) and the PERF `c1=` on a sprite title.
         //   Sprite renderer copy + attribute log: ~2.1 KB + 4 KB, their own block.
         static_assert(sizeof(SprRes) == 10, "SprRender packs 128 x 10");
-        const unsigned hotSz  = 8*256*2 + 8*256 + 384 + 512 + 512 + 4 * 768;
+        const unsigned hotSz0 = 8*256*2 + 8*256 + 384 + 512 + 512 + 4 * 768;
+        // + the tilemap map-row shadow headers (scanned per tilemap line on core1)
+        const unsigned hotSz  = hotSz0 + sizeof(NxMapShadow) * NX_MAP_SH;
         const unsigned coldSz = 16384 + 2048 + 128*5;
         uint8_t* hot  = (uint8_t*)Buffer::palloc(hotSz,  Buffer::NEED_POINTER | Buffer::HOT_SRAM);
         // The 640-wide pair tables and the Layer 2 column band (~6 KB, read per
@@ -1762,6 +1865,7 @@ void NEXTVID::Reset() {
         hiresRow    = pairMap + 256;
         remap       = hiresRow + 256;
         nxUb = (uint16_t*)(remap + 512);
+        s_mapSh = (NxMapShadow*)(hot + hotSz0);
         nxCtxRefresh();
     }
     // After the video state: that block is read per pixel, this one per line, so
@@ -1790,7 +1894,7 @@ void NEXTVID::Reset() {
                                 + 4 * NEXT_C1_STATES;
         constexpr unsigned segB = sizeof(NxPalDelta) * NX_SEG_POOL + sizeof(NxSegRec) * NX_SEG_Q
                                 + 2 * NEXT_C1_RING;
-        constexpr unsigned shB = sizeof(NxMapShadow) * NX_MAP_SH;   // map-row copies, 5.4 KB
+        constexpr unsigned shB = NX_MAP_SH_ROW * NX_MAP_SH;          // map-row copies, 20 KB (PSRAM)
         static_assert(base % 4 == 0, "segment pool alignment");
         // PSRAM (2026-10-14): read a few bytes a line, the 24 KB of SRAM bought ~nothing
         // (TX-1696 at 576p) and cost the core0 row helper its place after a menu visit.
@@ -1804,8 +1908,7 @@ void NEXTVID::Reset() {
             s_segPool = (NxPalDelta*)(q + base + sizeof(NxSegRec) * NX_SEG_Q);
             nx_segOf  = (uint16_t*)(q + base + sizeof(NxSegRec) * NX_SEG_Q + sizeof(NxPalDelta) * NX_SEG_POOL);
             memset(nx_segOf, 0, 2 * NEXT_C1_RING);
-            s_mapSh = (NxMapShadow*)(q + ((base + segB + 3) & ~3u));
-            memset((void*)s_mapSh, 0, shB);
+            s_mapShData = (uint8_t (*)[NX_MAP_SH_ROW])(q + ((base + segB + 3) & ~3u));
         }
         Debug::log("[NXC1] core1 line renderer %s @%08X", q ? "ON" : "unavailable (no RAM)", (unsigned)(uintptr_t)q);
     }
@@ -1849,7 +1952,8 @@ void NEXTVID::Reset() {
     memset(sprAttr, 0, 128 * 5);
     memset(sprR, 0, sizeof(SprRender));      // queue drained above
     sprR->dirty = 1; sprR->lo = 0; sprR->hi = 127;
-    spr_w = spr_app = 0;
+    spr_w = spr_app = spr_app0 = s_sprPatW = 0;
+    s_sprR0Valid = 0;
     sprNrSlot = 0;
     sprPatWrite = 0;
     sprAttrSlot = 0;
@@ -3016,28 +3120,81 @@ void nxMixU(uint8_t* __restrict fb, const uint16_t* __restrict pu, const uint8_t
 #if NEXT_TRACE
 volatile uint32_t g_nx_mix_span = 0, g_nx_mix_spanRows = 0;   // sprite-span rows and their pixels
 #endif
-template <bool MERGE>
-static inline __attribute__((always_inline)) void nxMixSprSpan(const NxMix& m, const uint16_t* pu, int xres,
-                                                               int mode, int s0, int s1) {
-    // outside [s0, s1) no sprite pixel is opaque: every order reduces to nxMixU
-    if (s0 > 0) nxMixU<MERGE>(m.fb, pu, m.remap, m.fb9, s0);
-    switch (mode) {
-        case 0: nxMixT<0, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
-        case 1: nxMixT<1, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
-        case 2: nxMixT<2, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
-        case 3: nxMixT<3, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
-        case 4: nxMixT<4, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
-        default: nxMixT<5, false, MERGE>(m.fb, pu, m.remap, m.fb9, s1, s0); break;
+
+// Layer 2 on, no opaque sprite pixel (a whole row, or outside its sprite span):
+// the six orders collapse to two. Without a sprite, orders 3-5's border give-way
+// never applies, so: UOVER = false (0 S L U, 1 L S U, 3 L U S) Layer 2 over
+// ula_final; UOVER = true (2 S U L, 4 U S L, 5 U L S) ula_final over Layer 2,
+// except a Layer 2 priority pixel. Same results as nxMixT with every sprite
+// pixel transparent, without reading the sprite line (Atic Atac Remake intro:
+// L2 + tilemap + sprites on every row, mix 8.2 ms of render a frame,
+// hw 2026-10-19).
+template <bool UOVER, bool MERGE>
+static IRAM_ATTR __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns")))
+void nxMixL(uint8_t* __restrict fb, const uint16_t* __restrict pu, const uint8_t* __restrict remap,
+            uint16_t fb9, int xres, int x0) {
+    const uint16_t* __restrict pl = nxL;
+    const uint16_t* __restrict pt = nxT;
+    if (MERGE) pu = nxU;
+    for (int x = x0; x < xres; x++) {
+        const uint16_t l = pl[x];
+        uint16_t uf = pu[x];
+        if (MERGE) {
+            const uint16_t tv = pt[x];
+            const bool uTr0 = uf & NX_TR, tTr0 = tv & NX_TR;
+            if (!tTr0 && (!(tv & NX_BELOW) || uTr0)) uf = (uint16_t)(tv & 0x1FF);
+            else if (!uTr0 && !tTr0) uf = (uint16_t)(uf & ~NX_BRD);
+        }
+        uint16_t v;
+        if (UOVER) v = ((l & (NX_TR | NX_PRIO)) == NX_PRIO) ? l : !(uf & NX_TR) ? uf : !(l & NX_TR) ? l : fb9;
+        else       v = !(l & NX_TR) ? l : !(uf & NX_TR) ? uf : fb9;
+        fb[x] = (v & NX_SLOT) ? (uint8_t)v : remap[v & 0x1FF];
     }
-    if (s1 < xres) nxMixU<MERGE>(m.fb, pu, m.remap, m.fb9, xres, s1);
 }
 
+// One table per mixer family (flash, read once a row): every caller goes
+// through a pointer, so each loop exists once with its x0 argument instead of a
+// constprop clone per call site — the dispatch below was three 6-way switches.
+typedef void (*NxMixFn)(uint8_t*, const uint16_t*, const uint8_t*, uint16_t, int, int);
+// Only the Layer 2 variants of nxMixT: nxL is filled NX_TR on every row
+// (RenderLayers), so with no opaque Layer 2 pixel they give exactly what the
+// L2 = false loops gave — one more load a pixel on sprite rows without Layer 2
+// (inside the sprite span only), for 12 loops (~1.9 KB) out of the full window.
+static const NxMixFn kNxMixT[2][6] = {   // [MERGE][order]
+    { nxMixT<0, true, false>, nxMixT<1, true, false>, nxMixT<2, true, false>,
+      nxMixT<3, true, false>, nxMixT<4, true, false>, nxMixT<5, true, false> },
+    { nxMixT<0, true, true>, nxMixT<1, true, true>, nxMixT<2, true, true>,
+      nxMixT<3, true, true>, nxMixT<4, true, true>, nxMixT<5, true, true> },
+};
+// No opaque sprite pixel: [L2][MERGE][ula_final over Layer 2]
+static const NxMixFn kNxMixNoSpr[2][2][2] = {
+    { { nxMixU<false>, nxMixU<false> }, { nxMixU<true>, nxMixU<true> } },
+    { { nxMixL<false, false>, nxMixL<true, false> }, { nxMixL<false, true>, nxMixL<true, true> } },
+};
+
 static IRAM_ATTR void nxMixOrder(const NxMix& m, int xres, int mode, bool span = false) {
+    const bool l2 = m.l2;
+    if (!l2 && !m.spr) {
+        const uint16_t* pu;
+        if (m.ulaEn && m.tm && !m.stencil) { nxMixU<true>(m.fb, nxU, m.remap, m.fb9, xres); return; }
+        if (m.ulaEn && m.tm) { nxUlaMerge(m.stencil, xres); pu = nxU; }
+        else pu = m.ulaEn ? nxU : nxT;
+        nxMixU<false>(m.fb, pu, m.remap, m.fb9, xres);
+        return;
+    }
+    // ula_final: inline in the loop (MERGE), a merge pass under the stencil, or one layer
+    const bool merge = m.ulaEn && m.tm && !m.stencil;
     const uint16_t* pu;
-    if (span && !m.l2 && m.spr && !m.stencil) {
-        // sprites without Layer 2 (TX-1696 at 576p: ~100 sprite rows a frame,
-        // each a full nxUlaMerge pass + a full nxMixT pass): resolve the sprite
-        // layer only over its opaque span, the ULA/tilemap merge inline
+    if (merge) pu = nxU;
+    else if (m.ulaEn && m.tm) { nxUlaMerge(m.stencil, xres); pu = nxU; }
+    else pu = m.ulaEn ? nxU : nxT;           // ULA off: tilemap (filled transparent when off)
+    const bool uover = mode == 2 || mode == 4 || mode == 5;
+    const NxMixFn rest = kNxMixNoSpr[l2][merge][uover];
+    if (!m.spr) { rest(m.fb, pu, m.remap, m.fb9, xres, 0); return; }
+    const NxMixFn full = kNxMixT[merge][mode];
+    if (span) {
+        // resolve the sprite layer only over its opaque span (TX-1696 at 576p:
+        // ~100 sprite rows a frame without Layer 2; Atic Atac with it)
         int s0 = nxSprX0, s1 = nxSprX1;
         if (s0 < 0) s0 = 0;
         if (s1 > xres) s1 = xres;
@@ -3046,50 +3203,13 @@ static IRAM_ATTR void nxMixOrder(const NxMix& m, int xres, int mode, bool span =
             g_nx_mix_span = g_nx_mix_span + (uint32_t)(s1 - s0);
             g_nx_mix_spanRows = g_nx_mix_spanRows + 1;
 #endif
-            if (m.ulaEn && m.tm) nxMixSprSpan<true>(m, nxU, xres, mode, s0, s1);
-            else nxMixSprSpan<false>(m, m.ulaEn ? nxU : nxT, xres, mode, s0, s1);
+            if (s0 > 0) rest(m.fb, pu, m.remap, m.fb9, s0, 0);
+            full(m.fb, pu, m.remap, m.fb9, s1, s0);
+            if (s1 < xres) rest(m.fb, pu, m.remap, m.fb9, xres, s1);
             return;
         }
     }
-    if (!m.l2 && !m.spr) {
-        if (m.ulaEn && m.tm && !m.stencil) { nxMixU<true>(m.fb, nxU, m.remap, m.fb9, xres); return; }
-        if (m.ulaEn && m.tm) { nxUlaMerge(m.stencil, xres); pu = nxU; }
-        else pu = m.ulaEn ? nxU : nxT;
-        nxMixU<false>(m.fb, pu, m.remap, m.fb9, xres);
-        return;
-    }
-    if (m.ulaEn && m.tm && !m.stencil && m.l2) {
-        switch (mode) {
-            case 0: nxMixT<0, true, true>(m.fb, nxU, m.remap, m.fb9, xres); break;
-            case 1: nxMixT<1, true, true>(m.fb, nxU, m.remap, m.fb9, xres); break;
-            case 2: nxMixT<2, true, true>(m.fb, nxU, m.remap, m.fb9, xres); break;
-            case 3: nxMixT<3, true, true>(m.fb, nxU, m.remap, m.fb9, xres); break;
-            case 4: nxMixT<4, true, true>(m.fb, nxU, m.remap, m.fb9, xres); break;
-            default: nxMixT<5, true, true>(m.fb, nxU, m.remap, m.fb9, xres); break;
-        }
-        return;
-    }
-    if (m.ulaEn && m.tm) { nxUlaMerge(m.stencil, xres); pu = nxU; }
-    else pu = m.ulaEn ? nxU : nxT;           // ULA off: tilemap (filled transparent when off)
-    if (m.l2) {
-        switch (mode) {
-            case 0: nxMixT<0, true>(m.fb, pu, m.remap, m.fb9, xres); break;
-            case 1: nxMixT<1, true>(m.fb, pu, m.remap, m.fb9, xres); break;
-            case 2: nxMixT<2, true>(m.fb, pu, m.remap, m.fb9, xres); break;
-            case 3: nxMixT<3, true>(m.fb, pu, m.remap, m.fb9, xres); break;
-            case 4: nxMixT<4, true>(m.fb, pu, m.remap, m.fb9, xres); break;
-            default: nxMixT<5, true>(m.fb, pu, m.remap, m.fb9, xres); break;
-        }
-    } else {
-        switch (mode) {
-            case 0: nxMixT<0, false>(m.fb, pu, m.remap, m.fb9, xres); break;
-            case 1: nxMixT<1, false>(m.fb, pu, m.remap, m.fb9, xres); break;
-            case 2: nxMixT<2, false>(m.fb, pu, m.remap, m.fb9, xres); break;
-            case 3: nxMixT<3, false>(m.fb, pu, m.remap, m.fb9, xres); break;
-            case 4: nxMixT<4, false>(m.fb, pu, m.remap, m.fb9, xres); break;
-            default: nxMixT<5, false>(m.fb, pu, m.remap, m.fb9, xres); break;
-        }
-    }
+    full(m.fb, pu, m.remap, m.fb9, xres, 0);
 }
 
 // Orders 6/7: Layer 2 + the blend source (NR 0x68 bits 6:5), saturated (6) or
@@ -3386,18 +3506,27 @@ __attribute__((noinline)) static bool nxL2SlowRow(uint16_t* o, const uint8_t* br
 // pointers in registers (inline, RenderL2Line spilled the band base and
 // reloaded it per pixel). Returns the OR of (colour ^ NX_TR): non-zero = an
 // opaque pixel was written.
+// Returns the AND of the pixel pairs written (both halves): bit 15 / bit 31
+// clear = an opaque pixel was written (NX_TR is 0x8000 and an opaque entry has
+// bit 15 clear) — two ANDs per four pixels where the XOR/OR form was eight
+// (Atic Atac Remake: 82k Layer 2 pixels a frame at 7 instructions each).
 static inline __attribute__((always_inline)) uint32_t nxL2LutSpan(const uint8_t* __restrict sp,
         uint16_t* __restrict op, int n, const uint16_t* __restrict lt) {
-    uint32_t acc = 0;
+    uint32_t acc = 0xFFFFFFFFu;
     for (; n >= 4; n -= 4, sp += 4, op += 4) {
         uint32_t b;
         __builtin_memcpy(&b, sp, 4);       // the band is SRAM: an unaligned LDR is fine on the M33
-        const uint16_t v0 = lt[b & 0xFF], v1 = lt[(b >> 8) & 0xFF], v2 = lt[(b >> 16) & 0xFF], v3 = lt[b >> 24];
-        op[0] = v0; op[1] = v1; op[2] = v2; op[3] = v3;
-        acc |= (uint32_t)((v0 ^ NX_TR) | (v1 ^ NX_TR) | (v2 ^ NX_TR) | (v3 ^ NX_TR));
+        const uint32_t w0 = (uint32_t)lt[b & 0xFF] | ((uint32_t)lt[(b >> 8) & 0xFF] << 16);
+        const uint32_t w1 = (uint32_t)lt[(b >> 16) & 0xFF] | ((uint32_t)lt[b >> 24] << 16);
+        __builtin_memcpy(op, &w0, 4);      // unaligned STR: the row buffer is SRAM too
+        __builtin_memcpy(op + 2, &w1, 4);
+        acc &= w0 & w1;
     }
-    while (n-- > 0) { const uint16_t v = lt[*sp++]; *op++ = v; acc |= (uint32_t)(v ^ NX_TR); }
+    while (n-- > 0) { const uint16_t v = lt[*sp++]; *op++ = v; acc &= (uint32_t)v | 0xFFFF0000u; }
     return acc;
+}
+static inline __attribute__((always_inline)) bool nxL2SpanOpaque(uint32_t acc) {
+    return (acc & 0x80008000u) != 0x80008000u;
 }
 
 // Flash: 256x192 with an odd X scroll or clip (rare — the word-aligned run in
@@ -3430,7 +3559,91 @@ __attribute__((noinline)) static void nxPalMono(uint8_t pal, const uint16_t* raw
     s_palMono[pal] = c;
 }
 __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns")))
-IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
+#if NEXT_TRACE
+volatile uint32_t g_nx_l2band[3] = {};   // band fills, borrowed from the other core, waits that gave up
+#endif
+// Layer 2 320x256: load the 8-row column band for (bank, blk). core0 helps by
+// taking the OLDEST queued row, so the two cores render consecutive rows and
+// each needed the same band: both filled it, 320 PSRAM line fills each, on the
+// one XIP port both cores share (Atic Atac Remake intro: ~28k misses a frame,
+// Layer 2 11 ms of render, hw 2026-10-19). A band the other core filled for the
+// same block in the same frame is copied instead (2.5 KB SRAM -> SRAM); one it
+// is filling right now is waited for. Same frame = queue positions less than 8
+// apart; gen is a seqlock (odd while written, our own copy included — the
+// other core may be borrowing from us). Flash: once per 8 rows.
+__attribute__((noinline)) static void nxL2BandLoad(NxBand& bd, uint8_t* band, uint8_t* shared, uint16_t bank,
+                                                   uint8_t blk, uint32_t key, int brow) {
+    const unsigned core = *(const uint32_t*)SIO_BASE & 1;
+    const uint32_t job = nx_jobAt[core];
+    NxBand& ot = s_band[&bd == &s_band[0] ? 1 : 0];
+    const volatile NxBand& vo = ot;
+    uint8_t* const obuf = ot.buf ? ot.buf : shared;
+    const bool share = g_next_c1_live && s_band[1].buf && obuf && obuf != band;
+    bd.pendKey = key; bd.pendRow = brow; bd.pendJob = job;
+    if (share) {
+        const uint64_t t0 = time_us_64();
+        for (;;) {
+            const uint32_t g1 = vo.gen;
+            __dmb();
+            if (g1 & 1) {
+                // the other core is writing its band: worth waiting for only if it is ours
+                if (vo.pendKey == key && vo.pendRow == brow && (uint32_t)(job - vo.pendJob) + 7u < 15u &&
+                    time_us_64() - t0 < 2000) { tight_loop_contents(); continue; }
+#if NEXT_TRACE
+                if (vo.pendKey == key && vo.pendRow == brow) g_nx_l2band[2] = g_nx_l2band[2] + 1;
+#endif
+                break;
+            }
+            if (vo.key != key || vo.row != brow || (uint32_t)(job - vo.fillJob) + 7u >= 15u) break;
+            __dmb();
+            bd.gen = bd.gen + 1;
+            __dmb();
+            memcpy(band, obuf, 320 * 8);
+            __dmb();
+            const bool ok = vo.gen == g1;
+            if (ok) { bd.key = key; bd.row = brow; bd.fillJob = vo.fillJob; }
+            __dmb();
+            bd.gen = bd.gen + 1;
+            if (ok) {
+#if NEXT_TRACE
+                g_nx_l2band[1] = g_nx_l2band[1] + 1;
+#endif
+                return;
+            }
+            break;   // it changed under the copy: fill it ourselves
+        }
+    }
+    __dmb();
+    bd.gen = bd.gen + 1;
+    __dmb();
+    for (int c0 = 0; c0 < 320; c0 += 32) {         // one 8K page = 32 columns
+        const uint32_t off0 = (uint32_t)c0 * 256 + blk;
+        const uint8_t* pg = MemESP::nextPgPtr(bank + (off0 >> 13));
+        for (int c = c0; c < c0 + 32; c++) {
+            uint32_t lo = 0, hi = 0;
+            if (pg) {
+                const uint32_t* q = (const uint32_t*)(pg + (((uint32_t)c * 256 + blk) & 0x1FFF));
+                lo = q[0]; hi = q[1];
+            }
+            uint8_t* d = band + c;
+            d[0]    = (uint8_t)lo; d[320]  = (uint8_t)(lo >> 8);
+            d[640]  = (uint8_t)(lo >> 16); d[960] = (uint8_t)(lo >> 24);
+            d[1280] = (uint8_t)hi; d[1600] = (uint8_t)(hi >> 8);
+            d[1920] = (uint8_t)(hi >> 16); d[2240] = (uint8_t)(hi >> 24);
+        }
+    }
+    __dmb();
+    bd.key = key; bd.row = brow; bd.fillJob = job;
+    __dmb();
+    bd.gen = bd.gen + 1;
+#if NEXT_TRACE
+    g_nx_l2band[0] = g_nx_l2band[0] + 1;
+#endif
+}
+
+// no-peel: with the band fill moved out (nxL2BandLoad) GCC peeled the scroll-wrap
+// loop below into a second copy of the LUT span, +300 B of the full .nxovl window
+IRAM_ATTR __attribute__((optimize("no-peel-loops", "no-unswitch-loops"))) void NEXTVID::RenderL2Line(int row) {
     uint8_t pal = (LS->palCtrl & 0x04) ? 5 : 1;
     const uint16_t* raw = rawPal[pal];
     const uint8_t transp = LS->r14;     // compared with the COLOUR (zxnext.vhd 7123)
@@ -3519,27 +3732,8 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
         const uint32_t key = ((uint32_t)bank << 8) | (sy & 0xF8);
         if (row < s_lastRow) s_bandKey = 0xFFFFFFFFu;     // a new frame: nothing carries over
         s_lastRow = row;
-        if (band && (key != s_bandKey || (unsigned)(row - s_bandRow) >= 8u)) {
-            const uint8_t blk = sy & 0xF8;
-            for (int c0 = 0; c0 < 320; c0 += 32) {         // one 8K page = 32 columns
-                const uint32_t off0 = (uint32_t)c0 * 256 + blk;
-                const uint8_t* pg = MemESP::nextPgPtr(bank + (off0 >> 13));
-                for (int c = c0; c < c0 + 32; c++) {
-                    uint32_t lo = 0, hi = 0;
-                    if (pg) {
-                        const uint32_t* q = (const uint32_t*)(pg + (((uint32_t)c * 256 + blk) & 0x1FFF));
-                        lo = q[0]; hi = q[1];
-                    }
-                    uint8_t* d = band + c;
-                    d[0]    = (uint8_t)lo; d[320]  = (uint8_t)(lo >> 8);
-                    d[640]  = (uint8_t)(lo >> 16); d[960] = (uint8_t)(lo >> 24);
-                    d[1280] = (uint8_t)hi; d[1600] = (uint8_t)(hi >> 8);
-                    d[1920] = (uint8_t)(hi >> 16); d[2240] = (uint8_t)(hi >> 24);
-                }
-            }
-            s_bandKey = key;
-            s_bandRow = row - (sy & 7);
-        }
+        if (band && (key != s_bandKey || (unsigned)(row - s_bandRow) >= 8u))
+            nxL2BandLoad(bd, band, l2Band, bank, (uint8_t)(sy & 0xF8), key, row - (sy & 7));
         // The visible columns: the clip window and the framebuffer, decided once.
         int t0 = cx1 > -xOrig ? cx1 : -xOrig;
         int t1 = cx2 < xres - 1 - xOrig ? cx2 : xres - 1 - xOrig;
@@ -3561,15 +3755,15 @@ IRAM_ATTR void NEXTVID::RenderL2Line(int row) {
                 nxL2LutBuild(lt, raw, palOfs, transp);
                 bd.lutKey = lk; bd.lutGen = gen;
             }
-            uint32_t acc = 0;
+            uint32_t acc = 0xFFFFFFFFu;
             int sx = t0 + scrollX; if (sx >= 320) sx -= 320;
             for (int tx = t0; tx <= t1; ) {
                 int n = t1 - tx + 1;
                 if (n > 320 - sx) n = 320 - sx;            // up to the scroll wrap
-                acc |= nxL2LutSpan(src + sx, o + tx, n, lt);
+                acc &= nxL2LutSpan(src + sx, o + tx, n, lt);
                 tx += n; sx = 0;
             }
-            any = acc != 0;
+            any = nxL2SpanOpaque(acc);
         } else {
             any = nxL2SlowRow(out + xOrig, band ? band + (sy & 7) * 320 : nullptr, raw, t0, t1, scrollX,
                               sy, bank, palOfs, transp, hires);
@@ -3699,6 +3893,13 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
         }
         return;
     }
+    // 4bpp whole tile: the 16 colours of the tile's palette row, transparency
+    // (NX_TR) and the under-ULA mark folded in, so a pixel is one load and one
+    // store — no compare, no branch. Rebuilt when the attribute's palette or
+    // the mark changes (one or two palettes a row: Atic Atac Remake, 40 tiles a
+    // row at ~12 instructions a pixel = tilemap 5.2 ms of render a frame).
+    uint16_t tl[16];
+    int tlKey = -1;
     for (int ph = 0; ph <= (pair ? 1 : 0); ph++) {
     uint16_t* const out = (ph ? nxT2 : nxT) + xOrig;
     int tx = t0;
@@ -3751,11 +3952,21 @@ IRAM_ATTR void NEXTVID::RenderTilemapLine(int row) {
                     // low nibbles are the source's odd pixels from the right.
                     uint32_t wn = xm ? __builtin_bswap32(w)
                                      : (((w >> 4) & 0x0F0F0F0Fu) | ((w << 4) & 0xF0F0F0F0u));
-                    const uint16_t* __restrict pr = rawTM + palHi;
+                    const int key = (int)palHi | (int)below;
+                    if (key != tlKey) {
+                        tlKey = key;
+                        const uint16_t* __restrict pr = rawTM + palHi;
+                        for (int i = 0; i < 16; i++) tl[i] = (uint16_t)((pr[i] & 0x1FF) | below);
+                        tl[transp] = NX_TR;   // the buffer was filled NX_TR: storing it is the skip
+                    }
                     uint16_t* __restrict o = out + tx;
-                    for (int k = 0; k < 8; k++, wn >>= 4) {
-                        const uint8_t pix = wn & 0x0F;
-                        if (pix != transp) o[k] = (uint16_t)((pr[pix] & 0x1FF) | below);
+                    if (!((uintptr_t)o & 2)) {
+                        // two pixels per word store (the row buffer is SRAM)
+                        uint32_t* __restrict ow = (uint32_t*)o;
+                        for (int k = 0; k < 4; k++, wn >>= 8)
+                            ow[k] = (uint32_t)tl[wn & 0x0F] | ((uint32_t)tl[(wn >> 4) & 0x0F] << 16);
+                    } else {
+                        for (int k = 0; k < 8; k++, wn >>= 4) o[k] = tl[wn & 0x0F];
                     }
                     tx += 8; sx += 8; if (sx >= wrap) sx -= wrap;
                     continue;
@@ -3812,10 +4023,14 @@ static inline bool sprIsRel(const uint8_t* a) {
 IRAM_ATTR void NEXTVID::sprLogPut(uint32_t e) {
     if (spr_w - spr_app >= SPR_LOG) {
         c1Drain(5);
-        sprApply(spr_w);
+        sprApplyTo(*sprR, spr_app, spr_w);   // core1's copy, nobody rendering
+        s_sprR0Valid = 0;                     // core0's: taken from core1's again at its next row
+    } else if (s_sprR0Valid && spr_w - spr_app0 >= SPR_LOG) {
+        s_sprR0Valid = 0;                     // core0 fell behind (it helped little): re-sync, no drain
     }
     sprLog[spr_w % SPR_LOG] = e;
     __dmb();
+    if (e & 0x80000000u) s_sprPatW = spr_w + 1;
     spr_w = spr_w + 1;
 }
 
@@ -3824,10 +4039,43 @@ IRAM_ATTR void NEXTVID::sprPut(uint8_t s, uint8_t b, uint8_t v) {
 }
 
 // Renderer: apply the log up to a line's capture position, widen the dirty range.
+IRAM_ATTR NEXTVID::SprRender* NEXTVID::sprCur() { return (nxOnCore0() && s_sprR0Valid) ? s_sprR0 : sprR; }
 IRAM_ATTR void NEXTVID::sprApply(uint32_t upto) {
-    SprRender& R = *sprR;
-    uint32_t i = spr_app;
+    if (nxOnCore0() && s_sprR0Valid) sprApplyTo(*s_sprR0, spr_app0, upto);
+    else sprApplyTo(*sprR, spr_app, upto);
+}
+// core0's copy = core1's attributes at core1's log position (then core0 replays
+// the log to each row's own position, exactly as core1 does). core1 writes its
+// attr[] only inside sprApplyTo (`applying` up, position published after);
+// a copy taken with the flag down and the position unmoved is whole. NOT the
+// live attributes at spr_w: that gave core0's rows a newer state than core1's
+// and the two cores' rows interleaved — striped sprites (hw 2026-10-19).
+void NEXTVID::sprR0Sync() {
+    if (!s_sprR0) return;
+    SprRender& d = *s_sprR0;
+    for (int tries = 0; tries < 64; tries++) {
+        const uint32_t a0 = spr_app;
+        __dmb();
+        if (sprR->applying) { tight_loop_contents(); continue; }
+        memcpy(d.attr, sprR->attr, sizeof d.attr);
+        __dmb();
+        if (sprR->applying || spr_app != a0) continue;
+        // resolveSprites rebuilds the visible list only where a sprite's VIS
+        // flag CHANGED against res[]: clear it so the full resolve below sees
+        // every visible sprite as new (stale flags left d.n at 0 — no sprites
+        // on core0's rows, hw 2026-10-19).
+        memset(d.res, 0, sizeof d.res);
+        d.n = 0; d.dirty = 1; d.lo = 0; d.hi = 127;
+        spr_app0 = a0;
+        __dmb();
+        s_sprR0Valid = 1;
+        return;
+    }
+}
+IRAM_ATTR void NEXTVID::sprApplyTo(SprRender& R, volatile uint32_t& app, uint32_t upto) {
+    uint32_t i = app;
     if ((int32_t)(upto - i) <= 0) return;   // older position: see palApply
+    R.applying = 1;
     __dmb();
     int lo = R.dirty ? R.lo : 127, hi = R.dirty ? R.hi : 0;
 #if NEXT_TRACE
@@ -3843,13 +4091,15 @@ IRAM_ATTR void NEXTVID::sprApply(uint32_t upto) {
     }
     if (lo <= hi) { R.lo = (uint8_t)lo; R.hi = (uint8_t)hi; R.dirty = 1; }   // patterns only: nothing to resolve
     __dmb();
-    spr_app = i;
+    app = i;
+    __dmb();
+    R.applying = 0;
 }
 
 // Renderer: re-resolve the dirty range — from the anchor at or before lo to the
 // last relative after hi (a relative is resolved against the anchor before it).
 IRAM_ATTR void NEXTVID::resolveSprites() {
-    SprRender& d = *sprR;
+    SprRender& d = *sprCur();
     int s0 = d.lo, s1 = d.hi + 1;
     while (s0 > 0 && sprIsRel(d.attr[s0])) s0--;
     while (s1 < 128 && sprIsRel(d.attr[s1])) s1++;
@@ -3928,8 +4178,8 @@ IRAM_ATTR void NEXTVID::resolveSprites() {
 // clipped to the paper area for now (sprites-over-border comes later).
 __attribute__((optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns")))
 IRAM_ATTR void NEXTVID::RenderSpritesLine(int y) {
-    if (sprR->dirty) resolveSprites();  // RenderLayers applied this line's log
-    const SprRender& sn = *sprR;
+    if (sprCur()->dirty) resolveSprites();  // RenderLayers applied this line's log
+    const SprRender& sn = *sprCur();
     const uint16_t* sprRaw = rawPal[(LS->palCtrl & 0x08) ? 6 : 2];   // NR 0x43 bit 3
     const uint8_t transp = LS->r4B;
     const int sline = y + 32;

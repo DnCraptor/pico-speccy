@@ -289,6 +289,16 @@ void next_trace_dump(uint32_t frames) {
                 (unsigned)g_nx_drain_src[4], (unsigned)g_nx_drain_src[5]);
             for (int i = 0; i < 8; i++) g_nx_drain_src[i] = 0;
             {
+                extern volatile uint32_t g_nx_drain_ra, g_nx_drain_ra_us, g_nx_drain_ra_n;
+                Debug::log("NEXT drain: longest %uus from lr=%08X (x%u)", (unsigned)g_nx_drain_ra_us,
+                           (unsigned)g_nx_drain_ra, (unsigned)g_nx_drain_ra_n);
+                g_nx_drain_ra = g_nx_drain_ra_us = g_nx_drain_ra_n = 0;
+                extern volatile uint32_t g_nx_l2band[3];
+                Debug::log("NEXT l2band: fill %u/fr borrowed %u/fr wait gave up %u",
+                           (unsigned)(g_nx_l2band[0] / f), (unsigned)(g_nx_l2band[1] / f), (unsigned)g_nx_l2band[2]);
+                g_nx_l2band[0] = g_nx_l2band[1] = g_nx_l2band[2] = 0;
+            }
+            {
                 extern volatile uint32_t g_nx_dmaw[4][3], g_nx_dmaw_key[4][2], g_nx_dmaw_sh;
                 char kb[96]; int kn = 0; kb[0] = 0;
                 for (int k = 0; k < 4 && g_nx_dmaw_key[k][0]; k++)
@@ -1300,13 +1310,19 @@ void NextReg::writeLayer2Port(uint8_t v) {
 // comes out as solid pairs). The last write of the frame used to decide, so a
 // copper that switched hi-res on and off again never got the driver.
 static void applyTimexMode(uint8_t v) {
-    NEXTVID::c1Drain();   // core1 reads the hi-res LUT live
     const uint8_t pi = VIDEO::timex_hires_ink;
     VIDEO::timex_mode = v & 0x07;
     VIDEO::timex_hires_ink = (v >> 3) & 0x07;
     // zxula.vhd: mode bit 2 is hi-res (4-7), not just 6
     if (VIDEO::timex_mode & 4) s_hiresSeen = true;
-    if (VIDEO::timex_hires_ink != pi && VIDEO::timex_hires_live) VIDEO::timexHiresColour();
+    // core1 takes the mode from each line's snapshot (r69); the only thing it
+    // reads live is the hi-res LUT, so wait for it only before a rebuild. An
+    // unconditional drain here cost a whole queue per NR 0x69 write — Atic Atac
+    // Remake writes it every frame (hw 2026-10-19: 10 ms/frame, 38 FPS).
+    if (VIDEO::timex_hires_ink != pi && VIDEO::timex_hires_live) {
+        NEXTVID::c1Drain();
+        VIDEO::timexHiresColour();
+    }
 }
 void NextReg::timexHiresFramePoll() {
     VIDEO::timexHiresRequest(s_hiresSeen || (VIDEO::timex_mode & 4) != 0);

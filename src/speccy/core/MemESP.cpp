@@ -979,7 +979,7 @@ bool MemESP::buildNextRam() {
 }
 
 // ===== Next hot-page pool =====
-// NEXT_HOT_FRAMES (CMake, default 8 = "4 x 16K") frames of 8K SRAM from the heap,
+// NEXT_HOT_FRAMES (CMake, default 1 since 2026-10-19; max 8) frames of 8K SRAM from the heap,
 // taken ~3 s into the Next session and grown while the heap allows (s_hotWait).
 // Policy, once per frame from VIDEO::EndFrame:
 //   * a candidate is a RAM page the CPU has mapped (mmu[0..7]) whose home is in
@@ -1042,6 +1042,14 @@ static void nextHotEvict(int f) {
 static int nextHotWant() {
     return NEXT_HOT_FRAMES > MemESP::NEXT_HOT_MAX ? MemESP::NEXT_HOT_MAX : NEXT_HOT_FRAMES;
 }
+// Heap kept free beside a taken frame. 16 KB never let the pool take a frame
+// in Atic Atac Remake's game (~20 KB free there); with 4 KB it takes page 06
+// (the game's code, 80% of PC samples) and core0's Z80 time drops 22-24 ->
+// 15.7 ms a frame (ns per M1 380-430 -> 285-300, hw 2026-10-19). One frame is
+// the default (cmake NEXT_HOT_FRAMES); the menu still opens on the 11 KB left.
+#ifndef NEXT_HOT_RESERVE
+#define NEXT_HOT_RESERVE 4096
+#endif
 static void nextHotGrow() {
     const int want = nextHotWant();
     const int n0 = s_hotN;
@@ -1051,7 +1059,7 @@ static void nextHotGrow() {
     // block. Asking for 8K + 16K in one piece got 1 frame out of 46 KB free
     // (hw 2026-10-16).
     extern size_t getFreeHeap(void);
-    while (n < want && getLargestAllocatable() >= 0x2000 && getFreeHeap() >= 0x2000 + 16384) {
+    while (n < want && getLargestAllocatable() >= 0x2000 && getFreeHeap() >= 0x2000 + NEXT_HOT_RESERVE) {
         uint8_t* p = (uint8_t*)tryMalloc(0x2000);
         if (!p) break;
         MemESP::nextHotFrame[n] = p;
@@ -1160,6 +1168,19 @@ void MemESP::nextHotFlush() {
     for (int f = 0; f < s_hotN; f++)
         if (s_hotPage[f] != 0xFF) nextHotEvict(f);
     memset(s_hotPrev, 0xFF, sizeof(s_hotPrev));
+}
+
+// The UI (menu, F5 browser) owns the heap while it is open: give the frames
+// back (the file browser PANICKED on the 11 KB a taken frame left in Atic Atac
+// Remake's game, hw 2026-10-19). nextHotTick re-takes them ~2 s after the
+// pool is empty, i.e. once the UI has gone and the heap is back.
+void MemESP::nextHotRelease() {
+    if (!nextHotIdx || !s_hotN) return;
+    nextHotFlush();
+    for (int f = 0; f < s_hotN; f++) { free(nextHotFrame[f]); nextHotFrame[f] = nullptr; }
+    s_hotN = 0;
+    s_hotWait = 100;
+    Debug::log("Next hot-page pool: frames released to the heap");
 }
 
 // Read a file into butter PSRAM through a small SRAM bounce: the SD driver

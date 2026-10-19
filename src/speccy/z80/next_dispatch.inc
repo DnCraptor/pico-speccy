@@ -48,7 +48,7 @@ case 0x2C: nx_p = &REG_L; goto nx_inc8;
 case 0x2D: nx_p = &REG_L; goto nx_dec8;
 case 0x2E: { REG_L = NextMemory::peek8_nx(nx_t, REG_PC); REG_PC++; } break;
 case 0x2F: { regA ^= 0xff; sz5h3pnFlags = (sz5h3pnFlags & FLAG_SZP_MASK) | HALFCARRY_MASK | (regA & FLAG_53_MASK) | ADDSUB_MASK; flagQ = true; } break;
-case 0x30: { int8_t offset = NextMemory::peek8_nx(nx_t, REG_PC); if (!carryFlag) { NextMemory::addressOnBus_nx(nx_t, REG_PC, 5); REG_PC += offset; REG_WZ = REG_PC + 1; } REG_PC++; } break;
+case 0x30: { int8_t offset = NextMemory::peek8_nx(nx_t, REG_PC); if (!carryFlag) { NextMemory::addressOnBus_nx(nx_t, REG_PC, 5); REG_PC += offset; REG_WZ = REG_PC + 1; REG_PC++; if (Z80Ops::isNext && offset < 0) nxIdleNote(); break; } REG_PC++; } break;
 case 0x31: { REG_SP = NextMemory::peek16_nx(nx_t, REG_PC); REG_PC = REG_PC + 2; } break;
 case 0x32: { REG_WZ = NextMemory::peek16_nx(nx_t, REG_PC); NextMemory::poke8_nx(nx_t, REG_WZ, regA); REG_WZ = (regA << 8) | ((REG_WZ + 1) & 0xff); REG_PC = REG_PC + 2; } break;
 case 0x33: { NextMemory::addressOnBusIR_nx(nx_t, 2); REG_SP++; } break;
@@ -56,7 +56,7 @@ case 0x34: { uint8_t work8 = NextMemory::peek8_nx(nx_t, REG_HL); inc8(work8); Ne
 case 0x35: { uint8_t work8 = NextMemory::peek8_nx(nx_t, REG_HL); dec8(work8); NextMemory::addressOnBus_nx(nx_t, REG_HL, 1); NextMemory::poke8_nx(nx_t, REG_HL, work8); } break;
 case 0x36: { NextMemory::poke8_nx(nx_t, REG_HL, NextMemory::peek8_nx(nx_t, REG_PC)); REG_PC++; } break;
 case 0x37: { uint8_t regQ = lastFlagQ ? sz5h3pnFlags : 0; carryFlag = true; sz5h3pnFlags = (sz5h3pnFlags & FLAG_SZP_MASK) | (((regQ ^ sz5h3pnFlags) | regA) & FLAG_53_MASK); flagQ = true; } break;
-case 0x38: { int8_t offset = NextMemory::peek8_nx(nx_t, REG_PC); if (carryFlag) { NextMemory::addressOnBus_nx(nx_t, REG_PC, 5); REG_PC += offset; REG_WZ = REG_PC + 1; } REG_PC++; } break;
+case 0x38: { int8_t offset = NextMemory::peek8_nx(nx_t, REG_PC); if (carryFlag) { NextMemory::addressOnBus_nx(nx_t, REG_PC, 5); REG_PC += offset; REG_WZ = REG_PC + 1; REG_PC++; if (Z80Ops::isNext && offset < 0) nxIdleNote(); break; } REG_PC++; } break;
 case 0x39: { NextMemory::addressOnBusIR_nx(nx_t, 7); add16(regHL, REG_SP); } break;
 case 0x3A: { REG_WZ = NextMemory::peek16_nx(nx_t, REG_PC); regA = NextMemory::peek8_nx(nx_t, REG_WZ); REG_WZ++; REG_PC = REG_PC + 2; } break;
 case 0x3B: { NextMemory::addressOnBusIR_nx(nx_t, 2); REG_SP--; } break;

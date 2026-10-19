@@ -11,6 +11,7 @@
 #include "OSDMain.h"
 #include "speccy/video/Video.h"
 #include "speccy/machines/Next/NextVideo.h"
+#include "speccy/core/MemESP.h"
 #include "speccy/z80/z80.h"
 #include "speccy/z80/z80operations.h"   // Z80Ops::isNext
 #include "app/Config.h"     // ui_vga_solid / ui_rounded — the menu-look preferences
@@ -239,7 +240,7 @@ void gfxBegin() {
     // The LIVE machine, not Config::arch: a machine switch writes A_NEXT before
     // its reboot and may show a message in between, while the .nxovl code is
     // not loaded (SIGBUS in c1Drain, Pentagon -> Next, hw 2026-10-14).
-    if (Z80Ops::isNext) NEXTVID::c1Drain();
+    if (Z80Ops::isNext) { NEXTVID::c1Drain(); MemESP::nextHotRelease(); }   // the UI needs the heap the pool took
     VIDEO::ftHold();          // ...or a VDAC2 frame / video (FT812, core1)
     VIDEO::blVmapSuspend();   // borderless: show what is drawn over the fb row for row
     gfxComputeSurface();

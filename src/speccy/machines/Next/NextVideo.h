@@ -228,18 +228,25 @@ private:
     // log position it was captured at, and the renderer applies the log up to
     // that position to ITS copy (SprRender) and re-resolves only the sprites
     // that changed (plus the relatives that follow them).
+public:                       // the type only: NextVideo.cpp's core0 copy names it
     struct SprRender {
         uint8_t attr[128][5];
         SprRes  res[128];
         uint8_t vis[128];    // visible sprite numbers, 0 -> 127
         uint8_t n;
         uint8_t dirty, lo, hi;   // resolve range [lo, hi] pending
+        volatile uint8_t applying;   // sprApplyTo is writing attr (core0's copy is taken from core1's)
+        uint8_t pad[3];
     };
+private:
     static SprRender* sprR;              // renderer side (own heap block, with sprLog)
     static uint32_t*  sprLog;            // [SPR_LOG] (sprite << 11) | (byte << 8) | value
     static void     sprPut(uint8_t s, uint8_t b, uint8_t v);   // core0
     static void     sprLogPut(uint32_t e);                       // core0: attr or (bit 31) pattern byte
-    static void     sprApply(uint32_t upto);                    // renderer
+    static void     sprApply(uint32_t upto);                    // renderer: this core's copy
+    static void     sprApplyTo(SprRender& R, volatile uint32_t& app, uint32_t upto);
+    static SprRender* sprCur();                                 // this core's render copy
+    static void     sprR0Sync();                                // core0's copy from the live attributes
     static void     resolveSprites();                           // renderer, the dirty range
 
     // copper state
