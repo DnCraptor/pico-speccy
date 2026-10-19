@@ -488,24 +488,32 @@ IRAM_ATTR void Z80DMA::collectParam(uint8_t data) {
     }
 }
 
-// WR3 (the block-length register) holds N-1 on BOTH DMA ports, so a block is
-// block_length + 1 bytes: that is the Z80 DMA's own convention and the Next's
-// zxnDMA keeps it. This used to depend on the port (#0B length+1, #6B only
-// `length`), which cost the last byte of every zxnDMA block — /!4TEST/DMA/'s
-// attribute demo programs 0x1F for a 32-byte attribute row through port #6B and
-// the rightmost cell of each row stayed at its cleared value (hw 2026-10-17).
+// The block-length convention depends on the CHIP, not on the port number:
+//  - every real Zilog Z80 DMA (MB-02+ on #0B, DATAGEAR on #6B) moves
+//    block_length + 1 bytes — the counter loads -1 (dma.vhd:664);
+//  - the Next's zxnDMA (port #6B on the Next) moves exactly block_length bytes,
+//    and only its #0B "Z80-DMA compatible" mode loads -1 (dma.vhd, zx_go
+//    pkg/next/dma: TestZxnModeStillTransfersLength).
+// 0b8a6766 made the Next's #6B length + 1 too, for /!4TEST/DMA/'s attribute
+// demo (0x1F for a 32-byte row through #6B) — that demo is written for a Zilog
+// card; on a real Next it loses the last column as well. It cost every zxnDMA
+// program one byte past each block (STNICCC span fills, NEXTEST patterns).
+static inline bool z80Mode() {
+    return Z80Ops::isNext ? Z80DMA::nextZ80Mode : true;
+}
+
 void Z80DMA::doLoad() {
     cur_port_a = port_a_addr;
     cur_port_b = port_b_addr;
-    nx_counter = 0xFFFF;   // dma.vhd: "z80 dma loads -1"
-    byte_counter = (uint32_t)block_length + 1;
+    nx_counter = z80Mode() ? 0xFFFF : 0;   // dma.vhd: "z80 dma loads -1"
+    byte_counter = (uint32_t)block_length + (z80Mode() ? 1 : 0);
     block_end = false;
 }
 
 void Z80DMA::doContinue() {
     // Reset byte counter but keep current working pointers
-    nx_counter = 0xFFFF;
-    byte_counter = (uint32_t)block_length + 1;
+    nx_counter = z80Mode() ? 0xFFFF : 0;
+    byte_counter = (uint32_t)block_length + (z80Mode() ? 1 : 0);
     block_end = false;
 }
 
@@ -629,7 +637,7 @@ __attribute__((noinline)) void Z80DMA::nxByteSlow(uint8_t ca, uint8_t cb) { nxBy
 void Z80DMA::nxReload() {
     cur_port_a = port_a_addr;
     cur_port_b = port_b_addr;
-    nx_counter = 0xFFFF;
+    nx_counter = z80Mode() ? 0xFFFF : 0;
 }
 
 // Does a memory write to this 8K page feed the picture? ULA screen / tilemap /
@@ -750,8 +758,8 @@ __attribute__((section(".nxdma_hot"), noinline)) bool Z80DMA::nxBatch(uint32_t s
     while (CPU::tstates + cyc < stop) {
         if (runs) {
             // Bytes left in the block, in the counter's own 16-bit arithmetic:
-            // the counter starts at 0xFFFF and the block is block_length + 1
-            // bytes (TX-1696 — a signed test here skipped its blocks whole,
+            // Zilog mode starts the counter at 0xFFFF (block_length + 1 bytes),
+            // zxn mode at 0 (block_length bytes) (TX-1696 — a signed test here skipped its blocks whole,
             // sprites came and went at random, hw 2026-10-15).
             const uint32_t rem = (uint16_t)(block_length - nx_counter);
             if (rem == 0) { done = true; break; }
@@ -809,7 +817,7 @@ void Z80DMA::nxRunSync() {
     const uint16_t dest_start = transfer_dir ? cur_port_b : cur_port_a;
     nxVideoDrain(dest_start, transfer_dir ? port_b_is_io : port_a_is_io,
                  transfer_dir ? port_b_inc : port_a_inc,
-                 (uint16_t)(block_length + 1));   // the block is length + 1
+                 (uint16_t)(block_length + (z80Mode() ? 1 : 0)));
     // A memory DMA into an attribute area: the per-scanline multicolour shadow
     // (NaPICu and the like), taken on the first such transfer of the session.
     if (!dma_attr_shadow && !(transfer_dir ? port_b_is_io : port_a_is_io) &&
