@@ -398,6 +398,13 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   (M1) в NextZXOS включён, её NMI-меню — Multiface: Alt+F10 на Next шлёт NMI Multiface, если не
   «только Drive» (NR 06 b4=1, b3=0 — личности с esxDOS), hw 2026-10-08. Карта: FW ищет `/machines/next/esxmmc.bin`, нужен `divmmc=1`; LFN Browser
   выходит сразу без `/bin/browse.cfg` (`.brwscfg` → Advanced → Auto detect device).
+  **LFN Browser v1.02 показывает один каталог «`TBUFILE <DIR>`» в корне — баг БРАУЗЕРА, не
+  DivSD (hw-confirmed 2026-10-20, патч работает).** Он считает корень = первый сектор данных
+  (кластер 2), а BPB карты владельца держит root cluster 798935 (корень перенесён
+  дефрагментатором); кластер 2 = файл TBBLUE, разобранный как каталог. esxDOS читает поле
+  BPB и потому в порядке. Патченный `BROWSE.BIN` + разбор — `debug/LFN-browser/`
+  (README там). Диагноз дал Ctrl+Alt+M: `#BF8E-#BFA6` = разобранный BPB, `#C000` = сектор.
+  Исходника браузера нет (bob_fossil публикует только плагины) — патч бинарный.
   Диагностика `[NMIT]` (NEXT_TRACE): после NMI 1500 событий в UART — map/unmap, `#E3`,
   RST 8 с кодом функции, сектора SD, AF/HL.
 - **VHDL-сверка 2026-10-08, первая партия исправлений** (`debug/DVp2-next-vhdlfix1-1.0.9.elf`,
