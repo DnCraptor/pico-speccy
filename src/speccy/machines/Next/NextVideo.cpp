@@ -528,8 +528,12 @@ static bool     s_pdRec = false;       // ScanlineWork is inside the line's copp
 // claim waits for the other core and blocks the next claim (nx_segRun) — far
 // cheaper than the old full drain on core0 (TX-1696: ~14 rows a frame, 10 ms
 // of core0 a frame waiting, hw 2026-10-13). Pool full = the old drain path.
-static constexpr unsigned NX_SEG_POOL = 256;      // deltas, power of two
-static constexpr unsigned NX_SEG_Q    = 32;       // posted segment rows in flight
+// Sized so that a whole ring of segment rows fits (2026-10-20: a scene with
+// ~71 copper rows a frame overflowed 32 records twice a frame, and each overflow
+// was a full drain, ~7 ms of core0). Pool start is 10 bits in nx_segOf (<< 6).
+static constexpr unsigned NX_SEG_POOL = 1024;     // deltas, power of two, <= 1024
+static constexpr unsigned NX_SEG_Q    = NEXT_C1_RING;   // posted segment rows in flight
+static_assert(NX_SEG_POOL <= 1024 && (NX_SEG_POOL & (NX_SEG_POOL - 1)) == 0, "nx_segOf packs start << 6");
 struct NxSegRec { uint32_t job, end; };
 static NxPalDelta* s_segPool = nullptr;           // [NX_SEG_POOL]  (queue heap block)
 static uint16_t*   nx_segOf  = nullptr;           // [NEXT_C1_RING]
@@ -1969,8 +1973,8 @@ void NEXTVID::Reset() {
         // palLog have always relied on: both cores see one coherent XIP cache,
         // so a state core0 wrote is visible to core1. Costs 9 216 B of SRAM
         // heap back; watch `c1=` / FPS and the `ring=` field of the NEXT line.
-        // + the copper segment rows: 256 x 8 B deltas, 32 x 8 B records,
-        // 320 x 2 B ring tags = 2 944 B.
+        // + the copper segment rows: 1024 x 8 B deltas, 320 x 8 B records,
+        // 320 x 2 B ring tags = 11 392 B (PSRAM).
         constexpr unsigned base = 4 * NEXT_C1_RING + sizeof(NextLineState) * NEXT_C1_STATES
                                 + 4 * NEXT_C1_STATES;
         constexpr unsigned segB = sizeof(NxPalDelta) * NX_SEG_POOL + sizeof(NxSegRec) * NX_SEG_Q
