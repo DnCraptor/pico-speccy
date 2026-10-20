@@ -16353,6 +16353,20 @@ was a per-frame line counter (where the wait began, where the scroll was written
 guest T spent in the token poll — a frame without its scroll write printed beside the SD
 figures.
 
+## Next: Layer 2 640x256x4 goes through the 640 pair frame — SymbOS ZNX 4.0 (2026-10-20, hw-confirmed DVp2 on `debug/DVp2-next-l2hi640-1.0.10`: owner "текст читаемый, картинка хорошая")
+
+SymbOS draws its desktop in Layer 2 640x256x4 (dump: NR 70=20, 69=80, 6B=00, 15=03,
+12=00, 14=E2), and the pair frame engaged only for the 80-column tilemap
+(`pairPoll`'s `want` = NR 6B C0), so each byte was shown as its left pixel at 320
+width: unreadable icon labels and taskbar. Now `want` also takes Layer 2 on with NR
+0x70 bit 5 (modes 2/3); `nxL2SlowRow(..., o2)` puts the high nibble into nxL and the
+low one into `nxL2nd` (a 4th per-core 768 B line: +768 B in the P80 block and in
+core0's helper block), each with its own transparency/priority, and RenderLayers
+merges the L2 [dx0, dx1) difference with the tilemap's and mixes the right pixels
+with `nxL = nxL2nd` (and `nxT = nxT2` only when the tilemap is also 80-column).
+The Layer 2 640 path is still the per-pixel slow row (flash) — FPS was not measured.
+`.nxovl` 51 432 of 51 456. Owed: an L2 640 title with sprites/tilemap over it, X scroll.
+
 ## Next 640 pair frame: a two-colour screen lost half its glyph pixels (2026-10-19, hw-confirmed DVp2: ZXZVM readable, NEXTEST unchanged)
 
 ZXZVM v1.17 (Garry Lancaster's Next module, 80-column 4bpp tilemap with attributes,

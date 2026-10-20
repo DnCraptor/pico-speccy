@@ -85,7 +85,9 @@ uint8_t* NEXTVID::hiresRow = nullptr;
 // and kept in VIDEO::profi_palette_live. Everything else of the frame (Layer 2
 // 320, ULA, sprites, border) is 320-wide and comes out as solid pairs.
 // One block, allocated when the mode first comes on, SRAM only (read per pixel):
-//   p80Line2 384 | p80Map16 256 | p80Solid 256 | nxT2 384x2 | nxUs 384x2 | p80Hist 256x4
+//   p80Line2 384 | p80Map16 256 | p80Solid 256 | nxT2 384x2 | nxUs 384x2 | nxL2nd 384x2 | p80Hist 256x4
+// Layer 2 640x256x4bpp goes the same way (SymbOS ZNX): the left nibble of a
+// byte into nxL, the right one into nxL2nd, and the row is mixed twice.
 bool     NEXTVID::p80Live = false;
 uint8_t* NEXTVID::l2Band = nullptr;
 static uint8_t*  p80Blk   = nullptr;
@@ -97,10 +99,11 @@ static uint8_t*  p80Map16 = nullptr;   // palette index -> pair colour 0..15
 static uint8_t*  p80Solid = nullptr;   // palette index -> pair slot (c, c)
 static uint16_t* nxT2b    = nullptr;
 static uint16_t* nxUsb    = nullptr;   // nxU before the first mix (nxUlaMerge works in place)
+static uint16_t* nxL2ndb  = nullptr;   // Layer 2 640x256: the right pixel of each byte
 static uint32_t* p80Hist  = nullptr;   // palette index -> pixels this frame (renderers write, core0 reads)
 static uint8_t   p80Cur[16];           // palette index shown in each pair colour (0xFF = unused)
 static void nxCtxRefresh();
-static constexpr unsigned P80_BLK = 384 + 256 + 256 + 384 * 2 * 2 + 256 * 4;
+static constexpr unsigned P80_BLK = 384 + 256 + 256 + 384 * 2 * 3 + 256 * 4;
 
 static inline bool nxIsSram(const void* p) {
     const uintptr_t a = (uintptr_t)p;
@@ -124,7 +127,8 @@ static bool p80Alloc() {
     p80Solid = p80Map16 + 256;
     nxT2b    = (uint16_t*)(p80Solid + 256);
     nxUsb    = nxT2b + 384;
-    p80Hist  = (uint32_t*)(nxUsb + 384);
+    nxL2ndb  = nxUsb + 384;
+    p80Hist  = (uint32_t*)(nxL2ndb + 384);
     nxCtxRefresh();
     return true;
 }
@@ -251,6 +255,7 @@ struct NxCtx {
     // Per-layer RGB line buffers of the compositor (RenderLayers), [384] each.
     uint16_t *u, *t, *l, *s;
     uint16_t *t2, *us;         // 640 pair frame: the tilemap's odd phase, nxU before the first mix
+    uint16_t *l2nd;            // 640 pair frame: Layer 2 640x256's right pixels
     uint8_t  *line, *line2;    // lineBuf (left pixels), p80Line2 (right pixels)
     NxBand*  band;
     int      dx0, dx1;         // this row's two phases differ in [dx0, dx1) (line2 valid there)
@@ -278,6 +283,7 @@ static inline __attribute__((always_inline, const)) NxCtx* nxCtx() {
 #define nxS       (nxCtx()->s)
 #define nxT2      (nxCtx()->t2)
 #define nxUs      (nxCtx()->us)
+#define nxL2nd    (nxCtx()->l2nd)
 #define p80Line2  (nxCtx()->line2)
 #define s_rowDiff (nxCtx()->rowDiff)
 #define s_dx0     (nxCtx()->dx0)
@@ -291,7 +297,7 @@ static inline __attribute__((always_inline, const)) NxCtx* nxCtx() {
 #endif
 static void nxCtxShared(NxCtx& c) {
     c.u = nxUb; c.t = nxUb ? nxUb + 384 : nullptr; c.l = nxUb ? nxUb + 768 : nullptr; c.s = nxUb ? nxUb + 1152 : nullptr;
-    c.t2 = nxT2b; c.us = nxUsb; c.line = NEXTVID::lineBufShared(); c.line2 = p80Line2b;
+    c.t2 = nxT2b; c.us = nxUsb; c.l2nd = nxL2ndb; c.line = NEXTVID::lineBufShared(); c.line2 = p80Line2b;
     c.band = &s_band[0];
 }
 static uint8_t* s_c0Blk = nullptr;     // core0's own row scratch (nxHelp), or nullptr
@@ -676,10 +682,10 @@ __attribute__((noinline)) bool NEXTVID::c0Help() {
 }
 
 // core0's own row scratch: lineBuf 384 | 4 layer lines 4 x 768 | nxT2 768 |
-// nxUs 768 | p80Line2 384, and the Layer 2 band (2560) as a SECOND block: one
+// nxUs 768 | nxL2nd 768 | p80Line2 384, and the Layer 2 band (2560) as a SECOND block: one
 // 7.9 KB piece was often not there on a fragmented heap (trace builds, NEXTEST:
 // "no SRAM" and core1 rendered alone). SRAM or nothing (read per pixel).
-static constexpr unsigned NX_C0_LINES = 384 + 4 * 768 + 768 + 768 + 384;
+static constexpr unsigned NX_C0_LINES = 384 + 4 * 768 + 768 + 768 + 768 + 384;
 static constexpr unsigned NX_C0_BAND  = NX_L2_BAND;
 static constexpr unsigned NX_C0_SPR   = (sizeof(NEXTVID::SprRender) + 3) & ~3u;   // core0's sprite state copy
 static uint8_t* s_c0Band = nullptr;
@@ -712,7 +718,8 @@ static void nxHelperAlloc() {
     c.t = c.u + 384; c.l = c.t + 384; c.s = c.l + 384;
     c.t2    = c.s + 384;
     c.us    = c.t2 + 384;
-    c.line2 = (uint8_t*)(c.us + 384);
+    c.l2nd  = c.us + 384;
+    c.line2 = (uint8_t*)(c.l2nd + 384);
     s_band[1].buf = bb;
     s_band[1].key = 0xFFFFFFFFu; s_band[1].row = -1000; s_band[1].lastRow = 0;
     s_band[1].lutKey = 0xFFFFFFFFu;
@@ -1441,7 +1448,9 @@ void NEXTVID::pairPoll() {
         l2Band = b;
         Debug::log("[NXV] Layer 2 column band %s", b ? "in SRAM" : "not allocated (no SRAM heap)");
     }
-    const bool want = (r[0x6B] & 0xC0) == 0xC0 && !VIDEO::timex_hires_live && !VIDEO::timex_hires_pending_on;
+    // 80-column tilemap, or Layer 2 640x256x4bpp (NR 0x70 bit 5, modes 2/3; SymbOS ZNX)
+    const bool l2Hi = ((NextReg::port123B & 0x02) || (r[0x69] & 0x80)) && (r[0x70] & 0x20);
+    const bool want = ((r[0x6B] & 0xC0) == 0xC0 || l2Hi) && !VIDEO::timex_hires_live && !VIDEO::timex_hires_pending_on;
     static uint8_t s_on = 0, s_off = 0;
     static bool s_refused = false;
     if (!p80Live) {
@@ -3573,7 +3582,23 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
     NX_LT_END(1);
     nxFillTr(nxL, xres);
     nxRowL2 = false;
+    // 640-wide pair frame, Layer 2 640x256x4bpp: the right pixels into nxL2nd
+    const bool l2Pair = l2En && LS->hires == 2 && (LS->r70 & 0x20);
+    if (l2Pair) nxFillTr(nxL2nd, xres);
     if (l2En) RenderL2Line(row);
+    if (l2Pair && nxRowL2) {
+        const uint32_t* a = (const uint32_t*)nxL; const uint32_t* b = (const uint32_t*)nxL2nd;
+        const int n = (xres + 1) >> 1;
+        int k0 = 0, k1 = n;
+        while (k0 < n && a[k0] == b[k0]) k0++;
+        if (k0 < n) {
+            while (k1 > k0 && a[k1 - 1] == b[k1 - 1]) k1--;
+            int e0 = k0 * 2, e1 = k1 * 2;
+            if (e1 > xres) e1 = xres;
+            if (!p2) { dx0 = e0; dx1 = e1; p2 = true; }
+            else { if (e0 < dx0) dx0 = e0; if (e1 > dx1) dx1 = e1; }
+        }
+    }
     NX_LT_END(2);
     nxFillTr(nxS, xres);
     nxRowSpr = false;
@@ -3622,7 +3647,7 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
             for (int k = dx0 >> 1; k < (dx1 + 1) >> 1; k++) b[k] = a[k];
         }
         uint16_t* const su = nxU; uint16_t* const st = nxT; uint16_t* const sl = nxL; uint16_t* const ss = nxS;
-        nxU = su + dx0; nxT = nxT2 + dx0; nxL = sl + dx0; nxS = ss + dx0;
+        nxU = su + dx0; nxT = (tmPair ? nxT2 : st) + dx0; nxL = (l2Pair ? nxL2nd : sl) + dx0; nxS = ss + dx0;
         m.fb = p80Line2 + dx0;
         if (order < 6) nxMixOrder(m, dx1 - dx0, order);
         else nxMixBlend(m, dx1 - dx0, order == 7);
@@ -3638,7 +3663,8 @@ IRAM_ATTR void NEXTVID::RenderLayers(uint8_t* fb, int row) {
 // row of the band or nullptr.
 __attribute__((noinline)) static bool nxL2SlowRow(uint16_t* o, const uint8_t* brow, const uint16_t* raw,
                                                   int t0, int t1, int scrollX, uint8_t sy, uint16_t bank,
-                                                  uint8_t palOfs, uint8_t transp, bool hires) {
+                                                  uint8_t palOfs, uint8_t transp, bool hires,
+                                                  uint16_t* o2 = nullptr) {
     bool any = false;
     uint16_t curPage = 0xFFFF;
     const uint8_t* pgp = nullptr;
@@ -3655,7 +3681,14 @@ __attribute__((noinline)) static bool nxL2SlowRow(uint16_t* o, const uint8_t* br
             b = pgp[off & 0x1FFF];
         }
         uint16_t e, v;
-        if (!hires) {
+        if (o2) {
+            // 640-wide pair frame: the left pixel here, the right one in o2
+            e = raw[(uint8_t)(palOfs | (b & 0x0F))];
+            v = e & 0x1FF;
+            if ((v >> 1) != transp) { o2[tx] = (uint16_t)(v | ((e & 0x8000) ? NX_PRIO : 0)); any = true; }
+            e = raw[(uint8_t)(palOfs | (b >> 4))];
+            v = e & 0x1FF;
+        } else if (!hires) {
             e = raw[(uint8_t)(b + palOfs)];
             v = e & 0x1FF;
         } else {
@@ -3941,7 +3974,8 @@ IRAM_ATTR __attribute__((optimize("no-peel-loops", "no-unswitch-loops"))) void N
             any = nxL2SpanOpaque(acc);
         } else {
             any = nxL2SlowRow(out + xOrig, band ? band + (sy & 7) * 320 : nullptr, raw, t0, t1, scrollX,
-                              sy, bank, palOfs, transp, hires);
+                              sy, bank, palOfs, transp, hires,
+                              (hires && LS->hires == 2) ? nxL2nd + xOrig : nullptr);
         }
         if (any) nxRowL2 = true;
     }
