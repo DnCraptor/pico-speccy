@@ -2270,6 +2270,7 @@ void ESPectrum::reset(uint8_t romInUse) {
   if (Tape::tape.obj.fs != NULL) {
     f_close(&Tape::tape);
   }
+  Tape::CSW_Close();   // a .csw decoder (~45 KB) goes with the file; LoadRemembered re-opens it
   Tape::tapeStatus = TAPE_STOPPED;
   Tape::tapePhase = TAPE_PHASE_STOPPED;
   Tape::SaveStatus = SAVE_STOPPED;

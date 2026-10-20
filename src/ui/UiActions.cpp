@@ -983,7 +983,8 @@ void act_tapePlayStop() {
 // blocks, so rows are fetched per redraw, never held in RAM). Enter repositions
 // the tape to the chosen block, exactly as the classic menuTape did.
 static void tapeRowCb(int idx, char* out, size_t n) {
-    string row = Tape::tapeBlockReadData(idx);
+    string row = Tape::tapeFileType == TAPE_FTYPE_CSW ? Tape::cswBlockReadData()
+                                                      : Tape::tapeBlockReadData(idx);
     while (!row.empty() && (row.back() == '\n' || row.back() == '\r')) row.pop_back();
     snprintf(out, n, "%s", row.c_str());
 }
@@ -1009,6 +1010,13 @@ void act_tapeBrowser() {
         Tape::Eject();
         Config::save();                         // or the ejected tape comes back at boot
         uiToast("Tape ejected", false, 900);
+        return;
+    }
+    if (Tape::tapeFileType == TAPE_FTYPE_CSW) {
+        // One pulse stream, one row: Enter rewinds it. The decoder keeps its own
+        // read position, so the f_lseek restore above does not apply.
+        Tape::CSW_RewindTo0();
+        uiToast("Tape rewound", false, 900);
         return;
     }
     if (Tape::tapeFileType == TAPE_FTYPE_TAP) Tape::CalcTapBlockPos(sel);

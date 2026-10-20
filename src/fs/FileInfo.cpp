@@ -1,3 +1,4 @@
+#include "speccy/devices/tape/CswFormat.h"
 #include <stdio.h>
 #include "app/TryAlloc.h"
 #include <string.h>
@@ -366,6 +367,36 @@ static void viewPZX(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
         blockNum++;
     }
 
+}
+
+// ---- CSW ----
+static void viewCSW(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
+    uint8_t hb[0x34];
+    UINT br = 0;
+    f_lseek(f, 0);
+    f_read(f, hb, sizeof(hb), &br);
+    csw::Header h;
+    if (!csw::parseHeader(hb, br, fileSize, h)) {
+        info += "Not a playable CSW file\n"; lines++;
+        return;
+    }
+    char line[64];
+    snprintf(line, sizeof(line), "CSW v%u.%02u, %s", h.major, h.minor,
+             h.compression == 2 ? "Z-RLE (deflate)" : "RLE");
+    info += line; info += "\n"; lines++;
+    snprintf(line, sizeof(line), "Sample rate  %u Hz", (unsigned)h.rate);
+    info += line; info += "\n"; lines++;
+    snprintf(line, sizeof(line), "Polarity     %s", h.polarity ? "high" : "low");
+    info += line; info += "\n"; lines++;
+    if (h.pulses) {
+        snprintf(line, sizeof(line), "Pulses       %u", (unsigned)h.pulses);
+        info += line; info += "\n"; lines++;
+    }
+    if (h.app[0]) {
+        snprintf(line, sizeof(line), "Made by      %s", h.app);
+        info += line; info += "\n"; lines++;
+    }
+    info += "Real-time loading only (no fast load)\n"; lines++;
 }
 
 // ---- TRD ----
@@ -1141,6 +1172,7 @@ void FileInfo::viewInfo(const string& path) {
     if (ext == "tap") viewTAP(&f, fileSize, info, lines);
     else if (ext == "tzx") viewTZX(&f, fileSize, info, lines);
     else if (ext == "pzx") viewPZX(&f, fileSize, info, lines);
+    else if (ext == "csw") viewCSW(&f, fileSize, info, lines);
     else if (ext == "trd") viewTRD(&f, fileSize, info, lines);
     else if (ext == "scl") viewSCL(&f, fileSize, info, lines);
     else if (ext == "sna") viewSNA(&f, fileSize, info, lines);

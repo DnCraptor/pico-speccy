@@ -237,6 +237,7 @@ static bool extMatches(const string& name) {
 static const char* typeLabel(const string& lcext) {
     if (lcext == "tap" || lcext == "tzx" || lcext == "pzx") return "Tape image";
     if (lcext == "wav" || lcext == "mp3")                   return "Audio tape";
+    if (lcext == "csw")                                     return "CSW tape";
     if (lcext == "sna" || lcext == "z80" || lcext == "p")   return "Snapshot";
     if (lcext == "pss")                                     return "pico-speccy snapshot";
     if (lcext == "spg")                                     return "TS-Conf program";
@@ -279,7 +280,7 @@ static bool viewableExt(const string& lcext) {
 // text when its head looks like text (no NUL, almost all printable / CP866 /
 // whitespace) — READ.ME, FILE_ID, a readme without an extension.
 static bool infoKnownExt(const string& e) {
-    static const char* const kExt[] = { "tap", "tzx", "pzx", "trd", "scl", "sna", "z80",
+    static const char* const kExt[] = { "tap", "tzx", "pzx", "csw", "trd", "scl", "sna", "z80",
         "szx", "spg", "pss", "rzx", "fdi", "dsk", "udi", "hdf", "pro", "mbd", "td0", "hdd",
         "img", "vhd", "mmc", "zip" };
     for (const char* k : kExt) if (e == k) return true;

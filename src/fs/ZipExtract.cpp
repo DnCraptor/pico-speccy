@@ -1019,7 +1019,7 @@ int ZipExtract::extractAll(const string& zipPath, const string& destDir, bool ke
 void ZipExtract::cleanup() {
     f_unlink(TEMP_FILE);   // extension-less staging name; never mounted
     const char* exts[] = {
-        ".sna", ".z80", ".p", ".tap", ".tzx", ".pzx", ".wav", ".mp3",
+        ".sna", ".z80", ".p", ".tap", ".tzx", ".pzx", ".csw", ".wav", ".mp3",
         ".trd", ".scl", ".udi", ".fdi", ".td0", ".mbd", ".pro", ".dsk",
         ".mmc", ".hdf", ".hdd", ".vhd", ".iso", ".rom", ".bin", NULL
     };

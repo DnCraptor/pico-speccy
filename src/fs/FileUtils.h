@@ -177,6 +177,7 @@ public:
     static bool hasTZXextension(const string& filename);
     static bool hasWAVextension(const string& filename);
     static bool hasPZXextension(const string& filename);
+    static bool hasCSWextension(const string& filename);
     static bool hasMP3extension(const string& filename);
     static bool hasZIPextension(const string& filename);
 

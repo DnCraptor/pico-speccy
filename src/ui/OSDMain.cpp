@@ -2938,7 +2938,7 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
 #endif
                     goto f5_retry;
                 }
-                if (ext == "tap" || ext == "tzx" || ext == "pzx" || ext == "wav" || ext == "mp3") {
+                if (ext == "tap" || ext == "tzx" || ext == "pzx" || ext == "csw" || ext == "wav" || ext == "mp3") {
                     // Tape — sync TAP_Path: /tmp/ for ZIP, ALL_Path for normal files
                     FileUtils::TAP_Path = fromZip ? "/tmp/" : FileUtils::ALL_Path;
                     Config::save();

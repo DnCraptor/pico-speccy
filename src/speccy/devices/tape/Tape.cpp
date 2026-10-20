@@ -412,6 +412,7 @@ void Tape::LoadTape(const string& mFile_) {
     // open so the new tape always loads from the folder the caller selected.
     const string savedTapPath = FileUtils::TAP_Path;
     StopRealPlayer();
+    CSW_Close();
     if (FileUtils::hasMP3extension(mFile)) {
         string keySel = mFile.substr(0,1);
         mFile.erase(0, 1);
@@ -525,6 +526,48 @@ void Tape::LoadTape(const string& mFile_) {
         Tape::Stop();
         Tape::PZX_Open(mFile);
         ESPectrum::TapeNameScroller = 0;
+    } else if (FileUtils::hasCSWextension(mFile)) {
+        // CSW: pulses only, so no fast load. "R" still types LOAD "" through the
+        // loader snapshot where one exists, and then the tape has to play — the
+        // in-ROM trap that makes TAP/TZX/PZX work with the tape stopped never fires
+        // for a CSW (Z80_JLS gates it on the block formats).
+        string keySel = mFile.substr(0,1);
+        mFile.erase(0, 1);
+        bool autoRun = false;
+        if ((keySel == "R") && Tape::autoRunAvailable()) {
+                OSD::notify(OSD_TAPE_FLASHLOAD, LEVEL_INFO, 700);
+                uint8_t OSDprev = VIDEO::OSD;
+                if (Config::isTc2068())
+                    FileZ80::loaderTc2068();
+                else if (Z80Ops::is48)
+                    FileZ80::loader48();
+                else
+                    FileZ80::loader128();
+                MemESP::writebyte(0x5C78,rand() % 256);
+                MemESP::writebyte(0x5C79,rand() % 256);
+
+                if (Config::ram_file != NO_RAM_FILE) {
+                    Config::ram_file = NO_RAM_FILE;
+                }
+                Config::last_ram_file = NO_RAM_FILE;
+
+                if (OSDprev) {
+                    VIDEO::OSD = OSDprev;
+                    VIDEO::Draw_OSD43 = VIDEO::BottomBorder_OSD;
+                    ESPectrum::TapeNameScroller = 0;
+                }
+                autoRun = true;
+        }
+        FileUtils::TAP_Path = savedTapPath; // undo any LoadRemembered() clobber from flashload reset
+        Tape::Stop();
+        Tape::CSW_Open(mFile);
+        ESPectrum::TapeNameScroller = 0;
+        // Play now only when the loader snapshot has typed LOAD "" already. Otherwise
+        // the tape stays STOPPED until a loader polls the ear (TapePortRead's
+        // auto-start): a CSW resumes where it stopped, so a tape spooling while the
+        // user is still in a menu (NextZXOS Tape Loader) would be past its header.
+        if (keySel == "R" && autoRun && Tape::tapeFileType == TAPE_FTYPE_CSW)
+            Tape::Play();
     }
     else {
         OSD::osdCenteredMsg(OSD_TAPE_LOAD_ERR, LEVEL_WARN);
@@ -544,7 +587,8 @@ void Tape::LoadTape(const string& mFile_) {
     const bool runKey = !mFile_.empty() && mFile_[0] == 'R';
     const bool playFallback = runKey && Config::tape_autostart &&
         !Tape::flashloadAvailable() && Tape::tapeStatus == TAPE_STOPPED &&
-        Tape::tapeFileType != TAPE_FTYPE_EMPTY && Tape::tapeFileName != "none";
+        Tape::tapeFileType != TAPE_FTYPE_EMPTY && Tape::tapeFileType != TAPE_FTYPE_CSW &&
+        Tape::tapeFileName != "none";   // CSW: started by its own branch / the auto-start
 #if TIMEX_PORT_TRACE
     // "the tape does nothing" has four possible causes and they are indistinguishable
     // from the screen: the caller asked for L not R, auto-start is off, flashload's
@@ -569,6 +613,7 @@ void Tape::LoadTape(const string& mFile_) {
 }
 
 void Tape::Init() {
+    CSW_Close();
     f_close(&tape);
     tapeFileType = TAPE_FTYPE_EMPTY;
 }
@@ -586,6 +631,7 @@ void Tape::Eject() {
     StopRealPlayer();
     FreeSymDefTable();
     if (cswBlock.obj.fs) f_close(&cswBlock);
+    CSW_Close();
     f_close(&tape);
     tapeFileType = TAPE_FTYPE_EMPTY;
     tapeFileName = "none";
@@ -602,7 +648,7 @@ void Tape::Eject() {
 
 // Re-mount the tape remembered in Config::tape_file, so a tape survives an F11
 // reset / power-cycle the same way a mounted TRD disk does (ESPectrum::reset()
-// otherwise wipes Tape::tapeFileName). Only TAP/TZX/PZX are remembered. Loads
+// otherwise wipes Tape::tapeFileName). Only TAP/TZX/PZX/CSW are remembered. Loads
 // with a non-"R" key so flashload never fires here (that would re-run the loader
 // and trash the freshly-reset machine state). Never auto-plays: auto-start applies
 // only to a fresh load through the file manager, not to a reset/boot re-mount —
@@ -615,7 +661,8 @@ void Tape::LoadRemembered() {
     if (full.empty() || full == "none") return;
     if (!FileUtils::hasTAPextension(full) &&
         !FileUtils::hasTZXextension(full) &&
-        !FileUtils::hasPZXextension(full)) return;
+        !FileUtils::hasPZXextension(full) &&
+        !FileUtils::hasCSWextension(full)) return;
     size_t slash = full.rfind('/');
     if (slash == string::npos) return;
     // A remembered "USB:/..." tape must wait for the stick to enumerate (boot
@@ -1238,6 +1285,16 @@ void Tape::Play() {
     if (VIDEO::OSD) VIDEO::OSD = 1;
     pzxFlashCont = false;
 
+    if (tapeFileType == TAPE_FTYPE_CSW) {
+        // One pulse stream: resume where Stop() left it (rewinds after the end).
+        if (!CSW_Play()) { Stop(); return; }
+        GDBEnd = false;
+        Tape::tapeStatus = TAPE_LOADING;
+        tapeStart = CPU::global_tstates + CPU::tstates;
+        wearReset();
+        return;
+    }
+
     // Prepare current block to play
     switch(tapeFileType) {
         case TAPE_FTYPE_TAP:
@@ -1524,6 +1581,9 @@ IRAM_ATTR void Tape::Read() {
         do {
             tapeCurrent -= tapeNext;
             switch (tapePhase) {
+            case TAPE_PHASE_CSWF:
+                CSW_Step();          // flash: one call per pulse
+                break;
             case TAPE_PHASE_CSW:
                 tapeEarBit ^= 1;
                 if (CSW_CompressionType == 1) { // RLE
@@ -2987,6 +3047,12 @@ bool Tape::TapePortRead() {
             } else { loopPC = pc; loopCount = 1; }
             return false;
         }
+        // A CSW is one "block" (number 0), and block 0 of a TAP/TZX is normally
+        // started by the fast load or the user. A CSW has no fast load, so the
+        // ROM / RAM loader polling the ear is what starts it — e.g. NextZXOS'
+        // Tape Loader resets into its 128K personality and then waits in
+        // LD-EDGE with the tape stopped. Respects the Auto-start setting.
+        const bool cswAuto = tapeFileType == TAPE_FTYPE_CSW && Config::tape_autostart;
         if (pc == loopPC) {
             if (++loopCount > 200) {
                 loopCount = 0;
@@ -3003,13 +3069,13 @@ bool Tape::TapePortRead() {
                     tapeAutoPlay = true;
                     Play();
                     Read();
-                } else if (tapeCurBlock > 0 && (pc >= 0x05E3 && pc <= 0x05F5)) {
+                } else if ((tapeCurBlock > 0 || cswAuto) && (pc >= 0x05E3 && pc <= 0x05F5)) {
                     // ROM LD-EDGE area — custom loaders call CALL 0x05E7
                     // for edge detection (e.g. Hollywood Poker).
                     tapeAutoPlay = true;
                     Play();
                     Read();
-                } else if (tapeCurBlock > 0 && isTapeEdgePoll(pc)) {
+                } else if ((tapeCurBlock > 0 || cswAuto) && isTapeEdgePoll(pc)) {
                     // Generic auto-start for RAM-based custom tape loaders.
                     // Only triggers on IN A,(n) (0xDB) followed by an edge test —
                     // IN r,(C) (0xED prefix) and keyboard scans (XOR/CPL/AND 0x1F)

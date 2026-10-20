@@ -16473,3 +16473,30 @@ hits served from retired windows / windows held. Host model (session scratch,
 Also noted, NOT changed: DeepSeek #03 raised the SD SCK target to 25.2 MHz, so 504
 MHz runs the card at 25.2 (idiv 5), 0.8% over the SD default-speed limit — if a
 card misbehaves only at 504, that is the first suspect (target 25.0 -> 21 MHz).
+
+## Standalone .csw tapes (2026-10-20, hw-confirmed DVp2 on `debug/DVp2-csw2-1.0.10`: owner "работает", incl. Next Tape Loader -> 128K; not itemised)
+
+`TAPE_FTYPE_CSW` (6), phase `TAPE_PHASE_CSWF` (19), `src/speccy/devices/tape/Tape_CSW.cpp` +
+the firmware-free `CswFormat.h` (header parser for v1.01 / v2.0, RLE and Z-RLE pulse
+decoder, Q16 samples->T with the fraction carried: 44100 Hz is 79.37 T, not 79). Z-RLE
+inflates ON THE FLY through tinfl: one `Buffer::palloc(NEED_POINTER|PREFER_PSRAM)` block
+(~43 KB: tinfl state + 32 KB window) held while the tape is mounted, freed by
+`CSW_Close()` (LoadTape, Eject, Init, ESPectrum::reset). The TZX 0x18 block keeps its
+old inflate-to-/tmp path, untouched. One pulse stream, one "block": `Tape::Read` calls
+the flash `CSW_Step()` per pulse; Stop keeps the position, Play resumes (rewinds after
+the end), Enter in the tape browser rewinds (`CSW_RewindTo0`). No fast load (no bytes
+in a CSW — the ROM trap and turbo flash-loaders stay gated on TAP/TZX/PZX); "R" still
+types LOAD "" through the loader snapshot and then presses Play. Without the loader
+snapshot (Next, ATM) the tape is NOT played at mount: TapePortRead's auto-start
+(ROM LD-EDGE 05E3-05F5 or a RAM edge poll, 200 reads at one PC) starts it, which
+for CSW also fires at "block 0" (`cswAuto`, gated on Config::tape_autostart). Found on
+the Next (hw 2026-10-20): Tape Loader -> 128K resets the personality, the tape comes
+back stopped, and the block-0 exclusion left LD-EDGE waiting for ever; a mount-time
+Play would also spool the CSW past its header while the user is in the menu (a CSW
+resumes where it stopped). Tape wear applies.
+Not resumable in .pss. F1 Info shows the header. Host test `tools/csw_test.cpp` (recipe
+in its header; `-DMINIZ_NO_ZLIB_COMPATIBLE_NAMES` because it uses the host zlib to
+build Z-RLE streams) — three mutations fail it. Static RAM +4 B. Test ELF
+`debug/DVp2-csw-1.0.10.elf`. Hw owed: a v1 RLE and a v2 Z-RLE file from WoS loading in
+real time, Stop/Play mid-tape, F11 with a CSW mounted, a no-PSRAM board (decoder on the
+heap, or "Not enough memory for CSW").

@@ -50,6 +50,7 @@ using namespace std;
 #define TAPE_FTYPE_WAV 3
 #define TAPE_FTYPE_MP3 4
 #define TAPE_FTYPE_PZX 5
+#define TAPE_FTYPE_CSW 6  // standalone .csw (Tape_CSW.cpp)
 #define PZX_MAX_PULSES 16  // max pulses per symbol in PZX DATA block
 
 // Tape status definitions
@@ -83,6 +84,7 @@ using namespace std;
 #define TAPE_PHASE_END 16
 #define TAPE_PHASE_PZX_PULS 17
 #define TAPE_PHASE_PZX_DATA 18
+#define TAPE_PHASE_CSWF 19     // standalone .csw pulse stream
 
 // Tape sync phases lenght in microseconds
 #define TAPE_SYNC_LEN 2168 // 620 microseconds for 2168 tStates (48K)
@@ -270,6 +272,11 @@ public:
     static string tapeBlockReadData(int Blocknum);
     static string tzxBlockReadData(int Blocknum);
     static string pzxBlockReadData(int Blocknum);
+    // Standalone .csw: one row for the tape browser, rewind to the first pulse,
+    // and drop the decoder (LoadTape / Eject / Init).
+    static string cswBlockReadData();
+    static void CSW_RewindTo0();
+    static void CSW_Close();
     static bool pzxFlashCont;         // FlashLoad partial -> real-mode continuation pending
 
     // .pss (PSTP block): where the tape is and whether it plays. A TAP/TZX/PZX
@@ -301,6 +308,11 @@ private:
     static void PZX_BlockLen(uint32_t &tag, uint32_t &size);
 
     static int inflateCSW(int blocknumber, long startPos, long data_length);
+
+    static void CSW_Open(const string& name);
+    static bool CSW_Play();
+    static void CSW_Step();
+    static void CSW_GetBlock();
 
     // Tape timing values
     static uint16_t tapeSyncLen;
