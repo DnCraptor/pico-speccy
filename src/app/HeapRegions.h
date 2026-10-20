@@ -74,6 +74,16 @@ static inline void* hr_sbrk(HeapRegions* h, char* base, long incr) {
         return (void*)prev;
     }
     if (incr <= 0) return (void*)-1;
+    // A positive request under one page is never a real extension: after the
+    // first call dlmalloc rounds every sbrk_size up to a page, and the only
+    // sub-page MORECORE it makes is the alignment "correction" that FOLLOWS a
+    // foreign sbrk (malloc_extend_top: `correction &= pagesz - 1`), assumed to
+    // be contiguous with the brk it just got. Jumping for it put top_size =
+    // new_brk - brk + correction across the resident window between the two
+    // regions, and the next mallocs were carved out of the Z80 DMA code
+    // (Pentagon + DMA, SIGBUS in Z80DMA::collectParam, 2026-10-20). Refusing it
+    // is the path dlmalloc handles: correction_failed, top stays sbrk_size.
+    if ((size_t)incr < 4096u) return (void*)-1;
     for (unsigned r = h->cur + 1; r < h->n; r++) {
         if ((size_t)(h->reg[r].hi - h->reg[r].lo) < (size_t)incr) continue;
         h->cur = r;

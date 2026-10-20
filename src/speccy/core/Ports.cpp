@@ -1111,6 +1111,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
        ((address & 0xFF) == 0x0B && NextReg::portOn(NextReg::PE_DMA0B)))) {
     LED::touchR(LED::DMA);
     ioContentionLate(MemESP::ramContended[rambank]);
+    Z80DMA::nextZ80Mode = ((address & 0xFF) == 0x0B);   // a read sets the latch too (zxnext.vhd 1816)
     const uint8_t v = Z80DMA::readPort();
     if (Z80DMA::nxPending) NextPorts::dmaPollSkip();   // the poll loop itself: skip to the next byte
     return v;
@@ -1461,6 +1462,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
                             ((address & 0xFF) == 0x0B && NextReg::portOn(NextReg::PE_DMA0B))))) {
       LED::touchR(LED::DMA);
       ioContentionLate(MemESP::ramContended[rambank]);
+      Z80DMA::nextZ80Mode = ((address & 0xFF) == 0x0B);   // a read sets the latch too (zxnext.vhd 1816)
       return Z80DMA::readPort();
     }
     // The default port value is 0xFF.
@@ -3509,7 +3511,7 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     if ((Config::dma_mode && (a8 == 0x0B || a8 == 0x6B)) ||
         (Z80Ops::isNext && ((a8 == 0x6B && NextReg::portOn(NextReg::PE_DMA6B)) ||
                             (a8 == 0x0B && NextReg::portOn(NextReg::PE_DMA0B))))) {
-      if (Z80Ops::isNext) Z80DMA::nextZ80Mode = (a8 == 0x0B);   // TX-1696 uploads its patterns via #0B
+      Z80DMA::nextZ80Mode = (a8 == 0x0B);   // the mode latch (zxnext.vhd 1817); read only on Next / zxnDMA
       LED::touchW(LED::DMA);
       Z80DMA::writePort(data);
       ioContentionLate(MemESP::ramContended[rambank]);

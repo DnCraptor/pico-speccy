@@ -687,7 +687,18 @@ pkg/next/wire.go = разжёванный zxnext.vhd — читать ПЕРЕД
   length: #6B = ровно `length` байт, #0B = `length + 1`; вне Next (MB-02+,
   DATAGEAR) всегда +1. С +1 на #6B неправильно рендерится Atic Atac Remake.
   Демо из `/!4TEST/DMA/` (0x1F через #6B) теряет правую колонку — так же, как на
-  настоящем Next; это не баг. Текст ниже про «+1 на обоих портах» — история. — остаток
+  настоящем Next; это не баг. (2026-10-20: «+1 на #6B в личностях 48K/128K/Pentagon»
+  было собрано и ОТКАЧЕНО по решению владельца — zxnext.vhd 1817 берёт режим только
+  из адреса порта, личность на него не влияет; не повторять.) **Вне Next меню DMA
+  выбирает ЧИП (2026-10-20, hw-confirmed DVp2 тем же днём на `debug/DVp2-zxndma-real-1.0.10`,
+  владелец: «работает», не детализировано):** «Z80 DMA»
+  (1) = Zilog на обоих портах, всегда `+1`; «zxnDMA» (2) = контроллер Next с его
+  правилом порта (#6B ровно `length`, #0B `+1`). До этого значение 2 вне Next ничего не
+  меняло — `z80Mode()` возвращал true для любой не-Next машины. Защёлка `nextZ80Mode`
+  ставится на каждом чтении и записи DMA-порта на всех машинах (VHDL 1816 — чтение тоже;
+  раньше чтения её не трогали и на Next), сброс — zxn. Не сделано: read-back счётчика
+  (RR1/RR2) вне Next отдаёт обратный `byte_counter`, не счётчик VHDL. Текст ниже про «+1 на
+  обоих портах» — история. — остаток
   считать в uint16 (`(uint16_t)(block_length - nx_counter)`); первая версия сравнивала
   в 32 битах и пропускала блоки TX-1696 целиком (спрайты появлялись/исчезали случайно,
   hw). Раньше `nx_counter` стартовал с 0xFFFF только для #0B, а на zxnDMA (#6B) — с 0,
@@ -8216,6 +8227,27 @@ change to HeapRegions.h.** Cost: +56 B .data, +4 B .bss. Test ELF
 `[OVL] heap region` lines and `setup: COMPLETE` ~28 KB higher, then 576p TS-Conf without
 GS; a Pentagon boot unchanged; and a long TS session (the jump happens the first time a
 malloc no longer fits the base — mid-session, under a running machine).
+
+**The jump's page CORRECTION must never jump again (2026-10-20, NOT hw-tested;
+`debug/DVp2-hr-corr-1.0.10.elf`).** Pentagon + Z80 DMA (`dma=2`, the `/!4TEST/DMA/`
+attribute demo) SIGBUSed at the first `OUT (#0B)` parameter: PC in `Z80DMA::collectParam`
+(`.dmarovl`), a `strb` through a literal that read 0x80000000 one run and 0x98000000
+the next — the window's literal pool overwritten by HEAP DATA. On that boot the layout
+is base | `.dmaovl` resident | ts/nx run released (51456 B) | `.dmarovl` resident |
+ngs+gs released, and dlmalloc's `malloc_extend_top` does TWO `MORECORE`s on a foreign
+sbrk: the request, then `correction` (< 4096, `&= pagesz - 1`) to page-align the new
+top, assuming both are contiguous. A 49000 B request (sbrk_size 49152 ≤ 51456) jumped
+into the run, its 0x9a0 B correction did not fit the run, `hr_sbrk` jumped AGAIN to
+the ngs+gs region, and `top_size = new_brk - brk + correction` spanned the resident
+`.dmarovl`: the next mallocs were carved out of the DMA code. Fix: `hr_sbrk` refuses
+to jump for a positive request under one page (after the first call every real
+extension is page-rounded; a sub-page one is the correction) — dlmalloc's
+`correction_failed` path keeps `top_size = sbrk_size`, nothing lost. Scenario 5 of
+`tools/heap_regions_test.c` is that layout (fails 3 checks on the old header); the
+harness's `t_mallinfo` now has `int` fields like newlib's (scenario 1 read garbage on
+a 64-bit host). The `[OVL]` lines are lost on a COLD boot — the console starts after
+`CodeOverlay::apply` — so a heap-vs-window question needs an F12 (tag-started console)
+capture. The same shape bites any resident window with a released run below it.
 
 **hw 2026-09-14 (owner, build 11:17): TS-Conf + NeoGS 480p `COMPLETE` 41 896 (was ~27 K);
 576p + NeoGS + UART console BOOTS at `COMPLETE freeHeap=15000` — and with one more

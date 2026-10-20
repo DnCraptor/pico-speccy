@@ -96,7 +96,7 @@ Raspberry Pi Pico 2 W is not supported.
 - Custom palettes support: load user-defined palettes from `/palette.nvs` file on SD card (up to 11 custom palettes, 3x3 RGB color transform matrix).
 - Ula+ support (https://sinclair.wiki.zxnet.co.uk/wiki/ULAplus).
 - Murmuzavr (up to 32 MB) support.
-- Z80 DMA / zxnDMA emulation on ports #0B (MB-02+) and #6B (DATA-GEAR), with the counting behaviour selectable as Z80 DMA (MB-02+/DATA-GEAR) or zxnDMA (Next) (RP2350 only).
+- Z80 DMA / zxnDMA emulation on ports #0B (MB-02+) and #6B (DATA-GEAR), with the chip selectable as Z80 DMA (MB-02+/DATA-GEAR: every block is length + 1 bytes) or zxnDMA (the Next controller: #6B moves exactly length bytes, #0B length + 1) (RP2350 only).
 - Contended memory and contended I/O emulation.
 - AY-3-8912 / TurboSound emulation, with ABC / ACB / BAC / CBA / Mono stereo modes (Audio → AY stereo mode).
 - TurboSound FM (2 x YM2203) emulation: NedoPC #FFFD pseudo-registers, OPN FM synthesis.

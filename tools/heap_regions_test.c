@@ -28,7 +28,7 @@
 #define WIN_TS    22272
 #define WIN_DMA   5632
 #define WIN_GS    26624
-static char ram[BASE_SZ + WIN_TS + WIN_DMA + WIN_GS + 4096] __attribute__((aligned(4096)));
+static char ram[256 * 1024] __attribute__((aligned(4096)));   // scenario 5 lays out ~234 KB
 static HeapRegions hr;
 static char* base;
 static int jumps = 0;
@@ -40,7 +40,8 @@ void* test_sbrk(intptr_t incr) {
 }
 extern void* t_malloc(size_t); extern void t_free(void*); extern void* t_realloc(void*, size_t); extern void* t_calloc(size_t,size_t);
 extern int malloc_trim(size_t);
-struct t_mallinfo { size_t arena, ordblks, smblks, hblks, hblkhd, usmblks, fsmblks, uordblks, fordblks, keepcost; };
+// newlib's struct mallinfo has int fields — size_t here mis-read it on a 64-bit host.
+struct t_mallinfo { int arena, ordblks, smblks, hblks, hblkhd, usmblks, fsmblks, uordblks, fordblks, keepcost; };
 extern struct t_mallinfo t_mallinfo(void);
 
 static int fails = 0;
@@ -68,7 +69,7 @@ int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc > 1) return scenario(atoi(argv[1]));
     int bad = 0;
-    for (int i = 1; i <= 4; i++) {
+    for (int i = 1; i <= 5; i++) {
         pid_t pid = fork();
         if (pid == 0) { char n[4]; snprintf(n, sizeof n, "%d", i); execl("/proc/self/exe", argv[0], n, (char*)NULL); _exit(127); }
         int st = 0; waitpid(pid, &st, 0);
@@ -153,6 +154,45 @@ static int scenario(int which) {
     CHECK(z && in(&hr.reg[1], z, 12000), "12000 B jumps into the GS window (%p)", z);
     CHECK(hr_window_touched(&hr, base + BASE_SZ), "TS window was used by the 20000 B block → touched");
     t_free(z); t_free(y); t_free(x);
+    }
+    if (which == 5) {
+    // ── dlmalloc's page correction after a jump must NOT jump again ────────────
+    // DVp2 Pentagon + Z80 DMA boot (debug/DVp2-next-pollfix-1.0.10.elf), offsets
+    // mod 4096 as on the target: base ..0x8e0 | .dmaovl resident 3456 B |
+    // released ts/nx run 0x660..0xf60 (51456 B) | .dmarovl resident 2688 B |
+    // released ngs+gs 0x9e0..0xfe0 (30208 B). A 49000 B request does not fit
+    // the base, jumps into the run (sbrk_size 49152 <= 51456), and dlmalloc
+    // then asks for the 0x9a0 B that page-align the new top — which does NOT
+    // fit the run. Jumping for THAT put top_size = new_brk - brk + correction
+    // across the resident .dmarovl, and the following mallocs were carved out
+    // of the Z80 DMA code (SIGBUS in Z80DMA::collectParam, hw 2026-10-20).
+    base = ram + 0xecc;
+    char* dmal_ws = ram + 0x238e0, *run_lo = dmal_ws + 3456, *dmar_ws = run_lo + 51456,
+        * r2_lo = dmar_ws + 2688, *top = r2_lo + 30208;
+    CHECK((size_t)(top - ram) <= sizeof ram, "scenario 5 layout exceeds the buffer");
+    HrWindow w[3] = { { dmal_ws, run_lo, 1 }, { run_lo, dmar_ws, 0 }, { dmar_ws, r2_lo, 1 } };
+    memset(&hr, 0, sizeof hr);
+    hr.reg[0].lo = base; hr.reg[0].hi = dmal_ws; hr.reg[0].hwm = base; hr.n = 1; hr.ceiling = dmal_ws;
+    hr_rebuild(&hr, base, w, 3, top);
+    memset(dmar_ws, 0xEE, 2688); memset(dmal_ws, 0xEE, 3456);
+    jumps = 0;
+    CHECK(hr.n == 3, "DMA layout: %u regions, want 3", hr.n);
+    void* keep[512]; int nk = 0;
+    while (nk < 512 && hr.cursor <= hr.reg[0].hi - 6000) { void* p = t_malloc(1000); if (!p) break; keep[nk++] = p; }
+    CHECK(hr.cur == 0, "base filling must stay in the base");
+    void* big = t_malloc(49000);
+    CHECK(big && in(&hr.reg[1], big, 49000), "49000 B must land in the released run (%p)", big);
+    CHECK(jumps == 1 && hr.cur == 1, "exactly one jump (got %d, cur %u): the page correction must not jump", jumps, hr.cur);
+    int inside = 0;
+    for (int i = 0; i < 64; i++) {
+        char* p = t_malloc(512); if (!p) break;
+        if (p + 512 > dmar_ws && p < r2_lo) inside++;
+        memset(p, 5, 512);
+    }
+    CHECK(inside == 0, "%d x 512 B handed out inside the resident .dmarovl", inside);
+    CHECK(window_clean(dmar_ws, 2688), "resident .dmarovl was written");
+    CHECK(window_clean(dmal_ws, 3456), "resident .dmaovl was written");
+    (void)keep;
     }
     printf("scenario %d: %s (fails=%d)\n", which, fails ? "FAILED" : "ok", fails);
     return fails != 0;

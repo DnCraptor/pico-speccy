@@ -7174,9 +7174,9 @@ static void buildEmulatorInfoText() {
 
         // DMA
         if (Config::dma_mode == 1)
-            pos += infoAppend(buf, pos, bufsz, " DMA            : Z80 DMA (#0B)\n");
+            pos += infoAppend(buf, pos, bufsz, " DMA            : Z80 DMA (#0B/#6B)\n");
         else if (Config::dma_mode == 2)
-            pos += infoAppend(buf, pos, bufsz, " DMA            : zxnDMA (#6B)\n");
+            pos += infoAppend(buf, pos, bufsz, " DMA            : zxnDMA (#0B/#6B)\n");
         else
             pos += infoAppend(buf, pos, bufsz, " DMA            : Off\n");
 

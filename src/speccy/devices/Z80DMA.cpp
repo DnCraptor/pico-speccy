@@ -156,6 +156,7 @@ void Z80DMA::reset() {
     auto_restart = false;
     r4_mode = 1;
     nx_counter = 0;
+    nextZ80Mode = false;   // zxnext.vhd 1813: reset -> zxn mode
     nxPending = false;
     nxStall = false;
 
@@ -498,8 +499,13 @@ IRAM_ATTR void Z80DMA::collectParam(uint8_t data) {
 // demo (0x1F for a 32-byte row through #6B) — that demo is written for a Zilog
 // card; on a real Next it loses the last column as well. It cost every zxnDMA
 // program one byte past each block (STNICCC span fills, NEXTEST patterns).
+// Off the Next the menu decides which chip sits on the bus: "Z80 DMA" (1) is a
+// Zilog part on both ports (MB-02+, DATA-GEAR — always +1), "zxnDMA" (2) is the
+// Next's controller with its port rule: #6B exact length, #0B length + 1
+// (zxnext.vhd 1817; the latch is set on every DMA port read and write).
 static inline bool z80Mode() {
-    return Z80Ops::isNext ? Z80DMA::nextZ80Mode : true;
+    if (Z80Ops::isNext || Config::dma_mode == 2) return Z80DMA::nextZ80Mode;
+    return true;
 }
 
 void Z80DMA::doLoad() {
