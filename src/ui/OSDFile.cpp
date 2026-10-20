@@ -61,6 +61,7 @@ using namespace std;
 #include "speccy/devices/disk/DiskSlots.h"
 #include "app/MachineSwitch.h"
 #include "fs/ZipExtract.h"
+#include "net/NetCancel.h"
 #include "fs/FileInfo.h"
 #include "OSDNewMenu.h"
 #include "UiBrowser.h"
@@ -170,10 +171,34 @@ static void rfd_push(void* ctx, const char* name, bool isDir, uint32_t size) {
     static unsigned tick = 0;
     if ((++tick & 0x7) == 0)
         OSD::progressDialog("", "", (int)((tick >> 3) % 20) * 5, 1); // 0,5,…,95, wrap
+    NetCancel::poll();   // Esc → confirm; the browser drops a cancelled listing
 }
 
 // Transfer progress: update the dialog; Esc/F1 aborts.
 static string rfd_xfer_title;
+
+// " 1.4 MB" for a byte count.
+static string rfd_size_str(uint32_t sz) {
+    char b[24];
+    if (sz < 1024)               snprintf(b, sizeof(b), " %lu B", (unsigned long)sz);
+    else if (sz < 1024u * 1024u) snprintf(b, sizeof(b), " %lu.%lu KB", (unsigned long)(sz / 1024),
+                                          (unsigned long)((sz % 1024) * 10 / 1024));
+    else                         snprintf(b, sizeof(b), " %lu.%lu MB", (unsigned long)(sz >> 20),
+                                          (unsigned long)(((sz & 0xFFFFF) * 10) >> 20));
+    return b;
+}
+
+// "Downloading... 1.4 MB": the transfer box title with the entry's size when the
+// source knows it up front (the Web Archives listing). Not every catalog source
+// carries a size; for those rfd_progress adds it once the server's
+// Content-Length arrives, and a source that sends neither stays without one.
+static bool rfd_title_has_size = false;
+static string rfd_title_sized(const char* title, RemoteFs* fs, const string& nm) {
+    const uint32_t sz = fs->entrySize(nm);
+    rfd_title_has_size = sz != 0;
+    return sz ? string(title) + rfd_size_str(sz) : string(title);
+}
+
 static bool rfd_progress(uint32_t done, uint32_t total) {
     // total == 0 = the transport never learned a length (a chunked source with no
     // Content-Length, e.g. archive.org's view_archive.php behind the TOSEC mirror;
@@ -183,11 +208,35 @@ static bool rfd_progress(uint32_t done, uint32_t total) {
     int pct = total ? (int)((uint64_t)done * 100 / total)
                     : (int)((done >> 12) % 20) * 5;   // wrap every 4 KB, 0,5,…,95
     if (pct > 100) pct = 100;
+    if (total && !rfd_title_has_size) {          // size learned from the response
+        rfd_xfer_title += rfd_size_str(total);
+        rfd_title_has_size = true;
+    }
     OSD::progressDialog(rfd_xfer_title, "", pct, 1);
+    return !NetCancel::poll();   // Esc/F1 → "Cancel?" → Yes stops it (and any resume)
+}
+
+// NetCancel's ask function: drain the keyboard; Esc/F1 asks for confirmation.
+// The dialog saves and restores what it covers (progress box or browser footer).
+bool OSD::netCancelAsk() {
+    auto* kb = ESPectrum::PS2Controller.keyboard();
+    bool esc = false;
     fabgl::VirtualKeyItem k;
-    if (ESPectrum::PS2Controller.keyboard()->virtualKeyAvailable() && ESPectrum::readKbd(&k))
-        if (k.down && is_back(k.vk)) return false;
-    return true;
+    while (kb->virtualKeyAvailable() && ESPectrum::readKbd(&k))
+        if (k.down && (k.vk == fabgl::VK_ESCAPE || k.vk == fabgl::VK_F1)) esc = true;
+    if (!esc) return false;
+    const bool yes = OSD::msgDialog(MSG_NET_CANCEL_T, MSG_NET_CANCEL_Q, /*defYes=*/true) == DLG_YES;
+    kb->emptyVirtualKeyQueue();   // the dialog's Enter/Esc must not leak into the transfer UI
+    if (yes) Debug::log("net: cancelled by the user");
+    return yes;
+}
+
+// After a transfer: a user cancel gets its own short notice, not "failed".
+static void rfd_xfer_result(bool ok, uint16_t ms) {
+    if (NetCancel::requested())
+        OSD::osdCenteredMsg(MSG_NET_CANCELLED, LEVEL_INFO, 1000);
+    else
+        OSD::osdCenteredMsg(ok ? MSG_NET_XFER_OK : MSG_NET_XFER_ERR, ok ? LEVEL_INFO : LEVEL_WARN, ms);
 }
 
 // Row source for the picker below: uiPickListCb takes a plain callback, so the
@@ -397,11 +446,11 @@ static bool rfd_copy_tree(RemoteFs* fs, const std::string& destSd, int depth) {
             std::string fbase = fs->downloadBasename(nm);
             if (fbase.empty()) fbase = nm;
             std::string fdst = destSd + "/" + rfd_fat_name(fbase, fs->utf8Names());
-            rfd_xfer_title = MSG_NET_COPYING;
+            rfd_xfer_title = rfd_title_sized(MSG_NET_COPYING, fs, nm);
             OSD::progressDialog(rfd_xfer_title, nm, 0, 0, fs->utf8Names());
             bool got = fs->get(nm, fdst, rfd_progress);
             OSD::progressDialog("", "", 0, 2);
-            if (!got) return false;
+            if (!got) { if (NetCancel::requested()) f_unlink(fdst.c_str()); return false; }
             rfd_gunzip_vgz(fdst);       // .vgz → ready .vgm beside the rest
         }
     }
@@ -644,6 +693,11 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
     // Read-only sources (online catalog) hide upload/delete and use the WEB sidebar.
     const bool ro = fs->readOnly();
     const int  side = ro ? FD_SIDE_WEB : FD_SIDE_REMOTE;
+    // Esc during a listing/transfer asks "Cancel?". The catalog (HTTPS, a fresh
+    // connection per request) may abandon socket waits at once; FTP/SFTP keep
+    // their control channel / SSH stream in step and stop at the next progress
+    // callback instead (NetCancel.h).
+    const bool hardCancel = ro;
     const string title = MENU_ALL_TITLE;   // same "Open File" window as SD
 
     // Cursor memory (like the SD browser): curFocus/curBegin persist across re-lists of
@@ -668,6 +722,8 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
         uint32_t key = netHash(fs->cacheId() + "|" + fs->cwdPath());
         filenames.init(netIdxName(key));    // /tmp/.net_<hash>.idx (may already exist)
         bool haveCache = (filenames.size() > 0);
+        {
+        NetCancel::Scope cancelScope(OSD::netCancelAsk, hardCancel);   // revalidate + listing
         bool reuse = false;
         if (haveCache && netSessSeen(key)) {
             reuse = true;                   // validated earlier this session → instant
@@ -685,10 +741,22 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
             filenames.push(string(2, (char)DIR_MARKER) + "..");
             bool ok = fs->listStream("", rfd_push, &filenames);
             OSD::progressDialog("", "", 0, 2);
+            if (!ok && NetCancel::requested()) {
+                // User cancel: the partial index must not be taken for the folder
+                // later; step back to where the user came from (or leave from the top).
+                filenames.unlink(); filenames.close();
+                OSD::osdCenteredMsg(MSG_NET_CANCELLED, LEVEL_INFO, 1000);
+                const string before = fs->cwdPath();
+                fs->cwd("..");
+                if (fs->cwdPath() == before) return;
+                popPos();
+                continue;
+            }
             if (!ok) { OSD::osdCenteredMsg(MSG_NET_XFER_ERR, LEVEL_WARN, 2000); filenames.close(); return; }
             if (!fs->preSorted()) filenames.sort(); // pre-sorted (static catalog) skips the slow sort
             netValWrite(key, fs->lastValidator()); // persist this fetch's validator (Web; "" else)
         }
+        }   // cancelScope
         netSessAdd(key);
 
         int outKey = FDK_ESC;
@@ -712,11 +780,12 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
                     Config::saveWifiConfig();
                     string base = local.substr(local.find_last_of('/') + 1);
                     rfd_xfer_title = MSG_NET_UPLOADING;
+                    rfd_title_has_size = true;   // an upload's own size is no news
+                    NetCancel::Scope cx(OSD::netCancelAsk, hardCancel);
                     OSD::progressDialog(rfd_xfer_title, base, 0, 0);
                     bool put_ok = fs->put(local, base, rfd_progress);
                     OSD::progressDialog("", "", 0, 2);
-                    OSD::osdCenteredMsg(put_ok ? MSG_NET_XFER_OK : MSG_NET_XFER_ERR,
-                                        put_ok ? LEVEL_INFO : LEVEL_WARN, 1800);
+                    rfd_xfer_result(put_ok, 1800);
                     if (put_ok) { netSessForget(key); filenames.unlink(); netValWrite(key, ""); }
                 }
                 continue;
@@ -775,6 +844,7 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
             if (!destBase.empty()) {
                 Config::net_dl_dir = destBase;
                 Config::saveWifiConfig();
+                NetCancel::Scope cx(OSD::netCancelAsk, hardCancel);
                 bool ok;
                 if (isDir) {                 // recursive folder copy (keep the dir name)
                     string dst = destBase + (destBase.back() == '/' ? "" : "/") + rfd_fat_name(nm, fs->utf8Names());
@@ -786,7 +856,7 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
                     }
                 } else {                     // single file — use the real filename (catalog
                                              // display names carry no extension)
-                    rfd_xfer_title = MSG_NET_DOWNLOADING;
+                    rfd_xfer_title = rfd_title_sized(MSG_NET_DOWNLOADING, fs, nm);
                     OSD::progressDialog(rfd_xfer_title, nm, 0, 0, fs->utf8Names()); // show first
                     string base = fs->downloadBasename(nm);   // (catalog: HTTP listing read)
                     if (base.empty()) base = nm;
@@ -794,9 +864,9 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
                     ok = fs->get(nm, dst, rfd_progress);
                     OSD::progressDialog("", "", 0, 2);
                     if (ok) rfd_gunzip_vgz(dst);   // .vgz → ready .vgm on the SD
+                    else if (NetCancel::requested()) f_unlink(dst.c_str()); // no partial file
                 }
-                OSD::osdCenteredMsg(ok ? MSG_NET_XFER_OK : MSG_NET_XFER_ERR,
-                                    ok ? LEVEL_INFO : LEVEL_WARN, 1800);
+                rfd_xfer_result(ok, 1800);
             }
             continue;
         }
@@ -808,7 +878,7 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
         // name (per extension) so /tmp isn't filled with one file per launch — it's
         // overwritten each time. The extension is kept (rfd_launch_tmp needs it to tell
         // the file type). For a real filename, use F5 Save instead.
-        rfd_xfer_title = MSG_NET_DOWNLOADING;
+        rfd_xfer_title = rfd_title_sized(MSG_NET_DOWNLOADING, fs, nm);
         OSD::progressDialog(rfd_xfer_title, nm, 0, 0, fs->utf8Names());
         // Extension straight from the display name only when the suffix is a *known*
         // launchable extension — avoids an extra request. Catalog titles routinely
@@ -828,7 +898,13 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
             isLaunchExt(FileUtils::getLCaseExt(nm)))
             ext = nm.substr(dot);                          // includes the '.'
         if (ext.empty()) {
+            NetCancel::Scope cx(OSD::netCancelAsk, hardCancel);   // catalog: an HTTP read
             string base = fs->downloadBasename(nm);
+            if (NetCancel::requested()) {
+                OSD::progressDialog("", "", 0, 2);
+                rfd_xfer_result(false, 0);
+                continue;
+            }
             size_t d2 = base.find_last_of('.');
             if (d2 != string::npos) ext = base.substr(d2);
         }
@@ -858,6 +934,7 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
                 FILINFO fi;
                 bool ok = f_stat(target.c_str(), &fi) == FR_OK;
                 if (!ok) {
+                    NetCancel::Scope cx(OSD::netCancelAsk, hardCancel);
                     FileUtils::mkdirParents(dir.c_str());
                     const string zip = "/tmp/next/_dl.zip";
                     f_unlink(zip.c_str());
@@ -871,7 +948,7 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
                     }
                     f_unlink(zip.c_str());
                     if (!ok) {
-                        OSD::osdCenteredMsg(MSG_NET_XFER_ERR, LEVEL_WARN, 2000);
+                        rfd_xfer_result(false, 2000);
                         continue;
                     }
                 } else {
@@ -896,6 +973,7 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
         LastRun::alias(tmpp, fs->downloadBasename(nm));   // quick-slot name: the remote file
         rfd_release_tmp(tmpp);   // free the fixed /tmp target if a prior launch still holds it
         const string ckey = rfd_cache_key(fs, nm);
+        NetCancel::Scope cx(OSD::netCancelAsk, hardCancel);   // until the end of this launch
         bool got;
         if (rfd_cache_hit(ckey, tmpp)) {
             Debug::log("net: quick-start reuses %s (already downloaded this session)", tmpp.c_str());
@@ -906,7 +984,8 @@ void OSD::remoteFileDialog(RemoteFs* fs) {
         }
         OSD::progressDialog("", "", 0, 2);
         if (!got) {
-            OSD::osdCenteredMsg(MSG_NET_XFER_ERR, LEVEL_WARN, 2000);
+            if (NetCancel::requested()) f_unlink(tmpp.c_str());
+            rfd_xfer_result(false, 2000);
         } else {
             OSD::osdCenteredMsg(MSG_NET_LAUNCHING, LEVEL_INFO, 400);
             if (rfd_launch_tmp(tmpp)) {

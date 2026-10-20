@@ -59,6 +59,7 @@ public:
     std::string schemeLabel() const override { return "WEB:"; }
     bool get(const std::string& remote, const std::string& localSdPath, XferProgressCb cb) override;
     std::string downloadBasename(const std::string& displayName) override;
+    uint32_t entrySize(const std::string& displayName) override;
     bool archiveMember(const std::string& displayName, std::string& id,
                        std::string& member) override;
     bool put(const std::string&, const std::string&, XferProgressCb) override { return false; } // read-only

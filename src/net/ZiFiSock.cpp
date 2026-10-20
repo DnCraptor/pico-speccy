@@ -5,6 +5,7 @@
 #include "speccy/devices/zifi/ZiFi.h"
 #include "WifiNet.h"
 #include "WifiSock.h"
+#include "NetCancel.h"
 #include "app/Debug.h"
 #include "app/Buffer.h"
 #include <pico/time.h>
@@ -159,6 +160,7 @@ static void process_status_line(const char* L) {
 
 void ZiFiSock::pump(uint32_t budget_ms) {
     if (!rx_buf) return;   // not begun (or buffers freed) — nothing to demux into
+    NetCancel::poll();     // every blocking wait passes here: Esc + confirm (no-op unarmed)
     absolute_time_t deadline = make_timeout_time_ms(budget_ms);
     do {
         uint8_t b;
@@ -629,7 +631,7 @@ int ZiFiSock::sock_recv(int id, uint8_t* buf, size_t maxlen, uint32_t timeout_ms
             pump(0);
             if (ringFill(id) > 0) return ringPop(id, buf, maxlen);
             if (was_closed) { g_drained[id] = true; return 0; }  // buffer drained → EOF
-            if (time_reached(deadline)) return 0;                // transient empty read
+            if (time_reached(deadline) || NetCancel::abortIo()) return 0; // transient empty read / user cancel
             pump(50);                        // wait for an +IPD notification / more data
         }
     }
@@ -639,6 +641,7 @@ int ZiFiSock::sock_recv(int id, uint8_t* buf, size_t maxlen, uint32_t timeout_ms
         pump(50);
         if (ringFill(id) > 0) return ringPop(id, buf, maxlen);
         if (closed[id]) return 0; // peer closed and nothing left buffered → EOF
+        if (NetCancel::abortIo()) return 0;   // user cancel: give up the wait (hard scope)
     }
     if (closed[id] && ringFill(id) == 0) return 0;
     return 0; // timeout with no data — treat as transient empty read
@@ -650,7 +653,7 @@ bool ZiFiSock::sock_recv_line(int id, char* buf, size_t maxlen, uint32_t timeout
 #endif
     size_t pos = 0;
     absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
-    while (!time_reached(deadline)) {
+    while (!time_reached(deadline) && !NetCancel::abortIo()) {
         uint8_t b;
         if (sock_recv(id, &b, 1, 100) == 1) {
             if (b == '\n') {

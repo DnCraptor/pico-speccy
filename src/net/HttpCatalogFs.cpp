@@ -490,6 +490,18 @@ static const char* itchUrlFor(void* ctx, int attempt) {
     return c->cur.c_str();
 }
 
+// From the cached listing only (written while browsing) — never a network read,
+// it runs before the download box and must not delay it.
+uint32_t HttpCatalogFs::entrySize(const std::string& displayName) {
+    if (!isStaticBase()) return 0;
+    const std::string cache = tsvCachePath();
+    FILINFO fi;
+    if (f_stat(cache.c_str(), &fi) != FR_OK) return 0;
+    LocateCtx loc = { displayName.c_str(), std::string(), 0, false };
+    readTsvCachedOrHttp(cache, std::string(), locate_line, &loc);
+    return loc.found ? loc.size : 0;
+}
+
 bool HttpCatalogFs::get(const std::string& remote, const std::string& localSdPath, XferProgressCb cb) {
     if (isStaticBase()) {
         // Resolve the file's locator from the local .tsv cache (written while browsing)

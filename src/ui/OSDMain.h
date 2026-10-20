@@ -156,6 +156,9 @@ public:
 
     // Remote (FTP/SFTP) file browser — bounded RAM via an SD index (see OSDFile.cpp).
     static void remoteFileDialog(class RemoteFs* fs);
+    // NetCancel ask function for network operations started from the UI: Esc/F1
+    // pressed while a transfer or listing runs -> "Cancel?" dialog; true = Yes.
+    static bool netCancelAsk();
 
     // Shared "file-browser chrome" list, reused for the F5 location level, the
     // saved-remotes list, and the remote/web file browser so they all look like the

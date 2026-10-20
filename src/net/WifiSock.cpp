@@ -3,6 +3,7 @@
 #if PICOSPECCY_WIFI
 
 #include "WifiNet.h"
+#include "NetCancel.h"
 #include "app/Debug.h"
 
 #include "pico/cyw43_arch.h"
@@ -44,6 +45,7 @@ struct { ip_addr_t addr; volatile int state; uint32_t gen; } s_dns = { {}, 0, 0 
 void pump(uint32_t ms) {
     cyw43_arch_wait_for_work_until(make_timeout_time_ms(ms));
     cyw43_arch_poll();
+    NetCancel::poll();     // Esc + confirm during any blocking wait (no-op unarmed)
 }
 
 void freeRx(Link& l) {
@@ -119,7 +121,7 @@ bool resolve(const char* host, ip_addr_t* out, uint32_t timeout_ms) {
     if (e == ERR_OK) { *out = s_dns.addr; return true; }
     if (e != ERR_INPROGRESS) return false;
     absolute_time_t dl = make_timeout_time_ms(timeout_ms);
-    while (s_dns.state == 0 && !time_reached(dl)) pump(10);
+    while (s_dns.state == 0 && !time_reached(dl) && !NetCancel::abortIo()) pump(10);
     if (s_dns.state == 1) { *out = s_dns.addr; return true; }
     s_dns.gen++;                      // a late answer must not land in *out
     return false;
@@ -170,7 +172,7 @@ int sock_open(const char* host, uint16_t port, bool tls, uint32_t timeout_ms) {
         return -1;
     }
     absolute_time_t dl = make_timeout_time_ms(timeout_ms);
-    while (l.connecting && !time_reached(dl)) pump(10);
+    while (l.connecting && !time_reached(dl) && !NetCancel::abortIo()) pump(10);
     if (l.connecting || l.closed || l.err != ERR_OK) {
         Debug::log("WifiSock: connect %s:%u %s (err %d)", host, (unsigned)port,
                    l.connecting ? "timed out" : "refused", (int)l.err);
@@ -214,7 +216,7 @@ int sock_recv(int id, uint8_t* buf, size_t maxlen, uint32_t timeout_ms) {
     Link& l = L[id];
     if (!l.open && !l.rxq) return l.closed ? 0 : -1;
     absolute_time_t dl = make_timeout_time_ms(timeout_ms);
-    while (!l.rxq && !l.closed && !time_reached(dl)) pump(10);
+    while (!l.rxq && !l.closed && !time_reached(dl)) { pump(10); if (NetCancel::abortIo()) break; }
     if (!l.rxq) return 0;             // nothing yet, or EOF — isClosed() tells them apart
     size_t avail = l.rxq->tot_len - l.rx_off;
     size_t n = avail < maxlen ? avail : maxlen;
@@ -241,7 +243,7 @@ bool sock_recv_line(int id, char* buf, size_t maxlen, uint32_t timeout_ms) {
         uint8_t c;
         int r = sock_recv(id, &c, 1, (uint32_t)(remain_us / 1000) + 1);
         if (r < 0) return false;
-        if (r == 0) { if (isClosed(id)) return false; continue; }
+        if (r == 0) { if (isClosed(id) || NetCancel::abortIo()) return false; continue; }
         if (c == '\n') break;
         if (n + 1 < maxlen) buf[n++] = (char)c;
     }

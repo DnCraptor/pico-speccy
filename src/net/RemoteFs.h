@@ -88,6 +88,11 @@ public:
     // echo the name (FTP/SFTP entry names already carry their extension).
     virtual std::string downloadBasename(const std::string& displayName) { return displayName; }
 
+    // Size in bytes of file entry `displayName` when the source already knows it
+    // without a request (the catalog's cached listing); 0 = unknown. Shown in the
+    // download box before the transfer starts.
+    virtual uint32_t entrySize(const std::string& displayName) { (void)displayName; return 0; }
+
     // True when entry `displayName` is an ARCHIVE whose program is one member of
     // it (the itch.io Next games: a zip of the game's files). `id` names the
     // archive stably (the extraction folder), `member` is the path inside it to

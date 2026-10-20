@@ -4,6 +4,7 @@
 
 #include "TlsSock.h"
 #include "ZiFiSock.h"
+#include "NetCancel.h"
 #include "speccy/devices/zifi/ZiFi.h"        // ZiFi::rxDropped() (RX-ring overflow diagnostic)
 #include "app/Buffer.h"
 #include "app/Debug.h"
@@ -95,7 +96,7 @@ bool readLine(Conn& c, char* buf, size_t maxlen, absolute_time_t deadline, bool*
             if (eofOut && pos == 0) *eofOut = true;
             buf[pos] = '\0'; return pos > 0;          // EOF
         } else {
-            if (time_reached(deadline)) { buf[pos] = '\0'; return false; }
+            if (time_reached(deadline) || NetCancel::poll()) { buf[pos] = '\0'; return false; }
         }
     }
 }
@@ -108,6 +109,7 @@ HttpsGet::Result HttpsGet::get(const char* url, SinkCb sink, void* sinkCtx,
                                const char* method) {
     Result res = {}; res.status = -1;
     const bool post = method && !strcmp(method, "POST");
+    if (NetCancel::requested()) return res;   // the user cancelled this operation already
 
     Buffer httpbuf;  // tiered (heap/butter); RAII frees on every exit path
     if (!httpbuf.alloc(HTTP_BUF_SZ, Buffer::NEED_POINTER)) { Debug::log("HttpsGet: buf alloc failed"); return res; }
@@ -309,6 +311,9 @@ HttpsGet::Result HttpsGet::get(const char* url, SinkCb sink, void* sinkCtx,
     }
 
 done:
+    // A user cancel can surface as a short read / clean-looking EOF (a recv wait
+    // that gave up early); never report that body as complete.
+    if (NetCancel::requested()) { res.ok = false; res.status = -1; }
     if (https) tls.close();
     else if (c.link >= 0) { ZiFiSock::sock_close(c.link); ZiFiSock::end(); }
     return res;
@@ -351,7 +356,7 @@ HttpsGet::Result HttpsGet::getToFileFn(UrlCb urlFor, void* urlCtx, const char* s
     uint32_t   received  = 0;   // total good bytes written across attempts
     uint32_t   total     = 0;   // full file size (0 = unknown: chunked/conn-close)
     bool       complete  = false;
-    for (int attempt = 0; attempt < MAX_TRIES && fs.ok; attempt++) {
+    for (int attempt = 0; attempt < MAX_TRIES && fs.ok && !NetCancel::requested(); attempt++) {
         const char* url = urlFor(urlCtx, attempt);
         if (!url || !*url) { fs.ok = false; break; }
         Result r = get(url, fileSink, &fs, caPath, progress, progCtx,
@@ -369,6 +374,7 @@ HttpsGet::Result HttpsGet::getToFileFn(UrlCb urlFor, void* urlCtx, const char* s
         }
         received += r.received;
         if (r.ok && (total == 0 || received >= total)) { complete = true; break; }
+        if (NetCancel::requested()) { Debug::log("HttpsGet: cancelled by user @%lu", (unsigned long)received); break; }
         if (!total || received >= total) break;                 // unknown size → can't resume
         Debug::log("HttpsGet: resume @%lu/%lu (attempt %d/%d)",
                    (unsigned long)received, (unsigned long)total, attempt + 1, MAX_TRIES);
@@ -376,7 +382,7 @@ HttpsGet::Result HttpsGet::getToFileFn(UrlCb urlFor, void* urlCtx, const char* s
     fclose2(f);
     res.length   = total;
     res.received = received;
-    res.ok       = fs.ok && (complete || (total != 0 && received >= total));
+    res.ok       = fs.ok && !NetCancel::requested() && (complete || (total != 0 && received >= total));
     return res;
 }
 

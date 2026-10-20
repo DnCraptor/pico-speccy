@@ -3,6 +3,7 @@
 #if ZIFI_NET_CLIENT
 
 #include "ZiFiSock.h"
+#include "NetCancel.h"
 #include "app/Buffer.h"
 #include "app/Debug.h"
 #include "fatfs/ff.h"
@@ -211,6 +212,7 @@ bool TlsSock::connect(const char* host, uint16_t port, uint32_t timeout_ms) {
     while ((r = mbedtls_ssl_handshake(&ssl)) != 0) {
         if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) {
             if (time_reached(deadline)) { last_err = r; Debug::log("TlsSock: handshake timeout"); close(); return false; }
+            if (NetCancel::poll()) { last_err = r; Debug::log("TlsSock: handshake cancelled"); close(); return false; }
             continue;
         }
         last_err = r;
@@ -272,7 +274,7 @@ int TlsSock::recv(uint8_t* buf, size_t maxlen) {
         if (r > 0) return r;
         if (r == 0 || r == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) return 0; // EOF
         if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) {
-            if (time_reached(deadline)) { last_err = r; return -1; }
+            if (time_reached(deadline) || NetCancel::poll()) { last_err = r; return -1; }
             continue;
         }
         last_err = r;

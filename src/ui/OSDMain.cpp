@@ -102,6 +102,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "net/Ssh.h"
 #include "net/HttpCatalogFs.h"
 #include "net/HttpsGet.h"
+#include "net/NetCancel.h"
 #include "net/Ftpd.h"
 #include "net/HttpCatalogFs.h"
 #include "net/HttpsGet.h"
@@ -679,6 +680,11 @@ static void netSessionRun(void* p) {
     // trust msgDialog (during SSH connect) saves/restores its own rect over this.
     OSD::progressDialog(MSG_NET_CONNECTING, c->host, 0, 0);
     RemoteFs* fs = nullptr;
+    bool cancelled = false;
+    {
+    // Esc -> "Cancel?": a cancelled connect is thrown away, so socket waits may
+    // give up at once (hard scope).
+    NetCancel::Scope cx(OSD::netCancelAsk, true);
     if (c->proto == 0) {
         Ftp* ftp = new Ftp();
         if (ftp->connect(c->host.c_str(), c->port, c->user.c_str(), c->pass.c_str())) fs = ftp;
@@ -690,8 +696,15 @@ static void netSessionRun(void* p) {
         if (sftp->connect(c->host.c_str(), c->port, c->user.c_str(), c->pass.c_str())) fs = sftp;
         else delete sftp;
     }
+    cancelled = NetCancel::requested();
+    if (cancelled && fs) { fs->disconnect(); delete fs; fs = nullptr; }
+    }
     OSD::progressDialog("", "", 0, 2); // close the "Connecting..." notice
-    if (!fs) { OSD::osdCenteredMsg(MSG_NET_CONN_ERR, LEVEL_WARN, 2500); return; }
+    if (!fs) {
+        if (cancelled) OSD::osdCenteredMsg(MSG_NET_CANCELLED, LEVEL_INFO, 1000);
+        else           OSD::osdCenteredMsg(MSG_NET_CONN_ERR, LEVEL_WARN, 2500);
+        return;
+    }
     if (!c->restorePath.empty() && c->restorePath != fs->cwdPath())
         fs->cwd(c->restorePath);               // reopen at the last folder for this remote
     OSD::remoteFileDialog(fs); // SD-indexed browser (bounded RAM); runs on this alt-stack
@@ -1182,8 +1195,15 @@ static void archSessionRun(void* p) {
     // sites.tsv past MAX_SITES is silently cut (RZX, the 13th, vanished at 12).
     const int MAX_SITES = 32;
     std::vector<string> site_ids(MAX_SITES), site_names(MAX_SITES);   // heap for the session, not .bss
-    int n = HttpCatalogFs::fetchSites(site_ids.data(), site_names.data(), MAX_SITES);
+    int n;
+    bool cancelled;
+    {
+        NetCancel::Scope cx(OSD::netCancelAsk, true);   // Esc -> "Cancel?"
+        n = HttpCatalogFs::fetchSites(site_ids.data(), site_names.data(), MAX_SITES);
+        cancelled = NetCancel::requested();
+    }
     OSD::progressDialog("", "", 0, 2);
+    if (cancelled) { OSD::osdCenteredMsg(MSG_NET_CANCELLED, LEVEL_INFO, 1000); return; }
     if (n <= 0) { OSD::osdCenteredMsg(MSG_ARCH_SITES_ERR, LEVEL_WARN, 2200); return; }
 
     // Site list rendered IN the browser window (not a popup) — ".." row returns to the
