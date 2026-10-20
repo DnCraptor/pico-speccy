@@ -849,17 +849,21 @@ NextReg::Raster NextReg::raster() {
     const bool h = key & 4;
     Raster r;
     r.hz60 = h;
+    // ULA INT pulse = CPU cycles at ANY speed (zxnext.vhd ~2033, pulse_count on
+    // i_CLK_CPU): 32 for the 48K and +3 timings, 36 for 128K and Pentagon. The
+    // Next's own figures, not the classic machines' (Pentagon here is 36).
+    r.intEnd = (s_machineTiming <= 1 || s_machineTiming == 3) ? 32 : 36;
     switch (key & 3) {
         case 0:  // 48K: 224 T x 312 (50) / 262 (60) — 3.5 MHz frames
-            r.kind = 0; r.tpl = 224; r.lines = h ? 262 : 312; r.intEnd = INT_END48;
+            r.kind = 0; r.tpl = 224; r.lines = h ? 262 : 312;
             r.micros = h ? MICROS_PER_FRAME_EVO60 : MICROS_PER_FRAME_48;
             break;
         case 2:  // Pentagon: 224 T x 320, 50 Hz only
-            r.kind = 2; r.tpl = 224; r.lines = 320; r.intEnd = INT_END_PENTAGON;
+            r.kind = 2; r.tpl = 224; r.lines = 320;
             r.micros = MICROS_PER_FRAME_PENTAGON;
             break;
         default: // 128K / +3: 228 T x 311 (50) / 261 (60)
-            r.kind = 1; r.tpl = 228; r.lines = h ? 261 : 311; r.intEnd = INT_END128;
+            r.kind = 1; r.tpl = 228; r.lines = h ? 261 : 311;
             // 60 Hz: 59508 T at the 128K pacing rate (70908 T per 19992 us)
             r.micros = h ? 16778 : MICROS_PER_FRAME_128;
             break;
@@ -1092,6 +1096,7 @@ void NextReg::write(uint8_t r, uint8_t v) {
             port123B = (uint8_t)((port123B & ~0x02) | ((v >> 6) & 0x02));
             uint8_t vl = (v >> 6) & 1;
             if (MemESP::videoLatch != vl) {
+                NEXTVID::screenFlipMark();   // the row on the beam keeps the old page
                 MemESP::videoLatch = vl;
                 VIDEO::grmem = vl ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
                 VIDEO::gigascreenAutoFlip();   // Gigascreen Auto (NEXTVID::gigsFrame)
@@ -1464,6 +1469,7 @@ void NextReg::write7FFD(uint8_t v) {
     applyBankC000();
     uint8_t vl = (v >> 3) & 1;
     if (MemESP::videoLatch != vl) {
+        NEXTVID::screenFlipMark();   // the row on the beam keeps the old page
         MemESP::videoLatch = vl;
         VIDEO::grmem = vl ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
         VIDEO::gigascreenAutoFlip();   // Gigascreen Auto (NEXTVID::gigsFrame)

@@ -66,6 +66,12 @@ uint8_t  NEXTVID::gigsBlend[256];
 // 0 = off, 1 = blend with the previous frame, 2 = only record this frame (the
 // first frame after the buffer came up, or Auto between flips)
 static uint8_t s_gigs = 0;
+// Gigascreen prev for the BORDER: one nibble per fb pixel, xres/2 bytes a row
+// over the whole fb (paper columns unused). The paper keeps NEXTVID::gigsPrev.
+// Across the Edge gigascreens its border too (per-line #FE colours alternating
+// per frame): on a Pentagon the shared Gigascreen blends the whole row, here
+// the border flickered unblended (owner, 2026-10-20).
+static uint8_t* s_gigsPrevBrd = nullptr;
 static bool    s_gigsSeed = true;
 uint8_t* NEXTVID::pairMap = nullptr;
 uint8_t* NEXTVID::hiresRow = nullptr;
@@ -415,6 +421,67 @@ __attribute__((noinline)) static void nxBorderSegs(NextLineState& st, int row, i
     // colour after the last in-row change: the one in force until the next
     // change (already recorded if it happened before this row was posted)
     st.border = (k < s_brdCnt) ? s_brdC[(s_brdHead + k) % NX_BRD_N] : (VIDEO::borderColor & 7);
+}
+
+// ---- ULA screen flips mid-frame (#7FFD bit 3 / NR 0x69 bit 6) ----
+// The ULA fetches a row's pixels and attributes from the page in force while
+// the beam crosses its paper, but a row is POSTED at the end of its raster
+// line — after a flip in the right border has already moved VIDEO::grmem.
+// Insult (Code Busters, Pentagon): 16 PUSHes = 32 attribute bytes into the
+// OFF-screen page, then OUT (#7FFD) XOR #0A (screen 5<->7, bank 7<->5) every
+// 448 T = two lines; posting with the new page gave half the rows the colours
+// of the next pair ("multicolour wrong", hw 2026-10-20, right on Pentagon
+// whose MainScreen reads per column). Same shape as the #FE ring above: a ring
+// of {T, page shown BEFORE the flip}, resolved per row at mid-paper.
+#define NX_FLIP_N 8
+static uint32_t s_flipT[NX_FLIP_N];
+static uint8_t  s_flipV[NX_FLIP_N];   // page shown before the flip: 5 or 7
+static uint8_t  s_flipHead = 0, s_flipCnt = 0;
+static uint8_t  s_flipFrame = 0, s_flipPrev = 0;   // flips this frame / last frame
+
+void NEXTVID::screenFlipMark() {
+    if (s_flipCnt == NX_FLIP_N) { s_flipHead = (s_flipHead + 1) % NX_FLIP_N; s_flipCnt--; }
+    const uint8_t i = (s_flipHead + s_flipCnt) % NX_FLIP_N;
+    s_flipT[i] = CPU::tstates;
+    s_flipV[i] = MemESP::videoLatch ? 7 : 5;
+    s_flipCnt++;
+    if (s_flipFrame < 255) s_flipFrame++;
+}
+
+// The page this row's paper was fetched from: flips before the row's mid-paper
+// T belong to it (and to every later row — drop them), the first flip after it
+// says which page was still on show.
+static void nxScreenFlipRow(NextLineState& st, int row, int fvLine) {
+    const uint8_t m = ESPectrum::multiplicator;
+    const int32_t tm = ((row + fvLine) * (int32_t)VIDEO::tStatesPerLine + s_bcol
+                        + (int32_t)VIDEO::vga.xres / 4) * (1 << m);
+    while (s_flipCnt && (int32_t)s_flipT[s_flipHead] < tm) {
+        s_flipHead = (s_flipHead + 1) % NX_FLIP_N; s_flipCnt--;
+    }
+    if (s_flipCnt) st.grmem = MemESP::ram[s_flipV[s_flipHead]].direct();
+}
+
+// A screen that flips more than once a frame rewrites the page it just took
+// off show (Insult: the same attribute row every four lines) — core1 reads
+// guest RAM later than that, so the row carries its own copy of the attribute
+// row (the DMA shadow's field). Gated on the flip count: an unconditional copy
+// would make every row a new queue state (nxSameState) on every ULA game.
+static void nxAttrSnap(NextLineState& st, int row, int paperTop) {
+    if (st.attOvr || (st.r69 & 0x07)) return;   // DMA shadow first; Timex modes: other bytes
+    const int y = row - paperTop;
+    if (y < 0 || y >= 192) return;
+    memcpy(st.attr, st.grmem + VIDEO::offAtt[y], sizeof st.attr);
+    st.attOvr = 1;
+}
+
+// Everything a posted row needs beyond captureLine(): the page at its paper
+// time, the #FE segments, the DMA attribute shadow, the attribute copy. One
+// flash call from the three posting sites (the .nxovl window is full).
+__attribute__((noinline)) static void nxRowFixups(NextLineState& st, int row, int fv, int pt) {
+    if (s_flipCnt) nxScreenFlipRow(st, row, fv);
+    if (s_brdCnt) nxBorderSegs(st, row, fv);
+    if (Z80DMA::dma_attr_valid) nxAttrShadow(st, row, pt);
+    if (s_flipFrame >= 2 || s_flipPrev >= 2) nxAttrSnap(st, row, pt);
 }
 
 // ---- the core1 line queue (NEXT_C1_*) ----
@@ -2095,6 +2162,7 @@ __attribute__((noinline)) void NEXTVID::gigsFrame() {
     const uint8_t mode = Config::gigascreen_onoff;
     if (!mode) {
         if (gigsPrev) { c1Drain(); Buffer::pfree(gigsPrev); gigsPrev = nullptr; }
+        if (s_gigsPrevBrd) { c1Drain(); Buffer::pfree(s_gigsPrevBrd); s_gigsPrevBrd = nullptr; }
         s_gigs = 0;
         return;
     }
@@ -2114,6 +2182,11 @@ __attribute__((noinline)) void NEXTVID::gigsFrame() {
         gigsPrev = (uint8_t*)Buffer::palloc(192 * 128, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         s_gigsSeed = true;
         if (!gigsPrev) { s_gigs = 0; return; }
+    }
+    if (!s_gigsPrevBrd) {   // best effort: without it the border stays unblended
+        s_gigsPrevBrd = (uint8_t*)Buffer::palloc((VIDEO::vga.xres / 2) * VIDEO::vga.yres,
+                                                 Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        if (s_gigsPrevBrd) s_gigsSeed = true;
     }
     bool want = (mode == 1);
     if (mode == 2 && VIDEO::gigascreen_auto_countdown > 0) {
@@ -2157,6 +2230,8 @@ void NEXTVID::EndFrame() {
         for (; row < (int)VIDEO::vga.yres; row++) emitRow(row);
     }
     s_brdHead = s_brdCnt = 0;   // the frame's T-states restart
+    s_flipHead = s_flipCnt = 0;
+    s_flipPrev = s_flipFrame; s_flipFrame = 0;
     // The machine timing (nextreg 0x03) and 50/60 Hz (0x05) change the whole
     // frame: apply at the frame boundary, after core1 has drawn every row of
     // the old geometry (RenderLayers reads paperTopRow live). The BIOS writes
@@ -2193,7 +2268,12 @@ void NEXTVID::EndFrame() {
         static bool s_lastAuto = false;
         const uint32_t qw = g_nx_qwait_us, waited = qw - s_qw;
         s_qw = qw;
-        if (!skipFrame && !s_lastAuto && g_next_c1_live && waited > NX_AUTOSKIP_US) {
+        // Not while the ULA is gigascreening or a title flips the screen inside
+        // the frame (Across the Edge, Insult): a skipped frame pairs frame N
+        // with N+2, which has the SAME page phase — the blend sees one page
+        // twice and the flip effect runs at 25 Hz. The guest slows instead.
+        const bool coherent = s_gigs != 0 || s_flipFrame >= 2 || s_flipPrev >= 2;
+        if (!skipFrame && !s_lastAuto && g_next_c1_live && waited > NX_AUTOSKIP_US && !coherent) {
             skipFrame = true;
             s_lastAuto = true;
             g_nx_autoskip = g_nx_autoskip + 1;
@@ -2302,8 +2382,7 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::ScanlineWork() {
             NextLineState st;
             if (draw) {
                 captureLine(st);
-                if (s_brdCnt) nxBorderSegs(st, row, firstVisibleLine);
-                if (Z80DMA::dma_attr_valid) nxAttrShadow(st, row, paperTopRow);
+                nxRowFixups(st, row, firstVisibleLine, paperTopRow);
             }
             copperRun(cur, 140, (uint16_t)uL);
             s_pdRec = false;
@@ -2351,8 +2430,7 @@ __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
         if (s_preCap) st = *s_preCap;
         else {
             captureLine(st);
-            if (s_brdCnt) nxBorderSegs(st, row, firstVisibleLine);
-            if (Z80DMA::dma_attr_valid) nxAttrShadow(st, row, paperTopRow);
+            nxRowFixups(st, row, firstVisibleLine, paperTopRow);
         }
         if (!nx_have || !nxSameState(st, nx_st[nx_cur])) {
             const uint32_t k = (nx_cur + 1) % NEXT_C1_STATES;
@@ -2378,8 +2456,7 @@ __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
         if (s_preCap) nx_sync = *s_preCap;
         else {
             captureLine(nx_sync);
-            if (s_brdCnt) nxBorderSegs(nx_sync, row, firstVisibleLine);
-            if (Z80DMA::dma_attr_valid) nxAttrShadow(nx_sync, row, paperTopRow);
+            nxRowFixups(nx_sync, row, firstVisibleLine, paperTopRow);
         }
         LS = &nx_sync;
 #if NEXT_TRACE
@@ -2697,6 +2774,30 @@ __attribute__((noinline)) static void nxPaintBorderRuns(uint16_t* u, int xres, c
     for (; x < xres; x++) u[x] = borderV;
 }
 
+// Gigascreen on the BORDER pixels of a row (s_gigsPrevBrd): each pixel blended
+// with the previous frame's nibble through the same table as the paper (the
+// border colours are the first eight ULA colours), this frame's recorded. The
+// paper columns of a paper row belong to the ULA renderer; a transparent
+// border pixel keeps NX_TR. Walks the row's #FE runs like nxPaintBorderRuns.
+__attribute__((noinline)) static void nxBorderGigs(uint16_t* u, int xres, int row, bool paperRow,
+                                                   int xPap, const uint8_t* blendTab) {
+    uint8_t* pb = s_gigsPrevBrd + row * (xres / 2);
+    const bool blend = LS->gigs == 1;
+    int x = 0;
+    auto span = [&](int xe, uint8_t c) {
+        if (xe > xres) xe = xres;
+        for (; x < xe; x++) {
+            if (paperRow && x >= xPap && x < xPap + 256) continue;
+            const uint8_t sh = (uint8_t)((x & 1) * 4);
+            const uint8_t prev = (pb[x >> 1] >> sh) & 15;
+            pb[x >> 1] = (uint8_t)((pb[x >> 1] & (0xF0 >> sh)) | (c << sh));
+            if (blend && !(u[x] & NX_TR)) u[x] = (uint16_t)(NX_SLOT | NX_BRD | blendTab[(prev << 4) | c]);
+        }
+    };
+    for (int i = 0; i < LS->brd.n; i++) span(2 * LS->brd.t[i], (LS->brd.c[i >> 1] >> ((i & 1) * 4)) & 7);
+    span(xres, LS->border & 7);
+}
+
 // The ULA layer (zxula.vhd): border, then the paper — classic / ULANext /
 // LoRes / Timex hi-res / Gigascreen. NR 0x68 bit 7 (ULA off) is applied by the
 // mixer, not here: blend mode 00 still sees the ULA colour.
@@ -2875,6 +2976,8 @@ IRAM_ATTR bool NEXTVID::RenderUlaLine(int row) {
 
     if (LS->brd.n && !hrMode) nxPaintBorderRuns(u, xres, bc, borderV);
     else for (int x = 0; x < xres; x++) u[x] = borderV;
+    if (LS->gigs && s_gigsPrevBrd && !hrMode && !ulaNext && !ulap && row >= 0 && row < (int)VIDEO::vga.yres)
+        nxBorderGigs(u, xres, row, y >= 0 && y < 192 && !VIDEO::paper_off, xPaperOff, gigsBlend);
 
     if (y < 0 || y >= 192 || VIDEO::paper_off) return true;
     uint16_t* p = u + xPaperOff;

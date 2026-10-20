@@ -437,9 +437,16 @@ static inline uint32_t pollRegs() {
 static NXP_HOT void pollSkip(PollMemo& m, uint16_t addr, bool ok, uint32_t dmax, uint32_t lim) {
     const uint16_t pc = Z80::getRegPC();
     const uint32_t t = CPU::tstates, r = Z80::getFetchCounter(), regs = pollRegs();
-    const uint32_t d = t - m.t, dR = r - m.r;
+    // The period is measured on a clock that runs ACROSS frames: CPU::tstates
+    // restarts every frame, so a read made once per frame at a fixed frame
+    // position looked like a pass of a few T — Insult's effect-1 ISR reads
+    // #FE once right after the INT with the same registers every frame, the
+    // "pass" was skipped to the slice end INSIDE the ISR, the next INT fell
+    // into IFF1=0 and 1 frame in 5 was lost (hw 2026-10-20, ISR measured 127k T).
+    const uint32_t g = (uint32_t)(CPU::global_tstates + t);
+    const uint32_t d = g - m.t, dR = r - m.r;
     const bool same = pc == m.pc && addr == m.addr && regs == m.regs;
-    m.pc = pc; m.addr = addr; m.t = t; m.r = r; m.regs = regs;
+    m.pc = pc; m.addr = addr; m.t = g; m.r = r; m.regs = regs;
     if (!same || !ok || d == 0 || d > dmax || MemESP::nextConfigMode) return;
     if (Rzx::mode || Z80::isNMI() || (int32_t)t < CPU::IntEnd) return;
     if (CPU::stFrame && CPU::stFrame < lim) lim = CPU::stFrame;
@@ -450,7 +457,7 @@ static NXP_HOT void pollSkip(PollMemo& m, uint16_t addr, bool ok, uint32_t dmax,
     if (!k) return;
     if (!NEXTVID::idleAdvanceTo(t + k * d)) return;
     Z80::incRegR(k * dR);
-    m.t = CPU::tstates; m.r = Z80::getFetchCounter();
+    m.t = (uint32_t)(CPU::global_tstates + CPU::tstates); m.r = Z80::getFetchCounter();
 #if NEXT_TRACE
     NextIdle::g_nx_idle_n = NextIdle::g_nx_idle_n + 1;
     NextIdle::g_nx_idle_t = NextIdle::g_nx_idle_t + (CPU::tstates - t);

@@ -76,7 +76,7 @@ inline bool cpuIm2() { return Z80::getIM() == Z80::IM2; }
 // 32 CPU cycles in 48K/+3 timing, 36 in 128K/Pentagon.
 __attribute__((always_inline)) inline int64_t pulseLen28() {
     const uint8_t t = NextReg::machineTiming();   // 1 48K, 2 128K, 3 +3, 4 Pentagon
-    return (int64_t)((t == 1 || t == 3) ? 32 : 36) * f28();
+    return (int64_t)((t <= 1 || t == 3) ? 32 : 36) * f28();   // t 0 = unset = 48K, as rasterKey()
 }
 
 inline int64_t fdiv(int64_t a, int64_t b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }

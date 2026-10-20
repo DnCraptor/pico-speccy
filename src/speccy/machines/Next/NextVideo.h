@@ -61,6 +61,7 @@ public:
     static uint8_t contWait[8];   // RAM: read per contended access
     static unsigned contendWait();   // wait states of a contended access starting now
     static void borderMark();   // VIDEO::DrawBorder: a #FE colour change (old colour)
+    static void screenFlipMark();   // #7FFD bit 3 / NR 0x69 bit 6 about to change (old page)
 
     // nextreg palette interface (regs 0x40/0x41/0x43/0x44)
     static uint8_t palRead8();

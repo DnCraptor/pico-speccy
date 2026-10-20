@@ -16016,6 +16016,92 @@ video ~50. Test ELFs `debug/DVp2-nxbulk-{plain,nxtrace}-1.0.10`. What did it, in
   were linked with `NXOVL_WIN_SIZE=52224` and the floor temporarily at 1600 KB in the .ld
   (reverted every time). PERF_TRACE now takes NEXT_TRACE's window term (51 208 B measured).
 
+## Next: a row takes the ULA page that was on show at ITS paper, not at its end — Insult (2026-10-20, hw-confirmed DVp2 the same day; owner: Insult "пофиксился", then the three follow-ups below each confirmed in turn)
+
+Insult (Code Busters 1994, `insult.scl`): multicolour right on Pentagon + DivSD, wrong on
+the Next in the Pentagon personality + DivSD — so not esxDOS. The engine, read out of a
+Ctrl+Alt+D dump (`/tmp/picospec_dump.log`, 64K view + the 8 pages; the IM2 vector
+3BFF/3C00 = FFFF lands on a `C9` in bank 7, IFF1 stays 0 — the INT pulse is irrelevant):
+`988B..A1A6`, 63 blocks of exactly 448 T = two lines each: `LD SP,D8xx` + 16 PUSH = 32
+attribute bytes into the OFF-screen page, `DJNZ` pad, `XOR #0A / OUT (#7FFD)` = screen
+5<->7 AND bank 7<->5 (`0x17`<->`0x1D`). It never races the beam in RAM; it flips the
+displayed page every two lines, with the flip at one fixed column. `NEXTVID::ScanlineWork`
+runs for raster line L at T = (L+1)*tpl and `captureLine` took `VIDEO::grmem` THEN — a flip
+in the right border gave the row the next pair's page. Pentagon's MainScreen reads the
+page per column and never saw it. Two changes, both in NextVideo.cpp:
+- **`NEXTVID::screenFlipMark()`** (from both `videoLatch` writers in NextReg.cpp — #7FFD
+  bit 3 and NR 0x69 bit 6) = the `borderMark` ring: {T, page on show BEFORE the flip};
+  `nxScreenFlipRow` resolves each posted row at its mid-paper T (`s_bcol + xres/4` into
+  the line), dropping flips that are already past. Reset with the border ring in EndFrame.
+- **`nxAttrSnap`**: with >= 2 flips in this or the previous frame, the row carries its 32
+  attribute bytes in `st.attr`/`attOvr` (the DMA shadow's field) — the demo rewrites the
+  page it just took off show every four lines and core1 reads RAM later. GATED on the
+  flip count on purpose: an unconditional copy makes every row a new queue state
+  (`nxSameState`) on every ULA game. Timex modes (NR 69 bits 2:0) and DMA-shadow rows skip it.
+`nxRowFixups(st, row, fv, pt)` is the one flash call the three posting sites make (flip
+page, #FE segments, DMA shadow, attribute copy) — the `.nxovl` window had 64 B left and
+this SHRANK it by 96 B. Cost +44 B .bss. Checked against the VHDL on the way:
+zxula_timing.vhd puts the Pentagon INT at vc 319 / hc 439 and the paper at vc 80 — our
+17983 anchor — where the wiki's Reference_machines table ("2 lines before blanking", i.e.
+81 lines) is loose; the VHDL stands. What still differs from a real Pentagon in that
+personality and is NOT modelled: EAR idles 0 (Pentagon 1), no #EFF7, no Beta (esxDOS only).
+Three follow-ups the same day, all hw-confirmed on DVp2 (owner), each found by a one-shot
+log of what the renderer actually did rather than by reasoning about it:
+- **The adaptive render skip killed the Next's Gigascreen and halved flip effects**
+  (Across the Edge hip-hop part: "the gigascreen does not work in places and the picture
+  looks shifted"; Insult's first effect "stutters, as if short of T-states" — the same
+  mechanism). A `[NXGS]` log of every row's page verdict for two consecutive frames showed
+  EVERY other frame posting no rows at all: `g_nx_autoskip` (core0 waited > 1 ms for the
+  core1 queue → the next frame is emulated, not drawn, never two in a row). The demo
+  inverts its page phase every frame, so drawing frames N and N+2 gives the blend the SAME
+  page twice — pure colours in bands, the eye reads it as a shift. Not a wait problem
+  (`waitState=0 waitRing=0`, core1 ~25-36 us a row with the blend): the gate is now off
+  while `s_gigs` or ≥ 2 flips in this/the previous frame (`coherent`), the guest slows
+  instead. The flips themselves were right all along (all in bucket 196-209 T = right
+  border; the per-row verdict inverts per frame).
+- **The Next Gigascreen blends the BORDER too** (`s_gigsPrevBrd`, one nibble per fb pixel,
+  xres/2 bytes a row over the whole fb in PSRAM, best effort; `nxBorderGigs` in flash walks
+  the row's #FE runs like `nxPaintBorderRuns` and blends through the same `gigsBlend` — the
+  border colours are the first eight ULA colours). Across gigascreens its per-line border
+  colours; on a Pentagon the shared Gigascreen's prev-FB covers the whole row, here only
+  the 192x128 paper did. `.nxovl` AUTO term 51 200 → 51 456 (51 240 used).
+- **`pollSkip` measured its period on the FRAME-relative `CPU::tstates`** (NextPorts.cpp).
+  Insult's effect-1 ISR (`880C`) does everything per frame — erase, draw with #7FFD bank
+  switches per pixel, music — and reads `#FE` once at `88EC` for O/P, at the same frame
+  position with the same registers every frame: two reads a frame apart differed by a few
+  T, read as a poll pass, and the "skip whole passes to the slice end" ran INSIDE the ISR:
+  `[NXINT]` (INT accept → first EI) measured the ISR at 127k T = ~55k real + one frame,
+  `ints=80-83 missed=17-20` per 100. The period is `global_tstates + tstates` now (a read a
+  frame later = 71680 ≫ 256). "2048" (real poll loops) unaffected. Any program reading the
+  keyboard once per ISR with unchanged registers had this.
+Still owed: a game that flips #7FFD bit 3 once a frame (no attribute copy must engage);
+Timex hi-colour + a flip; a 28 MHz title flipping screens (the ring's T are turbo-scaled).
+
+## Next: the ULA INT pulse is 32/36 CPU CYCLES at any speed — 4K Race Next (2026-10-20, hw-confirmed DVp2 on `debug/DVp2-next-4krace-1.0.10`, owner: "фиксед")
+
+`4krace-next.tap` (Ferraris/Costarelli, runs at 28 MHz) showed coloured stripes from a
+varying paper line to the bottom of the screen. A `[4KR]` trace of its NR 0x12/0x13 flips
+and copper control writes (a temporary diag, removed after the verdict — re-add
+`Debug::log` in `copperControl` and the NR 0x12/0x13 case if it is ever needed again)
+settled where: the game's swap + copper restart (`83B8 CALL 8A52`, then `NEXTREG 62,00`,
+a rewrite through NR 0x60, `NEXTREG 62,C0` at `841C`) DRIFTED through the frame — lines
+0, 101, 0 (1.5 frames apart), later 0, 89, 178 (1.33) — and the stripes began exactly at
+the paper row of the restart. The game waits `LD A,(IX+0B) / SUB 2 / JR C` for two frame
+interrupts (25 FPS) and its IM2 handler at `8B1C` is `INC (IX+0B) / EI / RETI`. A period
+under 2 frames means the counter reached 2 within ONE frame: the handler was taken
+TWICE per interrupt. Cause: `CPU::updateStatesInFrame` did `IntEnd <<= m` for every
+machine (the classic fixed-wall-time pulse: 32 base T = 256 CPU cycles at 28 MHz), while
+zxnext.vhd ~2033 counts `pulse_count` on `i_CLK_CPU` — **32 CPU cycles for the 48K/+3
+timings, 36 for 128K/Pentagon, at ANY speed** — so a 60-cycle handler (19 ack + 23 + 4 +
+14) re-takes the interrupt here and never on the board. `NextInt::pulseLen28` already had
+the CPU-cycle rule for the line/CTC sources; the ULA frame window (`classicUla()` =
+`CPU::IntStart..IntEnd`) did not. Now: no `<< m` on IntEnd for `A_NEXT`, and
+`NextReg::raster().intEnd` = the VHDL rule (was INT_END48/128/PENTAGON per raster kind:
++3 36 → 32, Pentagon 32 → 36). Expected on the trace: every B/S/C=C0 line at paper ≈ -60
+(right after the INT), never mid-frame; the game at a steady 25 FPS. The `[4KR]` diag is
+to be removed once confirmed. Not re-checked: anything else that returns from its ISR
+within 36..256 CPU cycles at turbo (NextZXOS itself does not).
+
 ## Next: the paging PORTS reset MMU0/1 to the ROM (2026-10-16, hw-confirmed DVp2: Aliens Neoplasma II starts)
 
 zxnext.vhd 4636-4644 / ports.txt: a guest write to #7FFD/#DFFD/#1FFD/#EFF7 sets MMU0=MMU1=#FF (RAM 0/1

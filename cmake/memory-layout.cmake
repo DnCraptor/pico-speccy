@@ -255,7 +255,9 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # 2026-10-15 (STNICCC): nxBatch's memory-to-memory RUNS (+~300 B) paid for by
     # its rare per-byte cases going to flash (nxByteSlow); nextOtirBatch (300 B)
     # for the zxnDMA program OTIRs. Content 51 112 B — 88 B left.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 51200)
+    # 2026-10-20: the ULA screen-flip page per row + the border Gigascreen call
+    # in the row renderer (Across the Edge / Insult) — +256 B.
+    set(NXOVL_WIN_SIZE_EFFECTIVE 51456)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
@@ -269,7 +271,7 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
         # (nxHiresInkPaper / nxHiresUlaRow / nxHiresPairRow) went to flash and
         # RenderSpritesLine to -O2 no-unroll (4308 -> 1208 B): content 47 248,
         # trace 47 608 — ~3.5 KB under the terms again. Terms unchanged.
-        set(NXOVL_WIN_SIZE_EFFECTIVE 51328)
+        set(NXOVL_WIN_SIZE_EFFECTIVE 51584)
     endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})

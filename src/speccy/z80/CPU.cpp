@@ -222,7 +222,14 @@ void CPU::updateStatesInFrame() {
     if (m) {
         statesInFrame <<= m;
         IntStart <<= m;
-        IntEnd <<= m;
+        // The classic model keeps the ULA pulse at a fixed WALL time (32 base T
+        // = 256 CPU cycles at 28 MHz). The Next counts it in CPU cycles at any
+        // speed (zxnext.vhd ~2033: pulse_count runs on i_CLK_CPU; 32 for 48K/+3,
+        // 36 for 128K/Pentagon), so a 60-cycle IM2 handler never re-takes the
+        // interrupt there. 4K Race Next at 28 MHz: `INC (IX+0B)/EI/RETI` was
+        // counted twice per frame under the 256-cycle window, its 2-frame wait
+        // loop ran free and the copper restart drifted through the picture.
+        if (Config::arch != A_NEXT) IntEnd <<= m;
     }
     stFrame = statesInFrame - IntEnd;
     // TS-Conf: the FRAME INT window is programmable (HSINT/VSINT) — override

@@ -131,7 +131,7 @@ public:
         uint16_t lines;      // lines per frame
         uint8_t  kind;       // 0 = 48K, 1 = 128K/+3, 2 = Pentagon
         bool     hz60;
-        uint8_t  intEnd;     // INT pulse length (base T)
+        uint8_t  intEnd;     // ULA INT pulse, CPU cycles at ANY speed (32 48K/+3, 36 128K/Pentagon)
         uint32_t micros;     // frame period, us
     };
     static Raster raster();
