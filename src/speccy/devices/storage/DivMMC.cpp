@@ -1247,6 +1247,7 @@ extern "C" {
 static uint8_t* s_sq2 = nullptr;
 static bool     s_sq2_tried = false;
 static uint32_t s_as_gen = 0;
+extern "C" volatile unsigned int g_sd_as_done;   // sdcard.c: blocks of the running burst already in
 static uint8_t  s_as_kind = 0;      // the posted request: 0 prefetch, 1 CMD17 single, 2 CMD17 burst
 
 static bool sq2Ensure() {
@@ -1358,6 +1359,7 @@ static void sqAsyncRequest(uint32_t next, uint32_t count) {
     g_sd_as_sector = next;
     g_sd_as_count = count;
     s_as_gen = g_disk_write_gen;
+    g_sd_as_done = 0;   // before the request is visible: core1 zeroes it only after taking it
     __dmb();
     g_sd_as_state = 1;
     SDK(4, next);
@@ -1486,6 +1488,7 @@ static bool c17TryPost(uint32_t count) {
     g_sd_as_sector = s_c17_sector;
     g_sd_as_count = count;
     s_as_gen = g_disk_write_gen;
+    g_sd_as_done = 0;   // before the request is visible: core1 zeroes it only after taking it
     __dmb();
     g_sd_as_state = 1;
     s_c17 = 2;
@@ -1496,6 +1499,24 @@ static bool c17TryPost(uint32_t count) {
 // data token is deferred; false = the caller loads it now (a read-ahead hit).
 // `stream` = inside a CMD18, where the guest itself declared that the next
 // blocks follow: that is what lets one card access cover the whole window.
+static int c17Ready();
+// The background read as the guest sees it: a burst (prefetch or CMD17/18
+// window) of the current write generation. idx = sector's place in it, or -1.
+static int asIdx(uint32_t sector) {
+    if ((s_as_kind != 0 && s_as_kind != 2) || s_as_gen != g_disk_write_gen) return -1;
+    const uint32_t i = sector - (uint32_t)g_sd_as_sector;
+    const uint32_t cnt = g_sd_as_count ? g_sd_as_count : 1;
+    return i < cnt ? (int)i : -1;
+}
+// A finished burst nobody took becomes the read-ahead window.
+static void asInstall() {
+    s_sq2 = raRotate(s_sq2);
+    const uint32_t cnt = g_sd_as_count ? g_sd_as_count : 1;
+    s_sq_base = g_sd_as_sector; s_sq_count = cnt; s_sq_gen = s_as_gen;
+    g_sd_as_state = 0;
+    if (!s_stream) sqAsyncRequest(s_sq_base + cnt, s_win_max);
+}
+
 static bool c17Begin(uint32_t sector, bool stream) {
     // core1 must be pumping (sd_async_pump runs from its Next renderer loop): a
     // dead queue (nxQueueDead) would leave the request untaken for ever — the
@@ -1508,11 +1529,15 @@ static bool c17Begin(uint32_t sector, bool stream) {
         s_c17_hit++;
         return false;                                         // read-ahead hit
     }
-    const uint8_t st = g_sd_as_state;
-    if (s_as_kind == 0 && g_sd_as_sector == sector) {
-        if (st == 3) return false;                            // prefetched: loadSector takes it
-        if (st == 1 || st == 2) { s_c17_sector = sector; s_c17 = 2; return true; }   // wait for it
+    uint8_t st = g_sd_as_state;
+    if (st == 3 && asIdx(g_sd_as_sector) == 0) {
+        asInstall();                                          // finished burst: keep it
+        if (raAnyHit(sector)) { s_c17_hit++; return false; }
+        st = g_sd_as_state;
     }
+    // A burst on the card (or posted) that holds this sector: wait for ITS
+    // block, which c17Ready hands over as soon as core1 has it.
+    if ((st == 1 || st == 2) && asIdx(sector) >= 0) { s_c17_sector = sector; s_c17 = 2; return true; }
     s_c17_sector = sector;
     s_c17 = 1;
     missNote(sector);
@@ -1534,10 +1559,26 @@ static int c17Ready() {
     }
     if (s_c17 == 1 && !c17TryPost(s_c17_count)) return 0;
     const uint8_t st = g_sd_as_state;
+    if (st == 2) {                                            // on the card: this block yet?
+        const int i = asIdx(s_c17_sector);
+        if (i < 0 || (unsigned)i >= g_sd_as_done) return 0;
+        __dmb();
+        memcpy(DivMMC::mmc_sector_buf, (const uint8_t*)g_sd_as_buf + (uint32_t)i * 512u, 512);
+        s1Set(s_c17_sector, s_as_gen);
+        s_sq_last = s_c17_sector;
+        s_c17 = 0;
+        s_c17_ok++;
+        SDK(1, s_c17_sector);
+        return 1;
+    }
     if (st != 3 && st != 4) return 0;
     __dmb();
     const uint32_t sector = s_c17_sector;
-    const bool ok = st == 3 && s_as_gen == g_disk_write_gen && g_sd_as_sector == sector;
+    const int bi = asIdx(sector);
+    // A burst may hand over any of its sectors (the guest took the earlier ones
+    // while it was on the card), a single read only its own.
+    const bool ok = st == 3 && s_as_gen == g_disk_write_gen &&
+                    (s_as_kind == 1 ? g_sd_as_sector == sector : bi >= 0);
     if (ok && (s_as_kind == 0 || s_as_kind == 2)) {           // a burst: becomes the read-ahead
         // No window adaptation here any more: it is measured from the guest's
         // own run length in loadSector() (see the DIVSD_RA_* comment). Anything
@@ -1546,8 +1587,8 @@ static int c17Ready() {
         // last window of every run is partial by construction.
         s_sq2 = raRotate(s_sq2);
         const uint32_t cnt = g_sd_as_count ? g_sd_as_count : 1;
-        s_sq_base = sector; s_sq_count = cnt; s_sq_gen = s_as_gen;
-        memcpy(DivMMC::mmc_sector_buf, s_sq_buf, 512);
+        s_sq_base = g_sd_as_sector; s_sq_count = cnt; s_sq_gen = s_as_gen;
+        memcpy(DivMMC::mmc_sector_buf, s_sq_buf + (uint32_t)bi * 512u, 512);
         s1Set(sector, s_as_gen);
         g_sd_as_state = 0;
         // Prefetch the next window only for a run the guest is in the middle of,

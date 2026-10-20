@@ -16295,9 +16295,9 @@ ns/m1`. Six changes, every one measured:
   `resolveSprites` (which rebuilds the visible list only on a VIS flag CHANGE) left it
   empty — striped sprites, two hw rounds. **Pattern bytes are ONE memory**: a core may
   take a row only if no pattern entry lies between the other core's position and the
-  row's (`nxSprPatClear`, `s_sprPatW`), else it waits as before — without that the intro's
-  ticker (scrolled by rewriting patterns every frame) jumped a frame ahead for one frame
-  (hw, video at 50 fps: the text 200 px left for one frame).
+  row's (`nxSprPatClear`, `s_sprPatW`), else it waits as before. (This was credited with
+  fixing the intro's jumping ticker — WRONG, the ticker is not sprites and kept jumping;
+  see the next section.)
 - **The row helper's block**: retry every 50 frames (was 250), and the queue waits
   (`nxWaitUntil`, `c1Drain`) do not call the flash `c0Help` while there is no helper —
   core0 spinning through flash cost core1's PSRAM stream (XIP 5M accesses a frame).
@@ -16312,6 +16312,30 @@ ns/m1`. Six changes, every one measured:
 - What the game is now: render ~19 ms/frame on core1 + 40-46 rows on core0, Z80
   ~13 ms, DMA 2.4 ms, NR 1F polls 2.2 ms. Left: the full mixer path (~22 us/row), the
   Layer 2 band fill (PSRAM floor), SD reads blocking core1 during room loads.
+
+### The intro ticker jumped because the guest waited for a WHOLE SD burst (2026-10-20, hw-confirmed DVp2: Atic Atac + Dune on BaseConf)
+
+"9bitcolor presents..." showed, about once in 5-10 s, one frame with the text ~200 px
+left. Frame-by-frame video: that frame is the ticker at Layer 2 scroll 0 — the text lies
+at x 30..160 of the 320x256 Layer 2 buffer (castle above it, same buffer) and is put on
+screen by NR 0x16/0x71. The intro's main loop (`#19E2..#1A08`, no HALT, no INT sync) ends
+in `#1B46` -> `#1C00`: `OUT #243B,#1E / IN / JR NZ`, `OUT #243B,#1F / IN / CP (#20EC=184)
+/ JR NZ`, then `NEXTREG #16/#71` = scroll; the line interrupt at 224 (NR 22=06, 23=E0)
+puts scroll back to 0 for the next frame's top. A loop pass that reaches the wait after
+line 184 leaves the ticker at scroll 0 for that frame. Music is streamed from the card
+(CMD18 via `#EB`, 17-35 sectors a chunk) and a CMD18 asked core1 for a window of up to 32
+sectors and gave the guest its FIRST data token only when the whole window was in:
+185-199k T of token polling per read (~7 ms at 28 MHz, 1/3 of a 567k-T frame). Fix
+(`sdcard.c` `g_sd_as_done` + DivMMC `asIdx`/`asInstall`): core1 publishes each block as
+it arrives, the guest's sector is handed over as soon as ITS block is in, a sector the
+running burst covers waits for its block only, and a finished burst nobody took becomes
+the read-ahead window instead of being thrown away. Measured: per-read wait 18-41k T,
+per chunk 70-97k T (was 210-270k), no missed frame. Off-Next ZC machines take the same
+path (Dune on BaseConf checked). How it was found, worth repeating: the copper/NMI and
+the NR 1F fast-forward were checked against the VHDL first and were right; what named it
+was a per-frame line counter (where the wait began, where the scroll was written) plus
+guest T spent in the token poll — a frame without its scroll write printed beside the SD
+figures.
 
 ## Next 640 pair frame: a two-colour screen lost half its glyph pixels (2026-10-19, hw-confirmed DVp2: ZXZVM readable, NEXTEST unchanged)
 

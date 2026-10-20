@@ -1,3 +1,4 @@
+#include "hardware/sync.h"
 #include "sdcard.h"
 
 #include "pico.h"
@@ -780,6 +781,14 @@ volatile uint8_t g_sd_c1_live = 0;
 BYTE*            g_sd_as_buf = 0;
 LBA_t            g_sd_as_sector = 0;
 UINT             g_sd_as_count = 0;
+/* Blocks of the RUNNING background read already in g_sd_as_buf (state 2): the
+   guest gets its sector's data token as soon as that block has arrived instead
+   of after the whole burst — a CMD18 window of 32 sectors used to cost it
+   ~7 ms (~190k T at 28 MHz) per first token, where a card answers in ~1 ms and
+   streams the rest (Atic Atac Remake's intro missed its raster wait and the
+   ticker jumped, hw 2026-10-20). Written by core1 after each block. */
+volatile UINT    g_sd_as_done = 0;
+static volatile UINT* s_as_prog = 0;
 static DRESULT disk_read_sd0(BYTE *buff, LBA_t sector, UINT count);
 
 volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max;
@@ -803,7 +812,10 @@ void sd_async_pump(void)		/* core1 */
 	uint8_t one = 1;
 	if (!__atomic_compare_exchange_n(&g_sd_as_state, &one, 2, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
 	const uint32_t t0 = time_us_32();
+	g_sd_as_done = 0;	/* core0 zeroed it at the post too: state 2 is already visible */
+	s_as_prog = &g_sd_as_done;
 	const DRESULT r = disk_read_sd0(g_sd_as_buf, g_sd_as_sector, g_sd_as_count);
+	s_as_prog = 0;
 	const uint32_t d = time_us_32() - t0;
 	g_sd_as_c1_us += d;
 	if (d > g_sd_as_c1_max) g_sd_as_c1_max = d;
@@ -836,13 +848,16 @@ static DRESULT disk_read_sd0(BYTE *buff, LBA_t sector, UINT count)
 		if ((send_cmd(CMD17, sector) == 0)	/* READ_SINGLE_BLOCK */
 			&& rcvr_datablock(buff, 512)) {
 			count = 0;
+			if (s_as_prog) { __dmb(); *s_as_prog = 1; }
 		}
 	}
 	else {				/* Multiple sector read */
 		if (send_cmd(CMD18, sector) == 0) {	/* READ_MULTIPLE_BLOCK */
+			UINT got = 0;
 			do {
 				if (!rcvr_datablock(buff, 512)) break;
 				buff += 512;
+				if (s_as_prog) { __dmb(); *s_as_prog = ++got; }
 			} while (--count);
 			send_cmd(CMD12, 0);				/* STOP_TRANSMISSION */
 		}

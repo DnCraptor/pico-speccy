@@ -165,9 +165,13 @@ static volatile uint8_t    s_sprR0Valid = 0;
 // Remake scrolls its ticker by rewriting the sprite patterns every frame
 // and the text jumped a frame ahead for one frame, hw 2026-10-19).
 static volatile uint32_t   s_sprPatW = 0;
-static inline bool nxSprPatClear(uint32_t otherPos, uint32_t seq) {
-    const uint32_t pw = s_sprPatW;
-    return (int32_t)(pw - otherPos) <= 0 || (int32_t)(pw - seq) > 0;
+// The test is on the ROW's own last pattern (NextLineState::sprPatW), not the
+// live s_sprPatW: the ticker writes patterns all frame long, so the live value
+// is nearly always past the row and an "after the row" escape let pattern
+// entries BETWEEN the other core and the row through (the jump came back,
+// hw 2026-10-20).
+static inline bool nxSprPatClear(uint32_t otherPos, uint32_t rowPatW) {
+    return (int32_t)(rowPatW - otherPos) <= 0;
 }
 static inline bool nxOnCore0() { return (*(const uint32_t*)SIO_BASE & 1) == 0; }
 
@@ -203,6 +207,7 @@ struct NextLineState {
     const uint8_t* grmem;
     uint32_t sprSeq;         // sprite attribute log position (NEXTVID::sprLog)
     uint32_t palSeq;         // palette log position (palLog)
+    uint32_t sprPatW;        // s_sprPatW at posting: just past the last PATTERN entry the row needs
     uint8_t clip[4][4];
     uint8_t r12, r14, r15, r16, r17, r2F, r30, r31, r32, r33, r42, r4A, r4B, r4C, r68, r69, r6B, r6C, r6E, r6F, r70, r71;
     uint8_t p123B, palCtrl, border, flashing, hires, osd;
@@ -341,6 +346,7 @@ IRAM_ATTR void NEXTVID::captureLine(NextLineState& st) {
     st.r6A = r[0x6A];
     st._pad6A[0] = st._pad6A[1] = st._pad6A[2] = 0;
     st.sprSeq = spr_w;
+    st.sprPatW = s_sprPatW;
     st.palSeq = pal_w;
     st.r27 = r[0x27];
     uint32_t* w = (uint32_t*)&st.brd;   // no libc memset on this path (flash)
@@ -590,7 +596,7 @@ __attribute__((noinline)) IRAM_ATTR bool NEXTVID::rowClaim(unsigned core, uint32
             // the sprite ATTRIBUTES are per core (core0's copy must exist), the
             // palette and the sprite PATTERNS are shared: see nxSprPatClear
             ok = !seg && (int32_t)(st.palSeq - pal_app) <= 0 && (core == 1 || s_sprR0Valid) &&
-                 nxSprPatClear(core == 0 ? spr_app : spr_app0, st.sprSeq);
+                 nxSprPatClear(core == 0 ? spr_app : spr_app0, st.sprPatW);
         }
         if (ok) {
             s_jobSeg[core] = seg;
