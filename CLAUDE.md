@@ -16109,6 +16109,22 @@ log of what the renderer actually did rather than by reasoning about it:
 Still owed: a game that flips #7FFD bit 3 once a frame (no attribute copy must engage);
 Timex hi-colour + a flip; a 28 MHz title flipping screens (the ring's T are turbo-scaled).
 
+## Next: tilemap map rows are copied at POST time — International Karate+ menu (2026-10-20, hw-confirmed DVp2 on `debug/DVp2-next-mapsnap-1.0.10`, owner: "фиксед")
+
+The menu (tilemap 40x32 + Layer 2 320x256, ULA off) showed only its title. The main loop
+waits for NR 0x1F = 208 (`#81AE`), clears the whole tilemap with LDIR `#4000-#49FF`
+(`#BD55`) and redraws the text (`#A042`, title first, "FIRE TO FIGHT" last = map rows
+28-29). On hardware the beam has passed every row by line 208; core1 renders queued rows
+later than their raster time and read them after the clear. `nxMapSnapPost` (flash, from
+emitRow when the tilemap is on) copies the map row a posted line reads into the map-shadow
+pool (key bit 14 = `NX_MAP_POST`, never matched by the per-key DMA scan), reused for the
+following lines of the same tile row while unchanged (`until` bumped), and
+`nx_mapOf[job % NEXT_C1_RING]` names it; `nxMapRowFor`/`nxMapRowForJob` take it first.
+No free entry = live read, as before. +320 B of the queue heap block. Owed: TX-1696 /
+Atic Atac / NEXTEST FPS against the previous build (more live shadows, one flash call per
+posted tilemap line). Tile DEFINITIONS rewritten by the CPU behind the raster are still
+read live.
+
 ## Next: the ULA INT pulse is 32/36 CPU CYCLES at any speed — 4K Race Next (2026-10-20, hw-confirmed DVp2 on `debug/DVp2-next-4krace-1.0.10`, owner: "фиксед")
 
 `4krace-next.tap` (Ferraris/Costarelli, runs at 28 MHz) showed coloured stripes from a

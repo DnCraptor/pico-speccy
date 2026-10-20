@@ -537,6 +537,7 @@ static_assert(NX_SEG_POOL <= 1024 && (NX_SEG_POOL & (NX_SEG_POOL - 1)) == 0, "nx
 struct NxSegRec { uint32_t job, end; };
 static NxPalDelta* s_segPool = nullptr;           // [NX_SEG_POOL]  (queue heap block)
 static uint16_t*   nx_segOf  = nullptr;           // [NEXT_C1_RING]
+static uint8_t*    nx_mapOf  = nullptr;           // [NEXT_C1_RING] post-time map-row copy, 0xFF none
 static NxSegRec*   s_segQ    = nullptr;           // [NX_SEG_Q]
 static uint32_t    s_segW = 0, s_segRel = 0, s_segQh = 0, s_segQt = 0;
 static uint16_t    s_segPost = 0;                 // emitRow: the row being posted carries this
@@ -872,6 +873,9 @@ static inline uint16_t nxMapKey(uint8_t bank, uint32_t off) {
 }
 static constexpr int NX_MAP_SH = 192;
 static constexpr int NX_MAP_SH_ROW = 160;
+// Key bit 14 (offsets are < 0x4000) marks a POST-TIME copy (nxMapSnapPost): never
+// matched by the per-key scan, reached only through nx_mapOf[job].
+static constexpr uint16_t NX_MAP_POST = 0x4000;
 static NxMapShadow* s_mapSh = nullptr;            // [NX_MAP_SH] headers (the hot SRAM block, Reset)
 static uint8_t (*s_mapShData)[NX_MAP_SH_ROW] = nullptr;   // [NX_MAP_SH] row copies (queue heap block)
 static volatile uint8_t s_mapShLive = 0;          // any entry possibly live (renderer fast test)
@@ -895,6 +899,11 @@ __attribute__((noinline)) static const uint8_t* nxMapRowFor(uint8_t bank, uint32
     if (!nx_busy[core] || !s_mapShData) return live;
     const uint32_t job = nx_jobAt[core];
     const uint16_t key = nxMapKey(bank, off);
+    if (nx_mapOf) {                       // the row as it was at this line's raster time
+        const uint8_t pk = nx_mapOf[job % NEXT_C1_RING];
+        if (pk < NX_MAP_SH && s_mapSh[pk].live && s_mapSh[pk].key == (uint16_t)(key | NX_MAP_POST))
+            return s_mapShData[pk];
+    }
     const NxMapShadow* best = nullptr;
     uint32_t bestUntil = 0;
     const int top = s_mapShTop;
@@ -912,6 +921,11 @@ __attribute__((noinline)) static const uint8_t* nxMapRowFor(uint8_t bank, uint32
 static const uint8_t* nxMapRowForJob(uint8_t bank, uint32_t off, const uint8_t* live, uint32_t job) {
     if (!s_mapShData || !s_mapShLive) return live;
     const uint16_t key = nxMapKey(bank, off);
+    if (nx_mapOf) {
+        const uint8_t pk = nx_mapOf[job % NEXT_C1_RING];
+        if (pk < NX_MAP_SH && s_mapSh[pk].live && s_mapSh[pk].key == (uint16_t)(key | NX_MAP_POST))
+            return s_mapShData[pk];
+    }
     const NxMapShadow* best = nullptr;
     uint32_t bestUntil = 0;
     const int top = s_mapShTop;
@@ -953,16 +967,15 @@ static bool nxLineUsesTiles(const NextLineState& st, int row, int paperTop, uint
 
 // core0: copy map row (bank, m0) for the posted jobs up to `until`. false = no
 // free entry (the caller waits instead).
-static bool nxMapShadowTake(uint8_t bank, uint32_t m0, int n, uint32_t until) {
-    const uint16_t key = nxMapKey(bank, m0);
+static int nxMapShadowAlloc(uint8_t bank, uint32_t m0, int n, uint32_t until, uint16_t key) {
     int freeK = -1;
     for (int k = 0; k < NX_MAP_SH; k++) {
         NxMapShadow& e = s_mapSh[k];
         if (e.live && (int32_t)(nx_r - e.until) > 0) e.live = 0;       // all its lines rendered
-        if (e.live && e.key == key && e.until == until) return true;   // already copied for them
+        if (e.live && e.key == key && e.until == until) return k;      // already copied for them
         if (!e.live && freeK < 0) freeK = k;
     }
-    if (freeK < 0) return false;
+    if (freeK < 0) return -1;
     NxMapShadow& e = s_mapSh[freeK];
     if (freeK >= s_mapShTop) s_mapShTop = freeK + 1;
     e.live = 0;
@@ -972,7 +985,42 @@ static bool nxMapShadowTake(uint8_t bank, uint32_t m0, int n, uint32_t until) {
     __dmb();
     e.live = 1;
     s_mapShLive = 1;
-    return true;
+    return freeK;
+}
+static bool nxMapShadowTake(uint8_t bank, uint32_t m0, int n, uint32_t until) {
+    return nxMapShadowAlloc(bank, m0, n, until, nxMapKey(bank, m0)) >= 0;
+}
+
+// core0, posting job `job`: give it the map row it reads AS IT IS NOW (its raster
+// time). core1 renders a line later than that, and a guest that clears and
+// redraws the whole tilemap once a frame (International Karate+'s menu: NR 0x1F
+// wait for line 208, LDIR over #4000-#49FF, then the text) had the rows read
+// after the clear — only the title, drawn first, survived (hw 2026-10-20). The
+// copy taken for the previous line of the same tile row is reused while the
+// row is unchanged (its `until` bumped), so a tile row costs one copy a frame.
+static int      s_mapPostK = -1;
+static uint32_t s_mapPostUntil = 0;
+__attribute__((noinline)) static void nxMapSnapPost(const NextLineState& st, int row, int paperTop, uint32_t job) {
+    uint8_t& of = nx_mapOf[job % NEXT_C1_RING];
+    of = 0xFF;
+    uint8_t bank; uint32_t m0; int n;
+    if (!nxLineMapRow(st, row, paperTop, bank, m0, n)) return;
+    const uint16_t key = (uint16_t)(nxMapKey(bank, m0) | NX_MAP_POST);
+    const uint8_t* live = MemESP::ram[bank].direct() + m0;
+    if (s_mapPostK >= 0) {
+        NxMapShadow& e = s_mapSh[s_mapPostK];
+        if (e.live && e.key == key && e.until == s_mapPostUntil && e.n == n
+            && !memcmp(s_mapShData[s_mapPostK], live, n)) {
+            e.until = job;                    // core0 only; a reader of `until` is fine either way
+            s_mapPostUntil = job;
+            of = (uint8_t)s_mapPostK;
+            return;
+        }
+    }
+    const int k = nxMapShadowAlloc(bank, m0, n, job, key);
+    s_mapPostK = k;
+    s_mapPostUntil = job;
+    if (k >= 0) of = (uint8_t)k;              // none free: the line reads guest RAM, as before
 }
 
 // core0: the DMA is about to write [o0, o1] of `bank`. If the only posted lines
@@ -1983,7 +2031,8 @@ void NEXTVID::Reset() {
         static_assert(base % 4 == 0, "segment pool alignment");
         // PSRAM (2026-10-14): read a few bytes a line, the 24 KB of SRAM bought ~nothing
         // (TX-1696 at 576p) and cost the core0 row helper its place after a menu visit.
-        uint8_t* q = (uint8_t*)Buffer::palloc(base + segB + shB + 4, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        static_assert(NX_MAP_SH < 0xFF, "nx_mapOf: 0xFF = no copy");
+        uint8_t* q = (uint8_t*)Buffer::palloc(base + segB + shB + 4 + NEXT_C1_RING, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
         if (q) {
             nx_ring = (uint32_t*)q;
             nx_st = (NextLineState*)(q + 4 * NEXT_C1_RING);
@@ -1994,6 +2043,8 @@ void NEXTVID::Reset() {
             nx_segOf  = (uint16_t*)(q + base + sizeof(NxSegRec) * NX_SEG_Q + sizeof(NxPalDelta) * NX_SEG_POOL);
             memset(nx_segOf, 0, 2 * NEXT_C1_RING);
             s_mapShData = (uint8_t (*)[NX_MAP_SH_ROW])(q + ((base + segB + 3) & ~3u));
+            nx_mapOf = q + ((base + segB + 3) & ~3u) + shB;
+            memset(nx_mapOf, 0xFF, NEXT_C1_RING);
         }
         Debug::log("[NXC1] core1 line renderer %s @%08X", q ? "ON" : "unavailable (no RAM)", (unsigned)(uintptr_t)q);
     }
@@ -2003,6 +2054,7 @@ void NEXTVID::Reset() {
     nx_segRun = 0; s_jobSeg[0] = s_jobSeg[1] = 0;
     s_segRel = s_segW; s_segQt = s_segQh;
     if (s_mapSh) for (int k = 0; k < NX_MAP_SH; k++) s_mapSh[k].live = 0;
+    s_mapPostK = -1;
     g_next_c1_live = nx_ring != nullptr;
     if (firstReset)
         Debug::log("[NXV] video state took %u B of heap (%u -> %u)",
@@ -2454,6 +2506,8 @@ __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
     if (g_next_c1_live) {
         nx_ring[nx_w % NEXT_C1_RING] = (uint32_t)row | (nx_cur << 16);
         nx_segOf[nx_w % NEXT_C1_RING] = s_segPost;
+        if (s_mapSh && (nx_st[nx_cur].r6B & 0x80)) nxMapSnapPost(nx_st[nx_cur], row, paperTopRow, nx_w);
+        else nx_mapOf[nx_w % NEXT_C1_RING] = 0xFF;
         __dmb();                    // job + state visible before the index
         nx_w = nx_w + 1;
         nx_st_job[nx_cur] = nx_w;
