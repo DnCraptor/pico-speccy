@@ -85,10 +85,6 @@ static const char *kBankPaths[] = {
     "/gm_bank.bin",
 };
 
-// Set by every openValidSdBank(): the file it opened is the stock gm_bank.bin (one of
-// kBankPaths, picked or fallen back to), not another bank the user chose.
-static bool s_openedDefault = false;
-
 // ── statics ──────────────────────────────────────────────────────────────────
 uint8_t MidiSynth::midi_status   = 0;
 uint8_t MidiSynth::midi_data[2]  = {0, 0};
@@ -153,12 +149,11 @@ static inline uint32_t bankAllocFlags() {
     return Buffer::NEED_POINTER | Buffer::PREFER_PSRAM | Buffer::ALLOW_FLASH;
 }
 
-// On a 16 MB module the flash region is ~10 MB that nothing else uses, so the STOCK
-// bank (gm_bank.bin = the converted GM.DLS) lives THERE: written once and then played
-// from XIP, leaving the butter arena free for pages, NeoGS and MoonSound. Any other
-// bank the user picks keeps the ladder above (PSRAM on a butter board), so switching
-// sources never rewrites flash. A stock bank the region cannot hold, or one that would
-// need a flash write after VIDEO::Init, also falls back to the ladder.
+// On a 16 MB module the flash region is ~10 MB that nothing else uses, so the bank
+// lives THERE first: written once (on the boot after a new bank is picked) and then
+// played from XIP with no SD read and no PSRAM — the butter arena stays free for
+// pages, NeoGS and MoonSound. A bank the region cannot hold, or a live pick that
+// would need a flash write after VIDEO::Init, falls back to the ladder above.
 #if FLASH_SIZE >= 16384
 static constexpr bool kBankFlashFirst = true;
 #else
@@ -196,7 +191,7 @@ bool MidiSynth::loadBank(bool force, bool mayWriteFlash) {
     if (!f) return false;                                  // no usable SD bank
     g_bankBuf.free();
     bool ok = false;
-    if (kBankFlashFirst && s_openedDefault &&
+    if (kBankFlashFirst &&
         g_bankBuf.alloc(size, Buffer::NEED_POINTER | Buffer::FORCE_FLASH)) {
         ok = g_bankBuf.load((uint32_t)size, force, bankFileReader, f, mayWriteFlash);
         if (!ok) g_bankBuf.free();   // e.g. a write needed post-video: play from PSRAM now
@@ -249,21 +244,14 @@ static FIL* tryOpenBank(const char* path, size_t* outSize, gm_bank_header_t* out
 // Open the GM wavetable bank on SD and validate its header. Prefers the user-chosen
 // bank (Config::midi_bank, set by the OSD picker) and falls back to the default
 // gm_bank.bin locations. Returns the open FIL* (caller fcloses) + size/header.
-static bool isDefaultBankPath(const char* p) {
-    for (size_t i = 0; i < sizeof(kBankPaths) / sizeof(kBankPaths[0]); i++)
-        if (strcasecmp(p, kBankPaths[i]) == 0) return true;
-    return false;
-}
-
 static FIL* openValidSdBank(size_t* outSize, gm_bank_header_t* outHdr) {
-    s_openedDefault = false;
     if (!Config::midi_bank.empty()) {
         FIL* f = tryOpenBank(Config::midi_bank.c_str(), outSize, outHdr);
-        if (f) { s_openedDefault = isDefaultBankPath(Config::midi_bank.c_str()); return f; }
+        if (f) return f;                        // chosen bank still present & valid
     }
     for (size_t i = 0; i < sizeof(kBankPaths) / sizeof(kBankPaths[0]); i++) {
         FIL* f = tryOpenBank(kBankPaths[i], outSize, outHdr);
-        if (f) { s_openedDefault = true; return f; }
+        if (f) return f;
     }
     return nullptr;
 }
