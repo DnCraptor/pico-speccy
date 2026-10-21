@@ -16617,3 +16617,21 @@ and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card 
   -> Debug::log tail call the first time, DivMMC::applyMapping the second). Gone after the owner
   reset the settings to defaults; which setting armed it is unknown. If it returns: the plain
   build vs sdcut7-prof in the same scenario, and a GDB capture of the ARM stack ABOVE SP.
+- **Pogie: parallax bands at the wrong scroll for one frame every ~0.5 s = a long CMD18 had no
+  prefetch (2026-10-21, hw-confirmed DVp2 on `debug/DVp2-next-sdstream-ldiag-1.1.0`, owner: "фиксед").**
+  Pogie's LoRes background is a line-IRQ chain (ULA INT off, NR 22=06, 14 MHz): lines 46/78/96/131
+  write NR 0x32 per band and the next NR 0x23, line 185 runs a long handler, line 240 sets the frame
+  flag. The 185 handler (IFF=0) streams ONE sector a frame of `pogie.cpa` (copper audio) itself:
+  512 x `INI` from `#EB` inside one endless CMD18, then `8C4A: IN A,(C) / CP #FF / JR Z` for the
+  next block's token. The read-ahead was deliberately off inside a CMD18 (`!s_stream`), so every
+  32 frames the window ran out, the next sector was a demand read, the guest's token wait ran the
+  handler ~4.5 lines past 240, the line-240 pulse was lost and the chain slipped a frame (the bands
+  then show the bottom band's scroll). Fix: `pfOk()` (DivMMC.cpp) — inside a CMD18 the next window
+  is prefetched once that CMD18 has served more than one full window (`s_stream_n >
+  DIVSD_RA_STREAM`); load chunks (17-35 sectors) keep the old no-prefetch rule. Owed: loads with
+  long CMD18s (Atic Atac, TX-1696, NextZXOS Browser) for extra card reads. Diagnostic kept:
+  **`-DNEXT_LINE_DIAG=ON`** (`[LDIAG]` in NextInt.cpp): every line pulse no INT acknowledge
+  followed, with IFF1/PC/stack when the loop first saw it and the lateness, plus a summary every
+  1500 pulses. `iff=0` = a handler still running (lost on the board too unless our timing is
+  longer), `iff=1` + large `seen` = we ran past the pulse. Read it first on any "raster split /
+  parallax glitches every N frames" report on the Next.

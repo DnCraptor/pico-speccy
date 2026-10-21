@@ -1176,6 +1176,16 @@ static inline void runHist(uint32_t L) {
     s_rh[L == 1 ? 0 : L == 2 ? 1 : L == 3 ? 2 : L < 8 ? 3 : L < 16 ? 4 : 5]++;
 }
 static bool     s_stream = false;          // inside a CMD18: the guest declared the run
+// Blocks served inside the current CMD18. A stream that has already run past one
+// full window is not a load chunk that is about to stop: it is a long stream
+// (Pogie reads one sector of its copper-audio stream per frame from a line-185
+// interrupt handler, with interrupts off, and waits for the next block's token
+// there; every demand refill at a window end cost ~5 scan lines of guest time,
+// the line-240 interrupt was lost and the parallax bands showed the wrong scroll
+// for a frame every ~0.5 s, hw 2026-10-21). From then on the next window is
+// prefetched as outside a stream.
+static uint32_t s_stream_n = 0;
+static inline bool pfOk() { return !s_stream || s_stream_n > DIVSD_RA_STREAM; }
 static bool     s_c17_force_sync = false;  // the CMD path already fell back: read now
 
 // Taken on the first read, not in raInit(): DivMMC::init runs BEFORE
@@ -1543,7 +1553,7 @@ static void asKeep() {
 // is prefetched.
 static void asInstall() {
     asKeep();
-    if (!s_stream && raCurHit(s_sq_base)) sqAsyncRequest(s_sq_base + s_sq_count, s_win_max);
+    if (pfOk() && raCurHit(s_sq_base)) sqAsyncRequest(s_sq_base + s_sq_count, s_win_max);
 }
 // The sector from a read-ahead window into mmc_sector_buf (c17Ready's 1).
 static int c17FromWindow(uint32_t sector) {
@@ -1563,7 +1573,11 @@ static bool c17Begin(uint32_t sector, bool stream) {
     // 2 s storage probe used to cancel it as a side effect, and without that
     // TX-1696 never started (hw 2026-10-09).
     if (!sdAsyncMachine() || !sq1Ensure() || !sq2Ensure()) return false;
-    if (stream) s_stream = true;
+    if (stream) {
+        if (!s_stream) s_stream_n = 0;
+        s_stream = true;
+        s_stream_n++;
+    }
     s_c17_t0 = time_us_32();
     if (raAnyHit(sector)) {
         s_c17_hit++;
@@ -1651,11 +1665,11 @@ static int c17Ready() {
         s1Set(sector, s_as_gen);
         g_sd_as_state = 0;
         // Prefetch the next window only for a run the guest is in the middle of,
-        // and NEVER inside a CMD18: there the guest may stop at the end of the
-        // chunk, and a burst nobody reads is 16 sectors of core1's render time
-        // thrown away. Inside a stream the demand read refills the window
-        // instead — that is still one card access per 16 blocks.
-        if (!s_stream) sqAsyncRequest(sector + cnt, s_win_max);
+        // and inside a CMD18 only once it has run past a whole window (pfOk):
+        // a short chunk may stop at its end, and a burst nobody reads is
+        // core1's render time thrown away; a long stream must not wait for the
+        // card at every window end.
+        if (pfOk()) sqAsyncRequest(sector + cnt, s_win_max);
     } else if (ok) {
         memcpy(DivMMC::mmc_sector_buf, s_sq2, 512);
         s1Set(sector, s_as_gen);
@@ -1895,8 +1909,9 @@ void DivMMC::loadSector(uint32_t sector) {
         if (raAnyHit(sector)) {
             memcpy(mmc_sector_buf, s_sq_buf + (size_t)(sector - s_sq_base) * 512, 512);
             s_sq_last = sector;
-            // Half in: post the next window (not inside a CMD18 — see c17Ready).
-            if (!s_stream && sector - s_sq_base >= 2) sqAsyncRequest(s_sq_base + s_sq_count, s_win_max);
+            // Half in: post the next window (inside a CMD18 only once it has run
+            // past a whole window — see pfOk()).
+            if (pfOk() && sector - s_sq_base >= 2) sqAsyncRequest(s_sq_base + s_sq_count, s_win_max);
             s_s1_sec = sector; s_s1_gen = s_sq_gen;
             SDK(0, sector);
             return;

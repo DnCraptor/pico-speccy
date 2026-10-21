@@ -7,9 +7,11 @@
 #include "speccy/z80/CPU.h"
 #include "speccy/z80/z80.h"
 #include "speccy/video/Video.h"
+#include "speccy/core/MemESP.h"
+#include "speccy/devices/Z80DMA.h"
 #include <cstdint>
 #include "pico.h"
-#if PERF_TRACE && PERF_HIST
+#if (PERF_TRACE && PERF_HIST) || NEXT_LINE_DIAG
 #include <cstdio>
 #include "app/Debug.h"
 #endif
@@ -96,6 +98,51 @@ NXI_HOT void exRecalc() {
     NextInt::ex = (s_lineEn || im2Hw() || ctcInt || s_unqPulse) ? 1 : 0;
     if (NextInt::ex && !was) NextInt::wake();
 }
+
+#if NEXT_LINE_DIAG
+// [LDIAG] (NEXT_LINE_DIAG builds): a line pulse that no INT acknowledge
+// followed. Recorded when the loop first SAW the event (sync), i.e. with the
+// CPU state of that moment: IFF1 0 there = a handler (or DI code) was still
+// running, lost on the board too; IFF1 1 + "late" = the loop saw the event
+// after the pulse had ended (a slice / batch / DMA ran past it). One summary
+// line per ~5 s. Flash, called from the window only under this option.
+struct LineDiag { int64_t t, seen; uint16_t line, pc, sp, ret; uint8_t iff, taken, valid, dma; };
+LineDiag s_ld;
+uint32_t s_ldRaise, s_ldAck, s_ldLost0, s_ldLost1, s_ldAckMax;
+__attribute__((noinline)) void ldReport() {
+    const LineDiag& d = s_ld;
+    const int64_t f = d.t - s_base28;
+    Debug::log("[LDIAG] line %u pulse not taken: seen +%luT iff=%u pc=%04X sp=%04X (%04X) dma=%u frT=%lu now pc=%04X iff=%u\n",
+               (unsigned)d.line, (unsigned long)((d.seen - d.t) / 8), (unsigned)d.iff, (unsigned)d.pc,
+               (unsigned)d.sp, (unsigned)d.ret, (unsigned)d.dma, (unsigned long)(f >= 0 ? f / 8 : 0),
+               (unsigned)Z80::getRegPC(), (unsigned)Z80::isIFF1());
+}
+__attribute__((noinline)) void ldRaise(int64_t t, int64_t now) {
+    if (s_ld.valid && !s_ld.taken) {
+        if (s_ld.iff) s_ldLost1++; else s_ldLost0++;
+        ldReport();
+    }
+    const uint16_t sp = Z80::getRegSP();
+    s_ld.t = t; s_ld.seen = now; s_ld.line = s_lineNum;
+    s_ld.pc = Z80::getRegPC(); s_ld.sp = sp;
+    s_ld.ret = (uint16_t)(MemESP::dbgPeek(sp) | (MemESP::dbgPeek((uint16_t)(sp + 1)) << 8));
+    s_ld.iff = Z80::isIFF1(); s_ld.taken = 0; s_ld.valid = 1;
+    s_ld.dma = (uint8_t)((Z80DMA::nxPending ? 1 : 0) | (Z80DMA::nxStall ? 2 : 0));
+    if (++s_ldRaise >= 1500) {
+        Debug::log("[LDIAG] %lu pulses, %lu acks, lost iff0 %lu iff1 %lu, ack delay max %luT\n",
+                   (unsigned long)s_ldRaise, (unsigned long)s_ldAck, (unsigned long)s_ldLost0,
+                   (unsigned long)s_ldLost1, (unsigned long)s_ldAckMax);
+        s_ldRaise = s_ldAck = s_ldLost0 = s_ldLost1 = s_ldAckMax = 0;
+    }
+}
+__attribute__((noinline)) void ldAck(int64_t now) {
+    s_ldAck++;
+    if (!s_ld.valid || s_ld.taken) return;
+    s_ld.taken = 1;
+    const uint32_t dl = (uint32_t)((now - s_ld.t) / 8);
+    if (dl > s_ldAckMax) s_ldAckMax = dl;
+}
+#endif
 
 // A source fired at absolute time t. `pulse` false = the ULA frame event, whose
 // pulse is the classic window.
@@ -308,6 +355,9 @@ NXI_HOT void sync() {
     const int64_t relPrev = s_last28 - s_base28, relNow = now - s_base28;
     if (s_lineEn && s_linePos28 >= 0 && s_linePos28 > relPrev && s_linePos28 <= relNow) {
         raise(D_LINE, s_base28 + s_linePos28, true);
+#if NEXT_LINE_DIAG
+        ldRaise(s_base28 + s_linePos28, now);
+#endif
 #if NEXT_TRACE
         g_li_raise++;
         // A pulse already over by the time the loop saw it: the CPU could not
@@ -461,6 +511,9 @@ NXI_HOT uint8_t ack() {
     sync();
 #if NEXT_TRACE
     g_int_ack++;
+#endif
+#if NEXT_LINE_DIAG
+    ldAck(s_last28);
 #endif
     if (!im2Hw() || !cpuIm2()) return 0xFF;
     const int d = presented();

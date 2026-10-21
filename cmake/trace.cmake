@@ -49,6 +49,7 @@ option(GS_DEBUG_TRACE "Enable General Sound port-IO trace ring + auto-dumps (~50
 option(NGS_TRACE "Enable NeoGS 1 Hz health line (GS-Z80 PC / SD counters; ~2-4 ms UART stall per line)" OFF)
 option(NGS_SD_TRACE "Also log every guest SD command (NGS_TRACE level 2; thousands of lines per directory scan)" OFF)
 option(NEXT_TRACE "Enable ZX Next 1 Hz health line (MMU/automap/PC/FPS state + nextreg event ring; ~7 KB of static SRAM on every board)" OFF)
+option(NEXT_LINE_DIAG "ZX Next: log every line-interrupt pulse that was never acknowledged (line, IFF1/PC/stack when the loop saw it, lateness) — Pogie parallax glitch" OFF)
 option(ZC_PORT_TRACE "Enable Z-Controller/DivSD SPI-SD command tracing (CS edges + command frames)" OFF)
 option(RZX_TRACE "RZX playback log: machine/ROM sums at start, a checkpoint per second, paging changes, short/overrun frames — same lines as tools/rzx_replay_sim.c RZX_LOG=1" OFF)
 option(ATM_PAGE_TRACE "ATM-Turbo paging trace only: page-register ring + page-table writes + RST #38 alarm (no SD flood)" OFF)
