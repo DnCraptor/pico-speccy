@@ -149,6 +149,17 @@ static inline uint32_t bankAllocFlags() {
     return Buffer::NEED_POINTER | Buffer::PREFER_PSRAM | Buffer::ALLOW_FLASH;
 }
 
+// On a 16 MB module the flash region is ~10 MB that nothing else uses, so the bank
+// lives THERE first: written once (on the boot after a new bank is picked) and then
+// played from XIP with no SD read and no PSRAM — the butter arena stays free for
+// pages, NeoGS and MoonSound. A bank the region cannot hold, or a live pick that
+// would need a flash write after VIDEO::Init, falls back to the ladder above.
+#if FLASH_SIZE >= 16384
+static constexpr bool kBankFlashFirst = true;
+#else
+static constexpr bool kBankFlashFirst = false;
+#endif
+
 // Defined below; needed by bindFromPsram() above its definition.
 static FIL* openValidSdBank(size_t* outSize, gm_bank_header_t* outHdr);
 
@@ -179,12 +190,20 @@ bool MidiSynth::loadBank(bool force, bool mayWriteFlash) {
     FIL* f = openValidSdBank(&size, &hdr);
     if (!f) return false;                                  // no usable SD bank
     g_bankBuf.free();
-    if (!g_bankBuf.alloc(size, bankAllocFlags())) {
-        fclose2(f);
-        Debug::log("MidiSynth: bank alloc failed (%uKB)", (unsigned)(size >> 10));
-        return false;
+    bool ok = false;
+    if (kBankFlashFirst &&
+        g_bankBuf.alloc(size, Buffer::NEED_POINTER | Buffer::FORCE_FLASH)) {
+        ok = g_bankBuf.load((uint32_t)size, force, bankFileReader, f, mayWriteFlash);
+        if (!ok) g_bankBuf.free();   // e.g. a write needed post-video: play from PSRAM now
     }
-    bool ok = g_bankBuf.load((uint32_t)size, force, bankFileReader, f, mayWriteFlash);
+    if (!ok) {
+        if (!g_bankBuf.alloc(size, bankAllocFlags())) {
+            fclose2(f);
+            Debug::log("MidiSynth: bank alloc failed (%uKB)", (unsigned)(size >> 10));
+            return false;
+        }
+        ok = g_bankBuf.load((uint32_t)size, force, bankFileReader, f, mayWriteFlash);
+    }
     fclose2(f);
     gm_bank_view_t v;
     if (!ok || !gm_bank_view(g_bankBuf.data(), &v)) { g_bankBuf.free(); return false; }
