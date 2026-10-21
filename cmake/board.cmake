@@ -99,12 +99,16 @@ if(FLASH_16MB)
     set(FLASH_SIZE 16384)
     set(PICO_FLASH_SIZE_BYTES "16 * 1024 * 1024")
     set(MOONSOUND 1)
+    set(GM_BANK_BUILTIN 1)
 else()
     set(FLASH_SIZE 4096)
     set(MOONSOUND 0)
+    set(GM_BANK_BUILTIN 0)
 endif()
 # MOONSOUND: the ZXM-MoonSound card (YMF278B wave half + its embedded YRW801 ROM).
 add_compile_definitions(MOONSOUND=${MOONSOUND})
+# GM_BANK_BUILTIN: the GM.DLS bank embedded in flash (src/speccy/roms/gmbank).
+add_compile_definitions(GM_BANK_BUILTIN=${GM_BANK_BUILTIN})
 
 # Board tag: prefix of the firmware file name and the per-board NVS config dir.
 # No chip suffix anymore — every target is RP2350.

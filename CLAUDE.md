@@ -16650,6 +16650,15 @@ lists the 16 MB VGA_HDMI images as `<BOARD>-16M`; tools/release_downloads.py str
 `-16MB` display suffix into the link label. DVp2: 4 MB 3.51 MB used, 16 MB 5.61 MB with a
 ~10.7 MB GM.DLS region. Rule: anything that does not fit 4 MB goes behind `MOONSOUND`-style
 16 MB guards, never into the 4 MB image.
+**Built-in GM.DLS bank on 16 MB** (`GM_BANK_BUILTIN`, cmake/board.cmake = the 16 MB flag;
+NOT hw-tested, `debug/DVp2-gmbuiltin-1.1.0`): `src/speccy/roms/gmbank/gm_bank.bin` (owner's
+file, GMWB v5, 1 668 026 B = the stock converted gm.dls) is `.incbin`'d by gm_bank.S as
+`gb_gm_bank_builtin` and played straight from XIP. An EMPTY `Config::midi_bank` means it
+(the picker's first row "Built-in GM.DLS", tag -1, shown without an SD card); an explicit SD
+pick loads into PSRAM as before, and a pick that is gone from the card falls back to the
+built-in bank (the default gm_bank.bin paths on the card are not consulted there).
+`bankFixedPtr()` (MidiSynth.cpp) replaces the flash partition as the no-SD binding;
+Memory Info says `built-in`. 4 MB images byte-identical in size.
 
 ## ZXM-MoonSound (YMF278B / OPL4) — 2026-10-21, NOT hw-tested
 

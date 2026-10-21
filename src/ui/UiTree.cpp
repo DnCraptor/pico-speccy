@@ -1415,6 +1415,8 @@ static const Option opt_midi_mode[] = {
     { "DLS Wavetable", 4 },
 };
 static bool p_midiDls()  { return Stage::get(SET_MIDI_MODE) == 4; }
+// The bank list needs a card, except on a 16 MB image, which carries its own bank.
+static bool p_midiBankVis() { return GM_BANK_BUILTIN || p_hasSD(); }
 static const Option opt_midi_bank_hints[] = {
     { SYM_ENTER " Select / install", 0 },
 };
@@ -1472,7 +1474,7 @@ static const Node kAudio[] = {
     // The bank list + on-device .dls conversion act immediately (like the disk slots):
     // a bank pick can applyBankLive() or defer a flash write to the next boot.
     NM_DYNH_EN (NM_IND TXT_MIDI_BANK,   midi_buildBanks, midi_keyBanks,
-                opt_midi_bank_hints, p_hasSD, p_midiDls),
+                opt_midi_bank_hints, p_midiBankVis, p_midiDls),
     NM_RADIO_D (TXT_AUD_GS,          SET_GS_MODE,  gs_modeOpts,  p_gsAvail),
     NM_RADIO_EN(NM_IND TXT_GS_CLOCK, SET_GS_CLOCK,  opt_gs_clock,  p_gsClockCls, p_gsClassic),
     NM_RADIO_DE(NM_IND TXT_GS_RAM,   SET_GS_RAM,    gs_ramOpts,    p_gsAvail, p_gsNeo),
