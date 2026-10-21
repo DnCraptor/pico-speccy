@@ -89,6 +89,13 @@ public:
     // (the bytes mmc_read() would return one by one); 0 = not in a plain data
     // phase, read the next byte with mmc_read(). Next INIR / INI-run batches.
     static uint32_t mmc_read_bulk(uint8_t* dst, uint32_t n);
+    // A guest polling for a read's data token while core1 fetches the sector:
+    // wait for it in WALL time, up to maxUs; returns the us waited (Z80::nextSdPollBatch
+    // turns them into skipped poll passes). 0 = no such read pending.
+    static uint32_t sdTokenWait(uint32_t maxUs);
+    // every following read of port 0xEB answers 0xFF with no side effect (the
+    // write-busy timeout wait): nextSdPollBatch skips those passes without waiting
+    static bool sdReadsIdleFF();
 
     // Z-Controller raw SD on ports 0x77 (config/status) / 0x57 (SPI data).
     // Reuses the DivMMC SPI state machine in DivSD/SDHC mode without ROM
@@ -241,11 +248,19 @@ private:
 
 // Keep the page filter shared with the direct Next fetch. Even non-trap
 // addresses on these pages can update the automap enable/arming state.
+// Page 0x1F holds nothing but the off points 0x1FF8-0x1FFF: the rest of it is
+// ordinary code, and NextZXOS's SD driver loop in the divMMC ROM lives exactly
+// there (guest PC 0x1F40-0x1F7F). Taking the whole page as a trap page sent every
+// opcode of that loop through nextOpcodeSlow — TX-1696's intro load at 37 FPS,
+// PERF_HIST profile 2026-10-21. The one side effect lost below 0x1FF8 is the Next
+// automap reset gate (NR 0x0A b4 / NR 0x83 b0), which the next fetch on any trap
+// page still applies.
 __attribute__((always_inline)) inline bool DivMMC::opcodeTrapPage(uint16_t pc) {
-    if (pc >= 0x4000) return false;
+    // pc < 0x4000: 0x3D page, pages 0/4/5 (mask), the eight off points
     const uint32_t page = pc >> 8;
-    constexpr uint32_t pages = (1u << 0) | (1u << 4) | (1u << 5) | (1u << 31);
-    return page == 0x3D || (page < 32 && ((pages >> page) & 1));
+    constexpr uint32_t pages = (1u << 0) | (1u << 4) | (1u << 5);
+    if (page < 32) return ((pages >> page) & 1) || (pc | 7u) == 0x1FFFu;
+    return page == 0x3D;
 }
 
 // Called only at a complete M1 boundary: every previous preOpcFetch has its

@@ -1395,10 +1395,69 @@ void nxprof_dump(uint32_t frames) {
                (unsigned)frames, (unsigned)(total / frames), (unsigned)(nx_int_cnt / frames),
                NextReg::reg[0x50], NextReg::reg[0x51], NextReg::reg[0x52], NextReg::reg[0x53],
                NextReg::reg[0x54], NextReg::reg[0x55], NextReg::reg[0x56], NextReg::reg[0x57]);
+    {
+        // PERF z80: CPU::loop time of this second against the ops it ran (cpu_frame_us
+        // is cumulative on the Next). ns/op includes the histogram's own cost.
+        extern volatile uint32_t cpu_frame_us;
+        static uint32_t s_prevCpu = 0;
+        const uint32_t c = cpu_frame_us, d = c - s_prevCpu;
+        s_prevCpu = c;
+        Debug::log("NXPROF z80: %u ops/fr, %u ns/op, cpu %u.%u ms/fr, mult %u",
+                   (unsigned)(total / frames), (unsigned)(total ? (uint64_t)d * 1000 / total : 0),
+                   (unsigned)(d / frames / 1000), (unsigned)(d / frames % 1000 / 100),
+                   (unsigned)ESPectrum::multiplicator);
+    }
     nxprofTop("NXPROF op:", z80_op_hist, 256, 24, 0, total);
     static const char* const tags[4] = { "NXPROF CB:", "NXPROF DD:", "NXPROF ED:", "NXPROF FD:" };
     for (int k = 0; k < 4; k++) nxprofTop(tags[k], nx_pfx_hist[k], 256, 14, 0, total);
     nxprofTop("NXPROF pc:", nx_pc_hist, 2048, 20, 5, ptot);
+    {
+        // A heavy second (> 35k ops a frame): the guest's own code around its four
+        // hottest 32-byte PC buckets, the registers and the stack, as the memory map
+        // shows them right now — the dump of a stall nobody can catch by hand.
+        // At most 4 such dumps, re-armed after a quiet second (< 15k ops a frame).
+        static uint8_t s_cdumps = 0, s_armed = 1;
+        const uint32_t opf = (uint32_t)(total / frames);
+        if (opf < 15000) s_armed = 1;
+        if (opf > 35000 && s_armed && s_cdumps < 4) {
+            s_armed = 0; s_cdumps++;
+            Debug::log("NXCODE #%u PC=%04X SP=%04X AF=%04X BC=%04X DE=%04X HL=%04X IX=%04X IY=%04X IFF1=%u IM=%u R=%02X",
+                       (unsigned)s_cdumps, Z80::getRegPC(), Z80::getRegSP(), Z80::getRegAF(), Z80::getRegBC(),
+                       Z80::getRegDE(), Z80::getRegHL(), Z80::getRegIX(), Z80::getRegIY(),
+                       (unsigned)Z80::isIFF1(), (unsigned)Z80::getIM(), (unsigned)Z80::getRegR());
+            auto line = [](const char* tag, uint16_t a) {
+                char b[160]; int p = snprintf(b, sizeof b, "%s %04X:", tag, a);
+                for (int i = 0; i < 32; i++) {
+                    const uint16_t x = (uint16_t)(a + i);
+                    const uint8_t* s = MemESP::ramCurrent[x >> 13];
+                    if ((uintptr_t)s < 0x10000000u) p += snprintf(b + p, sizeof b - p, " --");
+                    else p += snprintf(b + p, sizeof b - p, " %02X", s[x & 0x1FFF]);
+                }
+                Debug::log("%s", b);
+            };
+            line("NXCODE stk", Z80::getRegSP());
+            uint8_t used[2048 / 8] = {};
+            for (int k = 0; k < 8; k++) {
+                int best = -1; uint32_t bv = 0;
+                for (int i = 0; i < 2048; i++) if (!(used[i >> 3] & (1 << (i & 7))) && nx_pc_hist[i] > bv) { bv = nx_pc_hist[i]; best = i; }
+                if (best < 0) break;
+                used[best >> 3] |= (uint8_t)(1 << (best & 7));
+                const uint16_t a = (uint16_t)(best << 5);
+                line("NXCODE", (uint16_t)(a - 32));
+                line("NXCODE", a);
+                line("NXCODE", (uint16_t)(a + 32));
+            }
+            line("NXCODE pc", (uint16_t)(Z80::getRegPC() - 16));
+        }
+    }
+    {
+        extern uint32_t g_nxps[7];
+        Debug::log("NXPROF pollskip: calls %u newpc %u regs %u long %u (min %u T) skip %u passes %u",
+                   (unsigned)g_nxps[0], (unsigned)g_nxps[1], (unsigned)g_nxps[2], (unsigned)g_nxps[3],
+                   (unsigned)(g_nxps[6] == 0xFFFFFFFFu ? 0 : g_nxps[6]), (unsigned)g_nxps[4], (unsigned)g_nxps[5]);
+        for (int i = 0; i < 6; i++) g_nxps[i] = 0;
+        g_nxps[6] = 0xFFFFFFFFu;
+    }
     for (int i = 0; i < 256; i++) z80_op_hist[i] = 0;
     memset(nx_pfx_hist, 0, sizeof nx_pfx_hist);
     memset(nx_pc_hist, 0, sizeof nx_pc_hist);
@@ -2521,7 +2580,8 @@ void Z80::decodeOpcodedb()
     regA = Ports::input(REG_WZ);
     if (__builtin_expect(Rzx::mode != 0, 0)) regA = Rzx::onIn(regA);
     REG_WZ++;
-    if (Z80Ops::isNext && REG_PC == 0x192A && regA == 0xFF) nextSdPollBatch();
+    // ROM 2's token poll (0x1928) and enNxtmmc's (0x1F40): see nextSdPollBatch
+    if (Z80Ops::isNext && regA == 0xFF && (REG_PC == 0x192A || REG_PC == 0x1F42)) nextSdPollBatch();
 }
 
 
@@ -4460,44 +4520,101 @@ NX_OVL_CODE void Z80::nextLdirBatch(int d) {
     regR += 2 * n;
 }
 
-// ROM 2 waits for CMD17's data token here, before the INIR sector transfer.
-// Fuse only the taken inner loop, checking the actual bytes and mapping: the
-// same addresses in enNxtmmc contain unrelated code. Each IN still goes through
-// Ports (including asynchronous SD completion, LEDs and I/O tracing). Do not
-// fast-forward wall time or manufacture FF replies while core1 reads the card.
+// The data-token poll of a sector read: `IN A,(#EB) / CP #FF / RET NZ / DJNZ` —
+// ROM 2 at 0x1928, enNxtmmc (the divMMC ROM, NextZXOS's SD driver) at 0x1F40.
+// While core1 fetches the sector (DivMMC c17) every pass reads 0xFF, and at 28 MHz
+// that is ~15k IN a frame, each through Ports::input and DivMMC: TX-1696's intro
+// load ran at 37-44 FPS with the guest in this loop (PERF_HIST, hw 2026-10-21).
+// A real card answers in WALL time, so wait for it in wall time here
+// (DivMMC::sdTokenWait) and advance the guest by the passes that time covers —
+// the guest still sees the card's latency, it only stops costing an emulated IN
+// per 33 T. The pattern is checked in the mapped bytes (the same addresses hold
+// other code elsewhere); B counts the passes (DJNZ), so they stop at B = 1 and
+// leave the fall-through, the outer counter and any non-FF reply to the
+// interpreter. Never across stFrame (the next DMA / NMI / line or CTC interrupt
+// event) or the frame end, and not inside the ULA INT window — with EI the loop
+// may be interrupted only there, so EI is fine (the driver polls with
+// interrupts on: DI only skipped nothing on TX-1696, sdcut5 log). idleAdvanceTo
+// renders the lines the skipped time spans, and refuses under ULA contention.
+// g_sd_poll[]: calls / passes skipped / us waited / refusals (the [SD2] line).
+volatile uint32_t g_sd_poll[4];
+// Why a call skipped nothing, and who called the poll (the return address on the
+// stack: enNxtmmc 1F39 = R1 after a command, 1F50 = data token, 1FB3 = write data
+// response, 1FBC = write busy; other) — the [SD3] line (PERF_TRACE / NEXT_TRACE).
+// why: 0 pattern/page, 1 slice/frame end, 2 token wait not applicable (card state),
+// 3 answered at once (k 0), 4 idleAdvanceTo refused.
+volatile uint32_t g_sd_poll_why[5], g_sd_poll_who[5], g_sd_poll_whok[5];
+extern volatile uint8_t g_sd_tw_why;   // DivMMC::sdTokenWait: 0 ok, 1..5 the failing precondition
+volatile uint32_t g_sd_tw_whyn[6];
 Z80_COLD void Z80::nextSdPollBatch() {
-    if (!z80_in_nocheck || !g_next_fastrd || ffIFF1 ||
-        Config::numPcBP || Config::numPortReadBP || Config::numMemReadBP || Rzx::mode ||
-        MemESP::divmmc_mapped || MemESP::romInUse != 2 ||
-        !DivMMC::enabled || DivMMC::divide_mode || !NextReg::portOn(NextReg::PE_SPI)) return;
-    const uint8_t* p = MemESP::ramCurrent[0] + 0x1928;
-    if (p[0] != 0xDB || p[1] != 0xEB || p[2] != 0xFE || p[3] != 0xFF ||
-        p[4] != 0xC0 || p[5] != 0x10 || p[6] != 0xF9) return;
-    // CP FF (7), RET NZ not taken (5), DJNZ taken (13). Leave B=1's
-    // fall-through, and any non-FF response, to the ordinary interpreter.
-    // At most 32 iterations; never cross a raster line (copper may change the
-    // mapping) or stFrame, which may be the next scheduled DMA/interrupt event.
-    for (unsigned n = 0; n < 32 && regA == 0xFF && REG_B != 1; ++n) {
-        if (CPU::tstates >= CPU::stFrame || CPU::stFrame - CPU::tstates < 25) break;
-        if (CPU::tstates >= VIDEO::ts_line_t || VIDEO::ts_line_t - CPU::tstates <= 25) break;
-        cp(0xFF);
-        REG_B--;
-        REG_PC = REG_WZ = 0x1928;
-        regR += 3;
-        tsFastTick(25);
-        flagQ = false;                    // last instruction was DJNZ, not CP
-        opCode = 0x10;
-        if (n == 31 || CPU::stFrame - CPU::tstates < 8 || VIDEO::ts_line_t - CPU::tstates <= 8) break;
-        // Match today's early #EB port path: M1 4 + immediate 3 + I/O 1.
-        // If Ports gains the missing late 3 T, this bound must become 11.
-        tsFastTick(7);
-        regR++;
-        REG_PC = 0x192A;
-        REG_WZ = 0xFFEB;
-        regA = Ports::input(REG_WZ);
-        REG_WZ++;
-        opCode = 0xDB;
+    g_sd_poll[0] = g_sd_poll[0] + 1;
+    uint32_t who = 4;
+    {
+        const uint16_t sp = REG_SP;
+        const uint8_t* s0 = MemESP::ramCurrent[sp >> 13];
+        const uint8_t* s1 = MemESP::ramCurrent[(uint16_t)(sp + 1) >> 13];
+        const uint16_t ret = ((uintptr_t)s0 < 0x10000000u || (uintptr_t)s1 < 0x10000000u) ? 0 :
+            (uint16_t)(s0[sp & 0x1FFF] | (s1[(uint16_t)(sp + 1) & 0x1FFF] << 8));
+        who = ret == 0x1F39 ? 0 : ret == 0x1F50 ? 1 : ret == 0x1FB3 ? 2 : ret == 0x1FBC ? 3 : 4;
+        g_sd_poll_who[who] = g_sd_poll_who[who] + 1;
     }
+    if (!z80_in_nocheck || !g_next_fastrd || Z80::isNMI() || (ffIFF1 && (int32_t)CPU::tstates < CPU::IntEnd) ||
+        Config::numPcBP || Config::numPortReadBP || Config::numMemReadBP || Rzx::mode ||
+        !DivMMC::enabled || DivMMC::divide_mode || !NextReg::portOn(NextReg::PE_SPI)) { g_sd_poll[3] = g_sd_poll[3] + 1; return; }
+    const uint16_t in = (uint16_t)(REG_PC - 2);
+    if ((in & 0x1FFF) > 0x1FF9) { g_sd_poll_why[0] = g_sd_poll_why[0] + 1; return; }
+    const uint8_t* p = MemESP::ramCurrent[in >> 13];
+    if ((uintptr_t)p < 0x10000000u) { g_sd_poll_why[0] = g_sd_poll_why[0] + 1; return; }
+    p += in & 0x1FFF;
+    if (p[0] != 0xDB || p[1] != 0xEB || p[2] != 0xFE || p[3] != 0xFF ||
+        p[4] != 0xC0 || p[5] != 0x10 || p[6] != 0xF9) { g_sd_poll_why[0] = g_sd_poll_why[0] + 1; return; }
+    // One pass: CP FF 7, RET NZ not taken 5, DJNZ taken 13, IN A,(n) M1 4 +
+    // immediate 3 + the early #EB port path's 1 = 33 T, 4 fetches.
+    constexpr uint32_t P = 33;
+    const uint32_t t = CPU::tstates;
+    uint32_t lim = CPU::statesInFrame - (uint32_t)CPU::IntEnd;   // NextPorts::pollSkip's bound
+    if (CPU::stFrame && CPU::stFrame < lim) lim = CPU::stFrame;
+    if (lim <= t + P) { g_sd_poll_why[1] = g_sd_poll_why[1] + 1; return; }
+    uint32_t kmax = (REG_B ? (uint32_t)REG_B : 256u) - 1;
+    if ((lim - t) / P < kmax) kmax = (lim - t) / P;
+    // The card answers 0xFF to every read from here on (enNxtmmc's write-busy
+    // wait, 12800 passes after each sector write that only a timeout ends): the
+    // passes are known without waiting — skip all that B and the slice allow.
+    if (kmax && DivMMC::sdReadsIdleFF()) {
+        if (!NEXTVID::idleAdvanceTo(t + kmax * P)) { g_sd_poll_why[4] = g_sd_poll_why[4] + 1; return; }
+        g_sd_poll[1] = g_sd_poll[1] + kmax;
+        g_sd_poll_whok[who] = g_sd_poll_whok[who] + kmax;
+        cp(0xFF);
+        REG_B = (uint8_t)(REG_B - kmax);
+        REG_PC = (uint16_t)(in + 2);
+        REG_WZ = 0xFFEC;
+        regR += 4 * kmax;
+        flagQ = false;
+        opCode = 0xDB;
+        return;
+    }
+    // A short span is not worth a wait: the call itself costs about one pass
+    // (sdcut6 log: 65k calls a second skipping 0.8 pass each).
+    if (kmax < 16) { g_sd_poll[3] = g_sd_poll[3] + 1; return; }
+    // T-states per microsecond in Q8: 3.5 MHz << multiplicator (32-bit: kmax*P*256
+    // < 2.2M, waited*tq8 < 2^32 for any wait this bound allows)
+    const uint32_t tq8 = 896u << ESPectrum::multiplicator;
+    const uint32_t waited = DivMMC::sdTokenWait(kmax * P * 256u / tq8);
+    g_sd_tw_whyn[g_sd_tw_why] = g_sd_tw_whyn[g_sd_tw_why] + 1;
+    uint32_t k = (waited * (tq8 >> 3) / 32u + P - 1) / P;
+    if (k > kmax) k = kmax;
+    g_sd_poll[2] = g_sd_poll[2] + waited;
+    if (!k) { const uint32_t w = g_sd_tw_why ? 2 : 3; g_sd_poll_why[w] = g_sd_poll_why[w] + 1; return; }
+    if (!NEXTVID::idleAdvanceTo(t + k * P)) { g_sd_poll_why[4] = g_sd_poll_why[4] + 1; return; }
+    g_sd_poll[1] = g_sd_poll[1] + k;
+    g_sd_poll_whok[who] = g_sd_poll_whok[who] + k;
+    cp(0xFF);
+    REG_B = (uint8_t)(REG_B - k);
+    REG_PC = (uint16_t)(in + 2);
+    REG_WZ = 0xFFEC;
+    regR += 4 * k;
+    flagQ = false;
+    opCode = 0xDB;
 }
 
 // Spectrum Next, INIR from the SD SPI data port 0xEB (enNxtmmc / NextZXOS read a
@@ -4526,10 +4643,23 @@ Z80_COLD void Z80::nextInirBatch() {
     if (n > dstLeft) n = dstLeft;
     if (n < 2) return;
     const uint8_t ds = hl >> 13;
-    if (ds < 2) return;
-    uint8_t* dp = MemESP::ramCurrent[ds];
-    if ((uintptr_t)dp < 0x11000000u) return;          // ROM / accessor
-    *mem_desc_t::bank_dirty[ds] = true;
+    uint8_t* dp;
+    if (ds >= 2) {
+        dp = MemESP::ramCurrent[ds];
+        if ((uintptr_t)dp < 0x11000000u) return;          // ROM / accessor
+        *mem_desc_t::bank_dirty[ds] = true;
+    } else {
+        // divMMC RAM at 0x2000-0x3FFF (writebyte's rule for slot 1, as
+        // nextLdirBatch): enNxtmmc reads sectors into its own buffer there
+        // (0x1F6E INIR x2, HL = IX) — 512 trips through the whole port path a
+        // sector otherwise (TX-1696's load, hw 2026-10-21). Slot 0 stays per byte.
+        if (ds != 1 || !MemESP::divmmc_mapped) return;
+        { extern volatile uint8_t g_ngs_zxdma; if (g_ngs_zxdma) return; }
+        if (MemESP::page0_hi >= (uint8_t*)0x11000000 && !MemESP::mb02_write_gate) return;
+        dp = MemESP::page0_hi;
+        if (MemESP::divmmc_hi_dirty) *MemESP::divmmc_hi_dirty = true;
+        else if (MemESP::mb02_page_dirty) *MemESP::mb02_page_dirty = true;
+    }
     uint32_t o = hl & 0x1FFF;
     for (uint32_t i = 0; i < n; ) {           // data bytes in runs, the protocol bytes one by one
         const uint32_t k = DivMMC::mmc_read_bulk(dp + o, n - i);

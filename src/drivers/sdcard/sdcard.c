@@ -791,8 +791,44 @@ volatile UINT    g_sd_as_done = 0;
 static volatile UINT* s_as_prog = 0;
 static DRESULT disk_read_sd0(BYTE *buff, LBA_t sector, UINT count);
 
+/* Cutting a burst short. A burst is one demanded sector plus a speculative tail
+   (up to 32 sectors, ~6.8 ms on the card), and the slot is single: when the guest
+   then asks for a sector OUTSIDE the burst it used to wait for the whole tail —
+   and after 3 ms core0 gave up and read the card itself, with the emulation
+   stopped for the rest of the burst plus its own read (NextZXOS boot, hw log
+   2026-10-21: "fb 5", "sync 14ms", "wait 12ms max 3.7ms" in one second). core0
+   now writes the running request's id into g_sd_as_abort; core1 stops after the
+   block it is receiving (CMD12), the blocks already in stay a valid, shorter
+   window (g_sd_as_count = what arrived), and the new request is posted at once.
+   g_sd_as_seq is bumped by core0 at every post (DivMMC), so a late abort can
+   never cut the request that follows. */
+volatile uint32_t g_sd_as_seq = 0;
+volatile uint32_t g_sd_as_abort = 0;
+volatile uint32_t g_sd_as_cut_n = 0;	/* bursts cut short (stats) */
+/* Leading blocks of the posted request the guest is waiting for: 1 for a
+   sector read (DivMMC c17), 0 for a pure read-ahead. Everything past them is
+   speculative, and speculation must not cost the renderer: while the machine's
+   renderer is behind (sd_async_render_behind, NextVideo.cpp — core0 is waiting
+   for core1's row queue, or about to), core1 does not START a read-ahead and
+   stops a burst once its demanded blocks are in. TX-1696's intro load (hw log
+   2026-10-21): 566 ms of core1 a second on the card, ~3000 sectors read for 444
+   the guest used. A read-ahead left posted is cancelled by core0 when it needs
+   the slot, as before. */
+volatile uint8_t  g_sd_as_need = 1;
+volatile uint32_t g_sd_as_yield_n = 0;	/* speculative reads given up for the renderer (stats) */
+static UINT       s_as_need = 1;
+__attribute__((weak)) int sd_async_render_behind(void) { return 0; }
+static uint32_t   s_as_run = 0;			/* core1: id of the request on the card */
+static UINT       s_as_cut = 0;			/* core1: blocks kept when it was cut, 0 = not cut */
+
 volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_as_c0wait_max;
 volatile uint32_t g_sd_as_c1_n;     /* background reads run by core1 */
+
+/* core0: stop the running background read after its current block. */
+void sd_async_abort(void)
+{
+	if (g_sd_as_state == 2) g_sd_as_abort = g_sd_as_seq;
+}
 
 void sd_async_quiesce(void)
 {
@@ -800,6 +836,7 @@ void sd_async_quiesce(void)
 	uint8_t one = 1;
 	if (__atomic_compare_exchange_n(&g_sd_as_state, &one, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
 	if (g_sd_as_state != 2) return;
+	sd_async_abort();	/* the card is wanted by the host: no speculative tail */
 	const uint32_t t0 = time_us_32();
 	while (g_sd_as_state == 2) tight_loop_contents();
 	const uint32_t d = time_us_32() - t0;
@@ -809,13 +846,22 @@ void sd_async_quiesce(void)
 
 void sd_async_pump(void)		/* core1 */
 {
+	if (g_sd_as_state != 1) return;
+	if (!g_sd_as_need && sd_async_render_behind()) return;	/* a read-ahead waits for the renderer */
 	uint8_t one = 1;
 	if (!__atomic_compare_exchange_n(&g_sd_as_state, &one, 2, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
 	const uint32_t t0 = time_us_32();
+	s_as_need = g_sd_as_need;
 	g_sd_as_done = 0;	/* core0 zeroed it at the post too: state 2 is already visible */
+	s_as_run = g_sd_as_seq;	/* stable: core0 posts only while the slot is 0 */
+	s_as_cut = 0;
 	s_as_prog = &g_sd_as_done;
 	const DRESULT r = disk_read_sd0(g_sd_as_buf, g_sd_as_sector, g_sd_as_count);
 	s_as_prog = 0;
+	if (r == RES_OK && s_as_cut) {
+		g_sd_as_count = s_as_cut;	/* the window is what arrived; read by core0 after state 3 */
+		g_sd_as_cut_n = g_sd_as_cut_n + 1;
+	}
 	const uint32_t d = time_us_32() - t0;
 	g_sd_as_c1_us += d;
 	if (d > g_sd_as_c1_max) g_sd_as_c1_max = d;
@@ -857,7 +903,15 @@ static DRESULT disk_read_sd0(BYTE *buff, LBA_t sector, UINT count)
 			do {
 				if (!rcvr_datablock(buff, 512)) break;
 				buff += 512;
-				if (s_as_prog) { __dmb(); *s_as_prog = ++got; }
+				if (s_as_prog) {
+					__dmb(); *s_as_prog = ++got;
+					/* Cut short (see g_sd_as_abort): count 1 ends the loop as a success */
+					if (count > 1 && g_sd_as_abort == s_as_run) { s_as_cut = got; count = 1; }
+					else if (count > 1 && got >= s_as_need && sd_async_render_behind()) {
+						s_as_cut = got; count = 1;
+						g_sd_as_yield_n = g_sd_as_yield_n + 1;
+					}
+				}
 			} while (--count);
 			send_cmd(CMD12, 0);				/* STOP_TRANSMISSION */
 		}

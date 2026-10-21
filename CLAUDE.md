@@ -16514,3 +16514,106 @@ build Z-RLE streams) — three mutations fail it. Static RAM +4 B. Test ELF
 `debug/DVp2-csw-1.0.10.elf`. Hw owed: a v1 RLE and a v2 Z-RLE file from WoS loading in
 real time, Stop/Play mid-tape, F11 with a CSW mounted, a no-PSRAM board (decoder on the
 heap, or "Not enough memory for CSW").
+
+## SD background reads: cut the speculative tail instead of waiting it out (2026-10-21, NOT hw-tested)
+
+"FPS drops to 30 on SD access" on the Next. The 2026-10-19 SD DMA attempt (rolled back) relieved
+core1 but changed nothing visible, because the on-screen FPS/IDL is core0's time. What freezes
+core0 is the SINGLE background slot: a burst is one demanded sector plus a speculative tail
+(window up to 32 sectors, `c1 max 6.8 ms`), and when the guest then asks for a sector outside it
+(the `nm` misses: backwards / jumps dominate) the request waited for the whole tail, and after
+3 ms core0 gave up and read the card itself (`fb`, `sync`, `wait max 3.7 ms` on the [SD] line of
+the NextZXOS boot logs, 2026-10-21). Now:
+- **`sd_async_abort()` / `g_sd_as_abort` / `g_sd_as_seq`** (sdcard.c): core0 names the running
+  request; core1 stops after the block it is receiving (CMD12), `g_sd_as_count` becomes the blocks
+  that arrived, state 3. The id is bumped at every post (DivMMC), so a late abort cannot cut the
+  next request. Called from `c17TryPost` (slot busy with a burst that does not hold the sector),
+  `sd_async_quiesce` (the host wants the card) and `sqAsyncDiscard`.
+- **`asKeep()`**: a finished/cut burst of the current write generation is kept as a read-ahead
+  window wherever the slot is cleared (it used to be thrown away in `c17TryPost`); `asInstall()` =
+  `asKeep()` + prefetch. `c17FromWindow()` serves a waiting sector from it.
+- `c17Ready` re-posts instead of reading on core0 when a burst was cut before the sector's block,
+  and when its own request vanished — **latent bug in HEAD too**: `sd_async_quiesce` cancels a
+  request core1 has not started, after which nothing answered the guest's token poll for ever.
+- `c17FetchBlocking` waits for the sector's block of a running burst instead of reading synchronously.
+- [SD] line: `cut N`; deltas no longer wrap (NEXT_TRACE's block zeroes the same totals).
+Host model: `scratchpad/sdcut/harness.cpp` of the 2026-10-21 session — the SHIPPED DivMMC code
+(extracted from `#define DIVSD_RA_SECTORS` to the end of loadSector's divsd branch) on core0,
+sdcard.c's pump/loop transcribed on a second thread, sector content = f(sector, version), random
+sequential/jump/backward/CMD18/write/host-read traffic, every handed sector checked byte for byte.
+New: 0 errors in 3x60k reads under ASan; guest waits >2 ms 2881 -> 180, core0 fallbacks 540 -> 24,
+stuck requests 31 -> 0 against HEAD's code. Three mutations (window not shrunk, stale burst kept,
+cut path serving the wrong buffer) each fail it. Test ELFs `debug/DVp2-next-sdcut2-1.1.0` (plain)
+and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card if wrong — test on a spare card.
+- **Do not judge SD behaviour on a PERF_HIST build** (`build-all/PICO_DV-nxprof`): its CMD17 calls
+  `loadSector` directly (DivMMC `#if PERF_TRACE && PERF_HIST`), i.e. core0 blocks on every sector
+  and the c17 path never runs. The first sdcut perf log was taken that way (`hit 0`, 26-43 fps).
+  It still showed a real hole, fixed in sdcut2: on the `loadSector` path a FINISHED burst was never
+  made a window, so the next miss re-read it — `loadSector` and `c17Ready` now `asKeep()` it first.
+  `build-all/PICO_DV-sdperf` = PERF_TRACE ON, PERF_HIST OFF.
+- **sdcut3: a read-ahead gives way to the renderer.** TX-1696's intro load on sdcut2-perf: 566 ms/s of
+  core1 on the card, ~3000 sectors read for 444 the guest used (136 read-aheads posted a second).
+  `g_sd_as_need` (0 = pure read-ahead, 1 = the guest waits for block 0) is set at every post; while
+  `sd_async_render_behind()` (NextVideo.cpp: core0 in `c1Drain` — flag `g_nx_c0wait` — or the row
+  queue within 64 rows of full) core1 does not start a read-ahead and stops a burst once its demanded
+  blocks are in (`yield` on the [SD2] line). c17Begin/c17FetchBlocking no longer wait on a read-ahead
+  that is only POSTED (it may stay untaken now): c17TryPost replaces it with the demand. The
+  redundant `sd_async_pump()` in `c1Pump` was removed (render_core pumps before every call) to make
+  room: `.nxovl` 51 448 of 51 456. [SD2] line: fps, IDL min, frames with negative IDL, qwait, skip,
+  cut, yield (the [SD] line was over Debug::log's 256 bytes and came out mangled). ELFs
+  `debug/DVp2-next-sdcut3-1.1.0` and `-sdcut3-perf-`.
+- **The actual FPS drop on TX-1696's load was NOT the SD transfer** (sdcut3-prof, PERF_HIST log
+  2026-10-21: `fps 37 neg 26` with `wait 0 fb 0 qwait 3ms`). The PROF samples put core0 in
+  `DivMMC::nextOpcodeSlow`: NextZXOS's SD driver loop in the divMMC ROM runs at guest PC
+  0x1F40-0x1F7F, and `opcodeTrapPage` took the whole page 0x1F as a trap page (its only traps are
+  the off points 0x1FF8-0x1FFF), so every opcode of the loop went through the full
+  preOpcFetch/postOpcFetch. The filter now takes `(pc | 7) == 0x1FFF` on that page. Lost: the
+  Next automap reset gate (NR 0x0A b4 / NR 0x83 b0) on fetches at 0x1F00-0x1FF7 — the next fetch on
+  any trap page applies it. `.nxovl` AUTO term 51 456 -> 51 584 (trace 51 712), content 51 488.
+  The PERF_HIST CMD17 branch now takes the plain c17 path too. ELFs `debug/DVp2-next-sdcut4-1.1.0`
+  and `-sdcut4-prof-`.
+- **sdcut5: the rest of that load was the driver's own loops, emulated byte by byte.** enNxtmmc
+  (divMMC ROM) waits for the data token in `1F40: IN A,(#EB) / CP #FF / RET NZ / DJNZ` (+ `DEC C /
+  JR NZ`), ~15k IN a frame at 28 MHz while core1 reads, and reads the sector with `INIR` x2 into its
+  buffer at IX = divMMC RAM 0x2000-0x3FFF, which `nextInirBatch` refused (slots 0/1). Now:
+  `nextSdPollBatch` (hooked in `decodeOpcodedb` at PC 0x192A or 0x1F42, A = 0xFF; pattern checked in
+  the mapped bytes) waits for the sector in WALL time (`DivMMC::sdTokenWait`, which runs c17Ready /
+  the sync fallback exactly as the guest's polls would) and skips the passes that time covers
+  (33 T each, B decremented, never past B = 1, stFrame, statesInFrame - IntEnd, not inside the INT
+  window; idleAdvanceTo, so not under contention). sdcut5 allowed DI only and the loop still showed
+  in the profile (46-49 fps): the driver polls with EI — sdcut6 takes EI too. [SD2] `poll N/k/ms
+  ref R` = calls / passes skipped / ms waited / refusals. The guest still sees the card's latency, it no longer costs an emulated
+  IN per pass. `nextInirBatch` writes divMMC RAM (slot 1) by writebyte's rule, as nextLdirBatch.
+  ELFs `debug/DVp2-next-sdcut5-1.1.0` and `-sdcut5-prof-`.
+- **sdcut7 + sdidle: the write-busy wait and the diagnostics that found it (2026-10-21; hw-confirmed
+  DVp2 on `debug/DVp2-next-sdidle-prof-1.1.0`: write windows 42 -> 50 fps, IDL min -18k -> -3k).**
+  enNxtmmc's `1F3D` (`IN A,(#EB) / CP #FF / RET NZ / DJNZ`, BC = #0032 = 12800 passes) is called
+  from four places: `1F39` R1 after a command, `1F50` data token, `1FB3` write data response,
+  `1FBC` write busy. The busy wait (`1FB9: CALL 1F3D / AND A / JR Z`) can only end by the 1F3D
+  TIMEOUT once the card answers #FF — 12800 passes after every sector write, on hardware too
+  (~15 ms guest time), and the batch refused them all (`sdTokenWait`: last command CMD24).
+  `DivMMC::sdReadsIdleFF()` (mmc_read()'s own order: no card / CS high, R1 shown first, a written
+  block past response+busy, no command latched) says every following read is #FF with no side
+  effect; `nextSdPollBatch` then skips all passes B and the slice allow without a wall wait.
+  `[SD3]` (PERF_TRACE / NEXT_TRACE, beside [SD2]): `why` = why a batch call skipped nothing
+  (pattern, slice end, card state, answered at once, idleAdvanceTo refused), `tw` = which
+  sdTokenWait precondition failed, `who` = calls/passes per caller by the return address on the
+  guest stack (R1 / tok / wrsp / busy / other). Read `who` first on any "SD poll" report.
+  **PERF_HIST builds also log `NXCODE`** (one-shot, up to 4 a session, re-armed by a quiet second):
+  when a second runs > 35k guest ops a frame, the registers, 32 B of stack and the 8 hottest
+  32-byte guest-PC buckets (±32 B) as mapped right then — the dump of a stall nobody catches by
+  hand (decode with z80disasm). And `NXPROF pollskip:` (PERF_TRACE) = NextPorts::pollSkip's
+  calls / other PC-or-port / registers changed / period over dmax (min T) / skips / passes.
+  **The "-6000 IDL on load" left after this is TBBLUE.FW's boot menu, deliberately NOT skipped**:
+  NXCODE showed `6C00..6C3B` (`IN (#FE)` rows + `LD HL,(#CCE7) / INC HL / LD (#CCE7),HL`, 65535
+  passes, subroutines at B740-B9F7 incl. strncmp), pollskip had ~88k candidate reads a second
+  stopped only by the config-mode guard. ~2 s at 49-50 fps per hard boot, authentic guest time;
+  owner's call 2026-10-21: leave it (a signature hack advancing the memory counter was offered and
+  declined).
+  **OPEN, not reproduced since: SIGBUS in `Ports::output`'s epilogue on the prof build** (twice,
+  2026-10-21, after a NextZXOS soft reset with SD traffic): PC = 0x2003ac18 (= &CPU::tstates), SP
+  16 bytes LOW at the `ldmia {r4-fp, pc}` (Ports::output's return address 20024471 sat 12 bytes
+  ABOVE the fault SP) — a 4-word SP imbalance somewhere under a `Ports::output` call (mmc_write
+  -> Debug::log tail call the first time, DivMMC::applyMapping the second). Gone after the owner
+  reset the settings to defaults; which setting armed it is unknown. If it returns: the plain
+  build vs sdcut7-prof in the same scenario, and a GDB capture of the ARM stack ABOVE SP.

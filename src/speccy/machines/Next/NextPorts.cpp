@@ -424,6 +424,10 @@ int NextPorts::joyPortRead(uint8_t lo) { return joyRead(lo); }
 // the next read every time, so no PC ever met its own previous pass. A slot
 // evicted by a colliding PC simply misses its pass; one surviving PC is enough.
 struct PollMemo { uint16_t pc, addr; uint32_t t, r, regs; };
+#if PERF_TRACE
+// calls / pc-or-port differs / registers differ / period > dmax / skips / passes / min period over dmax
+uint32_t g_nxps[7] = { 0, 0, 0, 0, 0, 0, 0xFFFFFFFFu };
+#endif
 static PollMemo s_dp = { 0xFFFF, 0, 0, 0, 0 };
 static PollMemo s_kp[16];
 static inline uint32_t pollRegs() {
@@ -446,6 +450,13 @@ static NXP_HOT void pollSkip(PollMemo& m, uint16_t addr, bool ok, uint32_t dmax,
     const uint32_t g = (uint32_t)(CPU::global_tstates + t);
     const uint32_t d = g - m.t, dR = r - m.r;
     const bool same = pc == m.pc && addr == m.addr && regs == m.regs;
+#if PERF_TRACE
+    // NXPROF kbdskip line: why a poll pass was not skipped (DMA polls included)
+    g_nxps[0]++;
+    if (pc != m.pc || addr != m.addr) g_nxps[1]++;
+    else if (regs != m.regs) g_nxps[2]++;
+    else if (d > dmax) { g_nxps[3]++; if (d < g_nxps[6]) g_nxps[6] = d; }
+#endif
     m.pc = pc; m.addr = addr; m.t = g; m.r = r; m.regs = regs;
     if (!same || !ok || d == 0 || d > dmax || MemESP::nextConfigMode) return;
     if (Rzx::mode || Z80::isNMI() || (int32_t)t < CPU::IntEnd) return;
@@ -456,6 +467,9 @@ static NXP_HOT void pollSkip(PollMemo& m, uint16_t addr, bool ok, uint32_t dmax,
     const uint32_t k = (lim - t) / d;
     if (!k) return;
     if (!NEXTVID::idleAdvanceTo(t + k * d)) return;
+#if PERF_TRACE
+    g_nxps[4]++; g_nxps[5] += k;
+#endif
     Z80::incRegR(k * dR);
     m.t = (uint32_t)(CPU::global_tstates + CPU::tstates); m.r = Z80::getFetchCounter();
 #if NEXT_TRACE

@@ -18,6 +18,7 @@
 #include "speccy/machines/TsConf/Ft812.h"
 #include "speccy/machines/Atm.h"   // Atm::evo: the ZX-Evo drives the card CS
 #include "app/Debug.h"
+#include "app/ESPectrum.h"   // ESPectrum::idle for the [SD2] line
 #include "pico/time.h"    // time_us_32 for the raw-SD sector timer (FT812_TRACE meter)
 #include "hardware/timer.h"
 #include "fs/FileUtils.h"
@@ -1243,6 +1244,10 @@ extern "C" {
     extern BYTE*            g_sd_as_buf;
     extern LBA_t            g_sd_as_sector;
     extern UINT             g_sd_as_count;
+    extern volatile uint32_t g_sd_as_seq;        // request id, bumped at every post (see sdcard.c)
+    extern volatile uint32_t g_sd_as_cut_n, g_sd_as_yield_n;
+    extern volatile uint8_t  g_sd_as_need;       // 0 = pure read-ahead (the renderer may defer it)
+    void sd_async_abort(void);                   // stop the running burst after its current block
 }
 static uint8_t* s_sq2 = nullptr;
 static bool     s_sq2_tried = false;
@@ -1329,6 +1334,7 @@ static inline bool raAnyHit(uint32_t sector) {
 static void sqAsyncDiscard() {
     uint8_t st = g_sd_as_state;
     if (st == 1) { if (__atomic_compare_exchange_n(&g_sd_as_state, &st, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return; }
+    sd_async_abort();                          // the result is thrown away: no tail
     while (g_sd_as_state == 2) tight_loop_contents();
     if (g_sd_as_state >= 3) g_sd_as_state = 0;
 }
@@ -1360,6 +1366,8 @@ static void sqAsyncRequest(uint32_t next, uint32_t count) {
     g_sd_as_count = count;
     s_as_gen = g_disk_write_gen;
     g_sd_as_done = 0;   // before the request is visible: core1 zeroes it only after taking it
+    g_sd_as_seq = g_sd_as_seq + 1;
+    g_sd_as_need = 0;
     __dmb();
     g_sd_as_state = 1;
     SDK(4, next);
@@ -1465,21 +1473,30 @@ static uint32_t c17Win(bool stream, bool seq) {
     return s_win_max;
 }
 
-// Post the request if the slot is free; true once it is.
+static void asKeep();
+// Post the request if the slot is free; true once it is. The callers have
+// already established that the sector is not in the burst on the card.
 static bool c17TryPost(uint32_t count) {
     uint8_t st = g_sd_as_state;
     if (st == 1) {
         if (!__atomic_compare_exchange_n(&g_sd_as_state, &st, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return false;
         st = 0;
     }
-    if (st == 2) return false;
-    if (st >= 3) {
-        // A finished result nobody took. The window is no longer guessed from
-        // this (a prefetch at the end of a run is ALWAYS taken by nobody), it is
-        // measured from the guest's run length — shrinking here as well used to
-        // fight that measurement.
-        g_sd_as_state = 0;
+    if (st == 2) {
+        // A burst on the card that does not hold this sector: its tail is
+        // speculative. Cut it after the block core1 is receiving (sdcard.c
+        // g_sd_as_abort) instead of waiting it out — that wait, and the 3 ms
+        // fallback that then read the card on core0, were the frames lost on
+        // SD access. The next poll posts this request.
+        sd_async_abort();
+        return false;
     }
+    // A finished result nobody took. The window is no longer guessed from
+    // this (a prefetch at the end of a run is ALWAYS taken by nobody), it is
+    // measured from the guest's run length — shrinking here as well used to
+    // fight that measurement. What arrived is kept as a window, though: after a
+    // cut it is the sectors the guest asked for a moment ago.
+    if (st >= 3) asKeep();
     if (count < 1) count = 1;
     if (count > winCap()) count = winCap();
     s_as_kind = count > 1 ? 2 : 1;
@@ -1489,6 +1506,8 @@ static bool c17TryPost(uint32_t count) {
     g_sd_as_count = count;
     s_as_gen = g_disk_write_gen;
     g_sd_as_done = 0;   // before the request is visible: core1 zeroes it only after taking it
+    g_sd_as_seq = g_sd_as_seq + 1;
+    g_sd_as_need = 1;
     __dmb();
     g_sd_as_state = 1;
     s_c17 = 2;
@@ -1508,13 +1527,34 @@ static int asIdx(uint32_t sector) {
     const uint32_t cnt = g_sd_as_count ? g_sd_as_count : 1;
     return i < cnt ? (int)i : -1;
 }
-// A finished burst nobody took becomes the read-ahead window.
-static void asInstall() {
-    s_sq2 = raRotate(s_sq2);
-    const uint32_t cnt = g_sd_as_count ? g_sd_as_count : 1;
-    s_sq_base = g_sd_as_sector; s_sq_count = cnt; s_sq_gen = s_as_gen;
+// A finished burst (state 3) of the current write generation becomes the
+// read-ahead window; anything else in the slot (a failure, a single read, a
+// stale burst) is dropped. The slot is 0 afterwards.
+static void asKeep() {
+    if (g_sd_as_state == 3 && asIdx(g_sd_as_sector) == 0) {
+        __dmb();
+        s_sq2 = raRotate(s_sq2);
+        const uint32_t cnt = g_sd_as_count ? g_sd_as_count : 1;
+        s_sq_base = g_sd_as_sector; s_sq_count = cnt; s_sq_gen = s_as_gen;
+    }
     g_sd_as_state = 0;
-    if (!s_stream) sqAsyncRequest(s_sq_base + cnt, s_win_max);
+}
+// A finished burst nobody took becomes the read-ahead window, and the next one
+// is prefetched.
+static void asInstall() {
+    asKeep();
+    if (!s_stream && raCurHit(s_sq_base)) sqAsyncRequest(s_sq_base + s_sq_count, s_win_max);
+}
+// The sector from a read-ahead window into mmc_sector_buf (c17Ready's 1).
+static int c17FromWindow(uint32_t sector) {
+    if (!raAnyHit(sector)) return 0;
+    memcpy(DivMMC::mmc_sector_buf, s_sq_buf + (size_t)(sector - s_sq_base) * 512, 512);
+    s1Set(sector, s_sq_gen);
+    s_sq_last = sector;
+    s_c17 = 0;
+    s_c17_hit++;
+    SDK(0, sector);
+    return 1;
 }
 
 static bool c17Begin(uint32_t sector, bool stream) {
@@ -1535,13 +1575,16 @@ static bool c17Begin(uint32_t sector, bool stream) {
         if (raAnyHit(sector)) { s_c17_hit++; return false; }
         st = g_sd_as_state;
     }
-    // A burst on the card (or posted) that holds this sector: wait for ITS
-    // block, which c17Ready hands over as soon as core1 has it.
-    if ((st == 1 || st == 2) && asIdx(sector) >= 0) { s_c17_sector = sector; s_c17 = 2; return true; }
+    // A burst on the card that holds this sector: wait for ITS block, which
+    // c17Ready hands over as soon as core1 has it. One only POSTED is not waited
+    // for: a read-ahead may stay untaken while the renderer is behind
+    // (sdcard.c g_sd_as_need), and c17TryPost replaces it with this demand.
+    if (st == 2 && asIdx(sector) >= 0) { s_c17_sector = sector; s_c17 = 2; return true; }
     s_c17_sector = sector;
     s_c17 = 1;
     missNote(sector);
-    c17TryPost(c17Win(stream, false));
+    s_c17_count = c17Win(stream, false);    // c17Ready retries with it if the slot is busy
+    c17TryPost(s_c17_count);
     return true;
 }
 
@@ -1557,7 +1600,23 @@ static int c17Ready() {
             return 2;                       // the caller loadSector()s (waits out a read in flight)
         }
     }
-    if (s_c17 == 1 && !c17TryPost(s_c17_count)) return 0;
+    if (s_c17 == 1) {
+        // Waiting for the slot (a burst is being cut, see c17TryPost): when it
+        // frees, what it read may already hold this sector.
+        if (g_sd_as_state >= 3) asKeep();
+        if (c17FromWindow(s_c17_sector)) return 1;
+        if (!c17TryPost(s_c17_count)) return 0;
+    }
+    if (s_c17 == 2 && g_sd_as_state == 0) {
+        // Our request is gone: the host took the card first (sd_async_quiesce
+        // cancels a request core1 has not started) and nothing would ever
+        // answer the guest's token poll. Post it again — unless the burst it
+        // was waiting for finished and became a window meanwhile (loadSector).
+        if (c17FromWindow(s_c17_sector)) return 1;
+        s_c17 = 1;
+        s_c17_t0 = time_us_32();
+        if (!c17TryPost(s_c17_count)) return 0;
+    }
     const uint8_t st = g_sd_as_state;
     if (st == 2) {                                            // on the card: this block yet?
         const int i = asIdx(s_c17_sector);
@@ -1601,6 +1660,15 @@ static int c17Ready() {
         memcpy(DivMMC::mmc_sector_buf, s_sq2, 512);
         s1Set(sector, s_as_gen);
         g_sd_as_state = 0;
+    } else if (st == 3 && s_as_gen == g_disk_write_gen) {
+        // A burst cut short before this sector's block (the host wanted the card,
+        // or another read stopped it): keep what arrived, ask for the sector.
+        asKeep();
+        if (c17FromWindow(sector)) return 1;
+        s_c17 = 1;
+        s_c17_t0 = time_us_32();
+        c17TryPost(s_c17_count);
+        return 0;
     } else {
         g_sd_as_state = 0;
         s_c17 = 0;
@@ -1623,10 +1691,13 @@ static bool c17FetchBlocking(uint32_t sector, uint32_t count) {
     if (!sdAsyncMachine() || !sq2Ensure()) return false;
     s_c17_sector = sector;
     s_c17_t0 = time_us_32();
-    s_c17 = 1;
-    if (!c17TryPost(count)) { s_c17 = 0; return false; }   // a prefetch is on the card
-                                                   // (s_c17 left at 1 made the token poll
-                                                   // re-read the same sector on core1)
+    const uint8_t st0 = g_sd_as_state;
+    if (st0 == 2 && asIdx(sector) >= 0) {
+        s_c17 = 2;                                 // it is in the burst on the card: wait for its block
+    } else {
+        s_c17 = 1;                                 // c17Ready keeps a finished burst, serves the
+        s_c17_count = count;                       // sector from a window, or posts it (once the
+    }                                              // running burst is cut)
     const uint32_t t0 = time_us_32();
     for (;;) {
         const int r = c17Ready();
@@ -1645,6 +1716,39 @@ static bool c17FetchBlocking(uint32_t sector, uint32_t count) {
     }
 }
 
+// True when every following read of port 0xEB answers 0xFF with no side effect
+// — mmc_read()'s own order: no card / CS high; R1 shown first; a written block
+// past its response and busy (mmcWriteResponse stays at 0xFF); no command latched.
+// NextZXOS's driver waits after each sector write until its 12800-pass timeout
+// (enNxtmmc 1FB9: busy ends at 0xFF, which its poll keeps waiting through), so
+// Z80::nextSdPollBatch skips those passes without a wait.
+bool DivMMC::sdReadsIdleFF() {
+    if (!mmc_file_open[0] && !divsd_mode) return true;
+    if (!mmc_cs_active) return true;
+    if ((mmc_r1 & 1) == 0) return false;
+    if (mmc_wr_resp >= 0) return mmc_wr_resp == 2;
+    return mmc_last_command == 0;
+}
+
+volatile uint8_t g_sd_tw_why;   // why sdTokenWait did not wait: [SD3] line
+uint32_t DivMMC::sdTokenWait(uint32_t maxUs) {
+    g_sd_tw_why = (mmc_last_command != 0x51 && mmc_last_command != 0x52) ? 1 :
+                  !divsd_mode || !mmc_cs_active ? 2 : mmc_read_index != 2 ? 3 : mmc_nac ? 4 : !s_c17 ? 5 : 0;
+    if (g_sd_tw_why) return 0;
+    const uint32_t t0 = time_us_32();
+    for (;;) {
+        const int r = c17Ready();            // what the guest's own polls would run
+        if (r == 2) {                        // core1 gave it up: read it here, as mmc_read does
+            s_c17_force_sync = true;
+            loadSector(s_c17_sector);
+            s_c17_force_sync = false;
+        }
+        const uint32_t d = time_us_32() - t0;
+        if (r || d >= maxUs) return d;
+        tight_loop_contents();
+    }
+}
+
 // [SD] 1 Hz line (PERF_TRACE / NEXT_TRACE builds only since 2026-10-19 — owner's
 // call; it printed in plain builds for a second after any card traffic):
 // sync = card reads/writes core0 did itself (R = reads, W = writes) and the ms
@@ -1658,22 +1762,35 @@ extern volatile uint32_t g_sd_as_c1_us, g_sd_as_c1_max, g_sd_as_c0wait_us, g_sd_
 extern volatile uint32_t g_sd_ph[4];   // sdcard.c: select / R1 poll / token wait / block data, us
 void DivMMC::sdStatTick() {
 #if PERF_TRACE || NEXT_TRACE
-    static uint32_t t0 = 0, ops0, wr0, st0, n0, c1us0, w0, ok0, fb0, hit0, q0, sk0, k0[5], ph0[4], rh0[6], ms0[4], ol0;
+    static uint32_t t0 = 0, ops0, wr0, st0, n0, c1us0, w0, ok0, fb0, hit0, q0, sk0, k0[5], ph0[4], rh0[6], ms0[4], ol0, cut0;
+    // NEXT_TRACE's 1 Hz block zeroes some of these totals as well: a total that
+    // went backwards counts from 0 (it printed 4294967xxx before).
+#define SDD(x, x0) ((x) >= (x0) ? (x) - (x0) : (x))
+    // Called once per emulated frame (ESPectrum::loop): frames and the frame
+    // budget left (ESPectrum::idle, the IDL of the F8 stats), for the [SD2] line.
+    static uint32_t fr = 0, neg = 0, yl0 = 0, pl0[4];
+    extern volatile uint32_t g_sd_poll[4];   // Z80_JLS.cpp nextSdPollBatch
+    static int32_t idlMin = INT32_MAX;
+    {
+        const int32_t idl = (int32_t)ESPectrum::idle;
+        fr++;
+        if (idl < 0) neg++;
+        if (idl < idlMin) idlMin = idl;
+    }
     const uint32_t now = time_us_32();
     if ((uint32_t)(now - t0) < 1000000u) return;
     extern volatile uint32_t g_nx_qwait_us, g_nx_autoskip;
     const uint32_t ops = g_sd_ops, wr = g_sd_wr_ops, st = g_sd_stall_us, n = g_sd_as_c1_n, c1us = g_sd_as_c1_us,
                    w = g_sd_as_c0wait_us, q = g_nx_qwait_us, sk = g_nx_autoskip;
     if (t0 && (ops != ops0 || n != n0 || s_c17_ok != ok0 || s_c17_fb != fb0 || s_c17_hit != hit0)) {
-        Debug::log("[SD] sync %lu/%lums %luR/%luW c1 %lu/%lums max %luus wait %lums max %luus c17 ok %lu hit %lu fb %lu win %lu old %lu/%lu | qwait %lums skip %lu | k %lu/%lu/%lu/%lu/%lu | ph %lu/%lu/%lu/%lu | rh %lu/%lu/%lu/%lu/%lu/%lu | nm %lu/%lu/%lu/%lu",
-                   (unsigned long)(ops - ops0), (unsigned long)((st - st0) / 1000u),
-                   (unsigned long)(ops - ops0 > wr - wr0 ? (ops - ops0) - (wr - wr0) : 0),
-                   (unsigned long)(wr - wr0),
-                   (unsigned long)(n - n0), (unsigned long)((c1us - c1us0) / 1000u), (unsigned long)g_sd_as_c1_max,
-                   (unsigned long)((w - w0) / 1000u), (unsigned long)g_sd_as_c0wait_max,
+        Debug::log("[SD] sync %lu/%lums %luR/%luW c1 %lu/%lums max %luus wait %lums max %luus c17 ok %lu hit %lu fb %lu win %lu old %lu/%lu | k %lu/%lu/%lu/%lu/%lu | ph %lu/%lu/%lu/%lu | rh %lu/%lu/%lu/%lu/%lu/%lu | nm %lu/%lu/%lu/%lu",
+                   (unsigned long)SDD(ops, ops0), (unsigned long)(SDD(st, st0) / 1000u),
+                   (unsigned long)(SDD(ops, ops0) > SDD(wr, wr0) ? SDD(ops, ops0) - SDD(wr, wr0) : 0),
+                   (unsigned long)SDD(wr, wr0),
+                   (unsigned long)SDD(n, n0), (unsigned long)(SDD(c1us, c1us0) / 1000u), (unsigned long)g_sd_as_c1_max,
+                   (unsigned long)(SDD(w, w0) / 1000u), (unsigned long)g_sd_as_c0wait_max,
                    (unsigned long)(s_c17_ok - ok0), (unsigned long)(s_c17_hit - hit0), (unsigned long)(s_c17_fb - fb0),
                    (unsigned long)s_win_max, (unsigned long)(s_old_hit - ol0), (unsigned long)s_old_n,
-                   (unsigned long)((q - q0) / 1000u), (unsigned long)(sk - sk0),
                    (unsigned long)(s_sdk[0] - k0[0]), (unsigned long)(s_sdk[1] - k0[1]),
                    (unsigned long)(s_sdk[2] - k0[2]), (unsigned long)(s_sdk[3] - k0[3]),
                    (unsigned long)(s_sdk[4] - k0[4]),
@@ -1684,9 +1801,38 @@ void DivMMC::sdStatTick() {
                    (unsigned long)(s_rh[4] - rh0[4]), (unsigned long)(s_rh[5] - rh0[5]),
                    (unsigned long)(s_miss[0] - ms0[0]), (unsigned long)(s_miss[1] - ms0[1]),
                    (unsigned long)(s_miss[2] - ms0[2]), (unsigned long)(s_miss[3] - ms0[3]));
+        // Debug::log truncates at 256 bytes: the second half of the story.
+        Debug::log("[SD2] fps %lu idl min %ld neg %lu | qwait %lums skip %lu | cut %lu yield %lu | poll %lu/%lu/%lums ref %lu",
+                   (unsigned long)fr, (long)idlMin, (unsigned long)neg,
+                   (unsigned long)(SDD(q, q0) / 1000u), (unsigned long)(sk - sk0),
+                   (unsigned long)(g_sd_as_cut_n - cut0), (unsigned long)(g_sd_as_yield_n - yl0),
+                   (unsigned long)(g_sd_poll[0] - pl0[0]), (unsigned long)(g_sd_poll[1] - pl0[1]),
+                   (unsigned long)((g_sd_poll[2] - pl0[2]) / 1000u), (unsigned long)(g_sd_poll[3] - pl0[3]));
         g_sd_as_c1_max = g_sd_as_c0wait_max = 0;
+        // Why the token-poll batch skipped nothing, and who called the poll (calls /
+        // passes skipped) — Z80_JLS.cpp nextSdPollBatch.
+        extern volatile uint32_t g_sd_poll_why[5], g_sd_poll_who[5], g_sd_poll_whok[5], g_sd_tw_whyn[6];
+        static uint32_t wy0[5], wo0[5], wk0[5], tw0[6];
+        Debug::log("[SD3] why pat %lu slice %lu state %lu now %lu adv %lu | tw ok %lu cmd %lu cs %lu idx %lu nac %lu c17 %lu | who R1 %lu/%lu tok %lu/%lu wrsp %lu/%lu busy %lu/%lu other %lu/%lu",
+                   (unsigned long)(g_sd_poll_why[0] - wy0[0]), (unsigned long)(g_sd_poll_why[1] - wy0[1]),
+                   (unsigned long)(g_sd_poll_why[2] - wy0[2]), (unsigned long)(g_sd_poll_why[3] - wy0[3]),
+                   (unsigned long)(g_sd_poll_why[4] - wy0[4]),
+                   (unsigned long)(g_sd_tw_whyn[0] - tw0[0]), (unsigned long)(g_sd_tw_whyn[1] - tw0[1]),
+                   (unsigned long)(g_sd_tw_whyn[2] - tw0[2]), (unsigned long)(g_sd_tw_whyn[3] - tw0[3]),
+                   (unsigned long)(g_sd_tw_whyn[4] - tw0[4]), (unsigned long)(g_sd_tw_whyn[5] - tw0[5]),
+                   (unsigned long)(g_sd_poll_who[0] - wo0[0]), (unsigned long)(g_sd_poll_whok[0] - wk0[0]),
+                   (unsigned long)(g_sd_poll_who[1] - wo0[1]), (unsigned long)(g_sd_poll_whok[1] - wk0[1]),
+                   (unsigned long)(g_sd_poll_who[2] - wo0[2]), (unsigned long)(g_sd_poll_whok[2] - wk0[2]),
+                   (unsigned long)(g_sd_poll_who[3] - wo0[3]), (unsigned long)(g_sd_poll_whok[3] - wk0[3]),
+                   (unsigned long)(g_sd_poll_who[4] - wo0[4]), (unsigned long)(g_sd_poll_whok[4] - wk0[4]));
+        for (int i = 0; i < 5; i++) { wy0[i] = g_sd_poll_why[i]; wo0[i] = g_sd_poll_who[i]; wk0[i] = g_sd_poll_whok[i]; }
+        for (int i = 0; i < 6; i++) tw0[i] = g_sd_tw_whyn[i];
     }
+    fr = 0; neg = 0; idlMin = INT32_MAX; yl0 = g_sd_as_yield_n;
+    for (int i = 0; i < 4; i++) pl0[i] = g_sd_poll[i];
     t0 = now; ops0 = ops; wr0 = wr; st0 = st; n0 = n; c1us0 = c1us; w0 = w; ok0 = s_c17_ok; fb0 = s_c17_fb; hit0 = s_c17_hit; q0 = q; sk0 = sk;
+    cut0 = g_sd_as_cut_n;
+#undef SDD
     for (int i = 0; i < 5; i++) k0[i] = s_sdk[i];
     for (int i = 0; i < 4; i++) ph0[i] = g_sd_ph[i];
     for (int i = 0; i < 6; i++) rh0[i] = s_rh[i];
@@ -1740,6 +1886,11 @@ void DivMMC::loadSector(uint32_t sector) {
         } else if (s_run_sec < 0xFFFFu) {
             s_run_sec++;
         }
+        // A finished background burst nobody took is a window too (it used to
+        // be looked at only on the c17 path, and a loadSector miss then threw it
+        // away and read the same sectors again: 0 hits, ~10x over-read in the
+        // PERF_HIST log of 2026-10-21).
+        if (g_sd_as_state >= 3) asKeep();
         // Read-ahead hit: no card access at all
         if (raAnyHit(sector)) {
             memcpy(mmc_sector_buf, s_sq_buf + (size_t)(sector - s_sq_base) * 512, 512);
@@ -2324,8 +2475,11 @@ void DivMMC::mmc_write(uint8_t value) {
                 if (sdhc_mode) {
                     flushWriteBuffer();
 #if PERF_TRACE && PERF_HIST
+                    // The same path as the plain build: a PERF_HIST build that
+                    // read here with loadSector() blocked core0 on every sector
+                    // and measured a different machine (2026-10-21).
                     { const uint32_t sector = mmc_read_address; ZS_T0();
-                      loadSector(sector); ZS(ZS_C17, 1, "c17"); }
+                      if (!c17Begin(sector, false)) loadSector(sector); ZS(ZS_C17, 1, "c17"); }
 #else
                     if (!c17Begin(mmc_read_address, false)) loadSector(mmc_read_address);
 #endif

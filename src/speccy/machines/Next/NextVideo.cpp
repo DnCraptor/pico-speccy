@@ -759,16 +759,24 @@ volatile uint32_t g_nx_dmaw[4][3] = {}, g_nx_dmaw_key[4][2] = {}, g_nx_dmaw_sh =
 volatile uint32_t g_nx_drain_src[8] = {};    // waits per source: c1Drain's src, 4 = DMA range, 5 = sprite log full
 volatile uint32_t g_nx_drain_ra = 0, g_nx_drain_ra_us = 0, g_nx_drain_ra_n = 0;   // caller of the longest wait
 #endif
+// core0 is spinning in c1Drain right now (waiting for the whole row queue; the
+// other wait, nxWaitUntil, only happens with the queue near full, which
+// sd_async_render_behind tests directly — the flag would not fit .nxovl):
+// read by sdcard.c, through sd_async_render_behind(), to stop a speculative SD
+// read-ahead that would keep core1 off the rows core0 is waiting for.
+volatile uint8_t g_nx_c0wait = 0;
 IRAM_ATTR void NEXTVID::c1Drain(uint8_t src) {
     (void)src;
     if (nx_r == nx_w) return;
     const uint64_t t0 = time_us_64();
     uint64_t tw = t0;
+    g_nx_c0wait = 1;
     while (nx_r != nx_w) {
         if (s_c0Blk && c0Help()) { tw = time_us_64(); continue; }   // c0Help is flash: no call without a helper   // a row done here is a row core1 does not owe
-        if (time_us_64() - tw > 100000) { nxQueueDead("stuck"); return; }
+        if (time_us_64() - tw > 100000) { nxQueueDead("stuck"); break; }
         tight_loop_contents();
     }
+    g_nx_c0wait = 0;
 #if NEXT_TRACE
     g_nx_drain_n = g_nx_drain_n + 1;
     g_nx_drain_src[src & 7] = g_nx_drain_src[src & 7] + 1;
@@ -2546,14 +2554,18 @@ __attribute__((always_inline)) inline void NEXTVID::emitRowBody(int row) {
 }
 
 
+// For sdcard.c (core1, between SD blocks): the renderer is behind — core0 is
+// draining the row queue, or the queue is within 64 rows of full and core0 is
+// (or is about to be) waiting for room. A speculative SD read-ahead then gives way (see g_sd_as_need).
+extern "C" int sd_async_render_behind(void) {
+    return g_next_c1_live && (g_nx_c0wait || (uint32_t)(nx_w - nx_r) > NEXT_C1_RING - 64u);
+}
+
 // core1: render up to 8 posted lines per call (render_core interleaves the
 // GS pump and the rest of its loop between batches).
-extern "C" volatile uint8_t g_sd_as_state;
-extern "C" void sd_async_pump(void);
+// (The background SD read is pumped by render_core right before each call of
+// this — a second pump here was redundant and cost .nxovl bytes.)
 IRAM_ATTR void NEXTVID::c1Pump() {
-    // a background SD read posted by DivMMC (sdcard.c): ~1 ms on the card, run
-    // here so core0 keeps emulating meanwhile
-    if (__builtin_expect(g_sd_as_state == 1, 0)) sd_async_pump();
 #if NEXT_TRACE
     if (nx_c == nx_w) return;
     const uint64_t tb = time_us_64();

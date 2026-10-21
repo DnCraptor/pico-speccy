@@ -257,7 +257,10 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # for the zxnDMA program OTIRs. Content 51 112 B — 88 B left.
     # 2026-10-20: the ULA screen-flip page per row + the border Gigascreen call
     # in the row renderer (Across the Edge / Insult) — +256 B.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 51456)
+    # 2026-10-21: the divMMC opcode trap filter takes only the off points of page
+    # 0x1F (NextZXOS's SD driver loop lives on that page) and c1Drain marks
+    # core0 waiting for the SD read-ahead — +128 B (content 51 488 B).
+    set(NXOVL_WIN_SIZE_EFFECTIVE 51584)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
@@ -271,7 +274,7 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
         # (nxHiresInkPaper / nxHiresUlaRow / nxHiresPairRow) went to flash and
         # RenderSpritesLine to -O2 no-unroll (4308 -> 1208 B): content 47 248,
         # trace 47 608 — ~3.5 KB under the terms again. Terms unchanged.
-        set(NXOVL_WIN_SIZE_EFFECTIVE 51584)
+        set(NXOVL_WIN_SIZE_EFFECTIVE 51712)
     endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})
