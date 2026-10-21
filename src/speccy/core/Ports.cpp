@@ -1098,7 +1098,14 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
   // mode with no joystick on the port falls through to it as before.
   if (!PROFI && Z80Ops::isNext && ((address & 0xFF) == 0x1F || (address & 0xFF) == 0x37)) {
     const int v = NextPorts::joyPortRead((uint8_t)address);
-    if (v >= 0) return (uint8_t)v;
+    if (v >= 0) {
+      // A key-or-fire wait reads #1F once a pass and all eight #FE rows from ONE
+      // PC (D7EC.. in the 2026-10-21 dump), so the #FE memo never meets its own
+      // row again — the #1F read is the pass marker; the pad, like the matrix,
+      // only changes between frames.
+      NextPorts::kbdPollSkip(address);
+      return (uint8_t)v;
+    }
   }
   // zxnDMA read-back (#6B / #0B) on the Next: a title streaming a WAV through
   // the DMA (burst + prescaler into the DAC, auto-restart) refills its buffer
