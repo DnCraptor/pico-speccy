@@ -402,6 +402,11 @@ public:
     // YMF262/OPL3 sound card (AlexZor DivMMC VGM player: address/data pairs on
     // ports #C4/#C5 and #C6/#C7). Gates the port decode and OplFm/OplSubsys.
     static uint8_t  opl3;
+    // ZXM-MoonSound (Mick's YMF278B/OPL4 card): the FM half is the OPL3 above
+    // (#C4-#C7, brought up with it), the wavetable half answers #7E/#7F outside
+    // TR-DOS. Its 2 MB YRW801 ROM (from SD) + 1 MB SRAM live in butter PSRAM,
+    // claimed once in setup(), so the switch is reboot-class.
+    static bool     moonsound;
     // Creative Music System (2x SAA1099 @7.159 MHz, #FF family / A9 select)
     // and 2x SN76489 (#C9/#CD) — the same VGM-player card family.
     static uint8_t  cms;

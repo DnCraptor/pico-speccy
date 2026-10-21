@@ -387,7 +387,10 @@ const char* romsetName(int32_t composite);
     /* Video > Screen position (Config::screen_top: 48/60/64 rows of top border in   */ \
     /* the 288-row window, Pentagon raster only). Live: VIDEO::screenTopApply moves  */ \
     /* the border/paper window between frames. Appended last per the APPEND ONLY rule.*/ \
-    X(SET_SCREEN_TOP,     AC_LIVE,   0,                     get_screenTop,  put_screenTop, hook_screenTop, -1)
+    X(SET_SCREEN_TOP,     AC_LIVE,   0,                     get_screenTop,  put_screenTop, hook_screenTop, -1) \
+    /* Audio > ZXM-MoonSound (OPL4). Reboot-class: its 3 MB of PSRAM (ROM + SRAM) */ \
+    /* is claimed once in setup(). Appended last per the APPEND ONLY rule.        */ \
+    X(SET_MOONSOUND,      AC_REBOOT, 0,                     get_moonsound,  put_moonsound, nullptr,        -1)
 
 #define NM_X_ENUM(id, cls, flags, g, p, h, f) id,
 enum SettingId : uint16_t {

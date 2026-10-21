@@ -385,6 +385,8 @@ static bool    hook_tsconfVdac2Smooth(int32_t, int32_t) { Ft812::renderRequest()
 static int32_t get_tsconfVdac2Adapt()          { return Config::tsconf_vdac2_adapt ? 1 : 0; }
 static void    put_tsconfVdac2Adapt(int32_t v) { Config::tsconf_vdac2_adapt = v != 0; }
 static bool    hook_tsconfVdac2Adapt(int32_t, int32_t) { VIDEO::ftPaletteProgram(); return true; }   // cube back in, or the adaptive one rebuilt
+static int32_t get_moonsound()          { return Config::moonsound ? 1 : 0; }
+static void    put_moonsound(int32_t v) { Config::moonsound = v != 0; }
 static int32_t get_screenTop()          { return (int32_t)Config::screen_top; }
 static void    put_screenTop(int32_t v) { Config::screen_top = (uint8_t)(v >= 0 && v <= 2 ? v : 0); }
 static bool    hook_screenTop(int32_t, int32_t) { VIDEO::screenTopApply(); return true; }
@@ -1492,7 +1494,8 @@ static bool want_turbo() { return Config::twoAyChips(); }
 static bool want_covox() { return Config::covox != 0 || Config::soundriveEnabled(); }
 static bool want_saa()   { return Config::SAA1099; }
 static bool want_tsfm()  { return Config::tsfm != 0; }
-static bool want_opl3()  { return Config::opl3 != 0; }
+// MoonSound's FM half IS the OPL3, so the card keeps OplSubsys up by itself.
+static bool want_opl3()  { return Config::opl3 != 0 || Config::moonsound; }
 static bool want_opll()  { return Config::ym2413 != 0; }
 static bool want_cms()   { return Config::cms != 0; }
 static bool want_sn()    { return Config::sn76489 != 0; }

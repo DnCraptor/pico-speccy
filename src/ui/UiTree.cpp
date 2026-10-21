@@ -1338,6 +1338,8 @@ static const Node kVideo[] = {
 // as a fallback, plain SPI PSRAM with room left over for the MemESP swap pool (slow path,
 // ~30x, best-effort). One shared test with the classic menu's gs_avail.
 static bool p_gsAvail() { return Buffer::gsPsramAvailable(); }
+// ZXM-MoonSound keeps its 2 MB ROM + 1 MB SRAM in QSPI (butter) PSRAM.
+static bool p_moonAvail() { return butter_psram_size() != 0; }
 // The children read the STAGED mode so they light up as soon as the mode is switched.
 // Clock is classic-GS only (NeoGS firmware picks its own clock via GSCFG0 CKSEL);
 // the RAM pick is NeoGS only (classic GS stays on its 2 MB default).
@@ -1462,6 +1464,7 @@ static const Node kAudio[] = {
 
 
     NM_SUB  (TXT_AUD_VGM,        kVgmChips,        nullptr),
+    NM_BOOL (TXT_AUD_MOONSOUND,  SET_MOONSOUND,    p_moonAvail),
     NM_RADIO(TXT_AUD_COVOX,      SET_COVOX,        opt_covox,      nullptr),
     NM_RADIO(TXT_AUD_SOUNDRIVE,  SET_SOUNDRIVE,    opt_soundrive,  nullptr),
     NM_RADIO   (TXT_AUD_MIDI,           SET_MIDI_MODE,   opt_midi_mode,   nullptr),

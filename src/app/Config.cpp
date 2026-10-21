@@ -141,6 +141,7 @@ uint8_t  Config::ayConfig = 0;
 uint8_t  Config::turbosound = 3; // BOTH
 uint8_t  Config::tsfm = 0;       // TurboSound FM off by default
 uint8_t  Config::opl3 = 0;       // OPL3 (YMF262) card off by default
+bool     Config::moonsound = false;
 uint8_t  Config::cms = 0;        // CMS (2x SAA1099) off by default
 uint8_t  Config::sn76489 = 0;    // 2x SN76489 off by default
 uint8_t  Config::sn_clock = 0;   // 3.579545 MHz
@@ -1461,6 +1462,7 @@ void Config::load() {
         nvs_get_u8("turbosound", Config::turbosound, sts);
         nvs_get_u8("tsfm", Config::tsfm, sts);
         nvs_get_u8("opl3", Config::opl3, sts);
+        nvs_get_b("moonsound", Config::moonsound, sts);
         nvs_get_u8("cms", Config::cms, sts);
         nvs_get_u8("sn76489", Config::sn76489, sts);
         nvs_get_u8("sn_clock", Config::sn_clock, sts);
@@ -1846,6 +1848,7 @@ void Config::writeKeys(NvsWriter& buf) {
     nvs_set_u8(buf,"turbosound", Config::turbosound);
     nvs_set_u8(buf,"tsfm", Config::tsfm);
     nvs_set_u8(buf,"opl3", Config::opl3);
+    nvs_set_str(buf,"moonsound", Config::moonsound ? "true" : "false");
     nvs_set_u8(buf,"cms", Config::cms);
     nvs_set_u8(buf,"sn76489", Config::sn76489);
     nvs_set_u8(buf,"sn_clock", Config::sn_clock);

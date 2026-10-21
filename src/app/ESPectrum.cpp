@@ -43,6 +43,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/devices/sound/OpnFm.h"
 #include "speccy/devices/sound/OplFm.h"
 #include "speccy/devices/sound/OpllFm.h"
+#include "speccy/devices/sound/MoonPcm.h"
 #include "speccy/devices/sound/SnSound.h"
 #include "hardware/clocks.h"
 #include "Subsystem.h"
@@ -58,6 +59,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "drivers/sdcard/sdcard.h"
 #include "speccy/core/MemESP.h"
 #include "Buffer.h"
+#include "TryAlloc.h"
 #include "ui/LEDIndicators.h"
 #include "ui/OSDMain.h"
 #include "ui/OSDNewMenu.h"
@@ -875,6 +877,48 @@ void ESPectrum::powerOnRamFill(int arch, int romset) {
              getFreeHeap());
 }
 
+// ZXM-MoonSound wavetable half: one 3 MB block (YRW801 ROM + SRAM) in butter
+// PSRAM, the ROM read from the SD card. A missing ROM file is not fatal — the
+// card still plays samples a program uploads into its SRAM (MoonBlaster MWK
+// kits), only the GM ROM tones are silent. Runs once, in setup(): the block is
+// kept for the session.
+static void moonSoundInit() {
+  static const char* const kRomPaths[] = {
+    "/roms/moonsound/yrw801.rom", "/roms/moonsound/yrw801m.rom", "/roms/yrw801.rom",
+  };
+  if (!butter_psram_size()) {
+    OSD::bootNotice("MoonSound off: needs QSPI PSRAM");
+    return;
+  }
+  uint8_t* mem = (uint8_t*)Buffer::palloc(MoonPcm::MEM_BYTES, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+  if (!mem || (uintptr_t)mem < (uintptr_t)PSRAM_DATA) {
+    if (mem) Buffer::pfree(mem);
+    OSD::bootNotice("MoonSound off: no 3 MB of PSRAM left");
+    Debug::log("[MOON] no 3 MB PSRAM block (GS/pages took it)");
+    return;
+  }
+  memset(mem, 0, MoonPcm::MEM_BYTES);
+  bool rom = false;
+  if (FileUtils::fsMount) {
+    FIL* f = (FIL*)tryMalloc(sizeof(FIL));
+    for (unsigned k = 0; f && !rom && k < sizeof(kRomPaths) / sizeof(kRomPaths[0]); k++) {
+      if (f_open(f, kRomPaths[k], FA_READ) != FR_OK) continue;
+      UINT got = 0;
+      const FRESULT r = f_read(f, mem, MoonPcm::ROM_SIZE, &got);
+      f_close(f);
+      rom = (r == FR_OK && got == MoonPcm::ROM_SIZE);
+      Debug::log("[MOON] ROM %s: %u bytes%s", kRomPaths[k], (unsigned)got, rom ? "" : " (short - ignored)");
+      if (!rom) memset(mem, 0, MoonPcm::ROM_SIZE);
+    }
+    free(f);
+  }
+  if (!rom) OSD::bootNotice("MoonSound: no /roms/moonsound/yrw801.rom - GM ROM tones silent");
+  moonpcm = new (std::nothrow) MoonPcm(mem);
+  if (!moonpcm) { Buffer::pfree(mem); return; }
+  moonpcm->setRate(ESPectrum::Audio_freq);
+  Debug::log("[MOON] ZXM-MoonSound up: 3 MB @%08X, ROM %s", (unsigned)(uintptr_t)mem, rom ? "loaded" : "missing");
+}
+
 void ESPectrum::setup() {
   LastRun::mute(true);   // remounts of remembered media are not "started"; unmuted below
   //=======================================================================================
@@ -1528,6 +1572,10 @@ void ESPectrum::setup() {
     Debug::log2SD("setup: Ft812::init %s, freeHeap=%u", ok ? "ok" : "FAILED", (unsigned)getFreeHeap());
   }
 
+  // ZXM-MoonSound: the YMF278B's 2 MB ROM + 1 MB SRAM out of the butter arena
+  // (Buffer::pageBudget reserved them), before the GM.DLS bank takes its share.
+  if (Config::moonsound) moonSoundInit();
+
   // GM.DLS MIDI bank: load into butter PSRAM (preferred) or provision the flash
   // partition from SD. MUST be here — AFTER initPools() (the PSRAM arena is now
   // final) and BEFORE VIDEO::Init(): a flash erase disables XIP for the whole QMI
@@ -1691,7 +1739,7 @@ void ESPectrum::setup() {
   // Backstop for the menu/MachineSwitch rule: on TS-Conf the VGM player (Wild
   // Commander's) drives OPL3 + AY + SAA only — OPLL and SN never allocate there.
   if (Config::arch == A_TSCONF) { Config::ym2413 = 0; Config::sn76489 = 0; }
-  OplSubsys::request(!Config::tape_player && Config::opl3 != 0);
+  OplSubsys::request(!Config::tape_player && (Config::opl3 != 0 || Config::moonsound));
   OpllSubsys::request(!Config::tape_player && Config::ym2413 != 0);
   CmsSubsys::request(!Config::tape_player && Config::cms != 0);
   SnSubsys::request(!Config::tape_player && Config::sn76489 != 0);
@@ -2399,7 +2447,7 @@ void ESPectrum::reset(uint8_t romInUse) {
   // Backstop for the menu/MachineSwitch rule: on TS-Conf the VGM player (Wild
   // Commander's) drives OPL3 + AY + SAA only — OPLL and SN never allocate there.
   if (Config::arch == A_TSCONF) { Config::ym2413 = 0; Config::sn76489 = 0; }
-  OplSubsys::request(!Config::tape_player && Config::opl3 != 0);
+  OplSubsys::request(!Config::tape_player && (Config::opl3 != 0 || Config::moonsound));
   OpllSubsys::request(!Config::tape_player && Config::ym2413 != 0);
   CmsSubsys::request(!Config::tape_player && Config::cms != 0);
   SnSubsys::request(!Config::tape_player && Config::sn76489 != 0);
@@ -2434,6 +2482,7 @@ void ESPectrum::reset(uint8_t romInUse) {
     oplfm->setRates(OPL3_YMF262_CLOCK, Audio_freq, clock_get_hz(clk_sys) < 450000000u);
     oplfm->reset();
   }
+  if (moonpcm) { moonpcm->reset(); moonpcm->setRate(Audio_freq); }   // same reset line
   if (opllfm) {
     opllfm->setRates(OPLL_YM2413_CLOCK, Audio_freq, clock_get_hz(clk_sys) < 450000000u);
     opllfm->reset();
@@ -3437,6 +3486,16 @@ __not_in_flash("audio") void ESPectrum::FMGenSound(int count, int bufpos) {
 }
 
 #define OPL_WRITE_QUEUE_LEN 512
+// Queue entry: pos (bits 0-14; a frame is < 1024 samples) | bit 15 = MoonSound
+// wave write | FM port (bits 16-17) or wave register (bits 16-23) | value << 24.
+#define OPLQ_POS_MASK 0x7FFFu
+#define OPLQ_WAVE     0x8000u
+
+static inline void oplQueueApply(uint32_t e) {
+  if (e & OPLQ_WAVE) { if (moonpcm) moonpcm->write((uint8_t)(e >> 16), (uint8_t)(e >> 24)); }
+  else oplfm->write((e >> 16) & 3, (uint8_t)(e >> 24));
+}
+static uint8_t s_oplHiAddr = 0;   // last #C6 address byte (NEW2 = reg 0x105 bit 1)
 
 // YMF262 into audioBufferOPL_L/R[bufpos .. bufpos+count-1]; cleared first
 // because OplFm::gen accumulates. Queued register writes are applied at their
@@ -3462,21 +3521,22 @@ void ESPectrum::OPLGenSound(int count, int bufpos) {
     uint32_t next = end;
     if (oplWriteQueue && oplQHead < oplQTail) {
       uint32_t e = oplWriteQueue[oplQHead];
-      uint32_t p = e & 0xFFFF;
+      uint32_t p = e & OPLQ_POS_MASK;
       if (p <= cur) {          // due now — apply before generating further
-        oplfm->write((e >> 16) & 3, (uint8_t)(e >> 24));
+        oplQueueApply(e);
         oplQHead++;
         continue;
       }
       if (p < next) next = p;
     }
     oplfm->gen(audioBufferOPL_L, audioBufferOPL_R, next - cur, cur);
+    // MoonSound: the FM half is in the buffer now; the PCM half mixes onto it.
+    if (moonpcm) moonpcm->gen(audioBufferOPL_L, audioBufferOPL_R, next - cur, cur);
     cur = next;
   }
   // writes stamped exactly at `end` belong before whatever comes next
-  while (oplWriteQueue && oplQHead < oplQTail && (oplWriteQueue[oplQHead] & 0xFFFF) <= end) {
-    uint32_t e = oplWriteQueue[oplQHead++];
-    oplfm->write((e >> 16) & 3, (uint8_t)(e >> 24));
+  while (oplWriteQueue && oplQHead < oplQTail && (oplWriteQueue[oplQHead] & OPLQ_POS_MASK) <= end) {
+    oplQueueApply(oplWriteQueue[oplQHead++]);
   }
   if (oplQHead == oplQTail) { oplQHead = oplQTail = 0; }
   dcblock_run(audioBufferOPL_L + bufpos, count, s_dcOplL, &s_oplOutQuiet);
@@ -3489,11 +3549,43 @@ void ESPectrum::OPLGenSound(int count, int bufpos) {
 // Queue one OPL register write at the current T-state's sample position.
 void ESPectrum::OPLPortWrite(uint8_t a, uint8_t v) {
   if (!OplSubsys::enabled || !oplfm) return;
+  // NEW2 opens the MoonSound wave registers; it gates the writes at the port, so
+  // it is tracked here, not at queue time.
+  if (moonpcm) {
+    if ((a & 3) == 2) s_oplHiAddr = v;
+    else if ((a & 3) == 3 && s_oplHiAddr == 0x05) moonpcm->setNew2((v & 2) != 0);
+  }
   if (!oplWriteQueue) { oplfm->write(a, v); return; }   // no queue: degrade to direct
   if (oplQTail >= OPL_WRITE_QUEUE_LEN) OPLGetSample();  // overflow: flush (drains + resets)
   uint32_t pos = CPU::tstates / audioAYDivider;
   if (multiplicator) pos >>= multiplicator;
-  oplWriteQueue[oplQTail++] = (pos & 0xFFFF) | ((uint32_t)(a & 3) << 16) | ((uint32_t)v << 24);
+  oplWriteQueue[oplQTail++] = (pos & OPLQ_POS_MASK) | ((uint32_t)(a & 3) << 16) | ((uint32_t)v << 24);
+}
+
+// MoonSound wave data port (#7F). The memory access registers (2-6) take effect
+// at once — a sample upload is hundreds of KB through register 6 and must not
+// go through the 512-entry queue; register 2 also picks the header bank, so the
+// queue is drained first to keep it in order with the queued writes before it.
+// Everything else is queued at its sample position like an FM write.
+void ESPectrum::MoonWaveData(uint8_t v) {
+  if (!moonpcm || !moonpcm->new2()) return;
+  const uint8_t reg = moonpcm->addr();
+  if (MoonPcm::immediate(reg) || !oplWriteQueue) {
+    if (reg == 2) OPLGetSample();
+    moonpcm->write(reg, v);
+    return;
+  }
+  if (oplQTail >= OPL_WRITE_QUEUE_LEN) OPLGetSample();
+  uint32_t pos = CPU::tstates / audioAYDivider;
+  if (multiplicator) pos >>= multiplicator;
+  oplWriteQueue[oplQTail++] = (pos & OPLQ_POS_MASK) | OPLQ_WAVE | ((uint32_t)reg << 16) | ((uint32_t)v << 24);
+}
+
+// A read sees every write before it (players read-modify-write the key register).
+uint8_t ESPectrum::MoonWaveRead() {
+  if (!moonpcm) return 0xFF;
+  if (!MoonPcm::immediate(moonpcm->addr())) OPLGetSample();
+  return moonpcm->read(moonpcm->addr());
 }
 
 // Catch the OPL3 stream (and its write queue) up to the current T-state.

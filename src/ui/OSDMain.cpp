@@ -75,6 +75,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/core/Ports.h"
 #include "drivers/audio/audio.h"
 #include "speccy/devices/sound/AySound.h"
+#include "speccy/devices/sound/MoonPcm.h"
 #include "speccy/devices/sound/Midi.h"
 #include "speccy/devices/sound/MidiSynth.h"
 #include "speccy/devices/sound/dls_conv.h"
@@ -6970,6 +6971,10 @@ static void buildEmulatorInfoText() {
         pos += infoAppend(buf, pos, bufsz,
             " SAA1099        : %s\n",
             Config::SAA1099 ? "On (#FF)" : "Off");
+
+        // ZXM-MoonSound — configured vs up (its 3 MB of PSRAM may not have fitted)
+        pos += infoAppend(buf, pos, bufsz, " MoonSound      : %s\n",
+            !Config::moonsound ? "Off" : moonpcm ? "On (#C4-#C7, #7E/#7F)" : "No PSRAM");
 
         // General Sound — configured vs actually running: GS::init needs PSRAM
         // for its sample RAM, so "enabled but not up" is a real state (same

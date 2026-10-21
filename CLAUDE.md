@@ -16635,3 +16635,24 @@ and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card 
   1500 pulses. `iff=0` = a handler still running (lost on the board too unless our timing is
   longer), `iff=1` + large `seen` = we ran past the pulse. Read it first on any "raster split /
   parallax glitches every N frames" report on the Next.
+
+## ZXM-MoonSound (YMF278B / OPL4) — 2026-10-21, NOT hw-tested
+
+Audio > "ZXM-MoonSound (OPL4)" (`Config::moonsound`, NVS `moonsound`, `SET_MOONSOUND`
+AC_REBOOT, row only with butter PSRAM). Mick's card (micklab.ru; sources archived at
+github.com/alfishe/zxm-moonsound — CPLD, MoonService, MWM player). FM half = our OplFm
+on #C4-#C7 (MoonSound turns the OPL3 subsystem on by itself); wave half =
+`src/speccy/devices/sound/MoonPcm.{h,cpp}`, a port of ymfm's pcm_engine (BSD), 24 channels,
+wave registers on #7E (address) / #7F (data), DO2 output only, run at our output rate
+(Q16 chip-sample count, pitch/envelope exact). NEW2 (FM reg 0x105 bit 1) gates wave data
+writes; reg 2 reads back device id 0x20. Memory = one 3 MB butter palloc taken in setup()
+(`moonSoundInit`, reserved by `Buffer::pageBudget`): YRW801 ROM 0x000000-0x1FFFFF loaded
+from `/roms/moonsound/yrw801.rom` (2097152 B; also `yrw801m.rom`, `/roms/yrw801.rom`),
+1 MB SRAM 0x200000 mirrored at 0x300000. No ROM file = RAM samples only (bootNotice).
+Timed wave writes ride the OPL write queue (bit 15 = wave flag, position mask 0x7FFF);
+regs 2-6 (memory access) apply at once after an OPLGetSample catch-up; wave reads catch
+up first. Mix: regs 0xF8/0xF9 normalised so FM at the power-on mix is the plain OPL3
+level; PCM `>> kPcmShift` (1) — the level knob if hw disagrees. Host test
+`tools/moonpcm_test.cpp` (recipe in its header; 7 mutations fail it). Code in flash.
+Hw owed: MoonService detect + RAM test, MWM player (Pentagon 512K, demo-disks/*.trd),
+levels against FM, core0 cost with many channels.
