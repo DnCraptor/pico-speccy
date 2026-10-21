@@ -117,6 +117,8 @@ private:
     void     clockEnv(Ch& c, int ch, uint32_t counter);
     int16_t  fetch(const Ch& c) const;
     uint32_t memAutoInc();
+    void     flashCmd(uint32_t a, uint8_t v);
+    uint8_t  flashIdByte(uint32_t a) const;
     void     mixRecalc();
 
     const uint8_t* m_rom;
@@ -130,6 +132,8 @@ private:
     int32_t  m_fmFL, m_fmFR, m_pcmFL, m_pcmFR;   // mix factors, Q12 (FM 4096 = unchanged)
     uint8_t  m_addr;
     bool     m_new2;
+    uint8_t  m_flashCyc;        // AM29F016 command cycle (flashCmd)
+    bool     m_flashId;         // autoselect mode: ROM reads give the chip ID
 };
 
 // The one card, allocated in ESPectrum::setup while Config::moonsound is on and

@@ -118,6 +118,8 @@ void MoonPcm::reset() {
     m_acc = 0;
     m_addr = 0;
     m_new2 = false;
+    m_flashCyc = 0;
+    m_flashId = false;
     mixRecalc();
     for (int i = 0; i < CHANNELS; i++) recache(i);
 }
@@ -253,7 +255,8 @@ void MoonPcm::write(uint8_t reg, uint8_t v) {
     if (!m_new2) return;
     if (reg == 6 && (m_regs[2] & 1)) {                        // memory data
         const uint32_t a = memAutoInc() & 0x3FFFFF;
-        if (a >= ROM_SIZE) m_ram[a & (RAM_SIZE - 1)] = v;   // ROM is read-only here
+        if (a >= ROM_SIZE) m_ram[a & (RAM_SIZE - 1)] = v;
+        else               flashCmd(a, v);                   // the ROM takes flash commands only
         return;
     }
     m_regs[reg] = v;
@@ -265,8 +268,45 @@ void MoonPcm::write(uint8_t reg, uint8_t v) {
     if (reg >= 0x68 && reg < 0x80) keyOnOff(ch, (v & 0x80) != 0);
 }
 
+// The card's ROM is an AM29F016 (MoonService v0.3 identifies and reflashes it
+// through the memory-access registers). Only the command decoder is modelled, for
+// autoselect: AA@555 55@2AA 90@555 enters it, F0 leaves it, and reads then give the
+// manufacturer (AMD 01h) at A1:A0 = 0, the device (ADh) at 1 and "not protected"
+// (00h) at 2. Program (A0) and erase (80, then 10/30) are accepted and dropped: the
+// embedded ROM is read-only, so a write reads back unchanged and the toggle-bit
+// poll sees "ready" at once. Unlock addresses are A10..A0 of the byte address.
+void MoonPcm::flashCmd(uint32_t a, uint8_t v) {
+    const uint32_t lo = a & 0x7FF;
+    if (v == 0xF0) { m_flashCyc = 0; m_flashId = false; return; }
+    switch (m_flashCyc) {
+    case 0: m_flashCyc = (lo == 0x555 && v == 0xAA) ? 1 : 0; break;
+    case 1: m_flashCyc = (lo == 0x2AA && v == 0x55) ? 2 : 0; break;
+    case 2:
+        if (lo == 0x555 && v == 0x90)      { m_flashId = true; m_flashCyc = 0; }
+        else if (lo == 0x555 && v == 0x80) m_flashCyc = 3;   // erase setup
+        else if (lo == 0x555 && v == 0xA0) m_flashCyc = 6;   // program: next write = data
+        else                               m_flashCyc = 0;
+        break;
+    case 3: m_flashCyc = (lo == 0x555 && v == 0xAA) ? 4 : 0; break;
+    case 4: m_flashCyc = (lo == 0x2AA && v == 0x55) ? 5 : 0; break;
+    default: m_flashCyc = 0; break;                          // 10/30 erase, program data: dropped
+    }
+}
+
+uint8_t MoonPcm::flashIdByte(uint32_t a) const {
+    switch (a & 3) {
+    case 0:  return 0x01;    // AMD
+    case 1:  return 0xAD;    // AM29F016
+    default: return 0x00;    // sector not protected
+    }
+}
+
 uint8_t MoonPcm::read(uint8_t reg) {
-    if (reg == 6 && (m_regs[2] & 1)) return memRead(memAutoInc());
+    if (reg == 6 && (m_regs[2] & 1)) {
+        const uint32_t a = memAutoInc() & 0x3FFFFF;
+        if (m_flashId && a < ROM_SIZE) return flashIdByte(a);
+        return memRead(a);
+    }
     uint8_t v = m_regs[reg];
     if (reg == 2) v = (v & 0x1F) | 0x20;                      // device ID 001 = YMF278
     return v;

@@ -106,6 +106,31 @@ int main() {
     w(m, 6, 0x00);
     CHECK(g_mem[0x1000] == 0x60, "ROM written");
     CHECK(m.memRead(0x300003) == 0xA3, "RAM mirror");
+    // 2b. AM29F016 autoselect, the way MoonService v0.3 reads it.
+    {
+        auto fw = [&](uint32_t a, uint8_t v) {
+            w(m, 3, (uint8_t)(a >> 16)); w(m, 4, (uint8_t)(a >> 8)); w(m, 5, (uint8_t)a); w(m, 6, v);
+        };
+        auto fr = [&](uint32_t a) {
+            w(m, 3, (uint8_t)(a >> 16)); w(m, 4, (uint8_t)(a >> 8)); w(m, 5, (uint8_t)a); return m.read(6);
+        };
+        const uint8_t s0 = g_mem[0], s1 = g_mem[1];
+        g_mem[0] = 0x5A; g_mem[1] = 0xC3;
+        CHECK(fr(0) == 0x5A, "ROM byte before autoselect");
+        fw(0x555, 0xAA); fw(0x2AA, 0x55); fw(0x555, 0x90);
+        CHECK(fr(0) == 0x01 && fr(1) == 0xAD && fr(2) == 0x00, "autoselect id %02X %02X", fr(0), fr(1));
+        CHECK(fr(0x10000) == 0x01, "autoselect in another sector");
+        fw(0, 0xF0);
+        CHECK(fr(0) == 0x5A && fr(1) == 0xC3, "reset back to read");
+        fw(0x555, 0xAA); fw(0x2AA, 0x55); fw(0x555, 0xA0); fw(0x100, 0x00);   // program: dropped
+        CHECK(fr(0x100) == g_mem[0x100], "program changed the ROM");
+        fw(0x555, 0xAA); fw(0x2AA, 0x55); fw(0x555, 0x80);
+        fw(0x555, 0xAA); fw(0x2AA, 0x55); fw(0, 0x30);                         // sector erase: dropped
+        CHECK(fr(0) == 0x5A && fr(0) == fr(0), "erase / toggle bit");
+        fw(0x556, 0xAA); fw(0x2AA, 0x55); fw(0x555, 0x90);                     // wrong unlock
+        CHECK(fr(0) == 0x5A, "autoselect without a valid unlock");
+        g_mem[0] = s0; g_mem[1] = s1;
+    }
     w(m, 2, 0x10);                               // memory mode off, bank 4
 
     // 3. Pitch at OCT=1 FNUM=0 (recorded rate): 441 Hz; OCT=2: 882 Hz.

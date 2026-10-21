@@ -16667,7 +16667,12 @@ yrw801.rom) is EMBEDDED in flash — `src/speccy/roms/moonsound/yrw801.{rom,S}`,
 (path + OBJECT_DEPENDS in cmake/source-flags.cmake), symbol `gb_rom_yrw801` — and read in
 place through XIP; only the 1 MB SRAM (0x200000, mirrored at 0x300000) is a butter palloc
 taken in setup() (`moonSoundInit`, reserved by `Buffer::pageBudget` as `RAM_SIZE`).
-`MoonPcm(rom, ram)`; the SD ROM file loader is gone. Timed wave writes ride the OPL write queue (bit 15 = wave flag, position mask 0x7FFF);
+`MoonPcm(rom, ram)`; the SD ROM file loader is gone. The ROM answers AM29F016 commands for
+AUTOSELECT only (`MoonPcm::flashCmd`, owner's call 2026-10-21: no reflashing): AA@555
+55@2AA 90@555 -> reads via reg 6 give 01h / ADh / 00h at A1:A0 = 0/1/2 until F0, so
+MoonService v0.3 prints AM29F016; program/erase are accepted and dropped (an update
+with the shipped moonsnd.rom verifies, any other file fails its verify). The embedded
+ROM matches MoonService v0.2's per-16 KB CRC8 table in all 128 segments. Timed wave writes ride the OPL write queue (bit 15 = wave flag, position mask 0x7FFF);
 regs 2-6 (memory access) apply at once after an OPLGetSample catch-up; wave reads catch
 up first. Mix: regs 0xF8/0xF9 normalised so FM at the power-on mix is the plain OPL3
 level; PCM `>> kPcmShift` (1) — the level knob if hw disagrees. Host test
