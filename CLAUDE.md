@@ -16651,11 +16651,13 @@ lists the 16 MB VGA_HDMI images as `<BOARD>-16M`; tools/release_downloads.py str
 ~10.7 MB GM.DLS region. Rule: anything that does not fit 4 MB goes behind `MOONSOUND`-style
 16 MB guards, never into the 4 MB image.
 **GM.DLS on 16 MB lives in flash first** (`kBankFlashFirst`, MidiSynth::loadBank, `FLASH_SIZE >= 16384`):
-the bank is allocated FORCE_FLASH in the ~10 MB region, written once at the boot after a new
+only the STOCK bank (`gm_bank.bin` in CONFIG_DIR or the root = the converted GM.DLS; `s_openedDefault`,
+set by openValidSdBank) — any other bank the user picks stays on the PSRAM ladder, so switching
+sources never rewrites flash. The stock bank is allocated FORCE_FLASH in the ~10 MB region, written once at the boot after a new
 pick (Buffer::load's body compare skips the write when current) and played from XIP, so the
 butter arena stays free. A live pick that needs a flash write (post-VIDEO::Init) or a bank the
 region cannot hold falls back to PSRAM for this session; the next boot moves it to flash.
-NOT hw-tested (`debug/DVp2-midiflash16-1.1.0`): first boot after a pick blinks the LED while
+NOT hw-tested (`debug/DVp2-midiflash16b-1.1.0`): first boot after a pick blinks the LED while
 writing; check MIDI timing from XIP against the PSRAM copy, and Memory Info saying `flash`.
 
 ## ZXM-MoonSound (YMF278B / OPL4) — 2026-10-21, NOT hw-tested
