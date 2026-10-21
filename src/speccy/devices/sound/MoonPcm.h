@@ -58,16 +58,17 @@ class MoonPcm {
 public:
     // Card memory: the YRW801 ROM at 0x000000-0x1FFFFF, the 1 MB SRAM at
     // 0x200000-0x2FFFFF (mirrored at 0x300000-0x3FFFFF — the 22-bit bus has
-    // room for 2 MB of RAM and only half is fitted). One contiguous block.
+    // room for 2 MB of RAM and only half is fitted). Two blocks: the ROM is read
+    // in place (the firmware embeds it in flash), the SRAM is the caller's.
     static constexpr uint32_t ROM_SIZE  = 2u << 20;
     static constexpr uint32_t RAM_SIZE  = 1u << 20;
     static constexpr uint32_t MEM_BYTES = ROM_SIZE + RAM_SIZE;
     static constexpr uint32_t CHIP_RATE = 44100;   // 33.8688 MHz / 768
     static constexpr int      CHANNELS  = 24;
 
-    // mem: MEM_BYTES, owned by the caller. The ROM half is whatever the caller
-    // loaded (all zero = silent ROM tones, RAM samples still work).
-    explicit MoonPcm(uint8_t* mem);
+    // rom: ROM_SIZE bytes, read only (nullptr = silent ROM tones, RAM samples still
+    // work); ram: RAM_SIZE bytes, owned by the caller.
+    MoonPcm(const uint8_t* rom, uint8_t* ram);
 
     void setRate(uint32_t outRate);
     void reset();
@@ -91,7 +92,8 @@ public:
     bool anyActive() const { return m_active != 0; }
     uint8_t memRead(uint32_t a) const {
         a &= 0x3FFFFF;
-        return m_mem[a < MEM_BYTES ? a : a - RAM_SIZE];
+        if (a < ROM_SIZE) return m_rom ? m_rom[a] : 0;
+        return m_ram[a & (RAM_SIZE - 1)];
     }
 
 private:
@@ -117,7 +119,8 @@ private:
     uint32_t memAutoInc();
     void     mixRecalc();
 
-    uint8_t* m_mem;
+    const uint8_t* m_rom;
+    uint8_t*       m_ram;
     uint8_t  m_regs[256];
     Ch       m_ch[CHANNELS];
     uint32_t m_active;          // bit per channel: not yet quiet after release
@@ -130,7 +133,15 @@ private:
 };
 
 // The one card, allocated in ESPectrum::setup while Config::moonsound is on and
-// the 3 MB landed in butter PSRAM; nullptr otherwise.
+// its 1 MB SRAM landed in butter PSRAM (16 MB firmware only, MOONSOUND=1);
+// nullptr otherwise.
+// The 4 MB firmware has no card at all (MOONSOUND=0): the pointer is a constant
+// nullptr there, so every `if (moonpcm)` folds away with the code behind it.
+// MOONSOUND undefined = a host build (tools/moonpcm_test.cpp).
+#if !defined(MOONSOUND) || MOONSOUND
 extern MoonPcm* moonpcm;
+#else
+constexpr MoonPcm* moonpcm = nullptr;
+#endif
 
 #endif

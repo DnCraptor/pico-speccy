@@ -212,8 +212,9 @@ static size_t pageBudget(size_t chip, bool gs_lands_here, bool divmmc_here) {
     // The VDAC2's FT812 keeps its 1 MB RAM_G (+ fonts + state) in the butter arena
     // on a TS-Conf boot (ESPectrum::setup → Ft812::init, right after GS::init).
     if (gs_lands_here && Config::tsconf_vdac2 && Config::arch == A_TSCONF) reserve += Ft812::configuredBytes();
-    // ZXM-MoonSound: the YMF278B's ROM + SRAM (ESPectrum::setup, after GS::init).
-    if (gs_lands_here && Config::moonsound) reserve += MoonPcm::MEM_BYTES;
+    // ZXM-MoonSound: the YMF278B's 1 MB SRAM (ESPectrum::setup, after GS::init; its
+    // ROM is in flash). Config::moonsound is always false on the 4 MB firmware.
+    if (gs_lands_here && Config::moonsound) reserve += MoonPcm::RAM_SIZE;
     // DivMMC's banks sit directly above the pages (DivMMC.cpp). Reserved
     // unconditionally: esxDOS can be switched on at runtime, and 128 KB is cheap
     // next to being pushed onto the swap-file path for the rest of the session.

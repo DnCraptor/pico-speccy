@@ -16636,20 +16636,38 @@ and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card 
   longer), `iff=1` + large `seen` = we ran past the pulse. Read it first on any "raster split /
   parallax glitches every N frames" report on the Next.
 
+## Two flash types per board: 4 MB and 16 MB (2026-10-21, NOT hw-tested)
+
+`-DFLASH_16MB=ON` (cmake/options.cmake; the W/WS boards force it, they are 16 MB only)
+= `FLASH_SIZE 16384` + `PICO_FLASH_SIZE_BYTES` set before the SDK reads the board header
+(the SDK passes it to C itself — do NOT add a second compile definition, the two spellings
+"redefine" each other), name `<board>-speccy-<display>[-variant]-16MB-<ver>` /
+`+16MB` on screen for non-W boards, same BOARD_TAG (same NVS dir). It sets
+`MOONSOUND=1` (a global compile define, 0 on the 4 MB image). build_all.sh / .ps1 build
+every (target, display) pair in both types (`FLASH_TYPES="4 16"` / `-FlashTypes`), dirs
+`build-all/<dir>-16MB`, logs `<target>-<display>-16MB.log`; W targets only 16. check-release.sh
+lists the 16 MB VGA_HDMI images as `<BOARD>-16M`; tools/release_downloads.py strips a
+`-16MB` display suffix into the link label. DVp2: 4 MB 3.51 MB used, 16 MB 5.61 MB with a
+~10.7 MB GM.DLS region. Rule: anything that does not fit 4 MB goes behind `MOONSOUND`-style
+16 MB guards, never into the 4 MB image.
+
 ## ZXM-MoonSound (YMF278B / OPL4) — 2026-10-21, NOT hw-tested
 
 Audio > "ZXM-MoonSound (OPL4)" (`Config::moonsound`, NVS `moonsound`, `SET_MOONSOUND`
-AC_REBOOT, row only with butter PSRAM). Mick's card (micklab.ru; sources archived at
+AC_REBOOT, row only with butter PSRAM). **16 MB firmware only** (`MOONSOUND=1`): on the
+4 MB image `moonpcm` is a `constexpr nullptr` (MoonPcm.h), MoonPcm.cpp compiles to
+nothing, every `if (moonpcm)` folds away, and Config::load forces the setting off. Mick's card (micklab.ru; sources archived at
 github.com/alfishe/zxm-moonsound — CPLD, MoonService, MWM player). FM half = our OplFm
 on #C4-#C7 (MoonSound turns the OPL3 subsystem on by itself); wave half =
 `src/speccy/devices/sound/MoonPcm.{h,cpp}`, a port of ymfm's pcm_engine (BSD), 24 channels,
 wave registers on #7E (address) / #7F (data), DO2 output only, run at our output rate
 (Q16 chip-sample count, pitch/envelope exact). NEW2 (FM reg 0x105 bit 1) gates wave data
-writes; reg 2 reads back device id 0x20. Memory = one 3 MB butter palloc taken in setup()
-(`moonSoundInit`, reserved by `Buffer::pageBudget`): YRW801 ROM 0x000000-0x1FFFFF loaded
-from `/roms/moonsound/yrw801.rom` (2097152 B; also `yrw801m.rom`, `/roms/yrw801.rom`),
-1 MB SRAM 0x200000 mirrored at 0x300000. No ROM file = RAM samples only (bootNotice).
-Timed wave writes ride the OPL write queue (bit 15 = wave flag, position mask 0x7FFF);
+writes; reg 2 reads back device id 0x20. Memory: the YRW801 ROM (2 MB, CRC32 2A9D8D43 = MAME
+yrw801.rom) is EMBEDDED in flash — `src/speccy/roms/moonsound/yrw801.{rom,S}`, `.incbin`
+(path + OBJECT_DEPENDS in cmake/source-flags.cmake), symbol `gb_rom_yrw801` — and read in
+place through XIP; only the 1 MB SRAM (0x200000, mirrored at 0x300000) is a butter palloc
+taken in setup() (`moonSoundInit`, reserved by `Buffer::pageBudget` as `RAM_SIZE`).
+`MoonPcm(rom, ram)`; the SD ROM file loader is gone. Timed wave writes ride the OPL write queue (bit 15 = wave flag, position mask 0x7FFF);
 regs 2-6 (memory access) apply at once after an OPLGetSample catch-up; wave reads catch
 up first. Mix: regs 0xF8/0xF9 normalised so FM at the power-on mix is the plain OPL3
 level; PCM `>> kPcmShift` (1) — the level knob if hw disagrees. Host test

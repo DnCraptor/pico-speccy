@@ -89,11 +89,22 @@ message(STATUS "PICO_BOARD: ${PICO_BOARD}")
 # firmware (rp2350-memmap.ld), and on 4 MB the firmware has ~2.4 MB before it eats
 # into the GM_BANK_MIN_KB floor — a bound main has already overflowed once — against
 # ~14.3 MB here, where the same rule leaves the bank a 13.6 MB tail by itself.
+# Any other board builds in two types, 4 MB (default) and 16 MB (-DFLASH_16MB=ON);
+# the board header's own 4 MB default is overridden here, before the SDK reads it
+# (the SDK then defines PICO_FLASH_SIZE_BYTES for the C code from this value too).
 if(PICOSPECCY_WIFI)
+    set(FLASH_16MB ON)
+endif()
+if(FLASH_16MB)
     set(FLASH_SIZE 16384)
+    set(PICO_FLASH_SIZE_BYTES "16 * 1024 * 1024")
+    set(MOONSOUND 1)
 else()
     set(FLASH_SIZE 4096)
+    set(MOONSOUND 0)
 endif()
+# MOONSOUND: the ZXM-MoonSound card (YMF278B wave half + its embedded YRW801 ROM).
+add_compile_definitions(MOONSOUND=${MOONSOUND})
 
 # Board tag: prefix of the firmware file name and the per-board NVS config dir.
 # No chip suffix anymore — every target is RP2350.

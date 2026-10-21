@@ -1463,6 +1463,9 @@ void Config::load() {
         nvs_get_u8("tsfm", Config::tsfm, sts);
         nvs_get_u8("opl3", Config::opl3, sts);
         nvs_get_b("moonsound", Config::moonsound, sts);
+#if !MOONSOUND
+        Config::moonsound = false;   // the 4 MB firmware has no card (no room for its ROM)
+#endif
         nvs_get_u8("cms", Config::cms, sts);
         nvs_get_u8("sn76489", Config::sn76489, sts);
         nvs_get_u8("sn_clock", Config::sn_clock, sts);

@@ -83,7 +83,7 @@ int main() {
         p[0] = (uint8_t)(a >> 4); p[1] = (uint8_t)(((a & 0xF) << 4) | (b & 0xF)); p[2] = (uint8_t)(b >> 4);
     }
 
-    MoonPcm m(g_mem.data());
+    MoonPcm m(g_mem.data(), g_mem.data() + MoonPcm::ROM_SIZE);
     m.setRate(31250);
 
     // 1. ID + NEW2 gate.
@@ -133,7 +133,7 @@ int main() {
 
     // Same pitch at a 44.1 kHz output rate.
     {
-        MoonPcm m2(g_mem.data()); m2.setRate(44100); m2.setNew2(true);
+        MoonPcm m2(g_mem.data(), g_mem.data() + MoonPcm::ROM_SIZE); m2.setRate(44100); m2.setNew2(true);
         std::vector<int16_t> L2(44100), R2(44100);
         keyTone(m2, 3, 0, 1, 0x100);            // fnum 256 -> x1.25
         m2.gen(L2.data(), R2.data(), 44100, 0);

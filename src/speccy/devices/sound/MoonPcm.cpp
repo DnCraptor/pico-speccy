@@ -8,6 +8,8 @@
 #include "MoonPcm.h"
 #include <string.h>
 
+#if !defined(MOONSOUND) || MOONSOUND   // the 16 MB firmware only (cmake/board.cmake)
+
 MoonPcm* moonpcm = nullptr;
 
 namespace {
@@ -96,7 +98,7 @@ inline int16_t clamp16(int32_t v) { return v > 32767 ? 32767 : v < -32768 ? -327
 
 } // namespace
 
-MoonPcm::MoonPcm(uint8_t* mem) : m_mem(mem) {
+MoonPcm::MoonPcm(const uint8_t* rom, uint8_t* ram) : m_rom(rom), m_ram(ram) {
     m_ratio = (CHIP_RATE << 16) / 31250;
     reset();
 }
@@ -251,7 +253,7 @@ void MoonPcm::write(uint8_t reg, uint8_t v) {
     if (!m_new2) return;
     if (reg == 6 && (m_regs[2] & 1)) {                        // memory data
         const uint32_t a = memAutoInc() & 0x3FFFFF;
-        if (a >= ROM_SIZE) m_mem[a < MEM_BYTES ? a : a - RAM_SIZE] = v;   // ROM is read-only here
+        if (a >= ROM_SIZE) m_ram[a & (RAM_SIZE - 1)] = v;   // ROM is read-only here
         return;
     }
     m_regs[reg] = v;
@@ -333,3 +335,5 @@ void MoonPcm::gen(int16_t* L, int16_t* R, int n, int off) {
         R[i] = clamp16((R[i] * m_fmFR + sr * m_pcmFR) >> 12);
     }
 }
+
+#endif // MOONSOUND

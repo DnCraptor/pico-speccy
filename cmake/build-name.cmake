@@ -21,6 +21,14 @@ ELSEIF(HDMI_HSTX_ON)
     SET(DISPLAY_TAG "${DISPLAY_TAG}${VARIANT_TAG}")
 ENDIF()
 
+# 16 MB flash type of a board that has both (the W/WS boards are 16 MB only, so their
+# tag already says it): DVp2-speccy-VGA-HDMI-16MB-<version>, "+16MB" on screen.
+IF(FLASH_16MB AND NOT PICOSPECCY_WIFI)
+    SET(BUILD_NAME "${BUILD_NAME}-16MB")
+    SET(VARIANT_TAG "${VARIANT_TAG}+16MB")
+    SET(DISPLAY_TAG "${DISPLAY_TAG}+16MB")
+ENDIF()
+
 SET(BUILD_NAME "${BUILD_NAME}-${PORT_VERSION}")
 
 # Compact form for the OSD's Hardware Info row — z0p2+HDMI+1.0.2 — where the full

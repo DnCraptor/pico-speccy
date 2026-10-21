@@ -877,47 +877,32 @@ void ESPectrum::powerOnRamFill(int arch, int romset) {
              getFreeHeap());
 }
 
-// ZXM-MoonSound wavetable half: one 3 MB block (YRW801 ROM + SRAM) in butter
-// PSRAM, the ROM read from the SD card. A missing ROM file is not fatal — the
-// card still plays samples a program uploads into its SRAM (MoonBlaster MWK
-// kits), only the GM ROM tones are silent. Runs once, in setup(): the block is
-// kept for the session.
+// ZXM-MoonSound wavetable half (16 MB firmware only): the YRW801 ROM is embedded
+// in flash (src/speccy/roms/moonsound/yrw801.S) and read in place; only the card's
+// 1 MB SRAM comes from butter PSRAM. Runs once, in setup(): the block is kept for
+// the session.
+#if MOONSOUND
+extern "C" const uint8_t gb_rom_yrw801[];
 static void moonSoundInit() {
-  static const char* const kRomPaths[] = {
-    "/roms/moonsound/yrw801.rom", "/roms/moonsound/yrw801m.rom", "/roms/yrw801.rom",
-  };
   if (!butter_psram_size()) {
     OSD::bootNotice("MoonSound off: needs QSPI PSRAM");
     return;
   }
-  uint8_t* mem = (uint8_t*)Buffer::palloc(MoonPcm::MEM_BYTES, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
-  if (!mem || (uintptr_t)mem < (uintptr_t)PSRAM_DATA) {
-    if (mem) Buffer::pfree(mem);
-    OSD::bootNotice("MoonSound off: no 3 MB of PSRAM left");
-    Debug::log("[MOON] no 3 MB PSRAM block (GS/pages took it)");
+  uint8_t* ram = (uint8_t*)Buffer::palloc(MoonPcm::RAM_SIZE, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+  if (!ram || (uintptr_t)ram < (uintptr_t)PSRAM_DATA) {
+    if (ram) Buffer::pfree(ram);
+    OSD::bootNotice("MoonSound off: no 1 MB of PSRAM left");
+    Debug::log("[MOON] no 1 MB PSRAM block (GS/pages took it)");
     return;
   }
-  memset(mem, 0, MoonPcm::MEM_BYTES);
-  bool rom = false;
-  if (FileUtils::fsMount) {
-    FIL* f = (FIL*)tryMalloc(sizeof(FIL));
-    for (unsigned k = 0; f && !rom && k < sizeof(kRomPaths) / sizeof(kRomPaths[0]); k++) {
-      if (f_open(f, kRomPaths[k], FA_READ) != FR_OK) continue;
-      UINT got = 0;
-      const FRESULT r = f_read(f, mem, MoonPcm::ROM_SIZE, &got);
-      f_close(f);
-      rom = (r == FR_OK && got == MoonPcm::ROM_SIZE);
-      Debug::log("[MOON] ROM %s: %u bytes%s", kRomPaths[k], (unsigned)got, rom ? "" : " (short - ignored)");
-      if (!rom) memset(mem, 0, MoonPcm::ROM_SIZE);
-    }
-    free(f);
-  }
-  if (!rom) OSD::bootNotice("MoonSound: no /roms/moonsound/yrw801.rom - GM ROM tones silent");
-  moonpcm = new (std::nothrow) MoonPcm(mem);
-  if (!moonpcm) { Buffer::pfree(mem); return; }
+  memset(ram, 0, MoonPcm::RAM_SIZE);
+  moonpcm = new (std::nothrow) MoonPcm(gb_rom_yrw801, ram);
+  if (!moonpcm) { Buffer::pfree(ram); return; }
   moonpcm->setRate(ESPectrum::Audio_freq);
-  Debug::log("[MOON] ZXM-MoonSound up: 3 MB @%08X, ROM %s", (unsigned)(uintptr_t)mem, rom ? "loaded" : "missing");
+  Debug::log("[MOON] ZXM-MoonSound up: ROM @%08X (flash), 1 MB SRAM @%08X",
+             (unsigned)(uintptr_t)gb_rom_yrw801, (unsigned)(uintptr_t)ram);
 }
+#endif
 
 void ESPectrum::setup() {
   LastRun::mute(true);   // remounts of remembered media are not "started"; unmuted below
@@ -1574,7 +1559,9 @@ void ESPectrum::setup() {
 
   // ZXM-MoonSound: the YMF278B's 2 MB ROM + 1 MB SRAM out of the butter arena
   // (Buffer::pageBudget reserved them), before the GM.DLS bank takes its share.
+#if MOONSOUND
   if (Config::moonsound) moonSoundInit();
+#endif
 
   // GM.DLS MIDI bank: load into butter PSRAM (preferred) or provision the flash
   // partition from SD. MUST be here — AFTER initPools() (the PSRAM arena is now

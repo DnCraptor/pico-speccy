@@ -76,3 +76,9 @@ set_source_files_properties(external/tjpgd/tjpgd.c PROPERTIES COMPILE_OPTIONS "-
 # The VDAC2 copy of tinfl (CMD_INFLATE, runs from the .ftovl SRAM window): -O2 is the
 # point of the copy; no loop-distribute so its copy loops do not become flash memcpy.
 set_source_files_properties(src/speccy/machines/TsConf/FtInflate.c PROPERTIES COMPILE_OPTIONS "-O2;-fno-tree-loop-distribute-patterns")
+
+# ZXM-MoonSound's YRW801 ROM, .incbin'd by yrw801.S (16 MB images only): pass the
+# absolute path and make the object depend on the binary so a new ROM rebuilds it.
+set_source_files_properties(src/speccy/roms/moonsound/yrw801.S PROPERTIES
+    COMPILE_DEFINITIONS "YRW801_ROM_PATH=\"${CMAKE_SOURCE_DIR}/src/speccy/roms/moonsound/yrw801.rom\""
+    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/speccy/roms/moonsound/yrw801.rom")
