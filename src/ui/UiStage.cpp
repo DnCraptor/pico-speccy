@@ -1343,7 +1343,7 @@ static void resolveConstraints(CommitReport& rep) {
             && g_seq[SET_VREG] <= g_seq[SET_CPU_MHZ])
             changed |= force(SET_VREG, VREG_VOLTAGE_1_80, rep, "Core voltage 1.80 V for 540 MHz");
         // sys_clk 630 MHz: the same EDGE, to 1.90 V (540 needed 1.80; 630 is not
-        // hw-proven at any voltage — 2.00 V is the menu's ceiling, see opt_vreg).
+        // hw-proven at any voltage — 1.90/2.00 V are hidden from the menu, storage.nvs only — see vregOpts).
         if (bmGet(g_dirty, SET_CPU_MHZ) && staged(SET_CPU_MHZ) == Config::CPU_630_MHZ
             && g_base[SET_CPU_MHZ] != Config::CPU_630_MHZ
             && staged(SET_VREG) < VREG_VOLTAGE_1_90

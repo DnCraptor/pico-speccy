@@ -498,18 +498,47 @@ static const Option opt_cpu_mhz[] = {
     // HDMI (PIO 2.5, HSTX 31.5 MHz twins), VGA (PIO 25 / 30, HSTX 26.25 MHz twins);
     // see Config::CPU_630_MHZ. Needs ~1.90-2.00 V —
     // resolveConstraints raises the voltage to 1.90 V when 630 is picked.
+    // HIDDEN (cpu_mhzOpts): set only through storage.nvs (cpu_mhz=630).
     { "630 MHz", 630 },
 #endif
 };
+// Entries past this index are hidden from the menu (see hiddenTailOpts).
+static constexpr uint8_t kCpuMhzShown = NM_COUNT(opt_cpu_mhz) - (CPU_630_OFFERED ? 1 : 0);
 static const Option opt_vreg[] = {               // VREG_VOLTAGE_* enum values
     { "1.15 V", VREG_VOLTAGE_1_15 }, { "1.20 V", VREG_VOLTAGE_1_20 },
     { "1.25 V", VREG_VOLTAGE_1_25 }, { "1.30 V", VREG_VOLTAGE_1_30 },
     { "1.35 V", VREG_VOLTAGE_1_35 }, { "1.40 V", VREG_VOLTAGE_1_40 },
     { "1.50 V", VREG_VOLTAGE_1_50 }, { "1.60 V", VREG_VOLTAGE_1_60 },
     { "1.65 V", VREG_VOLTAGE_1_65 }, { "1.70 V", VREG_VOLTAGE_1_70 },
-    { "1.80 V", VREG_VOLTAGE_1_80 }, { "1.90 V", VREG_VOLTAGE_1_90 },
-    { "2.00 V", VREG_VOLTAGE_2_00 },
+    { "1.80 V", VREG_VOLTAGE_1_80 },
+    // HIDDEN (vregOpts): set only through storage.nvs (vreg=1_90 / 2_00).
+    { "1.90 V", VREG_VOLTAGE_1_90 }, { "2.00 V", VREG_VOLTAGE_2_00 },
 };
+static constexpr uint8_t kVregShown = NM_COUNT(opt_vreg) - 2;
+
+// The table's tail [shown, n) is not offered in the menu — those values are only
+// reachable by editing storage.nvs. One of them is still listed when it is the
+// STAGED or the COMMITTED value: nodeValueLabel() looks the value up in this very
+// list (a missing row blanks the collapsed row and marks nothing), and a user who
+// steps off it in the menu must be able to step back within the session.
+static const Option* hiddenTailOpts(const Option* tab, uint8_t n, uint8_t shown,
+                                    int32_t staged, int32_t live, Option* out, uint8_t& cnt) {
+    uint8_t k = 0;
+    for (uint8_t i = 0; i < n; i++)
+        if (i < shown || tab[i].value == staged || tab[i].value == live) out[k++] = tab[i];
+    cnt = k;
+    return out;
+}
+static const Option* cpu_mhzOpts(uint8_t& cnt) {
+    static Option opts[NM_COUNT(opt_cpu_mhz)];
+    return hiddenTailOpts(opt_cpu_mhz, NM_COUNT(opt_cpu_mhz), kCpuMhzShown,
+                          Stage::get(SET_CPU_MHZ), Config::cpu_mhz, opts, cnt);
+}
+static const Option* vregOpts(uint8_t& cnt) {
+    static Option opts[NM_COUNT(opt_vreg)];
+    return hiddenTailOpts(opt_vreg, NM_COUNT(opt_vreg), kVregShown,
+                          Stage::get(SET_VREG), Config::vreq_voltage, opts, cnt);
+}
 static const Option opt_flash_freq[] = {
     { "33 MHz", 33 }, { "66 MHz", 66 }, { "84 MHz", 84 },
     { "100 MHz", 100 }, { "133 MHz", 133 }, { "166 MHz", 166 },
@@ -1078,8 +1107,8 @@ static const Option opt_ide_scheme[] = {
 
 // ── Additional hardware ────────────────────────────────────────────────────────
 static const Node kOverclock[] = {
-    NM_RADIO(TXT_OC_CPU,   SET_CPU_MHZ,    opt_cpu_mhz,    nullptr),
-    NM_RADIO(TXT_OC_VREG,  SET_VREG,       opt_vreg,       nullptr),
+    NM_RADIO_D(TXT_OC_CPU,  SET_CPU_MHZ,   cpu_mhzOpts,    nullptr),
+    NM_RADIO_D(TXT_OC_VREG, SET_VREG,      vregOpts,       nullptr),
     NM_RADIO(TXT_OC_FLASH, SET_FLASH_FREQ, opt_flash_freq, nullptr),
     NM_RADIO(TXT_OC_PSRAM, SET_PSRAM_FREQ, opt_psram_freq, nullptr),
 };
