@@ -1560,3 +1560,94 @@ void NextReg::write1FFD(uint8_t v) {
 
 
 
+
+// ===== .pss snapshot (PSNX) =====
+// Flash code, run from the menu / a hot key / the boot resume only. The record is
+// the state NextReg::reset() re-derives everything else from, plus the MemESP
+// latches it does not own but rebuilds (mmu[], the config window, Alt-ROM).
+#include "app/SnapPack.h"
+extern bool g_next_automap_armed;   // DivMMC.cpp
+static constexpr uint8_t NX_SNAP_VER = 1;
+
+uint32_t NextReg::snapSave(uint8_t* out) {
+    SnapOut o(out);
+    o.u8(NX_SNAP_VER);
+    o.raw(reg, 256);
+    o.u8(selected);
+    o.u8(port7FFD); o.u8(portDFFD); o.u8(port1FFD); o.u8(port123B); o.u8(l2Offset);
+    o.u8(s_ioTrapCause); o.u8(portFF); o.u8(portFFIntDisable ? 1 : 0);
+    o.u8(s_machineType); o.u8(s_machineTiming); o.u8(s_userDTLock);
+    o.u8(s_hiresSeen ? 1 : 0); o.u8(resetPending);
+    o.raw(MemESP::mmu, 8);
+    o.u8(MemESP::romLatch); o.u8(MemESP::videoLatch); o.u8(MemESP::pagingLock);
+    o.u8((MemESP::altrom_rd ? 1 : 0) | (MemESP::altrom_wr ? 2 : 0));
+    o.u8((MemESP::nextBootRomActive ? 1 : 0) | (MemESP::nextConfigMode ? 2 : 0));
+    o.u8(MemESP::nextConfigPage);
+    // Which images the ROM region holds (TBBLUE.FW streams a personality's ROMs
+    // there; the region itself travels as pages 224.. of the snapshot).
+    o.u8((MemESP::nextRomBase ? 1 : 0) | (MemESP::nextDivRomBase ? 2 : 0) | (MemESP::mfRomBase ? 4 : 0));
+    o.u8(ESPectrum::multiplicator);
+    o.u8((DivMMC::next_nmi_btn ? 1 : 0) | (DivMMC::next_nmi_hold ? 2 : 0) | (g_next_automap_armed ? 4 : 0));
+    return o.n;
+}
+
+bool NextReg::snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return false;
+    uint8_t r[256];
+    s.raw(r, 256);
+    const uint8_t sel = s.u8();
+    const uint8_t p7 = s.u8(), pD = s.u8(), p1 = s.u8(), p12 = s.u8(), l2o = s.u8();
+    const uint8_t trap = s.u8(), pff = s.u8(), pffDis = s.u8();
+    const uint8_t mt = s.u8(), tm = s.u8(), dtl = s.u8(), hires = s.u8(), rp = s.u8();
+    uint8_t mmu[8];
+    s.raw(mmu, 8);
+    const uint8_t romL = s.u8(), vidL = s.u8(), lock = s.u8();
+    const uint8_t alt = s.u8(), cfg = s.u8(), cfgPage = s.u8(), roms = s.u8();
+    const uint8_t mult = s.u8(), div = s.u8();
+    if (!s.ok || !MemESP::nextRamReady) return false;
+
+    memcpy(reg, r, 256);
+    selected = sel;
+    port7FFD = p7; portDFFD = pD; port1FFD = p1; port123B = p12; l2Offset = l2o;
+    s_ioTrapCause = trap; portFF = pff; portFFIntDisable = pffDis != 0;
+    s_machineType = mt; s_machineTiming = tm; s_userDTLock = dtl;
+    s_hiresSeen = hires != 0; resetPending = rp;
+    MemESP::romLatch = romL & 1; MemESP::videoLatch = vidL & 1; MemESP::pagingLock = lock;
+    MemESP::altrom_rd = alt & 1; MemESP::altrom_wr = (alt & 2) != 0;
+    // The bootrom read overlay exists only where the boot chain is armed.
+    MemESP::nextBootRomActive = (cfg & 1) && MemESP::nextBootRom;
+    MemESP::nextConfigMode = (cfg & 2) != 0;
+    MemESP::nextConfigPage = cfgPage;
+    uint8_t* rr = MemESP::nextRomRegion();
+    MemESP::nextRomBase    = (roms & 1) ? rr : nullptr;
+    MemESP::nextDivRomBase = (roms & 2) ? rr + 0x10000 : nullptr;
+    MemESP::mfRomBase      = (roms & 4) ? MemESP::altRomBase + 0x8000 : nullptr;
+    DivMMC::next_nmi_btn  = div & 1;
+    DivMMC::next_nmi_hold = (div & 2) != 0;
+    g_next_automap_armed  = (div & 4) != 0;
+    portEnRecalc();
+
+    // The clock first: the raster below derives statesInFrame, the audio set and
+    // the contention from it (set directly, as the TS-Conf snapshot does — no
+    // tstates rescale: Pss restores CPU::tstates afterwards).
+    ESPectrum::multiplicator = (uint8_t)((mult & 3) <= Config::next_clk_cap ? (mult & 3) : Config::next_clk_cap);
+
+    // Memory map: ROM select (machine type, 7FFD/1FFD, the 0x8C locks), every
+    // MMU slot, the +3 all-RAM overlay, the TBBLUE window, Layer 2.
+    MemESP::wr_overlay_mask = 0;
+    MemESP::l2_rd_mask = 0;
+    applyRomSelect();
+    for (uint8_t sl = 0; sl < 8; sl++) MemESP::applyMMU(sl, mmu[sl]);
+    if (port1FFD & 0x01) write1FFD(port1FFD);
+    MemESP::applyNextConfigWindow();
+    updateLayer2Window();
+    VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
+    applyTimexMode(reg[0x69] & 0x3F);
+
+    // The frame: timing (NR 0x03), 50/60 Hz (NR 0x05) and the clock.
+    ESPectrum::nextRasterApply();
+    applyRasterPaper();
+    contendRecalc();
+    return true;
+}

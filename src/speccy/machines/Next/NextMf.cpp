@@ -189,3 +189,22 @@ NX_OVL_CODE void NextMf::portWrite(uint16_t address) {
     s_nmiActive = false;
     if ((dis && !modeP3()) || (en && modeP3())) s_invisible = true;
 }
+
+// ===== .pss snapshot =====
+uint8_t NextMf::snapSave() {
+    return (uint8_t)((s_nmiActive ? 1 : 0) | (s_invisible ? 2 : 0) | (s_memOn ? 4 : 0) |
+                     (s_pending ? 8 : 0) | (s_nr02 ? 16 : 0));
+}
+
+void NextMf::snapLoad(uint8_t f) {
+    s_nmiActive = f & 1;
+    s_invisible = (f & 2) != 0;
+    s_pending   = (f & 8) != 0;
+    s_nr02      = (f & 16) != 0;
+    s_memOn = false;              // setMem re-plugs only on a change
+    g_nxmf_mem = false;
+    setMem((f & 4) != 0);
+    // Requested but not yet taken at 0x0066: the Z80's pending NMI is not part of
+    // the snapshot, raise it again or the MF stays "pending" for good.
+    if (s_pending) { Z80::triggerNMI(); NextInt::wake(); }
+}

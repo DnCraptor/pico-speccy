@@ -18,10 +18,15 @@
 // PSID (IDE/ATA register file + sector in flight), PSSD (DivMMC / Z-Controller SD SPI
 // machine), PSNS (NeoGS SD interface), PSMD (size + date of every mounted image, so a
 // load can say which media is missing or changed).
+// Spectrum Next: PSNX (NextReg: registers, paging latches, MMU, config window, clock,
+// divMMC NMI flags), PSNM (Multiface flags), PSNV + PSNA (NEXTVID latches; palettes,
+// sprite attributes / patterns, copper program), PSNI (interrupts + CTC), PSNP (DACs,
+// TurboSound, third AY, ULA+, UART), PSDM (zxnDMA), PSXP / PSXF (8K pages 0-223 RAM,
+// 224-238 the ROM region). Crossing into or out of the Next reboots first.
 //
 // Covers 48K-family (incl. Byte, Didaktik, Timex), 128K / +2 / +3 / +3e / +3div,
 // Pentagon 128/512/1024 incl. Murmuzavr, the Scorpion family, Profi / Karabas,
-// ATM-Turbo, ZX-Evo BaseConf, TS-Conf and ALF — every machine there is.
+// ATM-Turbo, ZX-Evo BaseConf, TS-Conf, ALF and the Spectrum Next — every machine there is.
 #pragma once
 
 #include <stdint.h>

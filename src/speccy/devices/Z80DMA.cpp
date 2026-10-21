@@ -1278,3 +1278,61 @@ IRAM_ATTR uint8_t Z80DMA::readPort() {
     return result;
 }
 
+
+// ===== .pss snapshot (PSDM) =====
+#include "app/SnapPack.h"
+static constexpr uint8_t DMA_SNAP_VER = 1;
+
+uint32_t Z80DMA::snapSave(uint8_t* out) {
+    SnapOut o(out);
+    o.u8(DMA_SNAP_VER);
+    o.u8(transfer_dir);
+    o.u16(port_a_addr); o.u16(block_length);
+    o.u8(port_a_is_io ? 1 : 0); o.u8((uint8_t)port_a_inc); o.u8(port_a_cycles);
+    o.u16(port_b_addr);
+    o.u8(port_b_is_io ? 1 : 0); o.u8((uint8_t)port_b_inc); o.u8(port_b_cycles);
+    o.u8(prescalar); o.u8(auto_restart ? 1 : 0); o.u8(r4_mode);
+    o.u16(nx_counter);
+    o.u16(cur_port_a); o.u16(cur_port_b); o.u32(byte_counter);
+    o.u8((transfer_active ? 1 : 0) | (transfer_started ? 2 : 0) | (block_end ? 4 : 0) |
+         (nextZ80Mode ? 8 : 0) | (nxPending ? 16 : 0) | (nxStall ? 32 : 0) | (nxDrainDue ? 64 : 0) |
+         (mb02_deferred ? 128 : 0));
+    o.u32(nxNextT);
+    o.u8((uint8_t)write_state); o.u8(current_wr); o.u8(param_mask); o.u8(param_index);
+    o.u8((read_mask_pending ? 1 : 0) | (wr2_prescalar_pending ? 2 : 0) | (read_sequence_active ? 4 : 0));
+    o.u8(read_mask); o.u8(read_index);
+    return o.n;
+}
+
+void Z80DMA::snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return;
+    const uint8_t dir = s.u8();
+    const uint16_t pa = s.u16(), len = s.u16();
+    const uint8_t aio = s.u8(), ainc = s.u8(), acyc = s.u8();
+    const uint16_t pb = s.u16();
+    const uint8_t bio = s.u8(), binc = s.u8(), bcyc = s.u8();
+    const uint8_t pre = s.u8(), ar = s.u8(), r4 = s.u8();
+    const uint16_t cnt = s.u16(), ca = s.u16(), cb = s.u16();
+    const uint32_t bc = s.u32();
+    const uint8_t fl = s.u8();
+    const uint32_t nt = s.u32();
+    const uint8_t ws = s.u8(), cwr = s.u8(), pm = s.u8(), pi = s.u8(), rf = s.u8(), rm = s.u8(), ri = s.u8();
+    if (!s.ok) return;
+    transfer_dir = dir & 1;
+    port_a_addr = pa; block_length = len;
+    port_a_is_io = aio != 0; port_a_inc = (int8_t)ainc; port_a_cycles = acyc;
+    port_b_addr = pb;
+    port_b_is_io = bio != 0; port_b_inc = (int8_t)binc; port_b_cycles = bcyc;
+    prescalar = pre; auto_restart = ar != 0; r4_mode = r4 & 3;
+    nx_counter = cnt; cur_port_a = ca; cur_port_b = cb; byte_counter = bc;
+    transfer_active = fl & 1; transfer_started = (fl & 2) != 0; block_end = (fl & 4) != 0;
+    nextZ80Mode = (fl & 8) != 0; nxPending = (fl & 16) != 0; nxStall = (fl & 32) != 0;
+    nxDrainDue = (fl & 64) != 0; mb02_deferred = (fl & 128) != 0;
+    nxNextT = nt;
+    write_state = ws == WS_PARAM_BYTE ? WS_PARAM_BYTE : WS_COMMAND;
+    current_wr = cwr; param_mask = pm; param_index = pi;
+    read_mask_pending = rf & 1; wr2_prescalar_pending = (rf & 2) != 0; read_sequence_active = (rf & 4) != 0;
+    read_mask = rm; read_index = ri;
+    dma_in_progress = false;
+}

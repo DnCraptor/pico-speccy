@@ -67,7 +67,7 @@ Ported from the pico-next donor branch (`~/github/pico-next`,
   replaces esxdos in the divMMC automap; 128K ROM pair = fallback. Crossing
   the Next boundary ALWAYS hard-reboots (MachineSwitch) — the layout is decided
   once in setup(). Murmuzavr stays off via the existing non-Pentagon clamp;
-  contention/floating-bus off; persist snapshots gated off.
+  contention/floating-bus off; snapshots are `.pss` since 2026-10-21, hw-confirmed the same day, not itemised (docs/pss-snapshot-plan.md, "Spectrum Next").
 - **Z80N** in `decodeED()` under `Z80Ops::isNext` (NOPs elsewhere). NEXTREG
   opcodes → `NextReg::write`. Line IRQ (0x22/0x23) in `isActiveINT`; while
   armed, CPU::loop skips the exec_nocheck/FlushOnHalt fast paths. zxnDMA #6B

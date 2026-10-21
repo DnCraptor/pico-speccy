@@ -28,7 +28,14 @@ namespace NextPorts {
     void audioReset();                                  // machine reset (both types)
     void psgModeApply();                                // NR 0x06 bit 0: YM / AY on every AY
     void uartReset(bool hard);                          // UART select / frame / prescaler
-    void ulapReset();                                   // ULA+ mode / index, EFF7 (both reset types)
+    void ulapReset();
+    // .pss snapshot (Pss.cpp, block PSNP): the DACs, the TurboSound select and
+    // pans, the third AY's registers, ULA+ mode/index, #EFF7 and the UART
+    // latches. snapLoad re-applies the PSG mode / stereo layout from NR 0x06/08/09
+    // (restored by NextReg::snapLoad first) and republishes the DAC levels.
+    constexpr uint32_t SNAP_MAX = 48;
+    uint32_t snapSave(uint8_t* out);
+    void     snapLoad(const uint8_t* in, uint32_t n);                                   // ULA+ mode / index, EFF7 (both reset types)
     uint8_t eff7();                                     // port 0xEFF7 bits 3:2 (MF read-back)
     uint8_t e7Select(uint8_t v);                        // port 0xE7 value -> our card's CS (0xFE/0xFF)
 

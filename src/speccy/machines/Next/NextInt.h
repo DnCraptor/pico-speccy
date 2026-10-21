@@ -37,6 +37,13 @@ extern bool retnArmed;
 
 void reset(bool hard);
 
+// .pss snapshot (Pss.cpp, block PSNI): the interrupt devices, the line
+// interrupt, NR 0xC0/0xC4 and the CTC, every 28 MHz timestamp stored relative
+// to the frame. snapLoad needs CPU::tstates and the clock already restored.
+constexpr uint32_t SNAP_MAX = 160;
+uint32_t snapSave(uint8_t* out);
+void     snapLoad(const uint8_t* in, uint32_t n);
+
 // The /INT line now (Z80Ops::isActiveINT while ex).
 bool intLine();
 // Frame-relative tstates of the next moment /INT can go up, at least

@@ -17,6 +17,13 @@ public:
     static void writePort(uint8_t data);
     static uint8_t readPort();
     static void handleDMA();
+    // .pss snapshot (Pss.cpp, block PSDM; written for the Spectrum Next): the
+    // configured registers, the transfer position, the command / read-back state
+    // machines and the Next pacing (nxNextT is in CPU::tstates units, which the
+    // load restores unchanged).
+    static constexpr uint32_t SNAP_MAX = 64;
+    static uint32_t snapSave(uint8_t* out);
+    static void     snapLoad(const uint8_t* in, uint32_t n);
 
     // Per-scanline attribute shadow (8x1 attrs via DMA). 6 KB — heap-allocated
     // only while Config::dma_mode != 0 (DMA is off by default); freed when the

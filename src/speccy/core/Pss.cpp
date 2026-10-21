@@ -40,11 +40,18 @@
 #include "speccy/machines/Timex.h"
 #include "speccy/machines/Alf.h"
 #include "speccy/machines/Plus3/Plus3Fdc.h"
+#include "speccy/machines/Next/NextReg.h"
+#include "speccy/machines/Next/NextVideo.h"
+#include "speccy/machines/Next/NextInt.h"
+#include "speccy/machines/Next/NextPorts.h"
+#include "speccy/machines/Next/NextMf.h"
+#include "speccy/devices/Z80DMA.h"
 
 using std::string;
 using std::vector;
 
 extern std::string g_snapshot_loading_path;   // Snapshot.cpp
+extern void ts_fastrd_recalc();                // Video.cpp: the Next inline read gate
 
 namespace Pss {
 
@@ -53,7 +60,8 @@ bool bootResume = false;
 
 static bool archSupported(ArchIdx a) {
     return a == A_48K || a == A_128K || a == A_PENT || a == A_P512 || a == A_P1024 ||
-           a == A_SCORP || a == A_PROFI || a == A_ATM || a == A_TSCONF || a == A_ALF;
+           a == A_SCORP || a == A_PROFI || a == A_ATM || a == A_TSCONF || a == A_ALF ||
+           a == A_NEXT;
 }
 
 bool supported() {
@@ -68,6 +76,7 @@ static constexpr int MAX_PAGES = 2048;   // Murmuzavr 32 MB
 // conversion never meets a missing one).
 static int pageCount(bool& sparse) {
     sparse = false;
+    if (Z80Ops::isNext) return 0;   // its own 8K pages: PSXP / PSXF (saveNext)
     if (Z80Ops::is48) return 3;
     int n = Z80Ops::is1024 ? 64 : (Z80Ops::is512 ? 32 : 8);
     if (Z80Ops::isPentagon && MEM_PG_CNT > 64) n = (int)MEM_PG_CNT;   // Murmuzavr
@@ -183,8 +192,89 @@ static void saveFt812(W& w) {
     }
 }
 
+// ── Spectrum Next ───────────────────────────────────────────────────────────────
+// 8K pages in the Next's own numbering: 0-223 the RAM (banks 0-111), 224-238 the
+// ROM region (the personality's ROMs that TBBLUE.FW streamed in, the MMC ROM, the
+// Alt-ROM banks NextZXOS patches itself through, the Multiface ROM and its RAM).
+// Every page is written: PSXF {u16 page, u8 byte} for one repeated byte, else PSXP
+// {u16 page, 8 KB}. Read and written through an SRAM bounce — most of these pages
+// are butter PSRAM, and the SD driver's DMA does not see the XIP cache.
+static constexpr uint16_t NX_ROM_PAGES = 15;
+static constexpr uint16_t NX_SNAP_PAGES = MemESP::NEXT_PAGES + NX_ROM_PAGES;
+static constexpr uint32_t NX_PAGE = 0x2000;
+
+static uint8_t* nxPage(uint16_t pg, bool home) {
+    if (pg < MemESP::NEXT_PAGES) return home ? MemESP::nextHomePtr(pg) : MemESP::nextPgPtr(pg);
+    if (pg < NX_SNAP_PAGES) return MemESP::nextRomRegion() + (size_t)(pg - MemESP::NEXT_PAGES) * NX_PAGE;
+    return nullptr;
+}
+
+static void writeBounced(W& w, const uint8_t* p, uint32_t n) {
+    uint8_t b[512];
+    for (uint32_t o = 0; o < n && w.ok; o += sizeof(b)) {
+        const uint32_t k = n - o < sizeof(b) ? n - o : sizeof(b);
+        memcpy(b, p + o, k);
+        w.raw(b, k);
+    }
+}
+
+static void readBounced(R& r, uint8_t* p, uint32_t n) {
+    uint8_t b[512];
+    for (uint32_t o = 0; o < n && r.ok; o += sizeof(b)) {
+        const uint32_t k = n - o < sizeof(b) ? n - o : sizeof(b);
+        r.raw(b, k);
+        if (r.ok) memcpy(p + o, b, k);
+    }
+}
+
+static void saveNext(W& w) {
+    NEXTVID::snapPrepare();   // core1 idle, the palette / sprite logs applied
+    {
+        uint8_t b[NextReg::SNAP_MAX];
+        const uint32_t n = NextReg::snapSave(b);
+        w.begin("PSNX"); w.raw(b, n); w.end();
+    }
+    w.begin("PSNM"); w.u8(NextMf::snapSave()); w.end();
+    {
+        uint8_t b[NEXTVID::SNAP_MAX];
+        const uint32_t n = NEXTVID::snapSave(b);
+        w.begin("PSNV"); w.raw(b, n); w.end();
+    }
+    for (uint8_t a = 0; a < NEXTVID::SNAP_AREAS && w.ok; a++) {
+        uint32_t sz = 0;
+        const uint8_t* p = NEXTVID::snapArea(a, sz);
+        if (!p) continue;
+        w.begin("PSNA"); w.u8(a); writeBounced(w, p, sz); w.end();
+    }
+    {
+        uint8_t b[NextInt::SNAP_MAX];
+        const uint32_t n = NextInt::snapSave(b);
+        w.begin("PSNI"); w.raw(b, n); w.end();
+    }
+    {
+        uint8_t b[NextPorts::SNAP_MAX];
+        const uint32_t n = NextPorts::snapSave(b);
+        w.begin("PSNP"); w.raw(b, n); w.end();
+    }
+    {
+        uint8_t b[Z80DMA::SNAP_MAX];
+        const uint32_t n = Z80DMA::snapSave(b);
+        w.begin("PSDM"); w.raw(b, n); w.end();
+    }
+    for (uint16_t pg = 0; pg < NX_SNAP_PAGES && w.ok; pg++) {
+        const uint8_t* p = nxPage(pg, false);
+        if (!p) { w.ok = false; break; }
+        const uint8_t v = p[0];
+        uint32_t i = 1;
+        while (i < NX_PAGE && p[i] == v) i++;
+        if (i == NX_PAGE) { w.begin("PSXF"); w.u16(pg); w.u8(v); w.end(); continue; }
+        w.begin("PSXP"); w.u16(pg); writeBounced(w, p, NX_PAGE); w.end();
+    }
+}
+
 bool save(const string& path, const string& name) {
     if (!supported() || !FileUtils::fsMount) return false;
+    if (Z80Ops::isNext && !MemESP::nextRamReady) return false;
     // The images first: a track the WD1793 still holds, a +3 sector write, an IDE
     // sector — on the card before the snapshot that refers to them.
     flushMedia();
@@ -339,6 +429,8 @@ bool save(const string& path, const string& name) {
         if (Ft812::enabled) saveFt812(w);
     }
 
+    if (Z80Ops::isNext) saveNext(w);
+
     if (Z80Ops::isALF) {   // PSAL: the ROM-bank select (cart bit 7) + the #FE D3 read-back
         w.begin("PSAL"); w.u8(1); w.u8(Alf::snapSelector()); w.u8(Alf::newBit); w.end();
     }
@@ -358,7 +450,7 @@ bool save(const string& path, const string& name) {
 
     bool sparse;
     const int np = pageCount(sparse);
-    w.begin("PSPG"); w.u16((uint16_t)np); w.u8(sparse ? 1 : 0); w.end();
+    w.begin("PSPG"); w.u16(Z80Ops::isNext ? NX_SNAP_PAGES : (uint16_t)np); w.u8(sparse ? 1 : 0); w.end();
     for (int i = 0; i < np && w.ok; i++) {
         const uint16_t pg = pageAt(i);
         if (sparse) {
@@ -538,8 +630,8 @@ bool describe(const string& path, string& info, int& lines) {
         }
         else if (idIs(id, "Z80R") && sz >= 37)  { r.raw(z, 37); haveZ = true; }
         else if (idIs(id, "PSPG") && sz >= 3)     pages = r.u16();
-        else if (idIs(id, "RAMP") || idIs(id, "PSRP")) stored++;
-        else if (idIs(id, "PSPF"))                fills++;
+        else if (idIs(id, "RAMP") || idIs(id, "PSRP") || idIs(id, "PSXP")) stored++;
+        else if (idIs(id, "PSPF") || idIs(id, "PSXF")) fills++;
         else if (idIs(id, "PSAY") && sz >= 4)   { uint8_t b[4]; r.raw(b, 4); ay2 = b[3] != 0; }
         else if (idIs(id, "PLTT"))                ulap = true;
         else if (idIs(id, "COVX"))                covx = true;
@@ -1000,6 +1092,32 @@ bool load(const string& path) {
         return false;   // not reached
     }
 
+    // The Spectrum Next boundary: its memory (the 8K page carve-out, the ROM region)
+    // is laid out once in setup(), and requestMachine does not cross it — go there
+    // through a reboot, as the menu does, and resume this load through ram=.
+    {
+        const bool toNext = arch == A_NEXT;
+        const bool onNext = Config::arch == A_NEXT && MemESP::nextRamReady;
+        if (toNext != onNext) {
+            fclose2(f);
+            if (toNext && butter_psram_size() < (2u << 20)) {
+                loadFail("PSS: Spectrum Next needs 2MB+ PSRAM");
+                return false;
+            }
+            if (bootResume) {   // the reboot did not bring the machine up: no loop
+                loadFail(string("PSS: ") + sa + " is not available on this board");
+                return false;
+            }
+            Config::arch = arch;
+            Config::romSet = toNext ? R_NEXT : romset;
+            Config::ram_file = path;
+            Config::save();
+            Debug::log("[PSS] %s: crossing the Next boundary, rebooting", path.c_str());
+            OSD::osdCenteredMsg(" Switching machine - restarting ", LEVEL_INFO, 1200);
+            OSD::esp_hard_reset();
+            return false;   // not reached
+        }
+    }
     if (Config::arch != arch || (romset != R_NONE && Config::romSet != romset))
         Config::requestMachine(arch, romset);   // may reboot (memory layout) and resume us
     // A machine this board cannot run (GMX without QSPI PSRAM, say) falls back to
@@ -1054,6 +1172,17 @@ bool load(const string& path) {
     // they existed, or with the board off) does not keep the previous session's.
     const bool ftOn = Z80Ops::isTsconf && Ft812::enabled;
     if (ftOn) Ft812::snapLoadBegin();
+    // Spectrum Next: core1 idle with its logs emptied (the areas are read in place),
+    // the hot-page pool written home and emptied (pages are written home below).
+    const bool nxOn = Z80Ops::isNext && MemESP::nextRamReady;
+    uint8_t nxr[NextReg::SNAP_MAX] = {};    uint32_t nxrSize = 0;
+    uint8_t nxv[NEXTVID::SNAP_MAX] = {};    uint32_t nxvSize = 0;
+    uint8_t nxi[NextInt::SNAP_MAX] = {};    uint32_t nxiSize = 0;
+    uint8_t nxp[NextPorts::SNAP_MAX] = {};  uint32_t nxpSize = 0;
+    uint8_t nxd[Z80DMA::SNAP_MAX] = {};     uint32_t nxdSize = 0;
+    uint8_t nxmf = 0; bool haveNxMf = false;
+    uint16_t nxPages = 0;
+    if (nxOn) { NEXTVID::snapLoadBegin(); MemESP::nextHotFlush(); }
 
     while (r.ok && r.next(id, sz, at)) {
         if (idIs(id, "Z80R") && sz >= sizeof(z)) { r.raw(z, sizeof(z)); haveZ80 = true; }
@@ -1115,6 +1244,27 @@ bool load(const string& path) {
             uint8_t* p = Ft812::snapPage(r.u16());
             if (p) r.raw(p, Ft812::SNAP_PAGE);
         }
+        else if (nxOn && idIs(id, "PSNX")) { nxrSize = sz < sizeof(nxr) ? sz : sizeof(nxr); r.raw(nxr, nxrSize); }
+        else if (nxOn && idIs(id, "PSNV")) { nxvSize = sz < sizeof(nxv) ? sz : sizeof(nxv); r.raw(nxv, nxvSize); }
+        else if (nxOn && idIs(id, "PSNI")) { nxiSize = sz < sizeof(nxi) ? sz : sizeof(nxi); r.raw(nxi, nxiSize); }
+        else if (nxOn && idIs(id, "PSNP")) { nxpSize = sz < sizeof(nxp) ? sz : sizeof(nxp); r.raw(nxp, nxpSize); }
+        else if (nxOn && idIs(id, "PSDM")) { nxdSize = sz < sizeof(nxd) ? sz : sizeof(nxd); r.raw(nxd, nxdSize); }
+        else if (nxOn && idIs(id, "PSNM") && sz >= 1) { nxmf = r.u8(); haveNxMf = true; }
+        else if (nxOn && idIs(id, "PSNA") && sz >= 1) {
+            const uint8_t a = r.u8();
+            uint32_t want = 0;
+            uint8_t* p = NEXTVID::snapArea(a, want);
+            if (p && want == sz - 1) readBounced(r, p, want);
+        }
+        else if (nxOn && idIs(id, "PSXF") && sz == 3) {
+            uint8_t* p = nxPage(r.u16(), true);
+            const uint8_t v = r.u8();
+            if (p && r.ok) { memset(p, v, NX_PAGE); nxPages++; }
+        }
+        else if (nxOn && idIs(id, "PSXP") && sz == 2 + NX_PAGE) {
+            uint8_t* p = nxPage(r.u16(), true);
+            if (p && r.ok) { readBounced(r, p, NX_PAGE); if (r.ok) nxPages++; }
+        }
         else if (idIs(id, "PSGS"))             GS::snapLoadState(r, sz);
         else if (idIs(id, "PSGP") || idIs(id, "PSGF")) GS::snapLoadPage(r, id, sz);
         else if (idIs(id, "PSEF") && sz == 2048 && Atm::evo && EvoBase::font) r.raw(EvoBase::font, 2048);
@@ -1143,7 +1293,8 @@ bool load(const string& path) {
     }
     fclose2(f);
     GS::snapLoadEnd(ngs.p, ngs.n);
-    if (!haveZ80 || !havePT || ptSize < 16 || (!fileSparse && loadedPages != np)) {
+    if (!haveZ80 || !havePT || ptSize < 16 || (!fileSparse && loadedPages != np) ||
+        (nxOn && (nxPages != NX_SNAP_PAGES || !nxrSize))) {
         if (ftOn) Ft812::snapLoadEnd();   // a reset chip, but the renderer un-parked
         loadFail("PSS: damaged file (missing state)");
         return false;
@@ -1179,6 +1330,15 @@ bool load(const string& path) {
                 Debug::log("[PSS] VDAC2 state record refused - the chip stays reset");
             Ft812::snapLoadEnd();
         }
+    } else if (nxOn) {
+        // Registers, MMU, ROM select, Layer 2 windows, clock and raster first: the
+        // CPU block below checks CPU::tstates against the Next frame they set.
+        if (!NextReg::snapLoad(nxr, nxrSize))
+            Debug::log("[PSS] Next register record refused - the machine keeps its reset state");
+        if (nxvSize) NEXTVID::snapLoad(nxv, nxvSize);
+        NEXTVID::snapLoadEnd();
+        if (nxpSize) NextPorts::snapLoad(nxp, nxpSize);
+        if (nxdSize) Z80DMA::snapLoad(nxd, nxdSize);
     } else if (Config::isPlus3()) {
         MemESP::plus3Remap(Ports::port1FFD);
     } else {
@@ -1191,7 +1351,7 @@ bool load(const string& path) {
             MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3), Z80Ops::isPentagon ? false : (MemESP::bankLatch & 1) != 0);
         }
     }
-    if (!Z80Ops::is48 && !Z80Ops::isProfi && !Z80Ops::isAtm && !Z80Ops::isTsconf)   // they set their own (DS80 4/6, ATM remap, VPage)
+    if (!Z80Ops::is48 && !Z80Ops::isProfi && !Z80Ops::isAtm && !Z80Ops::isTsconf && !nxOn)   // they set their own (DS80 4/6, ATM remap, VPage, Next)
         VIDEO::grmem = MemESP::videoLatch ? MemESP::ram[7].direct() : MemESP::ram[5].direct();
 
     // DivMMC last of the memory map: it overrides page 0 while mapped.
@@ -1201,6 +1361,14 @@ bool load(const string& path) {
     if (ide.n) IDE::snapLoad(ide.p, ide.n);
     if (sdc.n) DivMMC::snapCardLoad(sdc.p, sdc.n);
     if (ftOn) Ft812::snapSyncCs(DivMMC::zc_ft_cs);   // the ZC latch decides the FT812 CS
+    if (nxOn) {
+        // The Multiface overlay wins over the divMMC window, Layer 2 sits under
+        // both: re-plug in that order, then re-derive the fast-path gates.
+        if (haveNxMf) NextMf::snapLoad(nxmf);
+        NextReg::updateLayer2Window();
+        ts_fastrd_recalc();
+        VIDEO::tsFastMemRecalc();
+    }
 
     // Timex SCLD (DEC first: its bit 7 decides what the HSR window shows).
     if (haveScld && (Config::isTimex() || Config::timex_video)) {
@@ -1229,7 +1397,7 @@ bool load(const string& path) {
     if (ay0.have) applyAy(chip0, 0, ay0);
     if (havePsay) {
         if (ay1.have && chip1) applyAy(*chip1, 1, ay1);
-        AySound::selected_chip  = (chip1 && aySel) ? 1 : 0;
+        AySound::selected_chip  = (aySel == 1 && chip1) ? 1 : (aySel == 2 && chip2) ? 2 : 0;   // 2: the Next's third AY
         AySound::ts_status_read = tsStatus != 0;
         AySound::ts_fm_enabled  = tsFm != 0;
     }
@@ -1262,6 +1430,13 @@ bool load(const string& path) {
     Z80::setPendingEI((z[34] & 1) != 0);
     Z80::setHalted((z[34] & 2) != 0);
     Z80::setMemPtr(w16(35));
+
+    // Next: the interrupt / CTC times and the renderer's line counter are counted
+    // from CPU::tstates, now final.
+    if (nxOn) {
+        if (nxiSize) NextInt::snapLoad(nxi, nxiSize);
+        NEXTVID::snapLineSync();
+    }
 
     // The tape last: its position is counted from CPU::tstates, now final.
     vector<string> problems;

@@ -29,6 +29,24 @@ struct NextLineState;   // NextVideo.cpp: the per-line render inputs
 class NEXTVID {
 public:
     static void Reset();
+    // .pss snapshot (src/speccy/core/Pss.cpp). PSNV = the small latches (palette
+    // index / NR 0x43, clip windows, sprite upload positions, copper index / PC /
+    // mode); PSNA = one big area, u8 id + bytes (palettes, sprite attributes,
+    // sprite patterns, copper program). snapPrepare (save) drains core1 and
+    // applies the palette / sprite logs, so the areas are whole; snapLoadBegin
+    // does the same and empties the logs before the areas are read in place;
+    // snapLoadEnd rebuilds the renderer's copies (LUTs, sprite render state,
+    // geometry); snapLineSync puts the line counter at CPU::tstates (call it
+    // after the CPU is restored).
+    enum SnapArea : uint8_t { SNAP_PAL = 0, SNAP_SPRATTR = 1, SNAP_SPRPAT = 2, SNAP_COPPER = 3, SNAP_AREAS = 4 };
+    static constexpr uint32_t SNAP_MAX = 64;
+    static void     snapPrepare();
+    static uint8_t* snapArea(uint8_t id, uint32_t& size);
+    static uint32_t snapSave(uint8_t* out);
+    static void     snapLoadBegin();
+    static void     snapLoad(const uint8_t* in, uint32_t n);
+    static void     snapLoadEnd();
+    static void     snapLineSync();
     // NR 0x02 soft reset: the renderer latches the zxnext.vhd reset block
     // covers (clip windows + indices, palette index / NR 0x43, copper mode +
     // address). Palette, sprite and copper RAM survive, as on the board.

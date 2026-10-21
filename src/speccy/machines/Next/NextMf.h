@@ -45,4 +45,10 @@ namespace NextMf {
     // data bus. Write: side effects only.
     int  portRead(uint16_t address);
     void portWrite(uint16_t address);
+    // .pss snapshot (Pss.cpp, in the PSNX record): the multiface.vhd flags as one
+    // byte. snapLoad pages the overlay back in when it was, so call it AFTER the
+    // divMMC window is restored (the MF wins over it); the MF RAM itself travels
+    // with the ROM region pages.
+    uint8_t snapSave();
+    void    snapLoad(uint8_t flags);
 }

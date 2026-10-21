@@ -4537,3 +4537,99 @@ IRAM_ATTR void NEXTVID::RenderSpritesLine(int y) {
 }
 
 
+
+// ===== .pss snapshot (PSNV / PSNA) =====
+// Flash code: the menu / a hot key / the boot resume only.
+#include "app/SnapPack.h"
+static constexpr uint8_t NXV_SNAP_VER = 1;
+
+void NEXTVID::snapPrepare() {
+    if (!sprPatterns) return;
+    c1Drain();
+    palApply(pal_w);                      // rawPal == cRaw
+    sprApplyTo(*sprR, spr_app, spr_w);    // pattern bytes live only in the log until applied
+}
+
+uint8_t* NEXTVID::snapArea(uint8_t id, uint32_t& size) {
+    size = 0;
+    if (!sprPatterns) return nullptr;
+    switch (id) {
+        case SNAP_PAL:     size = 8 * 256 * 2; return (uint8_t*)cRaw;
+        case SNAP_SPRATTR: size = 128 * 5;     return (uint8_t*)sprAttr;
+        case SNAP_SPRPAT:  size = 16384;       return sprPatterns;
+        case SNAP_COPPER:  size = 2048;        return copperMem;
+        default:           return nullptr;
+    }
+}
+
+uint32_t NEXTVID::snapSave(uint8_t* out) {
+    SnapOut o(out);
+    o.u8(NXV_SNAP_VER);
+    o.u8(palIdx); o.u8(pal9Second ? 1 : 0); o.u8(pal9First); o.u8(palCtrl);
+    o.raw(clip, 16); o.raw(clipIdx, 4);
+    o.u16(sprPatWrite); o.u8(sprAttrSlot); o.u8(sprAttrByte); o.u8(sprFlags); o.u8(sprNrSlot);
+    o.u16(copIndex); o.u16(copPC); o.u8(copCtrl); o.u8(cop16Second ? 1 : 0); o.u8(cop16First);
+    return o.n;
+}
+
+void NEXTVID::snapLoadBegin() {
+    if (!sprPatterns) return;
+    c1Drain();
+    palApply(pal_w);
+    sprApplyTo(*sprR, spr_app, spr_w);
+    // Both logs are now fully applied (app == w), so nothing can replay over the
+    // areas the load writes in place. core0's sprite copy is re-taken from core1's.
+    s_sprR0Valid = 0;
+}
+
+void NEXTVID::snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return;
+    const uint8_t pi = s.u8(), p9s = s.u8(), p9f = s.u8(), pc = s.u8();
+    uint8_t cl[16], ci[4];
+    s.raw(cl, 16); s.raw(ci, 4);
+    const uint16_t spw = s.u16();
+    const uint8_t sas = s.u8(), sab = s.u8(), sf = s.u8(), sns = s.u8();
+    const uint16_t cix = s.u16(), cpc = s.u16();
+    const uint8_t cct = s.u8(), c16s = s.u8(), c16f = s.u8();
+    if (!s.ok) return;
+    palIdx = pi; pal9Second = p9s != 0; pal9First = p9f; palCtrl = pc;
+    memcpy(clip, cl, 16);
+    for (int w = 0; w < 4; w++) clipIdx[w] = ci[w] & 3;
+    sprPatWrite = spw & 0x3FFF; sprAttrSlot = sas & 0x7F; sprAttrByte = sab < 5 ? sab : 0;
+    sprFlags = sf; sprNrSlot = sns & 0x7F;
+    copIndex = cix & 0x7FF; copPC = cpc & 0x3FF; copCtrl = cct;
+    cop16Second = c16s != 0; cop16First = c16f;
+}
+
+void NEXTVID::snapLoadEnd() {
+    if (!sprPatterns) return;
+    // Palettes: the renderer's copy, the CLUT LUTs and the derived flags.
+    memcpy(rawPal, cRaw, 8 * 256 * 2);
+    for (int p = 0; p < 8; p++) {
+        bool prio = false;
+        for (int i = 0; i < 256; i++) {
+            prio |= (rawPal[p][i] & 0x8000) != 0;
+            lut[p][i] = remap[rawPal[p][i] & 0x1FF];
+        }
+        palHasPrio[p] = prio;
+        nxPalDirty((uint8_t)p);
+    }
+    // Sprites: the renderer resolves all 128 against their anchors again.
+    memcpy(sprR->attr, sprAttr, 128 * 5);
+    memset(sprR->res, 0, sizeof sprR->res);
+    sprR->n = 0; sprR->dirty = 1; sprR->lo = 0; sprR->hi = 127; sprR->applying = 0;
+    // The raster may have changed (NextReg::snapLoad applied it).
+    totalLines = CPU::statesInFrame ?
+        ((CPU::statesInFrame >> ESPectrum::multiplicator) / VIDEO::tStatesPerLine) : 311;
+    computeGeometry();
+    xPaperOff = ((int)VIDEO::vga.xres - 256) / 2;
+}
+
+void NEXTVID::snapLineSync() {
+    const uint32_t tl = (uint32_t)VIDEO::tStatesPerLine << ESPectrum::multiplicator;
+    if (!tl) return;
+    lineIdx = CPU::tstates / tl;
+    if (lineIdx >= totalLines) { lineIdx = totalLines; nextLineTstate = 0xFFFFFFFF; }
+    else nextLineTstate = (lineIdx + 1) * tl;
+}

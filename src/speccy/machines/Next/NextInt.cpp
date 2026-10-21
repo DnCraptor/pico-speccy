@@ -688,3 +688,72 @@ void ctcProfDump() {
 }
 #endif
 }
+
+// ===== .pss snapshot (PSNI) =====
+// Flash code. Absolute 28 MHz times are written relative to the frame start
+// (s_base28); the load puts the frame start at 0 and re-derives `now` from the
+// restored CPU::tstates and clock, so every event keeps its place in the frame.
+#include "app/SnapPack.h"
+namespace NextInt {
+
+static constexpr uint8_t NXI_SNAP_VER = 1;
+
+uint32_t snapSave(uint8_t* out) {
+    sync();
+    ctcCatchUp();
+    SnapOut o(out);
+    o.u8(NXI_SNAP_VER);
+    o.raw(s_st, D_NUM);
+    o.u16(s_active); o.u16(s_req); o.u16(s_status);
+    o.u8(s_c0); o.u8(s_c4hi); o.u8(s_lineEn ? 1 : 0); o.u16(s_lineNum);
+    o.u8(s_unqPulse ? 1 : 0); o.u8(retnArmed ? 1 : 0);
+    const bool pul = s_pulse > -kNever / 2;
+    o.u8(pul ? 1 : 0); o.u64((uint64_t)(pul ? s_pulse - s_base28 : 0));
+    for (const Ctc& c : s_ctc) {
+        o.u8(c.st); o.u8(c.cw); o.u16(c.tc); o.u16(c.cnt);
+        o.u64((uint64_t)(c.run0 - s_base28)); o.u64((uint64_t)(c.ref - s_base28));
+    }
+    return o.n;
+}
+
+void snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return;
+    uint8_t st[D_NUM];
+    s.raw(st, D_NUM);
+    const uint16_t act = s.u16(), req = s.u16(), status = s.u16();
+    const uint8_t c0 = s.u8(), c4 = s.u8(), lineEn = s.u8();
+    const uint16_t lineNum = s.u16();
+    const uint8_t unq = s.u8(), retn = s.u8(), pul = s.u8();
+    const int64_t pulse = (int64_t)s.u64();
+    Ctc ctc[4];
+    for (Ctc& c : ctc) {
+        c.st = s.u8(); c.cw = s.u8(); c.tc = s.u16(); c.cnt = s.u16();
+        c.run0 = (int64_t)s.u64(); c.ref = (int64_t)s.u64();
+        if (c.st > C_RUN_TC) c.st = C_RESET;
+        if (!c.tc || c.tc > 256) c.tc = 256;
+        if (!c.cnt || c.cnt > 256) c.cnt = c.tc;
+    }
+    if (!s.ok) return;
+    s_base28 = 0;
+    s_last28 = now28();
+    for (int d = 0; d < D_NUM; d++) s_st[d] = st[d] <= S_ISR ? st[d] : S_0;
+    s_active = act & ((1u << D_NUM) - 1); s_req = req; s_status = status;
+    s_c0 = c0 & 0xE9; s_c4hi = c4 & 0x80;
+    s_lineEn = lineEn != 0; s_lineNum = lineNum & 0x1FF;
+    s_unqPulse = unq != 0; retnArmed = retn != 0;
+    s_pulse = pul ? pulse : -kNever;
+    for (int ch = 0; ch < 4; ch++) {
+        s_ctc[ch] = ctc[ch];
+        // A time ahead of `now` cannot have been recorded; clamp so advanceTimer
+        // never runs backwards.
+        if (s_ctc[ch].ref > s_last28) s_ctc[ch].ref = s_last28;
+        if (s_ctc[ch].run0 > s_ctc[ch].ref) s_ctc[ch].run0 = s_ctc[ch].ref;
+    }
+    s_ctcNext = -kNever; s_ctcNextInt = kNever; s_ctcIndep = false;
+    lineRecalc();
+    exRecalc();
+    wake();
+}
+
+} // namespace NextInt

@@ -641,3 +641,52 @@ NXP_HOT bool NextPorts::output(uint16_t address, uint8_t data) {
     if ((address & 0x8003) == 0x8001 && ESPectrum::AY_emu) return ayWrite(address, data);
     return false;
 }
+
+// ===== .pss snapshot (PSNP) =====
+#include "app/SnapPack.h"
+static constexpr uint8_t NXP_SNAP_VER = 1;
+
+uint32_t NextPorts::snapSave(uint8_t* out) {
+    SnapOut o(out);
+    o.u8(NXP_SNAP_VER);
+    o.raw(s_dac, 4); o.u8(s_dacLive ? 1 : 0);
+    o.u8((uint8_t)AySound::selected_chip);
+    o.raw(ay_next_pan, 3);
+    o.u8(chip2 ? 1 : 0);
+    o.u8(chip2 ? chip2->selReg() : 0);
+    for (uint8_t i = 0; i < 16; i++) o.u8(chip2 ? chip2->reg(i) : 0);
+    o.u8(s_ulapMode); o.u8(s_ulapIdx); o.u8(s_eff7);
+    o.u8(s_uartSel); o.raw(s_uartPrescMsb, 2); o.raw(s_uartFrame, 2);
+    return o.n;
+}
+
+void NextPorts::snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn s(in, n);
+    if (s.u8() < 1) return;
+    uint8_t dac[4], pan[3], regs[16];
+    s.raw(dac, 4);
+    const uint8_t live = s.u8(), sel = s.u8();
+    s.raw(pan, 3);
+    const uint8_t have2 = s.u8(), sel2 = s.u8();
+    s.raw(regs, 16);
+    const uint8_t um = s.u8(), ui = s.u8(), e7 = s.u8(), us = s.u8();
+    uint8_t pm[2], fr[2];
+    s.raw(pm, 2); s.raw(fr, 2);
+    if (!s.ok) return;
+    memcpy(s_dac, dac, 4);
+    s_dacLive = live != 0;
+    for (int i = 0; i < 3; i++) ay_next_pan[i] = pan[i] & 3;
+    if (have2 && chip2) {
+        const int prev = AySound::selected_chip;
+        AySound::selected_chip = 2;
+        for (uint8_t i = 0; i < 16; i++) { chip2->selectRegister(i); chip2->setRegisterData(regs[i]); }
+        chip2->selectRegister(sel2);
+        AySound::selected_chip = prev;
+    }
+    AySound::selected_chip = (sel < 3 && chips[sel]) ? sel : 0;
+    s_ulapMode = um; s_ulapIdx = ui & 0x3F; s_eff7 = e7;
+    s_uartSel = us & 1; memcpy(s_uartPrescMsb, pm, 2); memcpy(s_uartFrame, fr, 2);
+    psgModeApply();
+    ayModesApply();
+    dacPublish();
+}

@@ -1995,11 +1995,6 @@ void persistSetName(uint8_t slotnumber, const string& newName) {
 // UI-free save core (shared with the new UI): the caller has already resolved
 // the name and any overwrite question.
 bool persistSaveNamed(uint8_t slotnumber, const string& slotName) {
-    if (Z80Ops::isNext) {
-        // A correct Next state needs 1.75MB RAM + nextregs — SNA can't hold it
-        OSD::osdCenteredMsg("Snapshots not supported on Next yet", LEVEL_WARN, 2000);
-        return false;
-    }
     if (Pss::supported()) {
         if (!Pss::save(slotPath(slotnumber, "pss"), slotName)) return false;
         slotDropLegacy(slotnumber);
@@ -2115,10 +2110,6 @@ static void f_gets(char* b, size_t sz, FIL& f) {
 
 bool persistLoad(uint8_t slotnumber)
 {
-    if (Z80Ops::isNext) {
-        OSD::osdCenteredMsg("Snapshots not supported on Next yet", LEVEL_WARN, 2000);
-        return false;
-    }
     {
         const string pss = slotPath(slotnumber, "pss");
         string nm;
@@ -2131,6 +2122,12 @@ bool persistLoad(uint8_t slotnumber)
             Config::last_ram_file = pss;
             return true;
         }
+    }
+    // An old .sna + .esp slot: its loader does not cross the Next's memory layout
+    // (only Pss::load reboots across it), so it stays refused on the Next.
+    if (Z80Ops::isNext) {
+        OSD::osdCenteredMsg("Old .sna slots do not load on the Next", LEVEL_WARN, 2000);
+        return false;
     }
     char persistfname[sizeof(DISK_PSNA_FILE) + 7];
     char persistfinfo[sizeof(DISK_PSNA_FILE) + 7];

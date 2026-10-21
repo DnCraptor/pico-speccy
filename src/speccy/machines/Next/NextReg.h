@@ -77,6 +77,15 @@ public:
     // CTC live in NextInt (NextInt.h).
 
     static void reset(bool hard);
+    // .pss snapshot (src/speccy/core/Pss.cpp, block PSNX): the register file, the
+    // legacy paging latches, the MMU, the TBBLUE config window, which ROM images
+    // are in, the clock and the divMMC NMI flags. snapLoad rebuilds the memory
+    // map, the ROM select, the Layer 2 windows, the raster and the contention
+    // from them (after ESPectrum::resetForLoad); the other Next modules restore
+    // their own records. false = not a record this firmware understands.
+    static constexpr uint32_t SNAP_MAX = 320;
+    static uint32_t snapSave(uint8_t* out);
+    static bool     snapLoad(const uint8_t* in, uint32_t n);
     // nextreg 0x02 write latches a reset request; ESPectrum::loop performs
     // it at the next frame boundary (0 = none, 1 = soft, 2 = hard)
     static uint8_t resetPending;

@@ -687,3 +687,54 @@ Pss.cpp only frames them.
   saved mid-block (Fast load off) resumes and loads; the +3 loader mid-read; an IDE copy in
   progress (Profi CP/M, +3e); esxDOS mid-file; NeoGS NPL MP3 mid-track; a renamed image
   -> the report box.
+
+## Spectrum Next (2026-10-21; hw 2026-10-21, owner: "работает", not itemised)
+
+`A_NEXT` joins `archSupported`; quick slots on the Next write `.pss` (the two "Snapshots
+not supported on Next yet" gates in OSDMain are gone; an old `.sna` slot is still refused
+there, its loader does not cross the Next layout). Test ELF `debug/DVp2-next-pss-1.0.10`.
+
+- **Boundary**: the Next's memory (the 8K page carve-out and the ROM region) is laid out
+  once in `setup()`, and `requestMachine` does not cross it. `Pss::load` therefore reboots
+  into the snapshot's machine (Config::arch/romSet + `ram=`) when exactly one of "the file
+  is a Next" / "this session is a Next" holds, after `snapMergeForReboot` (which already
+  carries `arch` when other keys differ). On the resume a remaining mismatch fails instead
+  of looping. Entering needs butter PSRAM >= 2 MB.
+- **Pages**: the Next's own 8K numbering — `PSXP` {u16 page, 8 KB} / `PSXF` {u16 page, u8}
+  for a page of one byte; 0-223 RAM (banks 0-111), 224-238 the ROM region: the
+  personality's ROMs (TBBLUE.FW streams them there, so they cannot be reloaded from SD),
+  the MMC ROM, the 32 KB Alt-ROM NextZXOS patches itself through, the MF ROM and MF RAM.
+  Every page is written (all 239 must load). Read through `nextPgPtr` (the hot-page pool
+  frame when promoted), written home after `nextHotFlush`; both directions go through a
+  512 B SRAM bounce (butter PSRAM vs the SD driver's DMA). Generic `RAMP` is not used.
+- **Records** (each module packs its own, flash code): `PSNX` = `NextReg::snapSave` (reg[256],
+  select, 7FFD/DFFD/1FFD/123B + L2 offset, I/O-trap cause, port FF + INT disable, machine
+  type/timing/lock, hi-res seen, pending reset, mmu[8], ROM/video latches, paging lock,
+  Alt-ROM rd/wr, bootrom/config mode + RAMPAGE, which ROM images are in, the clock, divMMC
+  NMI button/hold + `$0000` trap armed); `PSNM` = NextMf flags; `PSNV` = NEXTVID latches
+  (palette index/NR 0x43/0x44 half, clip windows + indices, sprite upload positions,
+  copper index/PC/mode); `PSNA` {u8 id, bytes} = palettes (core0's 9-bit copy incl. the
+  priority bit), sprite attributes, 16 KB patterns, 2 KB copper; `PSNI` = NextInt (device
+  states, request/status, NR 0xC0/0xC4, line IRQ, pulse, CTC x4) with every 28 MHz time
+  relative to the frame; `PSNP` = NextPorts (DACs, TurboSound select + pans, the THIRD
+  AY's registers, ULA+ mode/index, #EFF7, UART latches); `PSDM` = Z80DMA (written for the
+  Next only). AY 0/1, Z80, SPCR/PSPT, DivMMC (`DMMC`/`DMRP`), storage and media are the
+  generic blocks.
+- **Load order**: `NEXTVID::snapLoadBegin` (core1 drained, logs applied) + `nextHotFlush`
+  before the blocks; then `NextReg::snapLoad` (clock first, ROM select, MMU, +3 overlay,
+  config window, Layer 2, raster via `nextRasterApply`, contention), NEXTVID state +
+  `snapLoadEnd` (rawPal/LUTs/priority flags, sprite render copy re-resolved, geometry),
+  NextPorts (PSG mode, stereo layout, DAC publish), Z80DMA; after the divMMC window
+  `NextMf::snapLoad` (MF overlay wins) + Layer 2 + fast-path gates; after the CPU block
+  `NextInt::snapLoad` and `NEXTVID::snapLineSync` (both need the final CPU::tstates). The
+  PSAY restore keeps `selected_chip` = 2 (the third AY) now.
+- **Not saved**: the I2C RTC bus phase (time comes from the RTC), keyboard/extended-key
+  state, the Z80's pending NMI (a pending MF NMI is re-raised), Gigascreen history, the
+  640 pair-frame / Timex hi-res driver choice (EndFrame polls re-derive them), the rows of
+  the current frame above the restored line (one frame shows the reset picture there).
+- No export (no format expresses the Next).
+- **Hw check still owed** (the verdict above is not itemised): NextZXOS menu / Browser saved and loaded; a game in Layer 2 + sprites
+  + tilemap (TX-1696, Atic Atac Remake — copper NMI sound, DMA); NXModPlayer (CTC + DACs);
+  28 MHz and 60 Hz; a 48K/128K/Pentagon personality (ROM region + raster); load of a Next
+  slot from another machine and of a Pentagon slot from the Next (both reboot); slot size
+  and save time.
