@@ -1669,6 +1669,7 @@ void ESPectrum::setup() {
   chip0.set_sound_format(Audio_freq, 1, 8);
   chip0.set_stereo(AYEMU_MONO, NULL);
   chip0.reset();
+  nextChip2Init();
   Debug::log("setup: AY init done, freeHeap=%u", getFreeHeap());
   Debug::log2SD("setup: AY init done");
 
@@ -1920,6 +1921,27 @@ void ESPectrum::resetForLoad(uint8_t rom) { s_reset_keeps_card = true; reset(rom
 // sets are the classic machines' own (48K 624, 128K 625, Pentagon 640 samples;
 // 60 Hz 524) — the Next used to fall into the Pentagon branch whatever its
 // frame was (640 samples on a 70908 T frame).
+// TurboSound Next third AY: allocated at Next boot only (the Next boundary
+// reboots, so no teardown path is needed). Called by setup() AND reset(): it
+// used to live in reset() alone, so after a cold boot (power-on, the RUN
+// button) chips[2] stayed null until the first F11 and NextPorts::ayWrite sent
+// every write for the third AY to chips[0] — TurboSound music came out garbled
+// until F11 (hw 2026-10-21).
+void ESPectrum::nextChip2Init() {
+  if (Config::arch == A_NEXT && !chip2) {
+    chip2 = new (std::nothrow) AySound(2);
+    chips[2] = chip2;
+  }
+  if (chip2) {
+    chip2->init();
+    chip2->set_sound_format(Audio_freq, 1, 8);
+    chip2->set_stereo(AYEMU_MONO, NULL);
+    chip2->reset();
+    ay_next_pan[0] = ay_next_pan[1] = ay_next_pan[2] = 3;
+  }
+  if (Config::arch == A_NEXT) NextPorts::psgModeApply();   // YM / AY tables (NR 0x06)
+}
+
 void ESPectrum::nextAudioSet() {
     const NextReg::Raster r = NextReg::raster();
     const uint32_t sif = (uint32_t)r.tpl * r.lines;
@@ -2396,20 +2418,7 @@ void ESPectrum::reset(uint8_t romInUse) {
     chip1->set_stereo(AYEMU_MONO, NULL);
     chip1->reset();
   }
-  // TurboSound Next third AY: allocated at Next boot only (the Next
-  // boundary reboots, so no teardown path is needed)
-  if (Config::arch == A_NEXT && !chip2) {
-    chip2 = new (std::nothrow) AySound(2);
-    chips[2] = chip2;
-  }
-  if (chip2) {
-    chip2->init();
-    chip2->set_sound_format(Audio_freq, 1, 8);
-    chip2->set_stereo(AYEMU_MONO, NULL);
-    chip2->reset();
-    ay_next_pan[0] = ay_next_pan[1] = ay_next_pan[2] = 3;
-  }
-  if (Config::arch == A_NEXT) NextPorts::psgModeApply();   // YM / AY tables (NR 0x06)
+  nextChip2Init();
 
   // Reset the TurboSound FM halves. The sample rate can have changed with the
   // arch (48K/Profi run at 30469 Hz, Pentagon at 31250), and every phase and

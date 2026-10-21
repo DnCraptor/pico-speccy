@@ -84,7 +84,7 @@ Ported from the pico-next donor branch (`~/github/pico-next`,
   copper/palette state = ONE ~25KB heap block allocated at first
   NEXTVID::Reset — do NOT make these static arrays again, that cost 29KB BSS
   on every legacy build. F8 stats rows skipped by the renderer.
-- **Sound**: chip2 = third AY, heap at Next boot; 0xFFFD control 111LRxCC
+- **Sound**: chip2 = third AY, heap at Next boot (`ESPectrum::nextChip2Init`, from setup() AND reset() — it was reset()-only until 2026-10-21, so after a cold boot / RUN button the third AY did not exist and `NextPorts::ayWrite` sent its writes to chip0: TurboSound music garbled until F11, hw-confirmed fixed); 0xFFFD control 111LRxCC
   (select + `ay_next_pan`, applied in the frame mixer); TurboSubsys forced on
   under Next. DAC ports 0F/1F/4F/5F/DF/FB/B3 → stereo Covox (A/B left, C/D
   right), CovoxSubsys requested when arch==A_NEXT.
