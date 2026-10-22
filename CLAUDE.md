@@ -16643,7 +16643,7 @@ and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card 
 (the SDK passes it to C itself — do NOT add a second compile definition, the two spellings
 "redefine" each other), name `<board>-speccy-<display>[-variant]-16MB-<ver>` /
 `+16MB` on screen for non-W boards, same BOARD_TAG (same NVS dir). It sets
-`MOONSOUND=1` (a global compile define, 0 on the 4 MB image). build_all.sh / .ps1 build
+`YRW801_BUILTIN=1` (the MoonSound ROM in flash; 4 MB reads it from SD). build_all.sh / .ps1 build
 every (target, display) pair in both types (`FLASH_TYPES="4 16"` / `-FlashTypes`), dirs
 `build-all/<dir>-16MB`, logs `<target>-<display>-16MB.log`; W targets only 16. check-release.sh
 lists the 16 MB VGA_HDMI images as `<BOARD>-16M`; tools/release_downloads.py strips a
@@ -16687,9 +16687,14 @@ native), which a test expectation got wrong once.
 ## ZXM-MoonSound (YMF278B / OPL4) — 2026-10-21, NOT hw-tested
 
 Audio > "ZXM-MoonSound (OPL4)" (`Config::moonsound`, NVS `moonsound`, `SET_MOONSOUND`
-AC_REBOOT, row only with butter PSRAM). **16 MB firmware only** (`MOONSOUND=1`): on the
-4 MB image `moonpcm` is a `constexpr nullptr` (MoonPcm.h), MoonPcm.cpp compiles to
-nothing, every `if (moonpcm)` folds away, and Config::load forces the setting off. Mick's card (micklab.ru; sources archived at
+AC_REBOOT, row only with butter PSRAM). Every image has the card (`MOONSOUND=1`); the
+YRW801 ROM is embedded only on 16 MB (`YRW801_BUILTIN`). The 4 MB image reads
+`/pico-speccy/roms/yrw801.rom` (exactly 2 MB) into butter PSRAM at boot
+(`src/speccy/devices/sound/MoonRom.{h,cpp}`, 4 KB SRAM bounce — no DMA into the cached
+alias; `Buffer::pageBudget` reserves the 2 MB only when the file is there); no file =
+bootNotice "MoonSound off: no /pico-speccy/roms/yrw801.rom", Hardware Info "No
+yrw801.rom". The Pico-Zx-Player takes `MoonRom::get()` (the card's copy) or reads its
+own copy for the track (freed at close; none = ROM tones silent). 2026-10-22, NOT hw-tested. Mick's card (micklab.ru; sources archived at
 github.com/alfishe/zxm-moonsound — CPLD, MoonService, MWM player). FM half = our OplFm
 on #C4-#C7 (MoonSound turns the OPL3 subsystem on by itself); wave half =
 `src/speccy/devices/sound/MoonPcm.{h,cpp}`, a port of ymfm's pcm_engine (BSD), 24 channels,

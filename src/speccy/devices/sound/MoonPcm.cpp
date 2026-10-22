@@ -8,7 +8,7 @@
 #include "MoonPcm.h"
 #include <string.h>
 
-#if !defined(MOONSOUND) || MOONSOUND   // the 16 MB firmware only (cmake/board.cmake)
+#if !defined(MOONSOUND) || MOONSOUND   // cmake/board.cmake
 
 MoonPcm* moonpcm = nullptr;
 

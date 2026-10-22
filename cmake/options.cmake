@@ -54,10 +54,11 @@ option(PICO_PC_WS "Olimex PICO-PC + Waveshare RP2350B-Plus-W (on-chip CYW43439 W
 # Flash size of the module: two firmware types per board. OFF = the 4 MB image every
 # Pico 2 / RP2350B board takes; ON = a 16 MB image ("-16MB" in the file name) for a
 # 16 MB module (Pimoroni Pico Plus 2, Waveshare RP2350B-Plus...). The 16 MB image adds
-# what does not fit 4 MB: ZXM-MoonSound with its 2 MB YRW801 ROM embedded (MOONSOUND=1),
-# and the GM.DLS bank region grows to ~14 MB by itself (rp2350-memmap.ld). The W/WS
+# what does not fit 4 MB: the ZXM-MoonSound YRW801 ROM embedded (YRW801_BUILTIN=1; the
+# 4 MB image reads /pico-speccy/roms/yrw801.rom from SD instead), the built-in GM.DLS
+# bank, and the GM.DLS bank region grows to ~14 MB by itself (rp2350-memmap.ld). The W/WS
 # boards are 16 MB only and turn this on themselves (cmake/board.cmake).
-option(FLASH_16MB "Build for a 16 MB flash module (adds ZXM-MoonSound)" OFF)
+option(FLASH_16MB "Build for a 16 MB flash module (built-in YRW801 + GM.DLS)" OFF)
 # OFF by default and shipped as a SEPARATE z0p2 firmware ("-PIOUSB" in the file name):
 # Pico-PIO-USB costs 17.7 KB of SRAM that cannot be reclaimed at runtime — 11.0 KB of
 # .time_critical code (the bit-banged host has to run from RAM) plus 6.7 KB of .bss,

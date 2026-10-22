@@ -44,6 +44,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/devices/sound/OplFm.h"
 #include "speccy/devices/sound/OpllFm.h"
 #include "speccy/devices/sound/MoonPcm.h"
+#include "speccy/devices/sound/MoonRom.h"
 #include "speccy/devices/sound/SnSound.h"
 #include "hardware/clocks.h"
 #include "Subsystem.h"
@@ -877,12 +878,11 @@ void ESPectrum::powerOnRamFill(int arch, int romset) {
              getFreeHeap());
 }
 
-// ZXM-MoonSound wavetable half (16 MB firmware only): the YRW801 ROM is embedded
-// in flash (src/speccy/roms/moonsound/yrw801.S) and read in place; only the card's
-// 1 MB SRAM comes from butter PSRAM. Runs once, in setup(): the block is kept for
-// the session.
+// ZXM-MoonSound wavetable half: the YRW801 ROM is embedded in flash on the 16 MB
+// firmware and read in place; the 4 MB firmware reads it from the SD card into
+// 2 MB of butter PSRAM (MoonRom.h). The card's 1 MB SRAM comes from butter PSRAM.
+// Runs once, in setup(): the blocks are kept for the session.
 #if MOONSOUND
-extern "C" const uint8_t gb_rom_yrw801[];
 static void moonSoundInit() {
   if (!butter_psram_size()) {
     OSD::bootNotice("MoonSound off: needs QSPI PSRAM");
@@ -895,12 +895,22 @@ static void moonSoundInit() {
     Debug::log("[MOON] no 1 MB PSRAM block (GS/pages took it)");
     return;
   }
+  const char* why = nullptr;
+  if (!MoonRom::loadForCard(&why)) {
+    Buffer::pfree(ram);
+    static char msg[64];
+    snprintf(msg, sizeof(msg), "MoonSound off: %s", why ? why : "no ROM");
+    OSD::bootNotice(msg);
+    Debug::log("[MOON] %s", msg);
+    return;
+  }
   memset(ram, 0, MoonPcm::RAM_SIZE);
-  moonpcm = new (std::nothrow) MoonPcm(gb_rom_yrw801, ram);
+  moonpcm = new (std::nothrow) MoonPcm(MoonRom::get(), ram);
   if (!moonpcm) { Buffer::pfree(ram); return; }
   moonpcm->setRate(ESPectrum::Audio_freq);
-  Debug::log("[MOON] ZXM-MoonSound up: ROM @%08X (flash), 1 MB SRAM @%08X",
-             (unsigned)(uintptr_t)gb_rom_yrw801, (unsigned)(uintptr_t)ram);
+  Debug::log("[MOON] ZXM-MoonSound up: ROM @%08X (%s), 1 MB SRAM @%08X",
+             (unsigned)(uintptr_t)MoonRom::get(), MoonRom::builtin() ? "flash" : "SD",
+             (unsigned)(uintptr_t)ram);
 }
 #endif
 

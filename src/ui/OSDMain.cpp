@@ -76,6 +76,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "drivers/audio/audio.h"
 #include "speccy/devices/sound/AySound.h"
 #include "speccy/devices/sound/MoonPcm.h"
+#include "speccy/devices/sound/MoonRom.h"
 #include "speccy/devices/sound/Midi.h"
 #include "speccy/devices/sound/MidiSynth.h"
 #include "speccy/devices/sound/dls_conv.h"
@@ -6620,10 +6621,12 @@ void OSD::MemoryInfo() {
         const size_t gs    = Config::gs_enabled ? GS::configuredRamBytes() : 0;
         const size_t midi  = MidiSynth::bankPsramBytes();   // butter here (SPI only without butter)
         const size_t gig   = VIDEO::gigascreenArmed() ? VIDEO::gigascreenPrevFBBytes() : 0;
+        // ZXM-MoonSound: its 1 MB SRAM, plus the 2 MB YRW801 when read from SD (4 MB fw)
+        const size_t moon  = moonpcm ? MoonPcm::RAM_SIZE + MoonRom::psramBytes() : 0;
         Buffer::PoolStat bp = Buffer::poolStat(Buffer::TIER_BUTTER);
-        const size_t known = roms + midi + gig;           // arena users listed by name
+        const size_t known = roms + midi + gig + moon;    // arena users listed by name
         const size_t other = bp.used > known ? bp.used - known : 0;
-        const size_t used  = emu + divm + gs + roms + midi + gig + other;
+        const size_t used  = emu + divm + gs + roms + midi + gig + moon + other;
         const size_t free_ = bsz > used ? bsz - used : 0;
         const char* fam = nullptr; const char* rs = nullptr;
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, " Butter PSRAM (%d.%d MB):\n",
@@ -6644,6 +6647,7 @@ void OSD::MemoryInfo() {
         row("General Sound", gs);
         row("MIDI (GM.DLS)", midi);
         row("Gigascreen", gig);
+        row("MoonSound", moon);
         row("Other buffers", other);
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d KB\n", "Free", (int)(free_ / KB));
         pos += snprintf(buf + pos, OSD_INFO_BUF_SZ - pos, "  %-14s : %d/%d KB\n",
@@ -6975,7 +6979,8 @@ static void buildEmulatorInfoText() {
 #if MOONSOUND
         // ZXM-MoonSound — configured vs up (its 1 MB of PSRAM may not have fitted)
         pos += infoAppend(buf, pos, bufsz, " MoonSound      : %s\n",
-            !Config::moonsound ? "Off" : moonpcm ? "On (#C4-#C7, #7E/#7F)" : "No PSRAM");
+            !Config::moonsound ? "Off" : moonpcm ? (MoonRom::builtin() ? "On (#C4-#C7, #7E/#7F)" : "On, ROM from SD")
+            : MoonRom::builtin() || MoonRom::filePresent() ? "No PSRAM" : "No yrw801.rom");
 #endif
 
         // General Sound — configured vs actually running: GS::init needs PSRAM

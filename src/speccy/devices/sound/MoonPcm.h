@@ -150,9 +150,8 @@ private:
 };
 
 // The one card, allocated in ESPectrum::setup while Config::moonsound is on and
-// its 1 MB SRAM landed in butter PSRAM (16 MB firmware only, MOONSOUND=1);
-// nullptr otherwise.
-// The 4 MB firmware has no card at all (MOONSOUND=0): the pointer is a constant
+// its 1 MB SRAM (and its ROM, MoonRom.h) are in place; nullptr otherwise.
+// MOONSOUND=0 would drop the card entirely: the pointer is then a constant
 // nullptr there, so every `if (moonpcm)` folds away with the code behind it.
 // MOONSOUND undefined = a host build (tools/moonpcm_test.cpp).
 #if !defined(MOONSOUND) || MOONSOUND

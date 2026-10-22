@@ -13,12 +13,23 @@
 //   (cd /tmp && /tmp/opl4vgm_test /path/to/pico-speccy/src/speccy/roms/moonsound/yrw801.rom)
 #include "player/PicoPlayer.h"
 #include <stdio.h>
+#include <unistd.h>
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
 #include <vector>
 #include <string>
 extern "C" { uint8_t gb_rom_yrw801[2u << 20]; }
+// MoonRom stub: the player takes the YRW801 from MoonRom::get() (MoonRom.cpp needs FatFs).
+#include "speccy/devices/sound/MoonRom.h"
+namespace MoonRom {
+bool builtin() { return true; }
+const uint8_t* get() { return gb_rom_yrw801; }
+bool filePresent() { return false; }
+uint8_t* loadFile(const char**) { return nullptr; }
+bool loadForCard(const char**) { return true; }
+uint32_t psramBytes() { return 0; }
+}
 namespace pp {
 Decoder* createVgmDecoder();
 Decoder::Decoder() : loops_(1), fadeS_(0) {}
@@ -79,6 +90,9 @@ int main(int argc, char** argv) {
         s2[0] = 4; s2[1] = 16; fwrite(s2, 2, 2, w); fwrite("data", 1, 4, w); fwrite(&db, 4, 1, w); fwrite(lr.data(), 2, lr.size(), w); fclose(w);
         delete dec; return 0;
     }
+    // The self-test writes its synthetic .vgm files into a private temp dir, not the cwd.
+    char tmpl[] = "/tmp/opl4vgm_test.XXXXXX";
+    if (!mkdtemp(tmpl) || chdir(tmpl) != 0) { printf("no temp dir\n"); return 1; }
 
     // A: ROM tone through the wave port
     { Vgm v; v.d0(2, 0x20, 0x00); v.d0(2, 0x08, 0x00); v.d0(2, 0x38, 0x00); v.d0(2, 0x50, 0x00); v.d0(2, 0x68, 0x80); v.wait(22050);

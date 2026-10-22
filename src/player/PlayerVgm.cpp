@@ -9,8 +9,8 @@
 //
 // Chips: AY-3-8910 / YM2149 (x2), SN76489 (x2), SAA1099 (x2), YM2413,
 // YM2203 (FM + SSG, x2), YM3812 / YM3526 / Y8950 (through the OPL3 core in
-// OPL2 mode), YMF262, and on the 16 MB firmware the YMF278B (OPL4: the OPL3
-// core for its FM half + MoonPcm with the built-in YRW801 ROM). Other chips in the header are listed as unsupported and
+// OPL2 mode), YMF262, and the YMF278B (OPL4: the OPL3 core for its FM half +
+// MoonPcm; YRW801 ROM built in on 16 MB, from the SD card on 4 MB). Other chips in the header are listed as unsupported and
 // their commands skipped by length.
 //
 // The meter is driven from register shadows (volume / key-on / TL), not from
@@ -28,6 +28,7 @@
 #include "speccy/devices/sound/OpllFm.h"
 #include "speccy/devices/sound/OpnFm.h"
 #include "speccy/devices/sound/MoonPcm.h"
+#include "speccy/devices/sound/MoonRom.h"
 #include "miniz/miniz.h"
 
 #include "fatfs/ff.h"
@@ -36,9 +37,6 @@
 #include <stdlib.h>
 #include <new>
 
-#if MOONSOUND
-extern "C" const uint8_t gb_rom_yrw801[];          // src/speccy/roms/moonsound/yrw801.S
-#endif
 
 namespace pp {
 
@@ -126,8 +124,9 @@ private:
     OpnFm*   opn_[2] = {}; bool opnPs_[2] = {};
     AySound* ssg_[2] = {}; bool ssgPs_[2] = {};
     OplFm*   opl_ = nullptr; bool oplPs_ = false; bool opl3_ = false;
-    MoonPcm* pcm_ = nullptr; bool pcmPs_ = false;  // YMF278B wave half (16 MB only)
+    MoonPcm* pcm_ = nullptr; bool pcmPs_ = false;  // YMF278B wave half
     uint8_t* pcmRam_ = nullptr;                    // its 1 MB sample RAM (butter PSRAM)
+    uint8_t* pcmRom_ = nullptr;                    // our own YRW801 copy from SD (4 MB fw)
     uint8_t** romPages_ = nullptr;                 // the file's own wave ROM (0x84 blocks),
     uint8_t*  romData_ = nullptr;                  //  4 KB pages; page 0 of romData_ = zeros
     uint32_t  romSize_ = 0;
@@ -435,6 +434,7 @@ void VgmDecoder::close() {
     if (pcmRam_) { Buffer::pfree(pcmRam_); pcmRam_ = nullptr; }
     if (romPages_) { Buffer::pfree(romPages_); romPages_ = nullptr; }
     if (romData_) { Buffer::pfree(romData_); romData_ = nullptr; }
+    if (pcmRom_) { Buffer::pfree(pcmRom_); pcmRom_ = nullptr; }
     if (b_) {
         Buffer::pfree(b_);
         b_ = nullptr;
@@ -504,7 +504,7 @@ bool VgmDecoder::step() {
             opl_->write(k * 2, a); opl_->write(k * 2 + 1, v); oplReg_[k][a] = v;
         }
         break;
-#if MOONSOUND                                      // MoonPcm is in the 16 MB firmware only
+#if MOONSOUND
     case 0xD0:                                     // YMF278B: D0 pp aa dd
         if (pcm_) {
             const uint8_t d = d_[pos_ + 3];
@@ -596,7 +596,15 @@ bool VgmDecoder::openOpl4(uint32_t clock) {
         if (!pcmRam_) { err = "Out of memory"; return false; }
         memset(pcmRam_, 0, MoonPcm::RAM_SIZE);
     }
-    pcm_ = mk<MoonPcm>(pcmPs_, romPages_ ? nullptr : gb_rom_yrw801, pcmRam_);
+    // No ROM of the file's own: the built-in YRW801, the emulated card's copy, or
+    // (4 MB firmware, card off) one read from the SD card for this track. Without
+    // any, ROM tones are silent and RAM samples still play.
+    const uint8_t* rom = nullptr;
+    if (!romPages_) {
+        rom = MoonRom::get();
+        if (!rom) rom = pcmRom_ = MoonRom::loadFile();
+    }
+    pcm_ = mk<MoonPcm>(pcmPs_, rom, pcmRam_);
     if (!pcm_) { err = "Out of memory"; return false; }
     if (romPages_) pcm_->setRomPages(romPages_, romSize_);
     opl3_ = true;
