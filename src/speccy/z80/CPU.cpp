@@ -1002,6 +1002,7 @@ __attribute__((noinline)) void CPU::samFrameLoop(uint64_t _loop_t0, bool pbbp, i
     if (!halted) tstates_active = tstates_frame;
     tstates -= statesInFrame;
     CPU::prev_tstates = tstates;
+    Sam::frameStart();               // arm the row tick for the frame that just began
 }
 
 NX_OVL_CODE void CPU::nextFrameLoop(uint64_t _loop_t0, bool pbbp, int nbp, uint32_t zifi_pump_due) {

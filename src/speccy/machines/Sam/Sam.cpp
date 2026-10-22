@@ -356,16 +356,6 @@ static inline uint32_t memWait(uint32_t t) {
 // ASIC ports (>= #F8): one 8 T slot.
 static inline uint32_t ioWait(uint32_t t) { return 7 - ((t + 2) & 7); }
 
-void draw(unsigned int n, bool contended) {
-    // n < 3 is addressOnBus (internal cycles): no MREQ, so no wait on the SAM.
-    if (contended && n >= 3) CPU::tstates += memWait(frameT());
-    CPU::tstates += n;
-}
-
-void drawOpcode(bool contended) {
-    if (contended) CPU::tstates += memWait(frameT());
-    CPU::tstates += 4;
-}
 
 // ---------------------------------------------------------------------------
 // Ports
@@ -528,7 +518,7 @@ void portOut(uint16_t address, uint8_t data) {
     case 0xFA: if (lmpr != data) { lmpr = data; remap(); } break;
     case 0xFB: if (hmpr != data) { hmpr = data; remap(); } break;
     case 0xFC: vmpr = data; break;
-    case 0xF8: clut[hi & 0x0F] = data & 0x7F; clutDirty = true; break;
+    case 0xF8: clut[hi & 0x0F] = data & 0x7F; break;   // takes effect on the next row rendered
     case 0x80: lepr = data; if (hmpr & HMPR_MCNTRL) remap(); break;
     case 0x81: hepr = data; if (hmpr & HMPR_MCNTRL) remap(); break;
     case 0xFF:
@@ -566,41 +556,72 @@ static inline const uint8_t* pagePtr(uint8_t page) {
 // The framebuffer stores pixel x at byte x ^ 2 (the scanout ISR's order).
 static inline void px(uint8_t* row, int x, uint8_t c) { row[x ^ 2] = c; }
 
-void renderFrame() {
-    auto& vga = VIDEO::vga;
-    if (!vga.frameBuffer) return;
-    const int xres = (int)vga.xres, yres = (int)vga.yres;
-    const int left = ((xres - 256) / 2) & ~3;
-    const int top  = (yres - 192) / 2;
+// ---------------------------------------------------------------------------
+// Video: rows rendered on the beam
+//
+// The framebuffer byte is the SAM COLOUR (0..127) + PAL_SLOT0, not the CLUT
+// index: the 128 palette colours sit in hardware slots 16..143 for the whole
+// session (VIDEO samPaletteFlush), so a CLUT write takes effect on the next row
+// rendered and costs no slot programming — raster bars, per-line palette splits
+// and the line-INT screen splits (VMPR / border / SOFF per line) all come out as
+// on the machine. Each fb row y shows raster line y - top + TOP_LINES and is
+// rendered when the beam leaves its paper: the tick in draw()/drawOpcode()
+// (every memory access charges T there) compares CPU::tstates with s_rowT.
+// Changes INSIDE a line land on the whole line (no mid-line segments).
+// Mode 3 (512 px) goes through the packed-pair driver with a 16-colour pair
+// palette decided once per frame (frameStart): CLUT changes inside a mode-3
+// frame are not shown, and a mode 1/2/4 row inside a pair frame renders its
+// CLUT index as a pair diagonal (entries 5..15 are the ZX colours).
+static int      s_xres, s_yres, s_left, s_top;
+static bool     s_pair, s_flash;
+static int      s_row = 0;                  // next fb row to render
+static uint32_t s_rowT = 0xFFFFFFFFu;       // frame T at which it is rendered (MAX = done / disarmed)
+static bool     s_armed = false;            // frameStart ran for the frame in progress
+
+static inline uint32_t rowEndT(int y) {
+    return (uint32_t)(y - s_top + (int)TOP_LINES + 1) * T_PER_LINE - CONT_OFFSET;
+}
+
+static void renderRow(int y) {
+    uint8_t* row = VIDEO::vga.frameBuffer[y];
+    if (!row) return;
+    const int xres = s_xres, left = s_left;
     const uint8_t brdIdx = (uint8_t)(((border & 0x20) >> 2) | (border & 7));
     const int mode = (vmpr & VMPR_MODE) >> 5;           // 0 = mode 1 .. 3 = mode 4
     const bool off = (border & BORDER_SOFF) && (vmpr & VMPR_MDE1);
+    const uint8_t (*pl)[16] = VIDEO::profi_pair_lookup;
+    const uint8_t brd = s_pair ? pl[4][4] : (uint8_t)(PAL_SLOT0 + clut[brdIdx]);
+    // Overlays drawn after EndFrame (F8 stats / volume box, LED panel, notify
+    // banner) own their rects: keep those bytes, or every frame erases them.
+    int cx[8][2];
+    const int nc = VIDEO::rowCarves(y, cx);
+    uint8_t keep[400];
+    int kn = 0;
+    for (int i = 0; i < nc; i++) {
+        const int x0 = cx[i][0] < 0 ? 0 : cx[i][0];
+        const int x1 = cx[i][1] > xres ? xres : cx[i][1];
+        if (x1 > x0 && kn + (x1 - x0) <= (int)sizeof(keep)) { memcpy(keep + kn, row + x0, x1 - x0); kn += x1 - x0; }
+        else cx[i][1] = cx[i][0];
+    }
+    const int sl = y - s_top;
     // Modes 3/4 span 24K: the even page of the pair and the one after it.
     const uint8_t pg = (mode >= 2) ? (vmpr & (VMPR_PAGE & ~1)) : (vmpr & VMPR_PAGE);
     const uint8_t* p0 = pagePtr(pg);
-    const uint8_t* p1 = pagePtr((uint8_t)(pg + 1));
-    const bool flash = VIDEO::flashing != 0;
-    uint8_t m3[4] = {0, 0, 0, 0};
-    if (mode == 2) {
-        const uint8_t b = (hmpr & 0x60) >> 3;
-        m3[0] = b | 0; m3[1] = b | 2; m3[2] = b | 1; m3[3] = b | 3;   // entries 1/2 swapped
-    }
-    // Mode 3 at its real 512 px: the packed-pair driver, pair index = pixel value
-    // 0..3, 4 = the border. Every other mode hands the driver back (no-op when off).
-    uint32_t rgb5[5];
-    for (int k = 0; k < 4; k++) rgb5[k] = colourRgb(clut[m3[k]]);
-    rgb5[4] = colourRgb(clut[brdIdx]);
-    const bool pair = VIDEO::samPairSync(mode == 2, rgb5);
-    const uint8_t (*pl)[16] = VIDEO::profi_pair_lookup;
-    const uint8_t brd = pair ? pl[4][4] : brdIdx;
-
-    auto renderRow = [&](uint8_t* row, int y) {
-        const int sl = y - top;
-        if (sl < 0 || sl >= 192 || off || !p0) { memset(row, brd, xres); return; }
+    if (sl < 0 || sl >= 192 || off || !p0) {
+        memset(row, brd, xres);
+    } else {
         // side borders (left is a multiple of 4, so the swizzle stays inside them)
         memset(row, brd, left);
         memset(row + left + 256, brd, xres - left - 256);
         uint8_t* o = row + left;
+        uint8_t m3[4] = {0, 0, 0, 0};
+        if (mode == 2) {
+            const uint8_t b = (hmpr & 0x60) >> 3;
+            m3[0] = b | 0; m3[1] = b | 2; m3[2] = b | 1; m3[3] = b | 3;   // entries 1/2 swapped
+        }
+        // CLUT index -> fb byte for this row.
+        uint8_t cl[16];
+        for (int i = 0; i < 16; i++) cl[i] = s_pair ? pl[i][i] : (uint8_t)(PAL_SLOT0 + clut[i]);
         switch (mode) {
         case 0:
         case 1: {
@@ -617,18 +638,20 @@ void renderFrame() {
                 const uint8_t at = a[c], bits = d[c];
                 uint8_t ink = (uint8_t)(((at >> 3) & 8) | (at & 7));
                 uint8_t pap = (uint8_t)((at >> 3) & 0xF);
-                if (flash && (at & 0x80)) { const uint8_t t = ink; ink = pap; pap = t; }
+                if (s_flash && (at & 0x80)) { const uint8_t t = ink; ink = pap; pap = t; }
+                const uint8_t ci = cl[ink], cp = cl[pap];
                 for (int b = 0; b < 8; b++)
-                    px(o, c * 8 + b, (bits & (0x80 >> b)) ? ink : pap);
+                    px(o, c * 8 + b, (bits & (0x80 >> b)) ? ci : cp);
             }
             break;
         }
         case 2:
         case 3: {
             const uint32_t off128 = (uint32_t)sl << 7;
+            const uint8_t* p1 = pagePtr((uint8_t)(pg + 1));
             const uint8_t* d = (off128 < 0x4000) ? p0 + off128 : (p1 ? p1 + (off128 - 0x4000) : nullptr);
             if (!d) { memset(o, brd, 256); break; }
-            if (pair) {
+            if (s_pair && mode == 2) {
                 // 512 px: two pixels per fb byte.
                 for (int i = 0; i < 128; i++) {
                     const uint8_t v = d[i];
@@ -637,45 +660,95 @@ void renderFrame() {
                 }
             } else if (mode == 3) {
                 for (int i = 0; i < 128; i++) {
-                    px(o, i * 2,     d[i] >> 4);
-                    px(o, i * 2 + 1, d[i] & 0x0F);
+                    px(o, i * 2,     cl[d[i] >> 4]);
+                    px(o, i * 2 + 1, cl[d[i] & 0x0F]);
                 }
             } else {
                 // 512 px at 2 bpp, shown at half width: the left pixel of each pair.
                 for (int i = 0; i < 128; i++) {
-                    px(o, i * 2,     m3[d[i] >> 6]);
-                    px(o, i * 2 + 1, m3[(d[i] >> 2) & 3]);
+                    px(o, i * 2,     cl[m3[d[i] >> 6]]);
+                    px(o, i * 2 + 1, cl[m3[(d[i] >> 2) & 3]]);
                 }
             }
             break;
         }
         }
-    };
-
-    for (int y = 0; y < yres; y++) {
-        uint8_t* row = vga.frameBuffer[y];
-        if (!row) continue;
-        // Overlays drawn after EndFrame (F8 stats / volume box, LED panel, notify
-        // banner) own their rects: keep those bytes, or every frame erases them.
-        int cx[8][2];
-        const int nc = VIDEO::rowCarves(y, cx);
-        if (!nc) { renderRow(row, y); continue; }
-        uint8_t keep[400];
-        int kn = 0;
-        for (int i = 0; i < nc; i++) {
-            const int x0 = cx[i][0] < 0 ? 0 : cx[i][0];
-            const int x1 = cx[i][1] > xres ? xres : cx[i][1];
-            if (x1 > x0 && kn + (x1 - x0) <= (int)sizeof(keep)) { memcpy(keep + kn, row + x0, x1 - x0); kn += x1 - x0; }
-            else cx[i][1] = cx[i][0];
-        }
-        renderRow(row, y);
-        kn = 0;
-        for (int i = 0; i < nc; i++) {
-            const int x0 = cx[i][0] < 0 ? 0 : cx[i][0];
-            const int x1 = cx[i][1] > xres ? xres : cx[i][1];
-            if (x1 > x0) { memcpy(row + x0, keep + kn, x1 - x0); kn += x1 - x0; }
-        }
     }
+    kn = 0;
+    for (int i = 0; i < nc; i++) {
+        const int x0 = cx[i][0] < 0 ? 0 : cx[i][0];
+        const int x1 = cx[i][1] > xres ? xres : cx[i][1];
+        if (x1 > x0) { memcpy(row + x0, keep + kn, x1 - x0); kn += x1 - x0; }
+    }
+}
+
+// Per-frame constants: geometry, the FLASH phase and the mode-3 pair decision.
+static bool frameSetup() {
+    auto& vga = VIDEO::vga;
+    if (!vga.frameBuffer) return false;
+    s_xres = (int)vga.xres; s_yres = (int)vga.yres;
+    s_left = ((s_xres - 256) / 2) & ~3;
+    s_top  = (s_yres - 192) / 2;
+    s_flash = VIDEO::flashing != 0;
+    const int mode = (vmpr & VMPR_MODE) >> 5;
+    const uint8_t brdIdx = (uint8_t)(((border & 0x20) >> 2) | (border & 7));
+    uint8_t m3[4] = {0, 0, 0, 0};
+    if (mode == 2) {
+        const uint8_t b = (hmpr & 0x60) >> 3;
+        m3[0] = b | 0; m3[1] = b | 2; m3[2] = b | 1; m3[3] = b | 3;
+    }
+    // Mode 3 at its real 512 px: the packed-pair driver, pair index = pixel value
+    // 0..3, 4 = the border. Every other mode hands the driver back (no-op when off).
+    uint32_t rgb5[5];
+    for (int k = 0; k < 4; k++) rgb5[k] = colourRgb(clut[m3[k]]);
+    rgb5[4] = colourRgb(clut[brdIdx]);
+    s_pair = VIDEO::samPairSync(mode == 2, rgb5);
+    return true;
+}
+
+static inline void rowsTick(uint32_t t) {
+    while (s_row < s_yres && t >= s_rowT) {
+        renderRow(s_row++);
+        s_rowT += T_PER_LINE;
+    }
+    if (s_row >= s_yres) s_rowT = 0xFFFFFFFFu;
+}
+
+void frameStart() {
+    s_armed = frameSetup();
+    if (!s_armed) { s_rowT = 0xFFFFFFFFu; return; }
+    s_row = 0;
+    s_rowT = rowEndT(0);
+}
+
+void frameEnd() {
+    // Rows the beam has not reached (a frame that ended early), or the whole
+    // frame when frameStart never ran for it (the first frame after a reset, a
+    // menu session); then disarm — the tick must not fire on the tail's
+    // overshoot, whose T belongs to the next frame.
+    if (!s_armed) renderFrame();
+    else while (s_row < s_yres) renderRow(s_row++);
+    s_armed = false;
+    s_row = s_yres;
+    s_rowT = 0xFFFFFFFFu;
+}
+
+void renderFrame() {
+    if (!frameSetup()) return;
+    for (int y = 0; y < s_yres; y++) renderRow(y);
+}
+
+void draw(unsigned int n, bool contended) {
+    if (__builtin_expect(CPU::tstates >= s_rowT, 0)) rowsTick(CPU::tstates);
+    // n < 3 is addressOnBus (internal cycles): no MREQ, so no wait on the SAM.
+    if (contended && n >= 3) CPU::tstates += memWait(frameT());
+    CPU::tstates += n;
+}
+
+void drawOpcode(bool contended) {
+    if (__builtin_expect(CPU::tstates >= s_rowT, 0)) rowsTick(CPU::tstates);
+    if (contended) CPU::tstates += memWait(frameT());
+    CPU::tstates += 4;
 }
 
 } // namespace Sam

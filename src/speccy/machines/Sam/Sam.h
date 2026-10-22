@@ -39,7 +39,14 @@ namespace Sam {
     uint8_t portIn(uint16_t address);
     void portOut(uint16_t address, uint8_t data);
 
-    // Whole frame into VIDEO::vga.frameBuffer (EndFrame).
+    // Video: rows are rendered on the beam (the tick in draw/drawOpcode, armed by
+    // frameStart from the frame loop, flushed + disarmed by frameEnd in EndFrame);
+    // renderFrame draws the whole frame from the current state (a paused redraw).
+    // The framebuffer byte is PAL_SLOT0 + the SAM colour: the 128 colours live in
+    // hardware slots 16..143 (VIDEO samPaletteFlush), the CLUT is applied per row.
+    static constexpr uint8_t PAL_SLOT0 = 16;
+    void frameStart();
+    void frameEnd();
     void renderFrame();
 
     // Disk launch (F5 / Web catalog): mount `path` in drive 1, switch to the SAM if

@@ -15741,6 +15741,13 @@ PSRAM ≥ 1 MB + `FlashRoms::romsUsable()`), romsets `R_SAM256/512/512_1M/2M/4M`
   auto-start = 200 #FE reads from one PC (no Play at F5 "R" on SAM); SAM mouse (9-nibble
   buffer on #FFFE, SimCoupe Mouse.cpp); SAMVox #7C-#7F into the Covox buffers. Details in
   `docs/sam-coupe-plan.md` §9.
+- **Rows on the beam + CLUT per row (2026-10-22, hw-confirmed DVp2w: the ROM 3.0 boot screen's rainbow bars, drawn by the line INT + CLUT per line, were a black screen before; `debug/DVp2w-sam-raster-1.1.0`)**:
+  the fb byte is `Sam::PAL_SLOT0 (16) + SAM colour`, the 128 colours sit in hardware slots
+  16..143 for the session (`samPaletteFlush`), the CLUT is applied when a row is rendered —
+  `rowEndT = (ln+1)*384-4`, the tick in `Sam::draw/drawOpcode`, armed by `Sam::frameStart()`
+  (samFrameLoop, after the tstates wrap), flushed + disarmed by `Sam::frameEnd()` (EndFrame).
+  Line-INT splits of VMPR/border/SOFF/CLUT render per row; mid-row changes take the whole row;
+  mode 3's pair palette is decided once per frame. Details in the plan §9.
 - **Fast tape load (2026-10-22, hw-confirmed DVp2w the same day — owner: fast load works, and so does the ZIP-named .dsk launch below; `debug/DVp2w-sam-tape-1.1.0`)**: `Sam::tapeTrap()`
   = SimCoupe's `LoadTrap` on the ROM 3.0 loader — `check_trdos` sees the RET into `#E678`
   (LDSTRT), the block comes from `Tape::flashBlockOpen/Read/Done` (new block-level API: TAP,

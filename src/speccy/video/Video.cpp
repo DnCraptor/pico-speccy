@@ -2256,13 +2256,20 @@ uint8_t VIDEO::paletteGen = 0;
 // SAM Coupe: the 16 CLUT entries own hardware slots 0..15 (the renderer writes
 // CLUT indices). Called from applyPalette (every palette rebuild) and from
 // EndFrame when the guest wrote #F8.
+// The SAM's 128 palette colours in hardware slots PAL_SLOT0..+127 (16..143: below
+// the UI block and the HDMI island words). The CLUT itself is applied per row by
+// the renderer, so this runs only when the slots were rewritten (Reset, applyPalette,
+// leaving the mode-3 pair driver). Slots 0..15 keep the ZX colours for the overlays.
 static void samPaletteFlush() {
     Sam::clutDirty = false;
     if (VIDEO::sam_pair_live) return;   // pair tables own the slots; samPairSync re-pushes
-    for (int i = 0; i < 16; i++) {
-        const uint32_t c = snapTransform(crtTransform(Sam::colourRgb(Sam::clut[i])));
-        graphics_set_palette(i, c);
-        vga_set_palette_entry_solid(i, c);
+    for (int i = 0; i < 128; i++) {
+        const uint32_t c = snapTransform(crtTransform(Sam::colourRgb((uint8_t)i)));
+        const uint8_t slot = (uint8_t)(Sam::PAL_SLOT0 + i);
+        graphics_set_palette(slot, c);
+        // Arbitrary colours, not the flat ZX 16: the dithered VGA entry
+        // graphics_set_palette wrote is right unless the user asked for solid.
+        if (!Config::vga_dither) vga_set_palette_entry_solid(slot, c);
     }
 }
 
@@ -4970,7 +4977,7 @@ bool VIDEO::gigascreenModeIncompatible() {
         // slots 17..219 (its RGB333 lattice) — the blend LUT's 17..136 landed
         // on top of it and broke the Next's colours.
         || Config::arch == A_NEXT
-        // SAM Coupe: its own whole-frame renderer (Sam::renderFrame), no prev-FB.
+        // SAM Coupe: its own per-row renderer (Sam::renderRow), no prev-FB.
         || Config::arch == A_SAM;
 }
 
@@ -5815,7 +5822,7 @@ void VIDEO::Reset() {
     }
 
     if (Z80Ops::isSam) {
-        // SAM Coupe: the whole frame is drawn at EndFrame (Sam::renderFrame);
+        // SAM Coupe: rows are rendered on the beam from Sam::draw (Sam::frameStart/End);
         // the beam machinery idles.
         gigascreen_enabled = false;
         // The raster: 384 T a line. haltAdvanceTo steps by it, and no other branch
@@ -9211,10 +9218,10 @@ IRAM_ATTR void VIDEO::EndFrame() {
     Debug::pumpUart();
 
     if (Z80Ops::isSam) {
-        if (Sam::clutDirty) samPaletteFlush();
+        if (Sam::clutDirty) samPaletteFlush();   // a slot rewrite (Reset), never a CLUT write
         SamFdc::frameEnd();
         Sam::frameTick();
-        Sam::renderFrame();
+        Sam::frameEnd();                         // rows the beam missed; disarm the row tick
         gigascreenModeGate();
         LED::decay();
         if (Config::ledIndicators) LED::draw();
