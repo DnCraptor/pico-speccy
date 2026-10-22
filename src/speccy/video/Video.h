@@ -539,6 +539,12 @@ public:
   static bool bl_pair_live;
   static void blPairRefresh();      // the ZX palette changed: re-push the pair tables
   static void blPairForceOff();     // machine reset: blRecalc re-arms it at EndFrame
+  // SAM Coupe mode 3 (512 px, 4 colours) through the packed-pair driver: pair
+  // index 0..3 = the four mode-3 CLUT colours, 4 = border, 5..15 = the ZX palette
+  // (for overlays). samPairSync(want, rgb5) arms/refreshes it, true while live.
+  static bool sam_pair_live;
+  static bool samPairSync(bool want, const uint32_t rgb5[5]);
+  static void samPairForceOff();
   // A menu or dialog is about to draw over the framebuffer: drop the scanout
   // line map until the next EndFrame, so what it draws is shown row for row.
   static void blVmapSuspend();

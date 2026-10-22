@@ -335,6 +335,8 @@ static __attribute__((noinline)) void profi_ds80_driver_set(bool active, const u
 // installs its own palette instead, which makes the choice meaningless, so the option
 // and Config::profi_ds80_std_palette_osd were removed; the classic OSD keeps the
 // running app's palette, which was that toggle's default.)
+static uint32_t* s_samPairPal = nullptr;   // SAM mode 3 pair palette, 16 words of heap (samPairSync)
+static void samPairPush();
 static uint32_t profi_palette_ui_saved[16];
 static bool     profi_palette_ui_saved_valid = false;
 
@@ -374,6 +376,7 @@ void VIDEO::restoreUiDS80Palette() {
         // guest palette port) — hand the guest ITS colours back, not Profi's.
         if (timex_hires_live) timexHiresRefresh();
         else if (bl_pair_live) blPairRefresh();
+        else if (sam_pair_live) samPairPush();
         else profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
         rebuildDS80ColorLut();
     }
@@ -421,7 +424,7 @@ void VIDEO::profiPaletteApplyPending() {
     // Timex hi-res raises profi_ds80_active but is NOT driven by the Profi
     // palette port — refreshing from profi_palette_live here would replace the
     // machine's own ZX palette with Profi's.
-    if (timex_hires_live || bl_pair_live) { profi_palette_dirty = false; return; }
+    if (timex_hires_live || bl_pair_live || sam_pair_live) { profi_palette_dirty = false; return; }
     if (profi_palette_dirty && profi_ds80_active
         && !profi_ds80_activate_pending && !profi_ds80_deactivate_pending) {
         profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
@@ -2254,6 +2257,7 @@ uint8_t VIDEO::paletteGen = 0;
 // EndFrame when the guest wrote #F8.
 static void samPaletteFlush() {
     Sam::clutDirty = false;
+    if (VIDEO::sam_pair_live) return;   // pair tables own the slots; samPairSync re-pushes
     for (int i = 0; i < 16; i++) {
         const uint32_t c = snapTransform(crtTransform(Sam::colourRgb(Sam::clut[i])));
         graphics_set_palette(i, c);
@@ -2321,6 +2325,7 @@ void VIDEO::applyPalette() {
     // the driver is running and what has to come back.
     if (timex_hires_live && !profi_palette_ui_saved_valid) timexHiresRefresh();
     else if (bl_pair_live && !profi_palette_ui_saved_valid) blPairRefresh();
+    else if (sam_pair_live && !profi_palette_ui_saved_valid) samPairPush();
     else if (profi_ds80_active) {
         profi_ds80_driver_set(true, profi_palette_live, &profi_pair_lookup[0][0]);
         profi_palette_dirty = false;
@@ -3988,7 +3993,8 @@ void VIDEO::getBmpPalette(uint8_t* out) {
         // into profi_palette_live, which is then what the driver is running.
         const bool tmx = (timex_hires_live || bl_pair_live) && !profi_palette_ui_saved_valid;
         for (int i = 0; i < 16; i++) {
-            uint32_t src = tmx ? paletteTransform(spectrum_rgb888[i]) : profi_palette_live[i];
+            uint32_t src = (sam_pair_live && s_samPairPal && !profi_palette_ui_saved_valid) ? s_samPairPal[i]
+                         : tmx ? paletteTransform(spectrum_rgb888[i]) : profi_palette_live[i];
             uint32_t c = Config::crt_filter ? crtTransform(src) : src;
             out[i * 4 + 0] = c & 0xFF;
             out[i * 4 + 1] = (c >> 8) & 0xFF;
@@ -5680,6 +5686,7 @@ void VIDEO::Reset() {
     timexHiresForceOff();
     if (NEXTVID::p80Live) NEXTVID::pairForceOff();   // Next 640-wide frames: re-armed by pairPoll
     blPairForceOff();   // borderless pair scaler: same rule, re-armed at EndFrame
+    samPairForceOff();  // SAM mode 3: re-armed by the next EndFrame
 
     if (Config::arch == A_PROFI || g_scorp_gmx || Config::arch == A_TSCONF || Config::arch == A_ATM) {
         // Build pair_lookup every reset (palette may change). Cheap — 16×16 = 256 iters.
@@ -7208,6 +7215,57 @@ void VIDEO::blPairRefresh() {
 // A machine reset rebuilds the standard driver tables under us: leave pair mode
 // now, blRecalc re-arms it at the next EndFrame.
 void VIDEO::blPairForceOff() { blPairOff(); }
+
+// ── SAM Coupe mode 3 through the pair driver ─────────────────────────────────
+bool VIDEO::sam_pair_live = false;
+static bool     s_samPairRefused = false;
+
+static void samPairPush() {
+    profi_ds80_driver_set(true, s_samPairPal, &VIDEO::profi_pair_lookup[0][0]);
+}
+
+static void samPairOff() {
+    if (!VIDEO::sam_pair_live) return;
+    VIDEO::sam_pair_live = false;
+    profi_ds80_driver_set(false, nullptr, nullptr);
+    Graphics8BitPalette::ds80_active = false;
+    samPaletteFlush();          // slots 0..15 back to the CLUT for modes 1/2/4
+    Debug::log("[SAM] mode 3: 512 px pair mode off");
+}
+
+bool VIDEO::samPairSync(bool want, const uint32_t rgb5[5]) {
+    if (!want) { s_samPairRefused = false; samPairOff(); return false; }
+    if (s_samPairRefused) return false;
+    uint32_t pal[16];
+    for (int i = 0; i < 5; i++) pal[i] = rgb5[i] & 0x00FFFFFF;
+    for (int i = 5; i < 16; i++) pal[i] = paletteTransform(spectrum_rgb888[i]) & 0x00FFFFFF;
+    if (sam_pair_live) {
+        // A full-screen menu owns the pair palette: leave it alone until it hands back.
+        if (profi_palette_ui_saved_valid) return true;
+        if (memcmp(pal, s_samPairPal, sizeof(pal)) == 0) return true;
+        memcpy(s_samPairPal, pal, sizeof(pal));
+        samPairPush();
+        return true;
+    }
+    if (profi_ds80_active) { s_samPairRefused = true; return false; }   // another pair owner
+    if (!s_samPairPal) s_samPairPal = (uint32_t*)tryMalloc(16 * sizeof(uint32_t));
+    if (!s_samPairPal) { s_samPairRefused = true; return false; }
+    memcpy(s_samPairPal, pal, sizeof(pal));
+    init_profi_pair_lookup();
+    samPairPush();
+    if (!profi_ds80_active) {
+        s_samPairRefused = true;
+        Debug::log("[SAM] mode 3: no packed-pair driver, 256 px fallback");
+        return false;
+    }
+    rebuildDS80ColorLut();
+    Graphics8BitPalette::ds80_active = true;
+    sam_pair_live = true;
+    Debug::log("[SAM] mode 3: 512 px pair mode on");
+    return true;
+}
+
+void VIDEO::samPairForceOff() { s_samPairRefused = false; samPairOff(); }
 
 void VIDEO::blSetCarve(int id, int x0, int y0, int x1, int y1) {
     if (id < 0 || id >= BL_CARVE_N) return;

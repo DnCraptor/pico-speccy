@@ -793,6 +793,7 @@ IRAM_ATTR void CPU::loop() {
     // is instantiated twice (the Profi "compile twice" shape), so the RAM-resident
     // loop carries none of the Next code (2026-10-10).
     if (Z80Ops::isNext) { nextFrameLoop(_loop_t0, pbbp, nbp, zifi_pump_due); return; }
+    if (__builtin_expect(Z80Ops::isSam, 0)) { samFrameLoop(_loop_t0, pbbp, nbp, zifi_pump_due); return; }
     frameRest<false>(_loop_t0, pbbp, nbp, zifi_pump_due);
 }
 
@@ -952,6 +953,54 @@ __attribute__((always_inline)) inline void CPU::frameRest(uint64_t _loop_t0, boo
     }
     tstates -= statesInFrame;
 
+    CPU::prev_tstates = tstates;
+}
+
+// SAM Coupe frame: two INT sources, the frame window at T 0 and the line window
+// (STATUS bit 0, Sam::lineIntStart). Unchecked slices up to the next window,
+// checked execute() while a window is up — the Stage D shape without an EI hook:
+// a window is only 128 T, so it is simply run checked whatever IFF1 says, and an
+// EI after it closed misses it, as on the chip. FLASH: SAM is butter-PSRAM only
+// and its frame costs the RAM-resident loop one test.
+__attribute__((noinline)) void CPU::samFrameLoop(uint64_t _loop_t0, bool pbbp, int nbp, uint32_t zifi_pump_due) {
+    (void)zifi_pump_due;
+    bool halted = false;
+    while (tstates < statesInFrame) {
+        const uint32_t t = tstates;
+        const uint32_t ls = Sam::lineIntStart();
+        const uint32_t tail = statesInFrame - IntEnd;       // the next frame's INT, by wrap
+        if (t < (uint32_t)IntEnd || t >= tail || (t >= ls && t < ls + Sam::INT_LEN)) {
+            Z80::execute();
+            BREAKPOINTS
+            continue;
+        }
+        uint32_t next = tail;
+        if (ls > t && ls < next) next = ls;
+        if (Z80::isHalted()) {
+            if (!halted) { tstates_active = tstates; halted = true; }
+            haltAdvanceTo(next);
+        } else {
+            stFrame = next;
+            Z80::exec_nocheck();
+            if (stFrame == 0) {
+                if (!halted) { tstates_active = tstates; halted = true; }
+                haltAdvanceTo(next);
+            }
+        }
+        BREAKPOINTS
+    }
+    {
+        uint64_t _ef_t0 = time_us_64();
+        VIDEO::EndFrame();
+        endframe_us = (uint32_t)(time_us_64() - _ef_t0);
+    }
+    CPU::tstates_diff += CPU::tstates - CPU::prev_tstates;
+    CPU::tstates_diff = CPU::tstates_diff % WD177XSTEPSTATES;
+    cpu_frame_us += (uint32_t)(time_us_64() - _loop_t0);
+    global_tstates += statesInFrame;
+    tstates_frame = tstates;
+    if (!halted) tstates_active = tstates_frame;
+    tstates -= statesInFrame;
     CPU::prev_tstates = tstates;
 }
 
@@ -1860,6 +1909,8 @@ IRAM_ATTR bool Z80Ops::isActiveINT(void) {
     // gates the line itself, so the window still opens and closes on time; the CPU
     // simply never sees it. Cleared on reset with the rest of the DEC register.
     if (__builtin_expect(VIDEO::timex_int_inhibit, 0)) return false;
+    // SAM Coupe: frame window OR the line window (STATUS bits 3 / 0); flash.
+    if (__builtin_expect(Z80Ops::isSam, 0)) return Sam::intLine();
     // Adding latetiming shifts the check 1T later for Late mode.
     // At end of frame (tstates=statesInFrame-1), tmp wraps to 0, firing
     // the Late INT via straddle — this is the correct hardware behaviour.

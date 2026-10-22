@@ -22,6 +22,7 @@ static Z80 cpu;
 static long T = 0; static int frame = 0;
 static int plog = 0;
 static int intPages = 32, extPages = 0;
+static uint8_t line = 0xFF;
 static uint8_t lmpr, hmpr, vmpr, lepr, hepr, border, clut[16], attr;
 static uint8_t keys[9];
 static const long FRAME = 119808, INTLEN = 128;
@@ -47,8 +48,17 @@ static uint8_t io_in(void* c, uint16_t port) {
     uint8_t lo = port & 0xFF, hi = port >> 8, v = 0xFF;
     long t = T + (long)cpu.cycles;
     switch (lo) {
-    case 0xFE: v = (hi == 0xFF ? (keys[8] & 0x1F) : rows(hi, 0x1F)) | (border & 0x80) | 0x40 | 0x20; break;
-    case 0xF9: v = rows(hi, 0xE0) | ((t < INTLEN) ? 0x17 : 0x1F); break;
+    case 0xFE: v = (hi == 0xFF ? (keys[8] & 0x1F) : rows(hi, 0x1F)) | (border & 0x80) | 0x40; break;   // SPEN (bit 5) = 0, as SimCoupe
+    case 0xF8: if ((port & 0x1FF) == 0x1F8) {   // HPEN: screen line under the beam, 192 outside
+                   long ln = t / 384, lc = t % 384;
+                   v = (ln >= 68 && ln < 260 && (ln != 68 || lc >= 128)) ? (uint8_t)(ln - 68) : 192;
+               } else v = border & 1;
+               break;
+    case 0xF9: {
+        long ls = line < 192 ? ((long)line + 68) * 384 : -1000000;
+        v = rows(hi, 0xE0) | ((t < INTLEN) ? 0x17 : 0x1F);
+        if (t >= ls && t < ls + INTLEN) v &= ~1;
+        break; }
     case 0xFA: v = lmpr; break; case 0xFB: v = hmpr; break; case 0xFC: v = 0x80 | vmpr; break;
     case 0xFF: v = attr; break;
     }
@@ -60,6 +70,7 @@ static void io_out(void* c, uint16_t port, uint8_t v) {
     logp("OUT", port, v);
     switch (lo) {
     case 0xFE: border = v; break;
+    case 0xF9: line = v; break;
     case 0xFA: lmpr = v; remap(); break;
     case 0xFB: hmpr = v; remap(); break;
     case 0xFC: vmpr = v; break;
@@ -110,7 +121,14 @@ int main(int argc, char** argv) {
         if (ks) { char* e = ks; while (*e) { int fr = strtol(e, &e, 10); e++; int r = strtol(e, &e, 10); e++; int b = strtol(e, &e, 10);
                   if (frame >= fr && frame < fr + 5) keys[r] &= ~(1 << b); if (*e == ',') e++; else break; } }
         z80_int(&cpu, 1); T += (long)z80_run(&cpu, INTLEN); cpu.cycles = 0; z80_int(&cpu, 0);
-        T += (long)z80_run(&cpu, (zusize)(FRAME - T)); cpu.cycles = 0;
+        // Line INT (SimCoupe): LINE < 192 -> 128 T at (LINE + 68) * 384. LINE is read
+        // per slice, so a write mid-frame moves the window from the next slice on.
+        while (T < FRAME) {
+            long ls = line < 192 ? ((long)line + 68) * 384 : FRAME;
+            if (T < ls) { T += (long)z80_run(&cpu, (zusize)((ls < FRAME ? ls : FRAME) - T)); cpu.cycles = 0; continue; }
+            if (T < ls + INTLEN && ls < FRAME) { z80_int(&cpu, 1); T += (long)z80_run(&cpu, (zusize)(ls + INTLEN - T)); cpu.cycles = 0; z80_int(&cpu, 0); continue; }
+            T += (long)z80_run(&cpu, (zusize)(FRAME - T)); cpu.cycles = 0;
+        }
         T -= FRAME; frame++;
         if (frame % 25 == 0) printf("F %d pc=%04X sp=%04X lmpr=%02X hmpr=%02X vmpr=%02X border=%02X iff=%d\n", frame,
                cpu.pc.uint16_value, cpu.sp.uint16_value, lmpr, hmpr, vmpr, border, cpu.iff1);

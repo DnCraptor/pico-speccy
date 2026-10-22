@@ -15,7 +15,8 @@
 //
 // Ports (low byte): #FE keyboard/border/beeper, #F9 status/line, #FA LMPR, #FB HMPR,
 // #FC VMPR, #F8 CLUT (index = A11..A8), #FF/#1FF SAA1099, #80 LEPR, #81 HEPR, #1F
-// Kempston. Not yet: line INT, contention, WD1772 drives, mouse, MIDI, clock, DACs.
+// Kempston. Line INT: STATUS bit 0, for LINE < 192 at T = (LINE + 68) * 384, 128 T
+// long (SimCoupe Events.cpp / SAMIO.cpp LINE_PORT). Not yet: contention, WD1772 drives, mouse, MIDI, clock, DACs.
 #pragma once
 
 #include <stdint.h>
@@ -38,6 +39,12 @@ namespace Sam {
 
     // Whole frame into VIDEO::vga.frameBuffer (EndFrame).
     void renderFrame();
+
+    // Line interrupt window (SimCoupe: TOP_BORDER_LINES 68, CPU_CYCLES_INT_ACTIVE 128).
+    static constexpr uint32_t T_PER_LINE = 384, TOP_LINES = 68, INT_LEN = 128;
+    inline uint32_t lineIntStart() { return line < 192 ? ((uint32_t)line + TOP_LINES) * T_PER_LINE : 0xFFFFFFFFu; }
+    bool intLine();             // Z80Ops::isActiveINT: frame OR line window (flash)
+    inline bool lineIntUp(uint32_t t) { const uint32_t s = lineIntStart(); return t >= s && t < s + INT_LEN; }
     // 7-bit SAM colour -> RGB888 (SimCoupe IO::Palette, full intensity).
     uint32_t colourRgb(uint8_t v);
 }
