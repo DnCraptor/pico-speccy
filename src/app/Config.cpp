@@ -16,6 +16,7 @@
 #include "ESPectrum.h"
 #include "speccy/devices/disk/MB02.h"
 #include "speccy/machines/Plus3/Plus3Fdc.h"
+#include "speccy/machines/Sam/SamFdc.h"
 #include "drivers/input/fabutils.h"
 #include "messages.h"
 #include "ui/OSDMain.h"
@@ -184,6 +185,8 @@ uint8_t  Config::mb02SoundLed = 0; // 0=Off, 1=Led, 2=Sound, 3=Sound+Led
 // image is not written to until the user says so.
 bool     Config::p3WP[2] = { true, true };
 string   Config::p3DiskFile[2] = { "", "" };
+bool     Config::samWP[2] = { false, false };
+string   Config::samDiskFile[2] = { "", "" };
 bool     Config::p3_speedlock = true;
 bool     Config::p3_fastdisk = false;
 bool     Config::zcontroller = true;
@@ -1120,6 +1123,17 @@ void Config::loadDiskMounts() {
                         Plus3Fdc::mount(i, fn);
                 }
             }
+            for (size_t i = 0; i < 2; ++i) {
+                char prefix[16];
+                snprintf(prefix, sizeof(prefix), "samd%u.file=", (unsigned)i);
+                const size_t plen = strlen(prefix);
+                if (s.length() >= plen && s.compare(0, plen, prefix) == 0) {
+                    std::string fn = s.substr(plen);
+                    samDiskFile[i] = fn;
+                    if (!fn.empty() && Config::arch == A_SAM && FileUtils::waitVolumeReady(fn))
+                        SamFdc::mount(i, fn);
+                }
+            }
             s.clear();
         } else {
             s += c;
@@ -1566,6 +1580,12 @@ void Config::load() {
             snprintf(k, sizeof(k), "p3d%d.file", i);
             nvs_get_str(k, p3DiskFile[i], sts);
         }
+        for (int i = 0; i < 2; i++) {
+            char k[16]; snprintf(k, sizeof(k), "samd%d.wp", i);
+            nvs_get_b(k, samWP[i], sts);
+            snprintf(k, sizeof(k), "samd%d.file", i);
+            nvs_get_str(k, samDiskFile[i], sts);
+        }
         nvs_get_b("p3_speedlock", p3_speedlock, sts);
         nvs_get_b("p3_fastdisk", p3_fastdisk, sts);
         nvs_get_b("zcontroller", zcontroller, sts);
@@ -1975,6 +1995,10 @@ void Config::writeKeys(NvsWriter& buf) {
         char k[12]; snprintf(k, sizeof(k), "p3d%d.wp", i);
         nvs_set_str(buf, k, p3WP[i] ? "true" : "false");
     }
+    for (int i = 0; i < 2; i++) {
+        char k[12]; snprintf(k, sizeof(k), "samd%d.wp", i);
+        nvs_set_str(buf, k, samWP[i] ? "true" : "false");
+    }
     nvs_set_str(buf,"p3_speedlock", p3_speedlock ? "true" : "false");
     nvs_set_str(buf,"p3_fastdisk", p3_fastdisk ? "true" : "false");
     nvs_set_str(buf,"zcontroller", zcontroller ? "true" : "false");
@@ -2019,6 +2043,10 @@ void Config::writeKeys(NvsWriter& buf) {
                 if (Config::isPlus3())
                     p3DiskFile[i] = Plus3Fdc::fname(i);
                 persistFile("p3d" + to_string(i) + ".file", p3DiskFile[i]);
+                // SAM Coupe drives, the same rule.
+                if (Config::arch == A_SAM)
+                    samDiskFile[i] = SamFdc::fname(i);
+                persistFile("samd" + to_string(i) + ".file", samDiskFile[i]);
             }
         }
     }

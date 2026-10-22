@@ -180,6 +180,8 @@ extern "C" const uint32_t profi_default_palette16[16];
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/devices/storage/IDE.h"
 #include "speccy/devices/disk/MB02.h"
+#include "speccy/machines/Sam/Sam.h"
+#include "speccy/machines/Sam/SamFdc.h"
 #include "speccy/machines/Plus3/Plus3Fdc.h"
 #include "speccy/devices/disk/DiskSlots.h"
 #include "app/MachineSwitch.h"
@@ -2969,6 +2971,18 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                             || ESPectrum::fdd.disk[0]->IsTD0File
                             ;
                     Config::save();
+                }
+                else if (FileUtils::ifaceForPath(fname) == IFACE_SAM) {
+                    // A SAM Coupe disk: Enter mounts it in drive 1 and boots it,
+                    // F5 opens the slot picker.
+                    if (!fromZip) FileUtils::DSK_Path = FileUtils::ALL_Path;
+                    if (forcePopup) {
+                        nm::runDiskSlots(IFACE_SAM, fname.c_str());
+                        forcePopup = false;
+                        goto f5_retry;
+                    }
+                    if (!Sam::launchDisk(fname))
+                        OSD::osdCenteredMsg(MSG_NET_UNSUPPORTED, LEVEL_WARN, 2200);
                 }
                 else if (FileUtils::ifaceForExt(ext) == IFACE_PLUS3) {
                     // A +3 disk. The image is only meaningful on a +3, so mounting one

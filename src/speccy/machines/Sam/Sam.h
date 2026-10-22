@@ -21,6 +21,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <string>
 
 namespace Sam {
     extern uint8_t lmpr, hmpr, vmpr, lepr, hepr, border, line, status, attr;
@@ -40,6 +41,14 @@ namespace Sam {
 
     // Whole frame into VIDEO::vga.frameBuffer (EndFrame).
     void renderFrame();
+
+    // Disk launch (F5 / Web catalog): mount `path` in drive 1, switch to the SAM if
+    // needed, reset and type BOOT + Enter once the ROM's interrupt handler is up.
+    bool launchDisk(const std::string& path);
+    void bootArm();                  // type BOOT after the next reset
+    void bootArmAcrossReboot();      // ...or after the reboot a machine switch may do
+    void bootResume();               // setup(): pick a pending request up after a reboot
+    void frameTick();                // EndFrame: drives the typing
 
     // VIDEO::Draw / Draw_Opcode while SAM runs: contended = the access is to
     // internal RAM (ramContended, set by remap). Wait states at the access START.

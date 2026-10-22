@@ -245,7 +245,8 @@ static const char* typeLabel(const string& lcext) {
     if (lcext == "trd" || lcext == "scl" || lcext == "fdi"
                        || lcext == "udi")                   return "TR-DOS disk";
     if (lcext == "mbd")                                     return "MB-02 disk";
-    if (lcext == "dsk")                                     return "+3 disk";
+    if (lcext == "dsk")                                     return "+3 / SAM disk";
+    if (lcext == "mgt" || lcext == "sad")                   return "SAM Coupe disk";
     if (lcext == "hdd" || lcext == "img") return "Raw disk image";
     if (lcext == "vhd") return "VHD disk image";
     if (lcext == "mmc" || lcext == "hdf")                   return "esxDOS image";
@@ -281,7 +282,7 @@ static bool viewableExt(const string& lcext) {
 // whitespace) — READ.ME, FILE_ID, a readme without an extension.
 static bool infoKnownExt(const string& e) {
     static const char* const kExt[] = { "tap", "tzx", "pzx", "csw", "trd", "scl", "sna", "z80",
-        "szx", "spg", "pss", "rzx", "fdi", "dsk", "udi", "hdf", "pro", "mbd", "td0", "hdd",
+        "szx", "spg", "pss", "rzx", "fdi", "dsk", "mgt", "sad", "udi", "hdf", "pro", "mbd", "td0", "hdd",
         "img", "vhd", "mmc", "zip" };
     for (const char* k : kExt) if (e == k) return true;
     return false;

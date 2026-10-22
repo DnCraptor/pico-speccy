@@ -84,6 +84,8 @@ enum DiskIface {
     // long-standing DISK_DSKFILE / DSK_Path constants, which are the GENERIC disk
     // dialog and have nothing to do with the CPC .dsk container.
     IFACE_PLUS3 = 5,
+    // SAM Coupe (VL1772): .mgt .sad, and a .dsk whose geometry is a SAM disk — Drive 1/2.
+    IFACE_SAM = 6,
 };
 
 class FileUtils
@@ -98,6 +100,8 @@ public:
     static string getLCaseExt(const string& filename);
 
     // Map a lowercase extension (no leading dot) to its disk-interface family.
+    // ifaceForPath() also reads the file: a .dsk is a SAM disk or a +3 one by content.
+    static DiskIface ifaceForPath(const string& path);
     // Returns IFACE_NONE for tape/snapshot/unknown extensions.
     static DiskIface ifaceForExt(const string& lcExt);
 

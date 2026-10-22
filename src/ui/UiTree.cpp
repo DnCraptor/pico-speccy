@@ -1097,6 +1097,12 @@ static bool p_mb02On()  { return Stage::get(SET_MB02) != 0; }
 // machine and cannot be turned off, so they appear whenever a +3 is staged or running.
 // The +3 is the R_P3 romset of the 128K arch, so this keys on the romset (as
 // p_byteActive does).
+// SAM Coupe drive rows: the drives belong to the machine, like the +3's.
+static bool p_samOn() {
+    const int32_t m = Stage::get(SET_MACHINE);
+    if (m >= 0) return (ArchIdx)((m >> 8) & 0xFF) == A_SAM;
+    return Config::arch == A_SAM;
+}
 static bool p_plus3On() {
     const int32_t m = Stage::get(SET_MACHINE);
     if (m >= 0) return isPlus3Romset((RomsetIdx)(m & 0xFF));
@@ -1185,6 +1191,7 @@ static const Node kHardware[] = {
     NM_DYN_EN  (NM_IND TXT_MB02_DRIVES,   slots_buildMb02, slots_keyMb02, p_hasSD, p_mb02On),
     NM_RADIO_EN(NM_IND TXT_MB02_SNDLED,   SET_MB02_LED,   opt_sndled, nullptr, p_mb02On),
     NM_DYN_EN  (TXT_P3_DRIVES,     slots_buildP3, slots_keyP3, p_hasSD, p_plus3On),
+    NM_DYN_EN  (TXT_SAM_DRIVES,    slots_buildSam, slots_keySam, p_hasSD, p_samOn),
     NM_BOOL_EN (NM_IND TXT_P3_FASTDISK,   SET_P3_FASTDISK,  nullptr, p_plus3On),
     NM_BOOL_EN (NM_IND TXT_P3_SPEEDLOCK,  SET_P3_SPEEDLOCK, nullptr, p_plus3On),
     NM_BOOL    (TXT_HW_ZC,         SET_ZCONTROLLER, p_hasSD),
@@ -1859,6 +1866,7 @@ const Node* slotNodeFor(int iface) {
         case IFACE_MB02: return findDyn(kHardware, NM_COUNT(kHardware), slots_buildMb02);
         case IFACE_ESX:  return findDyn(kHardware, NM_COUNT(kHardware), slots_buildEsx);
         case IFACE_PLUS3: return findDyn(kHardware, NM_COUNT(kHardware), slots_buildP3);
+        case IFACE_SAM:   return findDyn(kHardware, NM_COUNT(kHardware), slots_buildSam);
         default:         return nullptr;
     }
 }

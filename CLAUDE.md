@@ -15721,6 +15721,13 @@ PSRAM ≥ 1 MB + `FlashRoms::romsUsable()`), romsets `R_SAM256/512/512_1M/2M/4M`
   (`VIDEO::rowCarves`). HPEN/LPEN (#1F8/#F8) are modelled: ROM 3.0 sets LINE = 0 every
   frame and its line-INT handler polls HPEN until the beam leaves the line — a constant
   there hung boot at D4EF (black screen, hw 2026-10-22). #FE bit 5 (SPEN) reads 0.
+- Disks (2026-10-22, hw-confirmed DVp2w: Rick Dangerous, NoColor, Arkanoid 2 Demo boot from F5;
+  VIDEO::tStatesPerLine = 384 for SAM — it was never set, haltAdvanceTo spun at 0): `Sam/SamFdc` = SimCoupe's VL1772 Drive model, drive 1
+  #E0-#E7 / drive 2 #F0-#F7, MGT/SAD flat + EDSK via DskImage. `.dsk` is a SAM disk by
+  content (`SamFdc::looksSam`, `FileUtils::ifaceForPath`, `IFACE_SAM`). Launch = mount +
+  reset + type Enter (leaves the copyright screen) + BOOT+Enter into the matrix after the ROM's first LINE write (`Sam::launchDisk`,
+  F9 does NOT boot). Host test: `tools/sam_sim.c -DSAM_DISK` links the real SamFdc.cpp +
+  DskImage.cpp over `tools/sam_stub/` (recipe in its header).
 - Contention (2026-10-22, hw-confirmed DVp2w: boots, BASIC, modes): SimCoupe's tables applied at the access start
   through `VIDEO::Draw/Draw_Opcode = Sam::draw/drawOpcode` (internal RAM only; n < 3 =
   addressOnBus, no wait); ASIC ports >= #F8 wait to an 8 T slot. Docs: sam-coupe-plan.md §9.

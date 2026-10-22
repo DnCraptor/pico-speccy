@@ -7,6 +7,15 @@
 //       -o /tmp/sam_sim tools/sam_sim.c external/redcode/Z80_redcode.c
 //   /tmp/sam_sim src/speccy/roms/sam/src/samcoupe30.bin <frames> [portlog lines] [int pages 16|32] [ext pages]
 //
+// With a disk (the FIRMWARE's SamFdc.cpp + DskImage.cpp over stub headers):
+//   gcc -O2 -w -c -Iexternal/redcode -DZ80_STATIC '-DZ80_EXTERNAL_HEADER="Z80_compat.h"' -DSAM_DISK \
+//       -o /tmp/sim.o tools/sam_sim.c
+//   gcc -O2 -w -c -Iexternal/redcode -DZ80_STATIC '-DZ80_EXTERNAL_HEADER="Z80_compat.h"' \
+//       -o /tmp/z80.o external/redcode/Z80_redcode.c
+//   g++ -O2 -Itools/sam_stub -Isrc -o /tmp/sam_sim /tmp/sim.o /tmp/z80.o tools/sam_disk_glue.cpp \
+//       src/speccy/machines/Sam/SamFdc.cpp src/speccy/devices/disk/DskImage.cpp
+//   DISK=game.dsk KEYS=120:2:7 /tmp/sam_sim ...    (2:7 = F9 = BOOT)
+//
 // KEYS="frame:row:bit,..." holds a key (active low) for 5 frames from that frame.
 #define Z80_STATIC
 #define Z80_EXTERNAL_HEADER "Z80_compat.h"
@@ -18,7 +27,12 @@
 static uint8_t rom[2][16384];
 static uint8_t ram[32 + 256][16384];
 static uint8_t ffpage[16384];
-static Z80 cpu;
+#ifdef SAM_DISK
+uint8_t samfdc_in(int d, uint16_t port);
+void samfdc_out(int d, uint16_t port, uint8_t v);
+int samfdc_mount(int d, const char* path);
+void samfdc_frame(void);
+#endif
 static long T = 0; static int frame = 0;
 static int plog = 0;
 static int intPages = 32, extPages = 0;
@@ -27,19 +41,34 @@ static uint8_t lmpr, hmpr, vmpr, lepr, hepr, border, clut[16], attr;
 static uint8_t keys[9];
 static const long FRAME = 119808, INTLEN = 128;
 
-static uint8_t* winp[4]; static int winro[4];
+static uint8_t* winp[4]; static int winro[4], wincont[4];
+static Z80 cpu;
 
-static void mapInt(int w, int pg) { pg &= 31; if (pg >= intPages) { winp[w] = ffpage; winro[w] = 1; } else { winp[w] = ram[pg]; winro[w] = 0; } }
+static void mapInt(int w, int pg) { pg &= 31; if (pg >= intPages) { winp[w] = ffpage; winro[w] = 1; wincont[w] = 0; } else { winp[w] = ram[pg]; winro[w] = 0; wincont[w] = 1; } }
 static void mapExt(int w, int pg) { if (pg >= extPages) { winp[w] = ffpage; winro[w] = 1; } else { winp[w] = ram[32 + pg]; winro[w] = 0; } }
 static void remap(void) {
+    for (int i = 0; i < 4; i++) wincont[i] = 0;
     if (!(lmpr & 0x20)) { winp[0] = rom[0]; winro[0] = 1; } else { mapInt(0, lmpr & 31); if (lmpr & 0x80) winro[0] = 1; }
     mapInt(1, (lmpr + 1) & 31);
     if (hmpr & 0x80) mapExt(2, lepr); else mapInt(2, hmpr & 31);
     if (hmpr & 0x80) mapExt(3, hepr); else if (lmpr & 0x40) { winp[3] = rom[1]; winro[3] = 1; } else mapInt(3, (hmpr + 1) & 31);
 }
-static uint8_t rd(void* c, uint16_t a) { return winp[a >> 14][a & 0x3FFF]; }
-static void wr(void* c, uint16_t a, uint8_t v) { if (!winro[a >> 14]) winp[a >> 14][a & 0x3FFF] = v; }
+static int contend = 0;   // CONT=1: SimCoupe memory contention (approximate: at the callback)
+static uint8_t vmpr_c, border_c;
+static int memwait(long t) {
+    int mask = 3;
+    if (!((border_c & 0x80) && (vmpr_c & 0x40))) {
+        long ln = t / 384, lc = (t + 4) % 384;
+        int screen = ln >= 68 && ln < 260 && lc >= 128;
+        if (screen || (((vmpr_c & 0x60) == 0) && !(lc & 0x40))) mask = 7;
+    }
+    return mask - (int)((t + 2) & mask);
+}
+static void cwait(uint16_t a);
+static uint8_t rd(void* c, uint16_t a) { cwait(a); return winp[a >> 14][a & 0x3FFF]; }
+static void wr(void* c, uint16_t a, uint8_t v) { cwait(a); if (!winro[a >> 14]) winp[a >> 14][a & 0x3FFF] = v; }
 
+static void cwait(uint16_t a) { if (contend && wincont[a >> 14]) cpu.cycles += memwait(T + (long)cpu.cycles); }
 static void logp(const char* k, uint16_t port, uint8_t v) {
     if (plog > 0) { plog--; printf("%s f=%d T=%ld pc=%04X %04X=%02X\n", k, frame, T + (long)cpu.cycles, cpu.pc.uint16_value, port, v); }
 }
@@ -61,6 +90,12 @@ static uint8_t io_in(void* c, uint16_t port) {
         break; }
     case 0xFA: v = lmpr; break; case 0xFB: v = hmpr; break; case 0xFC: v = 0x80 | vmpr; break;
     case 0xFF: v = attr; break;
+#ifdef SAM_DISK
+    default:
+        if ((lo & 0xF8) == 0xE0) v = samfdc_in(0, port);
+        else if ((lo & 0xF8) == 0xF0) v = samfdc_in(1, port);
+        break;
+#endif
     }
     logp("IN ", port, v);
     return v;
@@ -69,14 +104,20 @@ static void io_out(void* c, uint16_t port, uint8_t v) {
     uint8_t lo = port & 0xFF;
     logp("OUT", port, v);
     switch (lo) {
-    case 0xFE: border = v; break;
+    case 0xFE: border = v; border_c = v; break;
     case 0xF9: line = v; break;
     case 0xFA: lmpr = v; remap(); break;
     case 0xFB: hmpr = v; remap(); break;
-    case 0xFC: vmpr = v; break;
+    case 0xFC: vmpr = v; vmpr_c = v; break;
     case 0xF8: clut[(port >> 8) & 15] = v & 0x7F; break;
     case 0x80: lepr = v; remap(); break;
     case 0x81: hepr = v; remap(); break;
+#ifdef SAM_DISK
+    default:
+        if ((lo & 0xF8) == 0xE0) samfdc_out(0, port, v);
+        else if ((lo & 0xF8) == 0xF0) samfdc_out(1, port, v);
+        break;
+#endif
     }
 }
 static void rgb(uint8_t i, uint8_t* o) {
@@ -116,6 +157,10 @@ int main(int argc, char** argv) {
     cpu.context = NULL;
     z80_power(&cpu, 1); z80_instant_reset(&cpu);
     char* ks = getenv("KEYS");
+    contend = getenv("CONT") != NULL;
+#ifdef SAM_DISK
+    if (getenv("DISK") && !samfdc_mount(0, getenv("DISK"))) { fprintf(stderr, "mount failed\n"); return 1; }
+#endif
     for (; frame < nframes;) {
         memset(keys, 0xFF, sizeof keys);
         if (ks) { char* e = ks; while (*e) { int fr = strtol(e, &e, 10); e++; int r = strtol(e, &e, 10); e++; int b = strtol(e, &e, 10);
@@ -130,9 +175,15 @@ int main(int argc, char** argv) {
             T += (long)z80_run(&cpu, (zusize)(FRAME - T)); cpu.cycles = 0;
         }
         T -= FRAME; frame++;
+#ifdef SAM_DISK
+        samfdc_frame();
+#endif
         if (frame % 25 == 0) printf("F %d pc=%04X sp=%04X lmpr=%02X hmpr=%02X vmpr=%02X border=%02X iff=%d\n", frame,
                cpu.pc.uint16_value, cpu.sp.uint16_value, lmpr, hmpr, vmpr, border, cpu.iff1);
     }
     dump();
+    if (getenv("DUMPPG")) {   // DUMPPG=n: raw 16K of internal page n to sam_page.bin
+        FILE* o = fopen("sam_page.bin", "wb"); fwrite(ram[atoi(getenv("DUMPPG")) & 31], 1, 16384, o); fclose(o);
+    }
     return 0;
 }

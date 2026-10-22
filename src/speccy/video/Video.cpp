@@ -39,6 +39,7 @@ visit https://zxespectrum.speccy.org/contacto
 #endif
 #include "Video.h"
 #include "speccy/machines/Sam/Sam.h"
+#include "speccy/machines/Sam/SamFdc.h"
 #include "app/PerfScope.h"
 #include "speccy/devices/storage/DivMMC.h"
 #include <math.h>       // powf() — CRT filter gamma curve (cold path, init only)
@@ -5817,6 +5818,10 @@ void VIDEO::Reset() {
         // SAM Coupe: the whole frame is drawn at EndFrame (Sam::renderFrame);
         // the beam machinery idles.
         gigascreen_enabled = false;
+        // The raster: 384 T a line. haltAdvanceTo steps by it, and no other branch
+        // above sets it for SAM — after a cold boot straight into SAM it was 0 and the
+        // first HALT outside an INT window spun for ever (Arkanoid 2 Demo, hw 2026-10-22).
+        tStatesPerLine = Sam::T_PER_LINE;
         // Draw only counts T-states (+ the contention wait, Sam::draw).
         Draw = &Sam::draw;
         Draw_Opcode = &Sam::drawOpcode;
@@ -9207,6 +9212,8 @@ IRAM_ATTR void VIDEO::EndFrame() {
 
     if (Z80Ops::isSam) {
         if (Sam::clutDirty) samPaletteFlush();
+        SamFdc::frameEnd();
+        Sam::frameTick();
         Sam::renderFrame();
         gigascreenModeGate();
         LED::decay();

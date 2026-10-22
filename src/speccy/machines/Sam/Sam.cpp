@@ -5,6 +5,7 @@
 // keep one predicted-not-taken test that sends a SAM access here.
 
 #include "Sam.h"
+#include "SamFdc.h"
 
 #include <string.h>
 
@@ -21,6 +22,10 @@
 #include "speccy/devices/sound/SAASound.h"
 #include "ui/LEDIndicators.h"
 #include "speccy/roms/sam/sam_roms.h"
+#include "speccy/devices/disk/DiskSlots.h"
+#include "app/MachineSwitch.h"
+#include "hardware/structs/watchdog.h"
+#include "hardware/watchdog.h"
 
 namespace Sam {
 
@@ -36,7 +41,10 @@ static uint32_t       s_intPages = 32;
 static uint32_t       s_extPages = 0;
 static uint8_t        s_ro = 0;           // windows mapped read-only (ROM, absent memory, LMPR D7)
 static uint8_t        s_cont = 0;         // windows showing internal RAM (contended)
-static uint8_t        s_hpen = 192, s_lpen = 0;  // last HPEN/LPEN (held while the screen is off)
+static uint8_t        s_inj[9] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // auto-typed keys (active low)
+static uint8_t        s_hpen = 192, s_lpen = 0;
+static bool           s_lineSeen = false;  // a LINE write since reset (bootTick waits for it)
+static int16_t        s_boot = -1;         // auto-BOOT: -1 off, else frames since the ROM came up  // last HPEN/LPEN (held while the screen is off)
 
 static constexpr uint8_t LMPR_PAGE = 0x1F, LMPR_ROM0_OFF = 0x20, LMPR_ROM1 = 0x40, LMPR_WPROT = 0x80;
 static constexpr uint8_t HMPR_PAGE = 0x1F, HMPR_MCNTRL = 0x80;
@@ -116,11 +124,77 @@ void reset() {
     line = 0xFF;
     status = 0xFF;
     s_hpen = 192; s_lpen = 0;
+    s_lineSeen = false;
+    memset(s_inj, 0xFF, sizeof(s_inj));
     memset(clut, 0, sizeof(clut));
     clutDirty = true;
+    SamFdc::reset();
     remap();
     Debug::log("[SAM] reset: %uK internal + %u MB external", (unsigned)(s_intPages * 16),
                (unsigned)(s_extPages / 64));
+}
+
+// ---------------------------------------------------------------------------
+// Disk launch and auto-BOOT
+//
+// ROM 3.0 boots a disk on BOOT + Enter (SimCoupe's own autoboot types exactly
+// that; F9 at the copyright screen did nothing in tools/sam_sim). The keys go
+// straight into the matrix the ROM scans (s_inj), held 5 frames, 10 apart,
+// starting 20 frames after the ROM's frame-INT handler first writes LINE — the
+// RAM test before it takes longer with external memory, so no fixed delay.
+
+static constexpr uint32_t BOOT_SCRATCH = 1;             // shares ESPectrum's P3BT register
+static constexpr uint32_t BOOT_TAG = 0x53414D42u;       // 'SAMB'
+
+struct BootKey { uint8_t row, bit; };
+// The first key only leaves the copyright screen and is swallowed (hw 2026-10-22:
+// "OOT" got typed), so an Enter goes first — harmless if the screen is already gone.
+static const BootKey kBootKeys[] = { {6, 0}, {7, 4}, {5, 1}, {5, 1}, {2, 4}, {6, 0} };   // Enter B O O T Enter
+static constexpr int BOOT_START = 20, BOOT_STEP = 15, BOOT_HOLD = 5;
+
+void bootArm() {
+    watchdog_hw->scratch[BOOT_SCRATCH] = 0;
+    s_boot = 0;
+    memset(s_inj, 0xFF, sizeof(s_inj));
+}
+
+void bootArmAcrossReboot() { watchdog_hw->scratch[BOOT_SCRATCH] = BOOT_TAG; }
+
+void bootResume() {
+    if (watchdog_hw->scratch[BOOT_SCRATCH] != BOOT_TAG) return;
+    watchdog_hw->scratch[BOOT_SCRATCH] = 0;
+    if (watchdog_caused_reboot() && Config::arch == A_SAM && SamFdc::mounted(0)) {
+        Debug::log("[SAM] disk auto-boot armed after reboot");
+        s_boot = 0;
+    }
+}
+
+void frameTick() {
+    if (s_boot < 0) return;
+    if (!SamFdc::mounted(0)) { s_boot = -1; memset(s_inj, 0xFF, sizeof(s_inj)); return; }
+    if (!s_lineSeen) return;                       // the ROM is not up yet
+    const int t = s_boot++ - BOOT_START;
+    memset(s_inj, 0xFF, sizeof(s_inj));
+    if (t < 0) return;
+    const int i = t / BOOT_STEP, ph = t % BOOT_STEP;
+    if (i >= (int)(sizeof(kBootKeys) / sizeof(kBootKeys[0]))) { s_boot = -1; return; }
+    if (ph < BOOT_HOLD) s_inj[kBootKeys[i].row] &= (uint8_t)~(1u << kBootKeys[i].bit);
+}
+
+bool launchDisk(const std::string& path) {
+    DiskSlots::slotMount(IFACE_SAM, 0, path);
+    if (!SamFdc::mounted(0)) return false;
+    Config::ram_file = NO_RAM_FILE;
+    Config::last_ram_file = NO_RAM_FILE;
+    Config::save();
+    if (Config::arch != A_SAM) {
+        bootArmAcrossReboot();
+        MachineSwitch::commit(A_SAM, Config::romSetSam);   // resets, or reboots and never returns
+    } else {
+        ESPectrum::resetForLoad();
+    }
+    bootArm();
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +251,7 @@ void drawOpcode(bool contended) {
 static uint8_t keyRows(uint8_t hi, uint8_t mask) {
     uint8_t k = mask;
     for (int r = 0; r < 8; r++)
-        if (!(hi & (1u << r))) k &= keys[r];
+        if (!(hi & (1u << r))) k &= keys[r] & s_inj[r];
     return k;
 }
 
@@ -225,7 +299,10 @@ uint8_t portIn(uint16_t address) {
         return s_lpen;
     }
     case 0x1F: return Config::joyLive() == JOY_KEMPSTON ? Ports::port[Config::kempstonPort] : 0;
-    default:   return 0xFF;
+    default:
+        if ((lo & 0xF8) == 0xE0) return SamFdc::in(0, address);   // drive 1
+        if ((lo & 0xF8) == 0xF0) return SamFdc::in(1, address);   // drive 2
+        return 0xFF;
     }
 }
 
@@ -249,6 +326,7 @@ void portOut(uint16_t address, uint8_t data) {
     case 0xF9:
         // A new line moves the window: end the running unchecked slice so
         // CPU::samFrameLoop re-derives the next event (TsConf tsWakeLoop shape).
+        s_lineSeen = true;            // the ROM's interrupt handler is running
         if (line != data) {
             line = data;
             if (CPU::stFrame > CPU::tstates) CPU::stFrame = CPU::tstates ? CPU::tstates : 1;
@@ -268,7 +346,10 @@ void portOut(uint16_t address, uint8_t data) {
             else                  saaChip->setRegisterData(data);
         }
         break;
-    default: break;
+    default:
+        if ((lo & 0xF8) == 0xE0)      SamFdc::out(0, address, data);
+        else if ((lo & 0xF8) == 0xF0) SamFdc::out(1, address, data);
+        break;
     }
 }
 

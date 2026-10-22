@@ -32,6 +32,7 @@ visit https://zxespectrum.speccy.org/contacto
 */
 
 #include "speccy/machines/Sam/Sam.h"
+#include "speccy/machines/Sam/SamFdc.h"
 #include "app/DramPattern.h"
 #include "speccy/core/Pss.h"
 #include "app/PerfFdc.h"
@@ -1789,6 +1790,8 @@ void ESPectrum::setup() {
       plus3AutoBootArm();
     }
   }
+
+  if (Config::arch == A_SAM) Sam::bootResume();   // a SAM disk launch that rebooted
 
   // Re-reset MB-02 after disk mounts so boot EPROM starts with disks already inserted
   if (MB02::enabled && mb02_fdd.disk[0]) {
@@ -4829,6 +4832,10 @@ void ESPectrum::loop() {
         fdd_active = Plus3Fdc::fdc.activity != 0;
         fdd_write  = Plus3Fdc::fdc.wroteRecently;
     }
+    if (Z80Ops::isSam) {                      // SAM Coupe: its VL1772 pair
+        fdd_active = SamFdc::active();
+        fdd_write  = SamFdc::wroteRecently();
+    }
     // While active: draw ONLY the sprite's foreground pixels (border shows through);
     // dotFast maps the ZX index for the current mode (DS80 → solid pair slot).
     // On the active→idle edge: erase by scheduling a full border repaint instead of
@@ -4840,7 +4847,7 @@ void ESPectrum::loop() {
     // the black DS80 right border).
     bool lamp_on = fdd_active &&
                    ((MB02::enabled && (Config::mb02SoundLed & 1)) ||
-                    (Z80Ops::isP3 && (Config::trdosSoundLed & 1)) ||
+                    ((Z80Ops::isP3 || Z80Ops::isSam) && (Config::trdosSoundLed & 1)) ||
                     (hasFdd && (Config::trdosSoundLed & 1)));
     static bool lamp_was_on = false;
     const int lx = VIDEO::osd_lamp_x, ly = VIDEO::osd_lamp_y;

@@ -1030,7 +1030,7 @@ IRAM_ATTR void CPU::haltAdvanceTo(uint32_t stEnd) {
     const uint32_t pre = tstates;
     while (tstates < stEnd) {
         uint32_t n = stEnd - tstates;
-        if (n > VIDEO::tStatesPerLine) n = VIDEO::tStatesPerLine;
+        if (n > VIDEO::tStatesPerLine && VIDEO::tStatesPerLine) n = VIDEO::tStatesPerLine;
         VIDEO::Draw(n, false);
     }
     Z80::incRegR((tstates - pre) >> 2);
