@@ -16,7 +16,8 @@
 // Ports (low byte): #FE keyboard/border/beeper, #F9 status/line, #FA LMPR, #FB HMPR,
 // #FC VMPR, #F8 CLUT (index = A11..A8), #FF/#1FF SAA1099, #80 LEPR, #81 HEPR, #1F
 // Kempston. Line INT: STATUS bit 0, for LINE < 192 at T = (LINE + 68) * 384, 128 T
-// long (SimCoupe Events.cpp / SAMIO.cpp LINE_PORT). Not yet: contention, WD1772 drives, mouse, MIDI, clock, DACs.
+// long (SimCoupe Events.cpp / SAMIO.cpp LINE_PORT). Contention: Sam::draw/drawOpcode
+// (SimCoupe Memory.cpp tables), ASIC ports >= #F8 in portIn/portOut. Not yet: WD1772 drives, mouse, MIDI, clock, DACs.
 #pragma once
 
 #include <stdint.h>
@@ -39,6 +40,11 @@ namespace Sam {
 
     // Whole frame into VIDEO::vga.frameBuffer (EndFrame).
     void renderFrame();
+
+    // VIDEO::Draw / Draw_Opcode while SAM runs: contended = the access is to
+    // internal RAM (ramContended, set by remap). Wait states at the access START.
+    void draw(unsigned int n, bool contended);
+    void drawOpcode(bool contended);
 
     // Line interrupt window (SimCoupe: TOP_BORDER_LINES 68, CPU_CYCLES_INT_ACTIVE 128).
     static constexpr uint32_t T_PER_LINE = 384, TOP_LINES = 68, INT_LEN = 128;

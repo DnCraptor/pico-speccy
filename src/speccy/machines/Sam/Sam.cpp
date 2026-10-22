@@ -35,6 +35,7 @@ static uint8_t*       s_ff   = nullptr;   // a 16K page of 0xFF for memory that 
 static uint32_t       s_intPages = 32;
 static uint32_t       s_extPages = 0;
 static uint8_t        s_ro = 0;           // windows mapped read-only (ROM, absent memory, LMPR D7)
+static uint8_t        s_cont = 0;         // windows showing internal RAM (contended)
 static uint8_t        s_hpen = 192, s_lpen = 0;  // last HPEN/LPEN (held while the screen is off)
 
 static constexpr uint8_t LMPR_PAGE = 0x1F, LMPR_ROM0_OFF = 0x20, LMPR_ROM1 = 0x40, LMPR_WPROT = 0x80;
@@ -68,6 +69,7 @@ static void mapInt(int w, uint8_t page) {
     page &= 0x1F;
     if (page >= s_intPages) { mapAbsent(w); return; }
     MemESP::plugPtr16(w, MemESP::ram[page].sync(w));
+    s_cont |= (uint8_t)(1u << w);
 }
 
 // External page (LEPR/HEPR, 0..255): ram[32 + page], or absent past the fitted megabytes.
@@ -78,6 +80,7 @@ static void mapExt(int w, uint8_t page) {
 
 void remap() {
     s_ro = 0;
+    s_cont = 0;
     // A
     if (!(lmpr & LMPR_ROM0_OFF)) mapRo(0, s_rom0);
     else {
@@ -94,7 +97,9 @@ void remap() {
     else if (lmpr & LMPR_ROM1) mapRo(3, s_rom1);
     else                       mapInt(3, (hmpr + 1) & HMPR_PAGE);
 
-    for (int s = 0; s < 8; s++) MemESP::ramContended[s] = false;   // contention: phase 1
+    // Contention (SimCoupe PageIn): internal RAM only — not ROM, external or absent memory.
+    for (int w = 0; w < 4; w++)
+        MemESP::ramContended[w * 2] = MemESP::ramContended[w * 2 + 1] = (s_cont >> w) & 1;
     g_atm_ro = s_ro;
     MemESP::romInUse = 0;
     MemESP::p3special = 2;        // recoverPage0() keeps out of window 0
@@ -129,6 +134,44 @@ __attribute__((noinline)) bool intLine() {
 }
 
 // ---------------------------------------------------------------------------
+// Contention (SimCoupe Memory.cpp Init / UpdateContention, SAMIO.h WaitStates)
+
+static constexpr uint32_t CONT_OFFSET = 4;   // CPU_CYCLES_SCREEN_CONTENTION_OFFSET
+
+static inline uint32_t frameT() {
+    uint32_t t = CPU::tstates;
+    if (t >= CPU::statesInFrame) t -= CPU::statesInFrame;
+    return t;
+}
+
+// Wait before a memory access starting at frame time t.
+static inline uint32_t memWait(uint32_t t) {
+    uint32_t mask = 3;
+    const bool off = (border & BORDER_SOFF) && (vmpr & VMPR_MDE1);
+    if (!off) {
+        const uint32_t ln = t / T_PER_LINE, lc = (t + CONT_OFFSET) % T_PER_LINE;
+        const bool screen = ln >= TOP_LINES && ln < TOP_LINES + 192 && lc >= 128;
+        const bool mode1 = (vmpr & VMPR_MODE) == 0;
+        if (screen || (mode1 && !(lc & 0x40))) mask = 7;
+    }
+    return mask - ((t + 2) & mask);
+}
+
+// ASIC ports (>= #F8): one 8 T slot.
+static inline uint32_t ioWait(uint32_t t) { return 7 - ((t + 2) & 7); }
+
+void draw(unsigned int n, bool contended) {
+    // n < 3 is addressOnBus (internal cycles): no MREQ, so no wait on the SAM.
+    if (contended && n >= 3) CPU::tstates += memWait(frameT());
+    CPU::tstates += n;
+}
+
+void drawOpcode(bool contended) {
+    if (contended) CPU::tstates += memWait(frameT());
+    CPU::tstates += 4;
+}
+
+// ---------------------------------------------------------------------------
 // Ports
 
 static uint8_t keyRows(uint8_t hi, uint8_t mask) {
@@ -139,7 +182,8 @@ static uint8_t keyRows(uint8_t hi, uint8_t mask) {
 }
 
 uint8_t portIn(uint16_t address) {
-    VIDEO::Draw(4, false);
+    if ((uint8_t)address >= 0xF8) CPU::tstates += ioWait(frameT());
+    CPU::tstates += 4;
     const uint8_t lo = (uint8_t)address, hi = (uint8_t)(address >> 8);
     switch (lo) {
     case 0xFE: {
@@ -186,7 +230,8 @@ uint8_t portIn(uint16_t address) {
 }
 
 void portOut(uint16_t address, uint8_t data) {
-    VIDEO::Draw(4, false);
+    if ((uint8_t)address >= 0xF8) CPU::tstates += ioWait(frameT());
+    CPU::tstates += 4;
     const uint8_t lo = (uint8_t)address, hi = (uint8_t)(address >> 8);
     switch (lo) {
     case 0xFE: {

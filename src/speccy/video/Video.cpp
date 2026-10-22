@@ -5815,11 +5815,12 @@ void VIDEO::Reset() {
 
     if (Z80Ops::isSam) {
         // SAM Coupe: the whole frame is drawn at EndFrame (Sam::renderFrame);
-        // the beam machinery idles. Phase 1 will race the beam per line.
+        // the beam machinery idles.
         gigascreen_enabled = false;
-        Draw = &Blank;
-        Draw_Opcode = &Blank_Opcode;
-        Draw_OSD169 = &Blank;
+        // Draw only counts T-states (+ the contention wait, Sam::draw).
+        Draw = &Sam::draw;
+        Draw_Opcode = &Sam::drawOpcode;
+        Draw_OSD169 = &Sam::draw;
         DrawBorder = &Border_Blank;
         samPaletteFlush();
     }
@@ -10082,6 +10083,8 @@ void VIDEO::RedrawPausedFrame() {
     // VDAC2: the picture is the FT812's last swapped list, not the ZX VRAM —
     // re-render it (core1) and wait; there is no beam walk to do.
     if (ft_live) { ftRedrawSync(); return; }
+    // SAM Coupe: no beam walk — redraw the frame from the current state.
+    if (Z80Ops::isSam) { Sam::renderFrame(); return; }
 
     // A TS-Conf palette change still waiting for the beam has to be applied
     // NOW: the beam rule is meaningless once the machine is stopped — nothing
