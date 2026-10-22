@@ -71,6 +71,14 @@ public:
     MoonPcm(const uint8_t* rom, uint8_t* ram);
 
     void setRate(uint32_t outRate);
+    // A ROM other than the card's (the Pico-Zx-Player, for a VGM that carries its own
+    // sample ROM): romSize bytes (<= 4 MB) read through 4 KB pages, pages[a >> 12];
+    // the RAM, if any, follows at romSize. nullptr = back to the flat rom.
+    static constexpr uint32_t PAGE_SHIFT = 12;
+    void setRomPages(const uint8_t* const* pages, uint32_t romSize) {
+        m_romPages = pages;
+        m_romSize = pages ? romSize : ROM_SIZE;
+    }
     void reset();
 
     // NEW2 (FM reg 0x105 bit 1) gates every wave DATA write, as on the chip.
@@ -92,8 +100,11 @@ public:
     bool anyActive() const { return m_active != 0; }
     uint8_t memRead(uint32_t a) const {
         a &= 0x3FFFFF;
-        if (a < ROM_SIZE) return m_rom ? m_rom[a] : 0;
-        return m_ram[a & (RAM_SIZE - 1)];
+        if (a < m_romSize) {
+            if (m_romPages) return m_romPages[a >> PAGE_SHIFT][a & ((1u << PAGE_SHIFT) - 1)];
+            return m_rom ? m_rom[a] : 0;
+        }
+        return m_ram ? m_ram[a & (RAM_SIZE - 1)] : 0;
     }
 
 private:
@@ -123,6 +134,8 @@ private:
 
     const uint8_t* m_rom;
     uint8_t*       m_ram;
+    const uint8_t* const* m_romPages = nullptr;
+    uint32_t       m_romSize = ROM_SIZE;
     uint8_t  m_regs[256];
     Ch       m_ch[CHANNELS];
     uint32_t m_active;          // bit per channel: not yet quiet after release

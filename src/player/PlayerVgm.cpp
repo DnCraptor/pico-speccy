@@ -128,6 +128,11 @@ private:
     OplFm*   opl_ = nullptr; bool oplPs_ = false; bool opl3_ = false;
     MoonPcm* pcm_ = nullptr; bool pcmPs_ = false;  // YMF278B wave half (16 MB only)
     uint8_t* pcmRam_ = nullptr;                    // its 1 MB sample RAM (butter PSRAM)
+    uint8_t** romPages_ = nullptr;                 // the file's own wave ROM (0x84 blocks),
+    uint8_t*  romData_ = nullptr;                  //  4 KB pages; page 0 of romData_ = zeros
+    uint32_t  romSize_ = 0;
+    uint32_t  romCopies_ = 0;                      // pages in romData_
+    char      errBuf_[64] = {};
 
     // register shadows for the meter
     uint8_t ayReg_[2][16] = {};
@@ -162,6 +167,7 @@ private:
     void close();
     bool step();                   // one command; false = end of stream
     bool openOpl4(uint32_t clock);
+    bool loadRomBlocks();
     void pcmRamBlock(uint32_t p, uint32_t len);
     void wait44(uint32_t n);
     void gen(int16_t* lr, int n);
@@ -174,6 +180,14 @@ bool VgmDecoder::loadFile(const char* path) {
     uint8_t* bounce = (uint8_t*)tryMalloc(4096);
     uint8_t* raw = nullptr;
     bool ok = false;
+    // Says what was asked and what the PSRAM arena has, so a "too big" report names
+    // the real limit (the emulator's own pages / GS / MoonSound share that arena).
+    auto tooBig = [&](uint32_t want) {
+        const Buffer::PoolStat ps = Buffer::poolStat(Buffer::TIER_BUTTER);
+        snprintf(errBuf_, sizeof(errBuf_), "File too big for PSRAM (%u KB, %u KB free)",
+                 (unsigned)((want + 1023) >> 10), (unsigned)(ps.free >> 10));
+        err = errBuf_;
+    };
     do {
         if (!f || !bounce) { err = "Out of memory"; break; }
         memset(f, 0, sizeof(FIL));
@@ -181,7 +195,7 @@ bool VgmDecoder::loadFile(const char* path) {
         const uint32_t sz = f_size(f);
         if (sz < 0x40 || sz > MAX_FILE) { err = "Bad file size"; f_close(f); break; }
         raw = (uint8_t*)Buffer::palloc(sz, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
-        if (!raw) { err = "File too big for PSRAM"; f_close(f); break; }
+        if (!raw) { tooBig(sz); f_close(f); break; }
         uint32_t off = 0;
         bool rdok = true;
         while (off < sz) {
@@ -210,7 +224,7 @@ bool VgmDecoder::loadFile(const char* path) {
             if (!out || !dec) {
                 if (out) Buffer::pfree(out);
                 if (dec) Buffer::pfree(dec);
-                err = "File too big for PSRAM"; break;
+                tooBig(isize); break;
             }
             tinfl_init(dec);
             size_t inLen = sz - p - 8, outLen = isize;
@@ -419,6 +433,8 @@ void VgmDecoder::close() {
     }
     rm(sn_, snPs_); rm(opll_, opllPs_); rm(opl_, oplPs_); rm(pcm_, pcmPs_);
     if (pcmRam_) { Buffer::pfree(pcmRam_); pcmRam_ = nullptr; }
+    if (romPages_) { Buffer::pfree(romPages_); romPages_ = nullptr; }
+    if (romData_) { Buffer::pfree(romData_); romData_ = nullptr; }
     if (b_) {
         Buffer::pfree(b_);
         b_ = nullptr;
@@ -448,6 +464,7 @@ bool VgmDecoder::step() {
         const uint32_t len = rd32(d_ + pos_ + 3) & 0x7FFFFFFF;
         if (len > n_ - pos_ - 7) return false;
         if (d_[pos_ + 2] == 0x87) pcmRamBlock(pos_ + 7, len);   // YMF278B RAM image
+        // 0x84 (YMF278B ROM image) was loaded by loadRomBlocks() at open.
         pos_ += 7 + len;
         return true;
     }
@@ -563,22 +580,30 @@ void VgmDecoder::gen(int16_t* lr, int n) {
 }
 
 // YMF278B. The FM half runs at clock / (19 * 36) (ymfm: OPL4 prescale 19), i.e. the
-// OPL3 core at an equivalent clock of clock * 8 / 19. The wave half reads the
-// built-in YRW801 ROM (a file's own ROM image, block 0x84, is not used) and a 1 MB
-// RAM at 0x200000 that RAM-image blocks (0x87) and the stream's own register-6
-// writes fill. NEW2 is taken as set: the wave writes of a rip that starts after
-// the chip's init would otherwise all be dropped.
+// OPL3 core at an equivalent clock of clock * 8 / 19; the wave half at clock / 768
+// (44.1 kHz on a MoonSound, 37.3 kHz on the 28.6 MHz arcade boards). Wave memory: the
+// file's own ROM image (0x84 blocks — arcade rips carry their sample ROM) when it has
+// one, else the built-in YRW801; a 1 MB RAM after the ROM (when the ROM leaves room)
+// that RAM-image blocks (0x87) and the stream's own register-6 writes fill. NEW2 is
+// taken as set: the wave writes of a rip that starts after the chip's init would
+// otherwise all be dropped.
 bool VgmDecoder::openOpl4(uint32_t clock) {
 #if MOONSOUND
     opl_ = mk<OplFm>(oplPs_);
-    pcmRam_ = (uint8_t*)Buffer::palloc(MoonPcm::RAM_SIZE, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
-    if (pcmRam_) pcm_ = mk<MoonPcm>(pcmPs_, gb_rom_yrw801, pcmRam_);
-    if (!opl_ || !OplFm::tablesReady() || !pcm_) { err = "Out of memory"; return false; }
-    memset(pcmRam_, 0, MoonPcm::RAM_SIZE);
+    if (!opl_ || !OplFm::tablesReady() || !loadRomBlocks()) { if (!err) err = "Out of memory"; return false; }
+    if (!romPages_ || romSize_ < (4u << 20)) {
+        pcmRam_ = (uint8_t*)Buffer::palloc(MoonPcm::RAM_SIZE, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+        if (!pcmRam_) { err = "Out of memory"; return false; }
+        memset(pcmRam_, 0, MoonPcm::RAM_SIZE);
+    }
+    pcm_ = mk<MoonPcm>(pcmPs_, romPages_ ? nullptr : gb_rom_yrw801, pcmRam_);
+    if (!pcm_) { err = "Out of memory"; return false; }
+    if (romPages_) pcm_->setRomPages(romPages_, romSize_);
     opl3_ = true;
     opl_->setRates((int)((uint64_t)clock * 8 / 19), RATE, false);
     opl_->reset();
-    pcm_->setRate(RATE);
+    // MoonPcm's chip rate is 44.1 kHz; scale the output rate it is given instead.
+    pcm_->setRate((uint32_t)(((uint64_t)RATE * 33868800u + clock / 2) / clock));
     pcm_->reset();
     pcm_->setNew2(true);
     static const char* const n24[24] = { "1","2","3","4","5","6","7","8","9","10","11","12",
@@ -590,6 +615,69 @@ bool VgmDecoder::openOpl4(uint32_t clock) {
     (void)clock;
     return false;
 #endif
+}
+
+// The YMF278B ROM image blocks (0x84: 4 bytes total ROM size, 4 bytes start, the
+// bytes), mapped before playback as 4 KB pages: a page one block covers whole reads
+// the file image in place (the file stays loaded for the whole track), a page only
+// partly covered (block edges) gets a copy, every other page reads the zero page.
+// So the ROM costs a few KB per block, not its size. No 0x84 block = nothing to do.
+bool VgmDecoder::loadRomBlocks() {
+    constexpr uint32_t PG = 1u << MoonPcm::PAGE_SHIFT, NPG = (4u << 20) / PG;
+    uint8_t* const PART = (uint8_t*)1;             // pass 0: page needs a copy
+    romPages_ = (uint8_t**)tryMalloc(NPG * sizeof(uint8_t*));
+    if (!romPages_) romPages_ = (uint8_t**)Buffer::palloc(NPG * sizeof(uint8_t*), Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+    if (!romPages_) { err = "Out of memory"; return false; }
+    memset(romPages_, 0, NPG * sizeof(uint8_t*));
+    bool any = false;
+    for (int pass = 0; pass < 2; pass++) {
+        for (uint32_t p = dataStart_; p < n_ && d_[p] != 0x66; ) {
+            const uint8_t c = d_[p];
+            if (c != 0x67) { p += cmdLen(c); continue; }
+            if (p + 7 > n_) break;
+            const uint32_t len = rd32(d_ + p + 3) & 0x7FFFFFFF;
+            if (len > n_ - p - 7) break;
+            if (d_[p + 2] == 0x84 && len > 8) {
+                uint32_t tot = rd32(d_ + p + 7), st = rd32(d_ + p + 11), n = len - 8;
+                if (!tot || tot > (4u << 20)) tot = 4u << 20;
+                if (tot > romSize_) romSize_ = tot;
+                if (st < (4u << 20)) {
+                    if (n > (4u << 20) - st) n = (4u << 20) - st;
+                    any = true;
+                    uint8_t* const src = d_ + p + 15;
+                    for (uint32_t pg = st / PG; pg <= (st + n - 1) / PG; pg++) {
+                        const uint32_t a0 = pg * PG > st ? pg * PG : st;
+                        const uint32_t a1 = (pg + 1) * PG < st + n ? (pg + 1) * PG : st + n;
+                        uint8_t*& e = romPages_[pg];
+                        const bool own = romData_ && e >= romData_ + PG && e < romData_ + romCopies_ * PG;   // a copy page
+                        if (pass == 0) {
+                            if (a1 - a0 == PG) e = src + (a0 - st);          // whole page: in place
+                            else if (!e) e = PART;                           // an edge: copy later
+                        } else if (own) {
+                            memcpy(e + (a0 - pg * PG), src + (a0 - st), a1 - a0);
+                        }
+                    }
+                }
+            }
+            p += 7 + len;
+        }
+        if (pass == 0) {
+            if (!any) { Buffer::pfree(romPages_); romPages_ = nullptr; romSize_ = 0; return true; }
+            uint32_t parts = 0;
+            for (uint32_t i = 0; i < NPG; i++) if (romPages_[i] == PART) parts++;
+            romCopies_ = parts + 1;                    // + the zero page
+            romData_ = (uint8_t*)Buffer::palloc(romCopies_ * PG, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+            if (!romData_) { err = "Out of memory"; return false; }
+            memset(romData_, 0, romCopies_ * PG);
+            uint8_t* next = romData_ + PG;
+            for (uint32_t i = 0; i < NPG; i++) {
+                if (romPages_[i] == PART) { romPages_[i] = next; next += PG; }
+                else if (!romPages_[i]) romPages_[i] = romData_;
+            }
+            if (romSize_ > (4u << 20)) romSize_ = 4u << 20;
+        }
+    }
+    return true;
 }
 
 // Data block 0x87: 4 bytes total RAM size, 4 bytes start (RAM-relative), the bytes.

@@ -3,7 +3,9 @@
 // (SD, allocator and the unrelated sound chips are stubbed in tools/opl4vgm_stub/).
 // A: ROM tone via D0 port 2; B: a RAM sample from a 0x87 data block (pitch checked,
 // and silent without the block); C: FM via D0 ports 0/1 at the OPL4 clock (pitch
-// checked against clock/684); D: 42 meter channels, wave-channel meter.
+// checked against clock/684); D: 42 meter channels, wave-channel meter; E: the file's
+// own sample ROM (0x84 blocks, as arcade rips carry) at a 28.6 MHz clock.
+// With <rom> <file> <out.wav> [seconds] it renders a real VGM to a WAV instead.
 //   g++ -O1 -DMOONSOUND=1 -fsanitize=address -Itools/opl4vgm_stub -Isrc -Iexternal \
 //       -o /tmp/opl4vgm_test tools/opl4vgm_test.cpp src/player/PlayerVgm.cpp \
 //       src/speccy/devices/sound/OplFm.cpp src/speccy/devices/sound/FmTables.cpp \
@@ -13,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 #include <vector>
 #include <string>
 extern "C" { uint8_t gb_rom_yrw801[2u << 20]; }
@@ -55,6 +58,27 @@ int main(int argc, char** argv) {
     FILE* f = fopen(argc > 1 ? argv[1] : "src/speccy/roms/moonsound/yrw801.rom", "rb");
     if (!f || fread(gb_rom_yrw801, 1, sizeof gb_rom_yrw801, f) != sizeof gb_rom_yrw801) { printf("no ROM\n"); return 1; }
     fclose(f);
+    if (argc > 3) {                          // render mode: <rom> <file.vgm/vgz> <out.wav> [seconds]
+        pp::Decoder* dec = pp::createVgmDecoder();
+        if (!dec->open(argv[2])) { printf("open failed: %s\n", dec->err); return 1; }
+        printf("%s | ch=%d extra='%s'\n", dec->meta.format, dec->channels(), dec->meta.extra);
+        const int maxF = (argc > 4 ? atoi(argv[4]) : 30) * 31250;
+        std::vector<int16_t> lr; int16_t buf[1024]; int n; double sq = 0; int clip = 0;
+        uint8_t lv[pp::MAX_CH]; int lvMax[pp::MAX_CH] = {};
+        while ((int)lr.size() / 2 < maxF && (n = dec->render(buf, 512)) > 0) {
+            lr.insert(lr.end(), buf, buf + 2 * n);
+            dec->levels(lv); for (int i = 0; i < dec->channels(); i++) if (lv[i] > lvMax[i]) lvMax[i] = lv[i];
+        }
+        for (auto v : lr) { sq += (double)v * v; if (v == 32767 || v == -32768) clip++; }
+        printf("frames %zu rms %.0f clipped %d; meters max:", lr.size() / 2, lr.empty() ? 0 : sqrt(sq / lr.size()), clip);
+        for (int i = 0; i < dec->channels(); i++) printf(" %d", lvMax[i]);
+        printf("\n");
+        FILE* w = fopen(argv[3], "wb"); uint32_t db = lr.size() * 2, rate = 31250, br = rate * 4;
+        fwrite("RIFF", 1, 4, w); uint32_t t = 36 + db; fwrite(&t, 4, 1, w); fwrite("WAVEfmt ", 1, 8, w);
+        t = 16; fwrite(&t, 4, 1, w); uint16_t s2[2] = { 1, 2 }; fwrite(s2, 2, 2, w); fwrite(&rate, 4, 1, w); fwrite(&br, 4, 1, w);
+        s2[0] = 4; s2[1] = 16; fwrite(s2, 2, 2, w); fwrite("data", 1, 4, w); fwrite(&db, 4, 1, w); fwrite(lr.data(), 2, lr.size(), w); fclose(w);
+        delete dec; return 0;
+    }
 
     // A: ROM tone through the wave port
     { Vgm v; v.d0(2, 0x20, 0x00); v.d0(2, 0x08, 0x00); v.d0(2, 0x38, 0x00); v.d0(2, 0x50, 0x00); v.d0(2, 0x68, 0x80); v.wait(22050);
@@ -90,6 +114,22 @@ int main(int argc, char** argv) {
       printf("C fm: rms=%.0f f=%.1f Hz (OPL4 expect %.1f, OPL3 clock would give %.1f) meter ch0=%d\n",
              o.rms(), freq(o), 408 * (33868800.0 / 684) / 65536, 408 * (14318180.0 / 288) / 65536, lv[0]);
       CHECK(o.rms() > 200, "FM silent"); CHECK(fabs(freq(o) - 408 * (33868800.0 / 684) / 65536) < 1.0, "FM pitch"); CHECK(lv[0] > 0, "FM meter"); }
+
+    // E: the file's own ROM (0x84 blocks, 4 MB, 28.6 MHz arcade clock): wave 0's header at
+    // ROM 0, its sample at 0x3F0000 (a page only the second block touches). The YRW801
+    // must not be used, and the pitch follows clock / 768 (37.3 kHz chip rate).
+    { Vgm v; v.put32(0x60, 28636350);
+      auto romBlock = [&](uint32_t start, const std::vector<uint8_t>& bytes) {
+          std::vector<uint8_t> b(8, 0); for (int i = 0; i < 4; i++) { b[i] = (4u << 20) >> (8 * i); b[4 + i] = start >> (8 * i); }
+          b.insert(b.end(), bytes.begin(), bytes.end()); v.block(0x84, b); };
+      romBlock(0, { 0x3F, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xF0, 0x00, 0x0F, 0x00 });
+      std::vector<uint8_t> smp; for (int i = 0; i < 256; i++) smp.push_back((i & 32) ? 0x60 : 0xA0);
+      romBlock(0x3F0000, smp);
+      v.d0(2, 0x20, 0x00); v.d0(2, 0x08, 0x00); v.d0(2, 0x38, 0x10); v.d0(2, 0x50, 0x00); v.d0(2, 0x68, 0x80); v.wait(22050);
+      v.save("e.vgm", 22050); Out o = play("e.vgm");
+      const double want = 28636350.0 / 768 / 64;            // 64-sample square period
+      printf("E file ROM: rms=%.0f f=%.0f Hz (want %.0f)\n", o.rms(), freq(o), want);
+      CHECK(o.rms() > 500, "file ROM sample silent"); CHECK(fabs(freq(o) - want) < 15, "file ROM pitch / clock"); }
 
     // D: meter on a wave channel
     { pp::Decoder* dec = nullptr; play("a.vgm", &dec); uint8_t lv[pp::MAX_CH] = {}; dec->levels(lv);

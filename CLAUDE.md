@@ -16660,15 +16660,28 @@ built-in bank (the default gm_bank.bin paths on the card are not consulted there
 `bankFixedPtr()` (MidiSynth.cpp) replaces the flash partition as the no-SD binding;
 Memory Info says `built-in`. 4 MB images byte-identical in size.
 **Pico-Zx-Player plays YMF278B (OPL4) VGMs on 16 MB** (2026-10-22, NOT hw-tested,
-`debug/DVp2-16M-opl4vgm-1.1.0`): `VgmDecoder::openOpl4` (PlayerVgm.cpp, all behind
+`debug/DVp2-16M-opl4vgm3-1.1.0`): `VgmDecoder::openOpl4` (PlayerVgm.cpp, all behind
 `MOONSOUND` — MoonPcm.cpp is not in the 4 MB image, a reference there is a link error).
 FM half = the OPL3 core at clock * 8 / 19 (ymfm's OPL4 prescale 19: 33.8688 MHz ->
-49 516 Hz), wave half = a private MoonPcm on the built-in YRW801 + a 1 MB PSRAM RAM.
+49 516 Hz), wave half = a private MoonPcm at clock / 768 (`setRate` is given RATE x
+33868800 / clock). Wave memory: the FILE's ROM when it has 0x84 blocks — arcade rips
+(Psikyo, The Fallen Angels: 4 MB ROM, 28.6 MHz, no RAM) carry their sample ROM, and
+playing YRW801 for them was the "does not play" report — mapped at open as 4 KB
+pages (`loadRomBlocks`: a page one block covers whole points INTO the loaded file, only
+block-edge pages are copied, the rest read a zero page — a few KB a track; output
+byte-identical to a full copy; `MoonPcm::setRomPages`, the emulator keeps its flat ROM).
+The whole .vgm is inflated into PSRAM, so a big track needs the butter arena the emulator
+leaves: on ZX Evolution (TS-Conf, 4 MB of pages) only the smallest fit — "File too big
+for PSRAM (N KB, M KB free)" names both figures. No 0x84
+block = the built-in YRW801. A 1 MB PSRAM RAM after the ROM when the ROM is < 4 MB.
 `D0 pp aa dd`: port 0/1 = FM banks, 2 = wave regs; data block 0x87 = RAM image
-(size, RAM-relative start, bytes), 0x84 (the file's own ROM) is ignored. NEW2 is forced
+(size, RAM-relative start, bytes). Checked against libvgm's vgm2wav on two Fallen
+Angels tracks: waveform correlation 0.98, envelope 0.997, our level half of libvgm's
+(the emulator's own mix scale). NEW2 is forced
 on (a rip that starts after the chip init would drop every wave write). Meter 18 FM + 24
 wave = 42 bars, so `pp::MAX_CH` 40 -> 48. A YMF262 beside it is listed unsupported. Host
-test `tools/opl4vgm_test.cpp` (recipe in its header). Octave 0 plays at HALF rate (+1 =
+test `tools/opl4vgm_test.cpp` (recipe in its header; with a file argument it renders a
+real VGM to WAV). Octave 0 plays at HALF rate (+1 =
 native), which a test expectation got wrong once.
 
 ## ZXM-MoonSound (YMF278B / OPL4) — 2026-10-21, NOT hw-tested

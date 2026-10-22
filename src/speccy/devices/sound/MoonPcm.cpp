@@ -255,7 +255,7 @@ void MoonPcm::write(uint8_t reg, uint8_t v) {
     if (!m_new2) return;
     if (reg == 6 && (m_regs[2] & 1)) {                        // memory data
         const uint32_t a = memAutoInc() & 0x3FFFFF;
-        if (a >= ROM_SIZE) m_ram[a & (RAM_SIZE - 1)] = v;
+        if (a >= m_romSize) { if (m_ram) m_ram[a & (RAM_SIZE - 1)] = v; }
         else               flashCmd(a, v);                   // the ROM takes flash commands only
         return;
     }
@@ -304,7 +304,7 @@ uint8_t MoonPcm::flashIdByte(uint32_t a) const {
 uint8_t MoonPcm::read(uint8_t reg) {
     if (reg == 6 && (m_regs[2] & 1)) {
         const uint32_t a = memAutoInc() & 0x3FFFFF;
-        if (m_flashId && a < ROM_SIZE) return flashIdByte(a);
+        if (m_flashId && a < m_romSize) return flashIdByte(a);
         return memRead(a);
     }
     uint8_t v = m_regs[reg];
