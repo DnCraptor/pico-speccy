@@ -16617,6 +16617,26 @@ and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card 
   -> Debug::log tail call the first time, DivMMC::applyMapping the second). Gone after the owner
   reset the settings to defaults; which setting armed it is unknown. If it returns: the plain
   build vs sdcut7-prof in the same scenario, and a GDB capture of the ARM stack ABOVE SP.
+  **It returned 2026-10-22 on a PLAIN build (DVp2w, CYW43 radio up, the Web catalog's
+  `nexload _RUN.NEX`)**: CFSR 00020000 (INVSTATE), PC = LR = 0x20037708 = `&VIDEO::ts_line_t`
+  this time (addr2line names a veneer there — a stale match, it is the variable), the
+  frame above SP = `&CPU::stFrame &CPU::tstates &MemESP::ramCurrent <ret into decodeED
+  right after bl Ports::output> &Z80::regA 0x56 0xDAF1 <ret into exec_nocheck_next>`, i.e.
+  the section-anchor registers `exec_nocheck_next` keeps in r4-r11. So an `OUT (C),r` from
+  the Next's ED dispatch, and `Ports::output` (or a callee) popped with SP 4 words low —
+  a callee-saved anchor landed in PC. Not a pointer table (none builds one), not the
+  `.dmaovl` classic loop (`executeTransfer`/`transferOneByte` are unreachable on the Next:
+  `doEnable` is under `isNext`, the other site is inside `executeTransfer`, the third is
+  MB-02). Since this run the fault dump prints r4-r11 (the trampoline pushes them) and 32
+  words of the caller frames.
+  **RESOLVED the same day — it is VOLTAGE MARGIN, not software** (owner: the fault went
+  away with Overclock > Core voltage = 1.65 V from the menu; it was 1.60 V at 504 MHz). A popped-register skew with no
+  code path that could produce it is what a core running past its margin looks like
+  (the m1p2 NeoGS core1 SIGBUS was the same class), and the Next at 504 MHz is the
+  heaviest load this firmware has. The "which setting armed it" question of 2026-10-21
+  is answered the same way: settings that changed the load. If this shape — PC = the
+  address of a RAM variable, SP a few words off, `Ports::output`/`exec_nocheck_next` on
+  the stack — comes back, ask for the VREG setting and the clock before reading code.
 - **Pogie: parallax bands at the wrong scroll for one frame every ~0.5 s = a long CMD18 had no
   prefetch (2026-10-21, hw-confirmed DVp2 on `debug/DVp2-next-sdstream-ldiag-1.1.0`, owner: "фиксед").**
   Pogie's LoRes background is a line-IRQ chain (ULA INT off, NR 22=06, 14 MHz): lines 46/78/96/131
@@ -16717,3 +16737,47 @@ level; PCM `>> kPcmShift` (1) — the level knob if hw disagrees. Host test
 `tools/moonpcm_test.cpp` (recipe in its header; 7 mutations fail it). Code in flash.
 Hw owed: MoonService detect + RAM test, MWM player (Pentagon 512K, demo-disks/*.trd),
 levels against FM, core0 cost with many channels.
+
+## CYW43 radio DMA starved the HDMI TMDS FIFO — vendored bus driver, CPU FIFO copy (2026-10-22, hw-confirmed DVp2w)
+
+"Web Archive over the on-chip radio blacks the monitor out" — Pimoroni Pico Plus 2 W in
+a Pico DV base, Next at 720x576, 504 MHz; ESP-01 on GP0/1 fine, 640x480 fine, Pentagon
+reported fine. `hdmi: TMDS FIFO underrun in N of M frames` 1-9 a second whenever the OSD
+was open with the radio up (the catalog's index reads from SD made it worst) — the 8-word
+TMDS FIFO (~160 ns) running dry; a strict sink loses lock on that.
+
+- **Fix**: `src/net/cyw43_bus_pio_spi_speccy.c` = the SDK 2.3.1 `cyw43_bus_pio_spi.c`
+  compiled INSTEAD of the SDK's (cmake/wifi.cmake strips it from `cyw43_driver_picow`;
+  the file is an empty TU on non-W boards), with the gSPI words fed to / drained from
+  the PIO FIFOs by core0 (`CYW43_SPI_CPU_COPY`, bswap per 32-bit word as the DMA did).
+  No DMA channels for the radio at all. core0 only ever busy-waited for them, so nothing
+  is slower; hw: zero underruns in the same session, download speed unchanged. The DMA
+  path stays under `CYW43_SPI_CPU_COPY=0`. Also in the file, kept but measured NOT to be
+  the cause: busy-polls paced every 256 cycles by a NOP pause, `dma_channel_abort` only
+  for a busy channel, the radio preferring pio0 over the SDK's first-fit (which put it in
+  pio2 with the HDMI SMs). Boot log: `cyw43 bus: pico-speccy driver (CPU FIFO copy, …)`
+  and `cyw43 bus: pioN smN, dma A/B`.
+- **The mechanism inside the DMA engine was NOT established** — only that triggering and
+  running two low-priority channels beside the four high-priority HDMI feeders does it.
+  `bus_ctrl` priority was set, no DMA touched XIP, the line ISR was on time (gap 34 us,
+  dur 23 us) throughout.
+- **Why "only Next / only 576p / only with the menu"**: with the machine running,
+  `WifiNet::poll` runs from `ESPectrum::loop` at one raster phase per frame; from
+  `uiIdle` it runs at random phases, 95 % of them in active video. The other two are
+  most likely degree, not mechanism — not re-checked after the fix.
+- **How it was found, in order (each a build + a hardware run)**: ISR gap/dur in the
+  underrun line (ISR exonerated); BUSCTRL counters (FASTPERI contested went 3k → 900k
+  with core0's polling — a red herring: throttling the SD and radio polls cut it to
+  150k and the underruns stayed); per-master activity counters (radio xfers tracked the
+  underruns); stall raster lines (random → not structural); then the one that worked:
+  **core0 tags its code sections in a byte, idle core1 polls the video SM's TXSTALL
+  flag every ~200 cycles and buckets each hit by the tag** — 100 % inside
+  `cyw43_spi_transfer`; splitting that tag put the densest cluster at the DMA trigger.
+  The diagnostics were removed again; `hdmi_tmds_stall_log` keeps ISR gap/dur and the
+  four BUSCTRL counters in the underrun line (`fastperi cont/dn/up`, `xip stall`,
+  `prio`), cheap and enough to separate "the bridge is busy" from "nothing on the bus
+  explains this". The probe pattern is the thing to rebuild first on the next
+  "DMA feeder starves" report; counters alone cost five rounds here.
+- Owed: Pentagon and 640x480 on the same build (the "only Next" claim is pre-fix), the
+  other W boards (`m1p2ws`/`m2p2ws`: radio ≥ GPIO32, the pio0 preference falls back to
+  the SDK search when pio0 is VGA's), and a long download for throughput.
