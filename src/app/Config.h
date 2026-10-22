@@ -142,6 +142,7 @@ public:
     static RomsetIdx romSetScorp;
     static RomsetIdx romSetTsconf;
     static RomsetIdx romSetAtm;
+    static RomsetIdx romSetSam;   // SAM Coupe: the memory fitted (ArchRom.h isSamRomset)
     static ArchIdx   pref_arch;
     static RomsetIdx pref_romSet_48;
     static RomsetIdx pref_romSet_128;
@@ -246,6 +247,13 @@ public:
     // then calls requestMachine, which compares against this).
     static uint32_t wantedPages(ArchIdx a, RomsetIdx rs = R_NONE) {
         if (a == A_TSCONF) return TSCONF_PAGES;
+        // SAM Coupe: 32 internal 16K pages + the external megabytes (samExtPages),
+        // never fewer than the 64 the rest of the firmware assumes exist.
+        if (a == A_SAM) {
+            const RomsetIdx r = (rs == R_NONE) ? romSetSam : rs;
+            const uint32_t n = 32 + samExtPages(r);
+            return n < 64 ? 64 : n;
+        }
         uint32_t n = mem_pg_cnt;
         if (n > 64 && !(a == A_PENT || a == A_P512 || a == A_P1024)) n = 64;
         // GMX requires live QSPI (butter) PSRAM — without it requestMachine falls
@@ -432,6 +440,7 @@ public:
     static bool trdosBaseOwnedByMachine();
     static bool isAtm1()  { return arch == A_ATM && isAtm1Romset(romSetAtm); }
     // ZX Evolution BaseConf: the ATM arch on the Pentagon raster (71680 T, 48.83 Hz).
+    static bool isSam() { return arch == A_SAM; }
     static bool isEvoBase() { return arch == A_ATM && isEvoBaseRomset(romSetAtm); }
     static bool isScorpEvo() { return arch == A_SCORP && isScorpEvoRomset(romSetScorp); }
     // Both ZX-Evo configurations that run the Pentagon raster (320 lines x 224 T).

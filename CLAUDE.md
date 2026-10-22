@@ -15696,6 +15696,26 @@ config port there, its CS bit 1 = 1 deselects the card), and on our ATM3 it hung
      so clearing it in `EvoBase::reset()` brought back Disc error until F12 (hw-confirmed fixed 2026-10-04, owner: "работает"). Test ELF
      `debug/DVp2-evo-vdisk2-1.0.8.elf`.
 
+## MGT SAM Coupe (A_SAM, 2026-10-22, phase 0, NOT hw-tested)
+
+Plan + status: `docs/sam-coupe-plan.md`. Model = SimCoupe (`Base/SAMIO.cpp`,
+`Memory.cpp`, `Frame.cpp`). Machine → SAM Coupe (`opt_mach_sam`, `p_showSam` = butter
+PSRAM ≥ 1 MB + `FlashRoms::romsUsable()`), romsets `R_SAM256/512/512_1M/2M/4M`
+(`samIntPages`/`samExtPages`, `Config::romSetSam`, NVS `romSetSam`; `wantedPages` =
+32 + external). ROM 3.0 raw in `.psramroms` (`tools/rom_pack.py sam`, `gb_rom_sam_30`).
+- `Sam::remap` is the one writer of the four windows (Atm pattern: `plugPtr16`, ROM and
+  absent pages park `bank_dirty` on the sink, `g_atm_ro` drops writes per window —
+  CPU::reset keeps it for SAM). Internal page n = `ram[n]`, external = `ram[32+n]`.
+- Ports: `Ports::input/output` hand every SAM access to `Sam::portIn/portOut` (flash)
+  first; they charge `Draw(4)`. Timing 119808 T (6 MHz), INT 0..128 T, audio = the 48K
+  set with divider 192. `check_trdos` and the tape traps are off for SAM.
+- Video: `Draw = Blank`, the whole frame is drawn at EndFrame by `Sam::renderFrame`
+  (no beam effects yet), CLUT → hardware slots 0..15 (`samPaletteFlush`, also from
+  applyPalette). Gigascreen suspended.
+- Keyboard: `samKeys` (ESPectrum.cpp) fills `Sam::keys[9]` from scratch.
+- Host check: `tools/sam_sim.c` (recipe in its header) boots ROM 3.0 to the copyright
+  screen and BASIC; re-run after any change to the model.
+
 ## Nemo KAY 256 Turbo / 1024 / 1024 v2010-v2018 + ZXM-Phoenix 2 MB (2026-09-26, NOT hw-tested)
 
 Four romsets of the **Scorpion arch**, not an arch of their own: `R_KAY256` "Kay256",

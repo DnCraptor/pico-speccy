@@ -612,6 +612,15 @@ static bool p_showAtm() {
     return butter_psram_size() >= (1u << 20) && FlashRoms::romsUsable();
 #endif
 }
+// SAM Coupe: its ROM is in .psramroms and its 512K + external memory lives in
+// butter PSRAM (pages 32+ are the external megabytes).
+static bool p_showSam() {
+#if !defined(VGA_HDMI)
+    return false;
+#else
+    return butter_psram_size() >= (1u << 20) && FlashRoms::romsUsable();
+#endif
+}
 // ZX Evolution BaseConf (ATM arch, R_EVO_BASE) running or staged.
 static bool p_evoBaseActive() {
     const int32_t m = Stage::get(SET_MACHINE);
@@ -802,6 +811,14 @@ static const Option opt_mach_atm[] = {
     { TXT_ROM_ATM3V107, NM_MACH(A_ATM, R_ATM3_107), TXT_ROM_ATM3V107_S },
     { TXT_ROM_ATM3,  NM_MACH(A_ATM, R_ATM3),  TXT_ROM_ATM3_S  },
 };
+// SAM Coupe: internal 256K / 512K, plus the external megabytes (LEPR/HEPR).
+static const Option opt_mach_sam[] = {
+    { "256K",          NM_MACH(A_SAM, R_SAM256),    "256K"   },
+    { "512K",          NM_MACH(A_SAM, R_SAM512),    "512K"   },
+    { "512K + 1 MB",   NM_MACH(A_SAM, R_SAM512_1M), "512K+1M" },
+    { "512K + 2 MB",   NM_MACH(A_SAM, R_SAM512_2M), "512K+2M" },
+    { "512K + 4 MB",   NM_MACH(A_SAM, R_SAM512_4M), "512K+4M" },
+};
 // Ceiling for the guest's SysConfig ZCLK (a 14 MHz Z80 costs ~4x a 3.5 MHz frame
 // of core0 time — TS titles that ask for 14 MHz can be pinned to 7 here; the
 // guest keeps its own timing, it just gets fewer T-states per frame).
@@ -917,6 +934,7 @@ static const Node kMachine[] = {
     NM_SUB  (NM_IND TXT_MACH_OPTS, kTsconf, p_tsconfActive),
     NM_SUB  (NM_IND TXT_MACH_EVO_OPTS, kEvoBase, p_evoBaseActive),
     NM_RADIO(TXT_MACH_NEXT,  SET_MACHINE, opt_mach_next,  p_showNext),
+    NM_RADIO(TXT_MACH_SAM,   SET_MACHINE, opt_mach_sam,   p_showSam),
     NM_RADIO(TXT_MACH_ALF,   SET_MACHINE, opt_mach_alf,   nullptr),
     NM_RADIO(TXT_MACH_OTHER, SET_MACHINE, opt_mach_other, p_extRam),
     // Not a machine, but it lives with them by request: the built-in game — the

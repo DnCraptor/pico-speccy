@@ -232,3 +232,18 @@ SAM — **не Spectrum**: ни одного общего порта ULA, дру
 - SimCoupe под Linux/SDL — эталон для трасс (PC, frame_cycles, порты).
 - Игры/демо в MGT/SAD/EDSK: worldofsam.org; demo с line-INT/CLUT-растрами для
   фазы 4; тест-дискеты контеншена (Simon Owen, «SAM timing tests»).
+
+## 9. Статус
+
+**Фаза 0 (2026-10-22, НЕ проверено на железе).** `A_SAM` + пять romset памяти
+(256K / 512K / 512K + 1/2/4 MB), строка Machine → SAM Coupe (только butter PSRAM и
+`FlashRoms::romsUsable()`). ROM 3.0 (32 KB, CRC32 0B7E3585) сырьём в `.psramroms`
+(`rom_pack.py sam`). Код: `src/speccy/machines/Sam/` — `remap` (секции A-D, отсутствующая
+память = страница 0xFF + запрет записи через `g_atm_ro`), порты FE/F9/FA/FB/FC/F8/FF/1FF/
+80/81/1F, кадр 119808 T с INT 128 T, звук — набор 48K (624 сэмпла, 192 T/сэмпл), рендер
+всего кадра в EndFrame (режимы 1/2/4, режим 3 через левый пиксель пары), CLUT → слоты
+палитры 0..15, клавиатура SAM своя (`samKeys`: левый Ctrl = SYMBOL, правый = CNTRL,
+цифровой блок = F0-F9). Хост-проверка `tools/sam_sim.c` (та же модель на redcode): ROM
+проходит тест памяти (~100 кадров), пишет «SAM Coupé 512K» / «256K», клавиша → курсор
+BASIC. Не сделано: строчное прерывание, contention, разрешение 512 px в режиме 3,
+диски (фаза 2), мышь/MIDI/часы/DAC, F-клавиши через keys-to-guest.

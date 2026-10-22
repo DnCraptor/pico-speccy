@@ -361,7 +361,7 @@ static inline bool tapeFastMachineOk() {
     // takes over only when the OS gives the load back to the deck (menu "Tape
     // Loader", no .tapein: Z80::next_os_tape_decline). So the deck must stay
     // STOPPED after a mount here too, or it spools past the header.
-    return Config::arch != A_ALF &&
+    return Config::arch != A_ALF && Config::arch != A_SAM &&
            Config::romSet != R_ZX81P && Config::romSet != R_48K_CS &&
            Config::romSet != R_128K_CS && !If2::live();   // a cartridge is not the 48K ROM
 }

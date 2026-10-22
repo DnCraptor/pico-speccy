@@ -889,6 +889,7 @@ IRAM_ATTR __attribute__((noinline)) void Z80::check_trdos() {
     // automap there, and rom[4] is never assigned (hw: the NMI-DOS restore
     // below ran on a stale flag and plugged a garbage rom[4] over the MMU —
     // the NextZXOS loader then CALLed into an empty ROM2 region and wedged).
+    if (Z80Ops::isSam) return;      // SAM Coupe: no Beta, no #3Dxx trap
     if (Z80Ops::isNext) {
 #if NEXT_TRACE
         nxJumpNote('J');
@@ -2398,7 +2399,7 @@ void Z80::decodeOpcode76()
     // On the Next, NextZXOS's own tape trap (automap at #056A) gets the block
     // whenever it is armed — see NextReg::osTapeTrapArmed(). BIOS personalities
     // without it (48K/128K/Pentagon, divmmc off) keep our fast load.
-    if ((((REG_PC == 0x56b || REG_PC == 0x56d || REG_PC == 0x57d)) && !Z80Ops::isTc2068
+    if ((((REG_PC == 0x56b || REG_PC == 0x56d || REG_PC == 0x57d)) && !Z80Ops::isTc2068 && !Z80Ops::isSam
          && !(Z80Ops::isNext && NextReg::osTapeTrapArmed()))
         || tcTrap) {
 

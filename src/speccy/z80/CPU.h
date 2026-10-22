@@ -40,6 +40,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "app/ESPectrum.h"
 
 #define TSTATES_PER_FRAME_48 69888
+#define TSTATES_PER_FRAME_SAM 119808   // SAM Coupe: 6 MHz, 384 T x 312 lines
 #define TSTATES_PER_FRAME_128 70908
 #define TSTATES_PER_FRAME_EVO60 58688   // ZX-Evo BaseConf 60 Hz raster: 262 lines x 224 T (video_sync_v.v)
 #define TSTATES_PER_FRAME_PENTAGON 71680
@@ -68,6 +69,7 @@ visit https://zxespectrum.speccy.org/contacto
 
 #define INT_START48 0
 #define INT_END48 32
+#define INT_END_SAM 128                // SAM frame INT: 128 T (SimCoupe INT_ACTIVE_TIME)
 #define INT_END_BYTE48 33
 #define INT_START128 0
 #define INT_END128 36 // 35 in real +2 and Weiv's Spectramine. I'll have to check those numbers

@@ -38,6 +38,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "hardware/regs/addressmap.h"
 #endif
 #include "Video.h"
+#include "speccy/machines/Sam/Sam.h"
 #include "app/PerfScope.h"
 #include "speccy/devices/storage/DivMMC.h"
 #include <math.h>       // powf() — CRT filter gamma curve (cold path, init only)
@@ -2248,6 +2249,18 @@ static void tsPalette256Flush(bool invalidate);   // TS-Conf 256-slot remap (def
 
 uint8_t VIDEO::paletteGen = 0;
 
+// SAM Coupe: the 16 CLUT entries own hardware slots 0..15 (the renderer writes
+// CLUT indices). Called from applyPalette (every palette rebuild) and from
+// EndFrame when the guest wrote #F8.
+static void samPaletteFlush() {
+    Sam::clutDirty = false;
+    for (int i = 0; i < 16; i++) {
+        const uint32_t c = snapTransform(crtTransform(Sam::colourRgb(Sam::clut[i])));
+        graphics_set_palette(i, c);
+        vga_set_palette_entry_solid(i, c);
+    }
+}
+
 void VIDEO::applyPalette() {
     tsRenderDrain();   // rewrites slots the core1 line queue maps into
     paletteGen++;      // the menu's palette preview re-programs its slots on a change
@@ -2282,6 +2295,7 @@ void VIDEO::applyPalette() {
     }
     // Orange (index 16)
     graphics_set_palette(16, paletteFinal(0xFF7F00));
+    if (Config::arch == A_SAM) samPaletteFlush();
 
     Debug::log2SD("applyPalette: done, 240+16+1 entries written");
 
@@ -4948,7 +4962,9 @@ bool VIDEO::gigascreenModeIncompatible() {
         // Spectrum Next: NEXTVID renders every layer itself and owns palette
         // slots 17..219 (its RGB333 lattice) — the blend LUT's 17..136 landed
         // on top of it and broke the Next's colours.
-        || Config::arch == A_NEXT;
+        || Config::arch == A_NEXT
+        // SAM Coupe: its own whole-frame renderer (Sam::renderFrame), no prev-FB.
+        || Config::arch == A_SAM;
 }
 
 // The one predicate every palette/blend decision uses: the user wants Gigascreen
@@ -5235,7 +5251,7 @@ void VIDEO::pickMachineVideoMode() {
     {
         switch (Config::baseVideoMode(vmSel)) {
             case Config::VM_640x480_50:
-                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 2;
+                if (Config::arch == A_48K || Config::arch == A_PROFI || Config::arch == A_SAM || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 2;
                 else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) video_mode = 3;
                 else video_mode = 1; // Pentagon
                 break;
@@ -5243,7 +5259,7 @@ void VIDEO::pickMachineVideoMode() {
                 video_mode = 7;
                 break;
             case Config::VM_720x576_50:
-                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 5;
+                if (Config::arch == A_48K || Config::arch == A_PROFI || Config::arch == A_SAM || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 5;
                 else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) video_mode = 6;
                 else video_mode = 4; // Pentagon
                 break;
@@ -5260,7 +5276,7 @@ void VIDEO::pickMachineVideoMode() {
                 video_mode = 0;
                 break;
             case Config::VM_640x480_50:
-                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 2;
+                if (Config::arch == A_48K || Config::arch == A_PROFI || Config::arch == A_SAM || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 2;
                 else if (Config::arch == A_128K || Config::isEvo128Raster() || nk == 1) video_mode = 3;
                 else video_mode = 1; // Pentagon
                 break;
@@ -5269,7 +5285,7 @@ void VIDEO::pickMachineVideoMode() {
                 break;
             case Config::VM_720x576_169:
             case Config::VM_720x576_50:
-                if (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 5;
+                if (Config::arch == A_48K || Config::arch == A_PROFI || Config::arch == A_SAM || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) video_mode = 5;
                 else if (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) video_mode = 6;
                 else video_mode = 4; // Pentagon
                 break;
@@ -5285,7 +5301,7 @@ void VIDEO::pickMachineVideoMode() {
     if (Config::isBigVideoMode(vmSel)) {
         // The big modes are per machine too (except the 60 Hz entries):
         // 0 = Pentagon, 1 = 48K/Profi/Scorpion, 2 = 128K — the 720x576 grouping.
-        const int klass = (Config::arch == A_48K || Config::arch == A_PROFI || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) ? 1
+        const int klass = (Config::arch == A_48K || Config::arch == A_PROFI || Config::arch == A_SAM || (Config::arch == A_SCORP && !Config::isScorpEvo()) || (Config::arch == A_ATM && !Config::isEvoBase()) || Config::isEvo48Raster() || nk == 0) ? 1
                         : (Config::arch == A_128K || Config::arch == A_ALF || Config::isEvo128Raster() || nk == 1) ? 2 : 0;
         // VGA runs them at its own pixel clocks (63 / 42 MHz, integer at 252/378/504),
         // so it takes the entry the HDMI mode would use at its own clock.
@@ -5788,6 +5804,17 @@ void VIDEO::Reset() {
         Draw_Opcode = &NEXTVID::Tick_Opcode;
         Draw_OSD169 = &NEXTVID::Tick;
         DrawBorder = &NEXTVID::borderMark;
+    }
+
+    if (Z80Ops::isSam) {
+        // SAM Coupe: the whole frame is drawn at EndFrame (Sam::renderFrame);
+        // the beam machinery idles. Phase 1 will race the beam per line.
+        gigascreen_enabled = false;
+        Draw = &Blank;
+        Draw_Opcode = &Blank_Opcode;
+        Draw_OSD169 = &Blank;
+        DrawBorder = &Border_Blank;
+        samPaletteFlush();
     }
 
     osdGeomRecalc();
@@ -9106,6 +9133,18 @@ IRAM_ATTR void VIDEO::EndFrame() {
     // never waits (it stops the moment the FIFO is full), and 60 x 32 bytes per
     // PERF window comfortably carries the ~600 bytes those lines write.
     Debug::pumpUart();
+
+    if (Z80Ops::isSam) {
+        if (Sam::clutDirty) samPaletteFlush();
+        Sam::renderFrame();
+        gigascreenModeGate();
+        LED::decay();
+        if (Config::ledIndicators) LED::draw();
+        else { setLedBar(0); setLedCarve(0, 0, 0, -1); setLedStrip(-1); }
+        OSD::drawNotify();
+        framecnt++;
+        return;
+    }
 
     if (Z80Ops::isNext) {
         // Timex hi-res (port FF %110 / NR 0x69): the same vblank-deferred

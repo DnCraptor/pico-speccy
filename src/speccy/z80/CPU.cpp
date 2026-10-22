@@ -34,6 +34,7 @@ visit https://zxespectrum.speccy.org/contacto
 */
 
 #include "CPU.h"
+#include "speccy/machines/Sam/Sam.h"
 #include "app/ESPectrum.h"
 #include "speccy/core/MemESP.h"
 #include "speccy/core/Ports.h"
@@ -136,6 +137,7 @@ bool Z80Ops::isTc2068 = false;
 // there (0x00FF data / 0x01FF address).
 bool g_timex_machine = false;
 bool Z80Ops::isNext = false;
+bool Z80Ops::isSam = false;
 
 void CPU::updateStatesInFrame() {
     Z80Ops::isALF = (Config::arch == A_ALF);
@@ -213,6 +215,10 @@ void CPU::updateStatesInFrame() {
         statesInFrame = (uint32_t)r.tpl * r.lines;
         IntStart = 0;
         IntEnd = r.intEnd + (r.kind == 1 ? CPU::latetiming : 0);
+    } else if (Config::arch == A_SAM) {
+        statesInFrame = TSTATES_PER_FRAME_SAM;
+        IntStart = 0;
+        IntEnd = INT_END_SAM;
     } else { // if (Config::arch == A_PENT) - by default
         statesInFrame = TSTATES_PER_FRAME_PENTAGON;
         IntStart = INT_START_PENTAGON;
@@ -277,7 +283,8 @@ void CPU::reset() {
     // 128K branch below hands it a separate flag set.
     Z80Ops::isTsconf = (Config::arch == A_TSCONF);
     Z80Ops::isAtm = (Config::arch == A_ATM);
-    if (!Z80Ops::isAtm) g_atm_ro = 0;
+    Z80Ops::isSam = (Config::arch == A_SAM);
+    if (!Z80Ops::isAtm && !Z80Ops::isSam) g_atm_ro = 0;
     Z80Ops::isTc2068 = Config::isTc2068();
     g_timex_machine  = Config::isTimex();
     Z80Ops::isNext = (Config::arch == A_NEXT);
@@ -408,6 +415,17 @@ void CPU::reset() {
         Z80Ops::is1024 = false;
         Z80Ops::isProfi = false;
         ESPectrum::target = NextReg::raster().micros;
+    } else if (Config::arch == A_SAM) {
+        // SAM Coupe: 119808 T at 6 MHz = the 48K frame period (19968 us).
+        Ports::getFloatBusData = &Ports::getFloatBusDataNone;
+        Z80Ops::isByte = false;
+        Z80Ops::is48 = false;
+        Z80Ops::is128 = false;
+        Z80Ops::isPentagon = false;
+        Z80Ops::is512 = false;
+        Z80Ops::is1024 = false;
+        Z80Ops::isProfi = false;
+        ESPectrum::target = MICROS_PER_FRAME_48;
     } else if (Config::arch == A_TSCONF) {
         // TS-Conf: Pentagon raster (224 T/line, 71680 T/frame), uncontended.
         Z80Ops::isByte = false;
@@ -513,6 +531,17 @@ void CPU::reset() {
         // HOME ROM are unrelated code — and its page-0 window would fight the SCLD
         // for the same 8 KB slots. Same three-place treatment as Beta on the +3.
         if (Z80Ops::isTc2068 && Config::esxdos) Config::esxdos = 0;
+    }
+
+    // SAM Coupe: none of the Spectrum interfaces exist on its bus; the SAA1099 is
+    // on the board. Backstop for paths that never pass through MachineSwitch.
+    if (Z80Ops::isSam) {
+        Config::betadisk = false;
+        if (Config::esxdos) Config::esxdos = 0;
+        Config::mb02 = false;
+        Config::timex_video = false;
+        Config::SAA1099 = true;
+        Sam::reset();
     }
 
     // Interface 2 cartridge: esxDOS off the bus while it is in (its automap entry

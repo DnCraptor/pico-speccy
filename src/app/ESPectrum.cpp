@@ -31,6 +31,7 @@ To Contact the dev team you can write to zxespectrum@gmail.com or
 visit https://zxespectrum.speccy.org/contacto
 */
 
+#include "speccy/machines/Sam/Sam.h"
 #include "app/DramPattern.h"
 #include "speccy/core/Pss.h"
 #include "app/PerfFdc.h"
@@ -1103,6 +1104,8 @@ void ESPectrum::setup() {
           Config::romSet = Config::romSetAtm;
       } else if (Config::arch == A_NEXT) {
         Config::romSet = R_NEXT;
+      } else if (Config::arch == A_SAM) {
+        Config::romSet = Config::romSetSam;
       } else {
         if (Config::pref_romSetPent != R_LAST)
           Config::romSet = Config::pref_romSetPent;
@@ -1567,6 +1570,7 @@ void ESPectrum::setup() {
     // the machine, not the "AY on 48K" card Config::AY48 offers, so the setting
     // cannot switch it off (the user's AY48 pick is left alone for other 48Ks).
     AY_emu = Config::AY48 || Config::isTc2068();
+    if (Config::arch == A_SAM) Config::SAA1099 = true;   // the SAM's SAA1099 is on the board
     SAA_emu = Config::SAA1099;
     Midi::enabled = Config::midi;
 #if defined(MIDI_TX_PIN)
@@ -1598,6 +1602,14 @@ void ESPectrum::setup() {
   // twin). Scorpion Green (316-line frame) gets its own exact set below.
   if (Config::arch == A_NEXT) {
     nextAudioSet();   // the machine timing's set (48K / 128K / Pentagon / 60 Hz)
+  } else if (Config::arch == A_SAM) {
+    // SAM Coupe: 119808 T / 624 samples = 192 T a sample, 31250 Hz at 50.08 fps.
+    samplesPerFrame = ESP_AUDIO_SAMPLES_48;
+    audioOverSampleDivider = 32;
+    audioAYDivider = 192;
+    audioSampleDivider = 6;
+    Audio_freq = ESP_AUDIO_FREQ_48;
+    tstatesPerSampleFP = (TSTATES_PER_FRAME_SAM << 8) / ESP_AUDIO_SAMPLES_48;
   } else if (Config::arch == A_48K || Config::arch == A_PROFI ||
       (Config::arch == A_SCORP && isScorpYellowTiming(Config::romSetScorp)) ||
       (Config::arch == A_ATM && !atmFrame316(Config::romSetAtm) && !Config::isEvoBase()) ||
@@ -2314,6 +2326,7 @@ void ESPectrum::reset(uint8_t romInUse) {
   Ports::sndriveUsed = 0;
 
   AY_emu = Config::AY48 || Config::isTc2068();   // built in on a TC2068 — see setup()
+    if (Config::arch == A_SAM) Config::SAA1099 = true;   // the SAM's SAA1099 is on the board
     SAA_emu = Config::SAA1099;
     Midi::enabled = Config::midi;
     if (Midi::enabled) Midi::init();
@@ -2330,6 +2343,14 @@ void ESPectrum::reset(uint8_t romInUse) {
   // its own exact 632-sample set below.
   if (Config::arch == A_NEXT) {
     nextAudioSet();   // the machine timing's set (48K / 128K / Pentagon / 60 Hz)
+  } else if (Config::arch == A_SAM) {
+    // SAM Coupe: 119808 T / 624 samples = 192 T a sample, 31250 Hz at 50.08 fps.
+    samplesPerFrame = ESP_AUDIO_SAMPLES_48;
+    audioOverSampleDivider = 32;
+    audioAYDivider = 192;
+    audioSampleDivider = 6;
+    Audio_freq = ESP_AUDIO_FREQ_48;
+    tstatesPerSampleFP = (TSTATES_PER_FRAME_SAM << 8) / ESP_AUDIO_SAMPLES_48;
   } else if (Config::arch == A_48K || Config::arch == A_PROFI ||
       (Config::arch == A_SCORP && isScorpYellowTiming(Config::romSetScorp)) ||
       (Config::arch == A_ATM && !atmFrame316(Config::romSetAtm) && !Config::isEvoBase()) ||
@@ -2617,6 +2638,40 @@ static void nextExtKeys(fabgl::Keyboard* Kbd, uint8_t* cols) {
     if (ralt) { cols[0] &= ~1; cols[4] &= ~2; }        // GRAPH  = CS + 9
     if (tab)  { cols[0] &= ~1; cols[3] &= ~4; }        // TRUE VIDEO = CS + 3
     if (bsl)  { cols[0] &= ~1; cols[3] &= ~8; }        // INV VIDEO  = CS + 4
+}
+
+// SAM Coupe keyboard (Sam::keys, read by Sam::portIn). Built from scratch, not
+// from the Spectrum PS2cols: those press SYMBOL/CAPS combos for punctuation and
+// cursors, while the SAM has its own keys for both (rows 0-7 bits 5-7, row 8 =
+// CNTRL + cursors; SimCoupe Keyboard.cpp). Left Ctrl = SYMBOL, Right Ctrl = CNTRL,
+// numpad = F0-F9.
+static void samKeys(fabgl::Keyboard* Kbd) {
+    using namespace fabgl;
+    struct K { VirtualKey a, b; uint8_t row, bit; };
+    static const K map[] = {
+        {VK_LSHIFT, VK_RSHIFT, 0, 0}, {VK_Z, VK_z, 0, 1}, {VK_X, VK_x, 0, 2}, {VK_C, VK_c, 0, 3}, {VK_V, VK_v, 0, 4},
+        {VK_KP_1, VK_KP_END, 0, 5}, {VK_KP_2, VK_KP_DOWN, 0, 6}, {VK_KP_3, VK_KP_PAGEDOWN, 0, 7},
+        {VK_A, VK_a, 1, 0}, {VK_S, VK_s, 1, 1}, {VK_D, VK_d, 1, 2}, {VK_F, VK_f, 1, 3}, {VK_G, VK_g, 1, 4},
+        {VK_KP_4, VK_KP_LEFT, 1, 5}, {VK_KP_5, VK_KP_CENTER, 1, 6}, {VK_KP_6, VK_KP_RIGHT, 1, 7},
+        {VK_Q, VK_q, 2, 0}, {VK_W, VK_w, 2, 1}, {VK_E, VK_e, 2, 2}, {VK_R, VK_r, 2, 3}, {VK_T, VK_t, 2, 4},
+        {VK_KP_7, VK_KP_HOME, 2, 5}, {VK_KP_8, VK_KP_UP, 2, 6}, {VK_KP_9, VK_KP_PAGEUP, 2, 7},
+        {VK_1, VK_EXCLAIM, 3, 0}, {VK_2, VK_AT, 3, 1}, {VK_3, VK_HASH, 3, 2}, {VK_4, VK_DOLLAR, 3, 3}, {VK_5, VK_PERCENT, 3, 4},
+        {VK_ESCAPE, VK_NONE, 3, 5}, {VK_TAB, VK_NONE, 3, 6}, {VK_CAPSLOCK, VK_NONE, 3, 7},
+        {VK_0, VK_RIGHTPAREN, 4, 0}, {VK_9, VK_LEFTPAREN, 4, 1}, {VK_8, VK_ASTERISK, 4, 2}, {VK_7, VK_AMPERSAND, 4, 3}, {VK_6, VK_CARET, 4, 4},
+        {VK_MINUS, VK_UNDERSCORE, 4, 5}, {VK_KP_PLUS, VK_NONE, 4, 6}, {VK_BACKSPACE, VK_NONE, 4, 7},
+        {VK_P, VK_p, 5, 0}, {VK_O, VK_o, 5, 1}, {VK_I, VK_i, 5, 2}, {VK_U, VK_u, 5, 3}, {VK_Y, VK_y, 5, 4},
+        {VK_EQUALS, VK_PLUS, 5, 5}, {VK_QUOTE, VK_QUOTEDBL, 5, 6}, {VK_KP_0, VK_KP_INSERT, 5, 7},
+        {VK_RETURN, VK_KP_ENTER, 6, 0}, {VK_L, VK_l, 6, 1}, {VK_K, VK_k, 6, 2}, {VK_J, VK_j, 6, 3}, {VK_H, VK_h, 6, 4},
+        {VK_SEMICOLON, VK_NONE, 6, 5}, {VK_COLON, VK_NONE, 6, 6}, {VK_GRAVEACCENT, VK_TILDE, 6, 7},
+        {VK_SPACE, VK_NONE, 7, 0}, {VK_LCTRL, VK_NONE, 7, 1}, {VK_M, VK_m, 7, 2}, {VK_N, VK_n, 7, 3}, {VK_B, VK_b, 7, 4},
+        {VK_COMMA, VK_LESS, 7, 5}, {VK_PERIOD, VK_GREATER, 7, 6}, {VK_BACKSLASH, VK_VERTICALBAR, 7, 7},
+        {VK_RCTRL, VK_NONE, 8, 0}, {VK_UP, VK_NONE, 8, 1}, {VK_DOWN, VK_NONE, 8, 2}, {VK_LEFT, VK_NONE, 8, 3}, {VK_RIGHT, VK_NONE, 8, 4},
+    };
+    uint8_t k[9] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    for (const K& e : map)
+        if (Kbd->isVKDown(e.a) || (e.b != VK_NONE && Kbd->isVKDown(e.b)))
+            k[e.row] &= (uint8_t)~(1u << e.bit);
+    memcpy(Sam::keys, k, sizeof(k));
 }
 
 void ESPectrum::processKeyboard() {
@@ -3095,6 +3150,7 @@ void ESPectrum::processKeyboard() {
                (!Kbd->isVKDown(fabgl::VK_B)) & (!Kbd->isVKDown(fabgl::VK_b)));
 
       if (Z80Ops::isNext) nextExtKeys(Kbd, PS2cols);
+      if (Z80Ops::isSam) samKeys(Kbd);
 
       // ── Profi extended keyboard ─────────────────────────────────────────
       // Active when arch=Profi and extended keyboard mode is on.
