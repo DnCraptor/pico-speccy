@@ -9,7 +9,8 @@
 //
 // Chips: AY-3-8910 / YM2149 (x2), SN76489 (x2), SAA1099 (x2), YM2413,
 // YM2203 (FM + SSG, x2), YM3812 / YM3526 / Y8950 (through the OPL3 core in
-// OPL2 mode), YMF262. Other chips in the header are listed as unsupported and
+// OPL2 mode), YMF262, and on the 16 MB firmware the YMF278B (OPL4: the OPL3
+// core for its FM half + MoonPcm with the built-in YRW801 ROM). Other chips in the header are listed as unsupported and
 // their commands skipped by length.
 //
 // The meter is driven from register shadows (volume / key-on / TL), not from
@@ -26,6 +27,7 @@
 #include "speccy/devices/sound/OplFm.h"
 #include "speccy/devices/sound/OpllFm.h"
 #include "speccy/devices/sound/OpnFm.h"
+#include "speccy/devices/sound/MoonPcm.h"
 #include "miniz/miniz.h"
 
 #include "fatfs/ff.h"
@@ -33,6 +35,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <new>
+
+#if MOONSOUND
+extern "C" const uint8_t gb_rom_yrw801[];          // src/speccy/roms/moonsound/yrw801.S
+#endif
 
 namespace pp {
 
@@ -120,6 +126,8 @@ private:
     OpnFm*   opn_[2] = {}; bool opnPs_[2] = {};
     AySound* ssg_[2] = {}; bool ssgPs_[2] = {};
     OplFm*   opl_ = nullptr; bool oplPs_ = false; bool opl3_ = false;
+    MoonPcm* pcm_ = nullptr; bool pcmPs_ = false;  // YMF278B wave half (16 MB only)
+    uint8_t* pcmRam_ = nullptr;                    // its 1 MB sample RAM (butter PSRAM)
 
     // register shadows for the meter
     uint8_t ayReg_[2][16] = {};
@@ -131,6 +139,7 @@ private:
     uint8_t opllReg_[64] = {};
     uint8_t opnKey_[2][3] = {};
     uint8_t oplReg_[2][256] = {};
+    uint8_t pcmReg_[256] = {};
 
     // meter layout
     int nch_ = 0;
@@ -138,7 +147,7 @@ private:
     const char* grName_[MAX_CH] = {};
     uint8_t chSrc_[MAX_CH] = {};   // source kind
     uint8_t chIdx_[MAX_CH] = {};   // chip<<5 | channel
-    enum : uint8_t { S_AY, S_SSG, S_SN, S_SAA, S_OPLL, S_OPN, S_OPL };
+    enum : uint8_t { S_AY, S_SSG, S_SN, S_SAA, S_OPLL, S_OPN, S_OPL, S_PCM };
 
     void addCh(uint8_t src, uint8_t chip, uint8_t ch, const char* name, const char* group) {
         if (nch_ >= MAX_CH) return;
@@ -152,6 +161,8 @@ private:
     void readGd3();
     void close();
     bool step();                   // one command; false = end of stream
+    bool openOpl4(uint32_t clock);
+    void pcmRamBlock(uint32_t p, uint32_t len);
     void wait44(uint32_t n);
     void gen(int16_t* lr, int n);
 };
@@ -351,8 +362,18 @@ bool VgmDecoder::open(const char* path) {
         }
         addName(chips, sizeof(chips), "YM2203", dual);
     }
+    // YMF278B (OPL4): FM half on the OPL3 core, wave half on MoonPcm.
+    bool opl4 = false;
+#if MOONSOUND
+    if (const uint32_t c = hdr(0x60) & M) {
+        if (!openOpl4(c)) return false;
+        opl4 = true;
+        addName(chips, sizeof(chips), "YMF278B", false);
+        if (hdr(0x5C) & M) addName(unsup, sizeof(unsup), "YMF262", false);
+    }
+#endif
     // OPL family: YMF262 native, OPL2-class through the same core (clock x4).
-    {
+    if (!opl4) {
         uint32_t c = hdr(0x5C) & M; const char* nm = "YMF262";
         opl3_ = c != 0;
         if (!c) { c = (hdr(0x50) & M) * 4; nm = "YM3812"; }
@@ -378,7 +399,7 @@ bool VgmDecoder::open(const char* path) {
         { 0xA4, "HuC6280" }, { 0xB4, "OKIM6258" }, { 0xB8, "OKIM6295" }, { 0xC4, "QSound" },
     };
     for (const auto& u : kUn)
-        if (hdr(u.off) & M) addName(unsup, sizeof(unsup), u.nm, false);
+        if ((hdr(u.off) & M) && !(opl4 && u.off == 0x60)) addName(unsup, sizeof(unsup), u.nm, false);
 
     if (!nch_) {
         err = unsup[0] ? "Unsupported sound chip" : "No sound chip in header";
@@ -396,7 +417,8 @@ void VgmDecoder::close() {
         rm(ay_[i], ayPs_[i]); rm(saa_[i], saaPs_[i]);
         rm(opn_[i], opnPs_[i]); rm(ssg_[i], ssgPs_[i]);
     }
-    rm(sn_, snPs_); rm(opll_, opllPs_); rm(opl_, oplPs_);
+    rm(sn_, snPs_); rm(opll_, opllPs_); rm(opl_, oplPs_); rm(pcm_, pcmPs_);
+    if (pcmRam_) { Buffer::pfree(pcmRam_); pcmRam_ = nullptr; }
     if (b_) {
         Buffer::pfree(b_);
         b_ = nullptr;
@@ -423,7 +445,10 @@ bool VgmDecoder::step() {
     }
     if (c == 0x67) {                                   // data block: 67 66 tt ssssssss
         if (pos_ + 7 > n_) return false;
-        pos_ += 7 + (rd32(d_ + pos_ + 3) & 0x7FFFFFFF);
+        const uint32_t len = rd32(d_ + pos_ + 3) & 0x7FFFFFFF;
+        if (len > n_ - pos_ - 7) return false;
+        if (d_[pos_ + 2] == 0x87) pcmRamBlock(pos_ + 7, len);   // YMF278B RAM image
+        pos_ += 7 + len;
         return true;
     }
     const int len = cmdLen(c);
@@ -462,6 +487,18 @@ bool VgmDecoder::step() {
             opl_->write(k * 2, a); opl_->write(k * 2 + 1, v); oplReg_[k][a] = v;
         }
         break;
+#if MOONSOUND                                      // MoonPcm is in the 16 MB firmware only
+    case 0xD0:                                     // YMF278B: D0 pp aa dd
+        if (pcm_) {
+            const uint8_t d = d_[pos_ + 3];
+            if (a < 2) {                               // FM, OPL3 register banks 0/1
+                opl_->write(a * 2, v); opl_->write(a * 2 + 1, d); oplReg_[a][v] = d;
+            } else if (a == 2) {                       // wave registers
+                pcm_->writeAddr(v); pcm_->write(v, d); pcmReg_[v] = d;
+            }
+        }
+        break;
+#endif
     case 0xA0: {
         const int k = (a & 0x80) ? 1 : 0, r = a & 0x7F;
         if (ay_[k] && r < 14) { ay_[k]->selectRegister(r); ay_[k]->setRegisterData(v); ayReg_[k][r] = v; }
@@ -492,6 +529,9 @@ void VgmDecoder::gen(int16_t* lr, int n) {
     // stage multiplies by 128 — so here OPL/OPLL go in raw, OPN x64, the rest
     // x128, and the player sounds as loud as the same chip inside a machine.
     if (opl_)  opl_->gen(L, R, n, 0);                        // +-16k
+#if MOONSOUND
+    if (pcm_)  pcm_->gen(L, R, n, 0);                        // adds the wave half (FM/PCM mix regs)
+#endif
     if (opll_) opll_->gen(Mo, n, 0);                         // +-16k
     int16_t* fm = b_->fm;
     bool haveFm = false;
@@ -520,6 +560,46 @@ void VgmDecoder::gen(int16_t* lr, int n) {
         if (sr > 32767) sr = 32767; else if (sr < -32768) sr = -32768;
         lr[2 * i] = (int16_t)sl; lr[2 * i + 1] = (int16_t)sr;
     }
+}
+
+// YMF278B. The FM half runs at clock / (19 * 36) (ymfm: OPL4 prescale 19), i.e. the
+// OPL3 core at an equivalent clock of clock * 8 / 19. The wave half reads the
+// built-in YRW801 ROM (a file's own ROM image, block 0x84, is not used) and a 1 MB
+// RAM at 0x200000 that RAM-image blocks (0x87) and the stream's own register-6
+// writes fill. NEW2 is taken as set: the wave writes of a rip that starts after
+// the chip's init would otherwise all be dropped.
+bool VgmDecoder::openOpl4(uint32_t clock) {
+#if MOONSOUND
+    opl_ = mk<OplFm>(oplPs_);
+    pcmRam_ = (uint8_t*)Buffer::palloc(MoonPcm::RAM_SIZE, Buffer::NEED_POINTER | Buffer::PREFER_PSRAM);
+    if (pcmRam_) pcm_ = mk<MoonPcm>(pcmPs_, gb_rom_yrw801, pcmRam_);
+    if (!opl_ || !OplFm::tablesReady() || !pcm_) { err = "Out of memory"; return false; }
+    memset(pcmRam_, 0, MoonPcm::RAM_SIZE);
+    opl3_ = true;
+    opl_->setRates((int)((uint64_t)clock * 8 / 19), RATE, false);
+    opl_->reset();
+    pcm_->setRate(RATE);
+    pcm_->reset();
+    pcm_->setNew2(true);
+    static const char* const n24[24] = { "1","2","3","4","5","6","7","8","9","10","11","12",
+                                         "13","14","15","16","17","18","19","20","21","22","23","24" };
+    for (int k = 0; k < 18; k++) addCh(S_OPL, k / 9, k % 9, n24[k], k ? nullptr : "OPL4 FM");
+    for (int k = 0; k < 24; k++) addCh(S_PCM, 0, k, n24[k], k ? nullptr : "OPL4 wave");
+    return true;
+#else
+    (void)clock;
+    return false;
+#endif
+}
+
+// Data block 0x87: 4 bytes total RAM size, 4 bytes start (RAM-relative), the bytes.
+void VgmDecoder::pcmRamBlock(uint32_t p, uint32_t len) {
+    if (!pcmRam_ || len < 8) return;
+    const uint32_t start = rd32(d_ + p + 4);
+    uint32_t n = len - 8;
+    if (start >= MoonPcm::RAM_SIZE) return;
+    if (n > MoonPcm::RAM_SIZE - start) n = MoonPcm::RAM_SIZE - start;
+    memcpy(pcmRam_ + start, d_ + p + 8, n);
 }
 
 int VgmDecoder::render(int16_t* lr, int n) {
@@ -577,6 +657,13 @@ void VgmDecoder::levels(uint8_t* out) {
             }
             break;
         }
+        case S_PCM:
+            // key-on: reg 0x68+ch bit 7; total level: 0x50+ch bits 7..1 (0 = loudest)
+            if (pcmReg_[0x68 + ch] & 0x80) {
+                lv = 255 - (pcmReg_[0x50 + ch] >> 1) * 2;
+                if (lv < 16) lv = 16;
+            }
+            break;
         }
         out[i] = (uint8_t)(lv > 255 ? 255 : lv);
     }

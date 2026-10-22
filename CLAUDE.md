@@ -16659,6 +16659,17 @@ pick loads into PSRAM as before, and a pick that is gone from the card falls bac
 built-in bank (the default gm_bank.bin paths on the card are not consulted there).
 `bankFixedPtr()` (MidiSynth.cpp) replaces the flash partition as the no-SD binding;
 Memory Info says `built-in`. 4 MB images byte-identical in size.
+**Pico-Zx-Player plays YMF278B (OPL4) VGMs on 16 MB** (2026-10-22, NOT hw-tested,
+`debug/DVp2-16M-opl4vgm-1.1.0`): `VgmDecoder::openOpl4` (PlayerVgm.cpp, all behind
+`MOONSOUND` — MoonPcm.cpp is not in the 4 MB image, a reference there is a link error).
+FM half = the OPL3 core at clock * 8 / 19 (ymfm's OPL4 prescale 19: 33.8688 MHz ->
+49 516 Hz), wave half = a private MoonPcm on the built-in YRW801 + a 1 MB PSRAM RAM.
+`D0 pp aa dd`: port 0/1 = FM banks, 2 = wave regs; data block 0x87 = RAM image
+(size, RAM-relative start, bytes), 0x84 (the file's own ROM) is ignored. NEW2 is forced
+on (a rip that starts after the chip init would drop every wave write). Meter 18 FM + 24
+wave = 42 bars, so `pp::MAX_CH` 40 -> 48. A YMF262 beside it is listed unsupported. Host
+test `tools/opl4vgm_test.cpp` (recipe in its header). Octave 0 plays at HALF rate (+1 =
+native), which a test expectation got wrong once.
 
 ## ZXM-MoonSound (YMF278B / OPL4) — 2026-10-21, NOT hw-tested
 

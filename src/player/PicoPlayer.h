@@ -25,7 +25,7 @@
 namespace pp {
 
 constexpr int RATE = 31250;          // output rate = the audio timer's
-constexpr int MAX_CH = 40;           // meter channels a decoder may report
+constexpr int MAX_CH = 48;           // meter channels a decoder may report (OPL4 VGM: 42)
 
 struct Meta {
     char format[40];                 // "MP3 128 kbps 44.1 kHz stereo", "VGM 1.51: AY8910 x2"
