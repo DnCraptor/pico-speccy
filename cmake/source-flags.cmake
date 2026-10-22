@@ -82,7 +82,15 @@ set_source_files_properties(src/speccy/machines/TsConf/FtInflate.c PROPERTIES CO
 set_source_files_properties(src/speccy/roms/moonsound/yrw801.S PROPERTIES
     COMPILE_DEFINITIONS "YRW801_ROM_PATH=\"${CMAKE_SOURCE_DIR}/src/speccy/roms/moonsound/yrw801.rom\""
     OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/speccy/roms/moonsound/yrw801.rom")
-# The built-in GM.DLS bank, .incbin'd by gm_bank.S (16 MB images only).
-set_source_files_properties(src/speccy/roms/gmbank/gm_bank.S PROPERTIES
-    COMPILE_DEFINITIONS "GM_BANK_PATH=\"${CMAKE_SOURCE_DIR}/src/speccy/roms/gmbank/gm_bank.bin\""
-    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/speccy/roms/gmbank/gm_bank.bin")
+# The built-in GM.DLS bank, .incbin'd by gm_bank.S (16 MB images only). gm_bank.bin is
+# not in git (gm.dls is not redistributable), so a 4 MB build must not depend on it.
+if(GM_BANK_BUILTIN)
+    set(GM_BANK_BIN "${CMAKE_SOURCE_DIR}/src/speccy/roms/gmbank/gm_bank.bin")
+    if(NOT EXISTS "${GM_BANK_BIN}")
+        message(FATAL_ERROR "16 MB build needs ${GM_BANK_BIN} (not in git): "
+            "python3 tools/dls_pack.py <gm.dls> ${GM_BANK_BIN}")
+    endif()
+    set_source_files_properties(src/speccy/roms/gmbank/gm_bank.S PROPERTIES
+        COMPILE_DEFINITIONS "GM_BANK_PATH=\"${GM_BANK_BIN}\""
+        OBJECT_DEPENDS "${GM_BANK_BIN}")
+endif()
