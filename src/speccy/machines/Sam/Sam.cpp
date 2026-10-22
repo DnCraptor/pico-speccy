@@ -225,11 +225,9 @@ void renderFrame() {
         m3[0] = b | 0; m3[1] = b | 2; m3[2] = b | 1; m3[3] = b | 3;   // entries 1/2 swapped
     }
 
-    for (int y = 0; y < yres; y++) {
-        uint8_t* row = vga.frameBuffer[y];
-        if (!row) continue;
+    auto renderRow = [&](uint8_t* row, int y) {
         const int sl = y - top;
-        if (sl < 0 || sl >= 192 || off || !p0) { memset(row, brd, xres); continue; }
+        if (sl < 0 || sl >= 192 || off || !p0) { memset(row, brd, xres); return; }
         // side borders (left is a multiple of 4, so the swizzle stays inside them)
         memset(row, brd, left);
         memset(row + left + 256, brd, xres - left - 256);
@@ -275,6 +273,31 @@ void renderFrame() {
             }
             break;
         }
+        }
+    };
+
+    for (int y = 0; y < yres; y++) {
+        uint8_t* row = vga.frameBuffer[y];
+        if (!row) continue;
+        // Overlays drawn after EndFrame (F8 stats / volume box, LED panel, notify
+        // banner) own their rects: keep those bytes, or every frame erases them.
+        int cx[8][2];
+        const int nc = VIDEO::rowCarves(y, cx);
+        if (!nc) { renderRow(row, y); continue; }
+        uint8_t keep[400];
+        int kn = 0;
+        for (int i = 0; i < nc; i++) {
+            const int x0 = cx[i][0] < 0 ? 0 : cx[i][0];
+            const int x1 = cx[i][1] > xres ? xres : cx[i][1];
+            if (x1 > x0 && kn + (x1 - x0) <= (int)sizeof(keep)) { memcpy(keep + kn, row + x0, x1 - x0); kn += x1 - x0; }
+            else cx[i][1] = cx[i][0];
+        }
+        renderRow(row, y);
+        kn = 0;
+        for (int i = 0; i < nc; i++) {
+            const int x0 = cx[i][0] < 0 ? 0 : cx[i][0];
+            const int x1 = cx[i][1] > xres ? xres : cx[i][1];
+            if (x1 > x0) { memcpy(row + x0, keep + kn, x1 - x0); kn += x1 - x0; }
         }
     }
 }

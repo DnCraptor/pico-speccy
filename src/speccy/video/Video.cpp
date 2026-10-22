@@ -7388,6 +7388,18 @@ static __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-
     }
 }
 
+int VIDEO::rowCarves(int row, int (*cx)[2]) {
+    int n = 0;
+    if (row >= osd_bar_y && row < osd_bar_y + 16
+        && osdBarRange((OSD & 0x07) != 0, (int)vga.xres, cx[n][0], cx[n][1])) n++;
+    if (row >= ts_notice_y0 && row < ts_notice_y1) { cx[n][0] = ts_notice_x0; cx[n][1] = ts_notice_x1; n++; }
+    for (int i = 0; i < BL_CARVE_N && n < 8; i++) {
+        const int16_t* r = ov_carve[i];
+        if (row >= r[1] && row < r[3]) { cx[n][0] = r[0]; cx[n][1] = r[2]; n++; }
+    }
+    return n;
+}
+
 void VIDEO::ovRecalc() {
     if (!osd_in_paper || !ov_stage || bl_live) { ov_y0 = ov_y1 = 0; return; }
     int y0 = 1 << 30, y1 = 0;

@@ -451,6 +451,10 @@ public:
   // the F8 stats box's 16 rows. Every renderer leaves the rect to LED::draw.
   static void setLedBar(int w);
   static bool osdBoxCarved();
+  // Overlay rects on fb row `row` a whole-frame renderer must leave alone (stats /
+  // volume box + LED panel, notify banner, LED/lamp carves): fills cx[i] = {x0, x1},
+  // returns the count (<= 8). Flash; for renderers that repaint every row (SAM).
+  static int rowCarves(int row, int (*cx)[2]);
   // Cold EndFrame halves, flash-resident on purpose (EndFrame is RAM code):
   static void gmxApplyPending();         // deferred on/off switch, vblank only
   static void gmxBorderFrame(bool skipFrame); // top/bottom band repaint
