@@ -224,6 +224,9 @@ void CPU::updateStatesInFrame() {
         IntStart = INT_START_PENTAGON;
         IntEnd = INT_END_PENTAGON;
     }
+    // SAM Coupe: no turbo — the 6 MHz clock is the machine's only speed. The
+    // user's pick (multUser) is kept for the next machine.
+    if (Config::arch == A_SAM) ESPectrum::multiplicator = 0;
     uint8_t m = ESPectrum::multiplicator;
     if (m) {
         statesInFrame <<= m;
