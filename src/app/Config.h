@@ -541,6 +541,7 @@ public:
     static string p3DiskFile[2]; // remembered paths; survive the machine being switched away
     static bool samWP[2];        // SAM Coupe drives 1/2: write protect
     static string samDiskFile[2]; // SAM Coupe drives 1/2: remembered paths
+    static bool samKeepTmp;      // a /tmp disk launch must survive the reboot of a machine switch
     // Speedlock's protection reads one sector twice and expects the reads to differ;
     // the dumps carry a single copy, so the difference is manufactured. On by default,
     // matching Fuse, and self-suppressing on a dump that records the variation for real.

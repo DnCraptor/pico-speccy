@@ -2108,6 +2108,7 @@ void ESPectrum::reset(uint8_t romInUse) {
   // keyboard goes back to the automatic verdict (and that is one more way out
   // for a user who forced the keys to the guest and wants the menu back).
   ZxEvoAvr::clearKeysOverride();
+  Sam::clearKeysOverride();
   VIDEO::timexHiresForceOff();// Timex hi-res 512x192: ditto (VIDEO::Reset zeroes timex_mode)
   VIDEO::blPairForceOff();    // borderless pair scaler: blRecalc re-arms it
   // Timex TC2068 SCLD: HSR = 0 and DEC bit 7 = 0, i.e. the whole 64 KB is HOME
@@ -2670,10 +2671,20 @@ static void samKeys(fabgl::Keyboard* Kbd) {
         {VK_COMMA, VK_LESS, 7, 5}, {VK_PERIOD, VK_GREATER, 7, 6}, {VK_BACKSLASH, VK_VERTICALBAR, 7, 7},
         {VK_RCTRL, VK_NONE, 8, 0}, {VK_UP, VK_NONE, 8, 1}, {VK_DOWN, VK_NONE, 8, 2}, {VK_LEFT, VK_NONE, 8, 3}, {VK_RIGHT, VK_NONE, 8, 4},
     };
+    // Host F1-F9 / F10 = SAM F1-F9 / F0, only while the guest owns them (Sam::keysToGuest).
+    static const K fmap[] = {
+        {VK_F1, VK_NONE, 0, 5}, {VK_F2, VK_NONE, 0, 6}, {VK_F3, VK_NONE, 0, 7},
+        {VK_F4, VK_NONE, 1, 5}, {VK_F5, VK_NONE, 1, 6}, {VK_F6, VK_NONE, 1, 7},
+        {VK_F7, VK_NONE, 2, 5}, {VK_F8, VK_NONE, 2, 6}, {VK_F9, VK_NONE, 2, 7},
+        {VK_F10, VK_NONE, 5, 7},
+    };
     uint8_t k[9] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     for (const K& e : map)
         if (Kbd->isVKDown(e.a) || (e.b != VK_NONE && Kbd->isVKDown(e.b)))
             k[e.row] &= (uint8_t)~(1u << e.bit);
+    if (Sam::keysToGuest())
+        for (const K& e : fmap)
+            if (Kbd->isVKDown(e.a)) k[e.row] &= (uint8_t)~(1u << e.bit);
     memcpy(Sam::keys, k, sizeof(k));
 }
 
@@ -2861,7 +2872,10 @@ void ESPectrum::processKeyboard() {
         // real ZX-Evo too (the AVR's hardware reset).
         const bool extKeysOn = (Z80Ops::isProfi && Config::profi_ext_keys)
             || (ZxEvoAvr::keysToGuest()
-                && KeytoESP != fabgl::VK_F11 && KeytoESP != fabgl::VK_F12);
+                && KeytoESP != fabgl::VK_F11 && KeytoESP != fabgl::VK_F12)
+            // SAM Coupe: F1-F10 only (its keyboard has no nav keys to give).
+            || (Z80Ops::isSam && Sam::keysToGuest()
+                && KeytoESP >= fabgl::VK_F1 && KeytoESP <= fabgl::VK_F10);
         bool passToZ80 = extKeysOn
             && KeytoESP != fabgl::VK_PAUSE
             && KeytoESP != fabgl::VK_TILDE
@@ -4258,12 +4272,13 @@ void ESPectrum::loop() {
 
     // TS-Conf: F1-F10 silently ceasing to open the menu is exactly the kind of
     // thing a user cannot be asked to guess, so say it once per transition.
-    if (Z80Ops::isTsconf) {
+    if (Z80Ops::isTsconf || Z80Ops::isSam) {
         static bool s_keys_prev = false;
-        const bool  keys_now = ZxEvoAvr::keysToGuest();
+        const bool  keys_now = Z80Ops::isSam ? Sam::keysToGuest() : ZxEvoAvr::keysToGuest();
         if (keys_now != s_keys_prev) {
             s_keys_prev = keys_now;
-            OSD::notify(keys_now ? " PS/2 keys: ON " : " PS/2 keys: OFF ", LEVEL_INFO, 900);
+            OSD::notify(Z80Ops::isSam ? (keys_now ? " F-keys: ON " : " F-keys: OFF ")
+                                      : (keys_now ? " PS/2 keys: ON " : " PS/2 keys: OFF "), LEVEL_INFO, 900);
             Debug::log("[PS2] keys -> %s", keys_now ? "ON (guest is reading the scancode log)"
                                                     : "OFF (the hotkey layer keeps them)");
         }

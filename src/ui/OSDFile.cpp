@@ -478,6 +478,8 @@ static bool rfd_launch_tmp(string path) {
     }
 
     // Downloaded archive: unpack to /tmp and launch the first usable inner file.
+    // A ZIP named like an image (zxart's defenders_of_the_earth.dsk) counts too.
+    if (ext != "zip" && ext != "vgz" && FileUtils::isZipByMagic(path)) ext = "zip";
     if (ext == "zip") {
         string inner = ZipExtract::extract(path, DISK_ALLFILE); // → /tmp/...
         if (inner.empty() || inner == "\x1b") {

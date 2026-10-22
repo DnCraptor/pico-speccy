@@ -2451,6 +2451,12 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
             notify(Config::next_ext_keys ? " Next keyboard ON " : " Next keyboard OFF ", LEVEL_INFO, 900);
             return;
         }
+        if (Z80Ops::isSam) {      // SAM Coupe F-keys: the same three states
+            const Sam::KeysMode m = Sam::cycleKeysMode();
+            notify(m == Sam::KEYS_ON  ? " F-keys: ON "
+                 : m == Sam::KEYS_OFF ? " F-keys: OFF " : " F-keys: AUTO ", LEVEL_INFO, 900);
+            return;
+        }
         if (Z80Ops::isTsconf || (Z80Ops::isAtm && Atm::evo)) {
             // ON -> OFF -> AUTO, for the session only: AUTO is the resting
             // state (the guest's own polling decides) and a machine reset
@@ -2898,7 +2904,10 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                 ext = FileUtils::getLCaseExt(fname);
                 fromZip = false;
 
-                // ZIP archive — extract and replace fname/ext/mFile
+                // ZIP archive — extract and replace fname/ext/mFile. Also an archive
+                // under an image name (defenders_of_the_earth.dsk from zxart = a
+                // ZIP holding the .dsk): mounting the archive itself as a +3 disk.
+                if (ext != "zip" && FileUtils::isZipByMagic(fname)) ext = "zip";
                 if (ext == "zip") {
                     // (The Gigascreen prevFB lease that used to be taken here now
                     // lives inside ZipExtract::extract, so every entry point gets it.)

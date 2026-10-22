@@ -15734,6 +15734,25 @@ PSRAM ≥ 1 MB + `FlashRoms::romsUsable()`), romsets `R_SAM256/512/512_1M/2M/4M`
 - Host check: `tools/sam_sim.c` (recipe in its header) boots ROM 3.0 to the copyright
   screen and BASIC; re-run after any change to the model.
 
+- **Phase 3a (2026-10-22, NOT hw-tested, `debug/DVp2w-sam-p3a-1.1.0.elf`)**: Web-catalog
+  `.dsk` survives the machine-switch reboot (`Config::samKeepTmp` lets `save()` write the
+  `/tmp` path); F0-F9 via keys-to-guest ON/OFF/AUTO (`Sam::keysToGuest`, AUTO = #F9 row read
+  from a non-ROM window within 2 s); tape at 7/12 (`tapeClock()`/`tapeFrameT()` in Tape.cpp),
+  auto-start = 200 #FE reads from one PC (no Play at F5 "R" on SAM); SAM mouse (9-nibble
+  buffer on #FFFE, SimCoupe Mouse.cpp); SAMVox #7C-#7F into the Covox buffers. Details in
+  `docs/sam-coupe-plan.md` §9.
+- **Fast tape load (2026-10-22, hw-confirmed DVp2w the same day — owner: fast load works, and so does the ZIP-named .dsk launch below; `debug/DVp2w-sam-tape-1.1.0`)**: `Sam::tapeTrap()`
+  = SimCoupe's `LoadTrap` on the ROM 3.0 loader — `check_trdos` sees the RET into `#E678`
+  (LDSTRT), the block comes from `Tape::flashBlockOpen/Read/Done` (new block-level API: TAP,
+  TZX 0x10/0x11/0x14; else play for real), written by HL with HMPR+1 at `#C000`, exits via
+  `#E739` (LOADEXIT, L = parity) or `#E6F5` (LOADFAIL, A = A' H = type). Signatures checked in
+  `bindRoms`. F5 "R" on SAM = `Sam::launchTape()`: reset + typed `LOAD ""` (the BOOT key
+  sequence generalised, `s_seq`). `Tape::flashloadAvailable()` is true on SAM with Fast load on;
+  `autoRunAvailable()` stays false (Spectrum snapshots). Details in the plan §9. Same build:
+  a ZIP under an image name (zxart `defenders_of_the_earth.dsk` = a ZIP holding the EDSK)
+  is detected by signature (`FileUtils::isZipByMagic`) in the F5 dispatch and the web launch
+  and goes through `ZipExtract::extract` first — it used to be mounted as a +3 disk.
+
 ## Nemo KAY 256 Turbo / 1024 / 1024 v2010-v2018 + ZXM-Phoenix 2 MB (2026-09-26, NOT hw-tested)
 
 Four romsets of the **Scorpion arch**, not an arch of their own: `R_KAY256` "Kay256",

@@ -31,6 +31,7 @@
 #include "CPU.h"
 #include "app/Col16Trace.h"
 #include "speccy/machines/Atm.h"
+#include "speccy/machines/Sam/Sam.h"
 #include "speccy/machines/EvoBase.h"
 #include "speccy/devices/tape/Tape.h"
 #include "app/Config.h"
@@ -889,7 +890,10 @@ IRAM_ATTR __attribute__((noinline)) void Z80::check_trdos() {
     // automap there, and rom[4] is never assigned (hw: the NMI-DOS restore
     // below ran on a stale flag and plugged a garbage rom[4] over the MMU —
     // the NextZXOS loader then CALLed into an empty ROM2 region and wedged).
-    if (Z80Ops::isSam) return;      // SAM Coupe: no Beta, no #3Dxx trap
+    if (Z80Ops::isSam) {            // SAM Coupe: no Beta, no #3Dxx trap — only the
+        if (REG_PC == Sam::TAPE_LDSTRT) Sam::tapeTrap();   // ROM 3.0 tape loader (flash)
+        return;
+    }
     if (Z80Ops::isNext) {
 #if NEXT_TRACE
         nxJumpNote('J');

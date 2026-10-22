@@ -47,6 +47,7 @@ using namespace std;
 #include "speccy/machines/Next/NextReg.h"
 #include "speccy/machines/Timex.h"
 #include "speccy/machines/If2.h"
+#include "speccy/machines/Sam/Sam.h"
 #include "fs/FileUtils.h"
 #include "speccy/z80/CPU.h"
 #include "speccy/video/Video.h"
@@ -96,6 +97,17 @@ uint16_t Tape::tapeBit1PulseLen2; // 2nd pulse for bit 1 (PZX asymmetric)
 uint16_t Tape::tapeHdrLong;  // Header sync lenght in pulses
 uint16_t Tape::tapeHdrShort; // Data sync lenght in pulses
 uint32_t Tape::tapeBlkPauseLen; 
+// The tape clock, in 3.5 MHz T-states: every pulse length in TAP/TZX/PZX/CSW is in
+// those units. A SAM Coupe runs at 6 MHz, so its T-states are scaled by 7/12 —
+// one place, so Play / Read / the snapshot restore all agree.
+static inline uint64_t tapeClock() {
+    const uint64_t t = CPU::global_tstates + CPU::tstates;
+    return Z80Ops::isSam ? t * 7 / 12 : t;
+}
+static inline uint32_t tapeFrameT() {
+    return Z80Ops::isSam ? CPU::statesInFrame * 7 / 12 : CPU::statesInFrame;
+}
+
 uint32_t Tape::tapeNext;
 uint8_t Tape::tapeLastByteUsedBits = 8;
 uint8_t Tape::tapeEndBitMask;
@@ -186,8 +198,8 @@ static inline bool wearSignalPhase() {
 }
 
 static void wearReset() {
-    wear.reset(Config::tape_wear, (uint32_t)(CPU::global_tstates + CPU::tstates));
-    wearAudioLast = CPU::global_tstates + CPU::tstates;
+    wear.reset(Config::tape_wear, (uint32_t)(tapeClock()));
+    wearAudioLast = tapeClock();
     wearFrozenBit = Tape::tapeEarBit;
 }
 
@@ -219,7 +231,7 @@ static uint32_t wearPulse(uint32_t next) {
 static void wearAudio() {
     const uint8_t was = wear.evtKind;
     if (!wear.sync(Config::tape_wear)) return;
-    const uint64_t now = CPU::global_tstates + CPU::tstates;
+    const uint64_t now = tapeClock();
     const uint64_t d = now - wearAudioLast;
     wearAudioLast = now;
     if (wear.audio(d > tapewear::MAX_PULSE_T ? 0u : (uint32_t)d)) {
@@ -368,8 +380,13 @@ static inline bool tapeFastMachineOk() {
 
 // Load tape file (.wav, .tap, .tzx)
 bool Tape::flashloadAvailable() {
-    return fastLoadOn() && tapeFastMachineOk();
+    // SAM Coupe: its own trap on the ROM 3.0 loader (Sam::tapeTrap) — not the
+    // Spectrum one, so it is not in tapeFastMachineOk (which also gates the
+    // Spectrum loader snapshots of autoRunAvailable).
+    return fastLoadOn() && (tapeFastMachineOk() || Config::arch == A_SAM);
 }
+
+bool Tape::fastLoadEnabled() { return fastLoadOn(); }
 
 bool Tape::autoRunAvailable() {
     // Tape wear ignores the in-ROM TRAP but must NOT disable the AUTO-RUN, and the
@@ -433,6 +450,8 @@ void Tape::LoadTape(const string& mFile_) {
         string keySel = mFile.substr(0,1);
         mFile.erase(0, 1);
         // Flashload .tap if needed — see Tape::flashloadAvailable().
+        // SAM Coupe: no loader snapshot — reset and type LOAD "" (Sam::launchTape).
+        if ((keySel == "R") && Config::arch == A_SAM) Sam::launchTape();
         if ((keySel == "R") && Tape::autoRunAvailable()) {
                 OSD::notify(OSD_TAPE_FLASHLOAD, LEVEL_INFO, 700);
                 uint8_t OSDprev = VIDEO::OSD;
@@ -467,6 +486,7 @@ void Tape::LoadTape(const string& mFile_) {
         string keySel = mFile.substr(0,1);
         mFile.erase(0, 1);
         // Flashload .tzx if needed
+        if ((keySel == "R") && Config::arch == A_SAM) Sam::launchTape();
         if ((keySel == "R") && Tape::autoRunAvailable()) {
                 OSD::notify(OSD_TAPE_FLASHLOAD, LEVEL_INFO, 700);
                 uint8_t OSDprev = VIDEO::OSD;
@@ -588,7 +608,8 @@ void Tape::LoadTape(const string& mFile_) {
     const bool playFallback = runKey && Config::tape_autostart &&
         !Tape::flashloadAvailable() && Tape::tapeStatus == TAPE_STOPPED &&
         Tape::tapeFileType != TAPE_FTYPE_EMPTY && Tape::tapeFileType != TAPE_FTYPE_CSW &&
-        Tape::tapeFileName != "none";   // CSW: started by its own branch / the auto-start
+        Tape::tapeFileName != "none" &&   // CSW: started by its own branch / the auto-start
+        Config::arch != A_SAM;            // SAM: Sam::portIn starts it when LOAD polls
 #if TIMEX_PORT_TRACE
     // "the tape does nothing" has four possible causes and they are indistinguishable
     // from the screen: the caller asked for L not R, auto-start is off, flashload's
@@ -1290,7 +1311,7 @@ void Tape::Play() {
         if (!CSW_Play()) { Stop(); return; }
         GDBEnd = false;
         Tape::tapeStatus = TAPE_LOADING;
-        tapeStart = CPU::global_tstates + CPU::tstates;
+        tapeStart = tapeClock();
         wearReset();
         return;
     }
@@ -1334,7 +1355,7 @@ void Tape::Play() {
 
     // Start loading
     Tape::tapeStatus = TAPE_LOADING;
-    tapeStart = CPU::global_tstates + CPU::tstates;
+    tapeStart = tapeClock();
 
     wearReset();
 }
@@ -1411,7 +1432,7 @@ uint32_t Tape::snapSave(uint8_t* out) {
     o.u8(playing ? 1 : 0);
     o.u8(resumable ? 1 : 0);
     if (!resumable) return o.n;
-    const uint64_t now = CPU::global_tstates + CPU::tstates;
+    const uint64_t now = tapeClock();
     o.u32((uint32_t)f_tell(&tape));
     o.u64(now - tapeStart);   // Read() works modulo 2^64 as well
     o.u8(tapePhase); o.u8(tapeEarBit); o.u8(tapeCurByte); o.u8(tapeBitMask);
@@ -1503,7 +1524,7 @@ bool Tape::snapLoad(const uint8_t* in, uint32_t n) {
              : tapeFileType == TAPE_FTYPE_PZX ? &PZX_GetBlock : &TAP_GetBlock;
     GDBEnd = false;
     tapeStatus = TAPE_LOADING;
-    const uint64_t now = CPU::global_tstates + CPU::tstates;
+    const uint64_t now = tapeClock();
     tapeStart = now - elapsed;   // may wrap: Read() takes now - tapeStart
     wearReset();
     if (VIDEO::OSD) VIDEO::OSD = 1;
@@ -1517,13 +1538,13 @@ IRAM_ATTR void Tape::Read() {
         return;
     }
 #endif
-    uint64_t tapeCurrent = CPU::global_tstates + CPU::tstates - tapeStart; // states since start
+    uint64_t tapeCurrent = tapeClock() - tapeStart; // states since start
     FIL* tape = &Tape::tape;
     if ( tapeFileType == TAPE_FTYPE_MP3 ) {
         if (!mf) return;
         uint32_t FPS = 50;
         uint32_t samplesPerFrame = musicFileGetSampleRate(mf) / FPS; // samples/second / frame/second; ~44100 / 50 = 882
-        uint32_t statesPerSample = CPU::statesInFrame / samplesPerFrame; // states/frame / samples/frame; ~70000 / 882 = 79
+        uint32_t statesPerSample = tapeFrameT() / samplesPerFrame; // states/frame / samples/frame; ~70000 / 882 = 79
         FSIZE_t sampleNumber = sampleNumber = tapeCurrent * (musicFileIsStereo(mf) ? 2 : 1) / statesPerSample;
         // + wav_offset; // states / states/sample
         size_t t = mp3_read;
@@ -1543,13 +1564,13 @@ IRAM_ATTR void Tape::Read() {
             }
         }
         wearAudio();
-        tapeStart = CPU::global_tstates + CPU::tstates - tapeCurrent; // recover?
+        tapeStart = tapeClock() - tapeCurrent; // recover?
         return;
     }
     else if ( tapeFileType == TAPE_FTYPE_WAV ) {
         uint32_t FPS = 50; /// VIDEO::framecnt / (ESPectrum::totalseconds / 1000000); // ~50 fps
         uint32_t samplesPerFrame = wav.freq / FPS; // samples/second / frame/second; ~44100 / 50 = 882
-        uint32_t statesPerSample = CPU::statesInFrame / samplesPerFrame; // states/frame / samples/frame; ~70000 / 882 = 79
+        uint32_t statesPerSample = tapeFrameT() / samplesPerFrame; // states/frame / samples/frame; ~70000 / 882 = 79
         FSIZE_t sampleNumber;
         if (wav.ch == 1) { // mono
             if (wav.byte_per_sample == 1) { // 8-bit
@@ -1574,7 +1595,7 @@ IRAM_ATTR void Tape::Read() {
             f_lseek(tape, 0);
         }
         wearAudio();
-        tapeStart = CPU::global_tstates + CPU::tstates - tapeCurrent; // recover?
+        tapeStart = tapeClock() - tapeCurrent; // recover?
         return;
     }
     if (tapeCurrent >= tapeNext) {
@@ -2114,9 +2135,9 @@ IRAM_ATTR void Tape::Read() {
 
         // More precision just for DRB and CSW. Makes some loaders work but bigger TAIL_LEN also does and seems better solution.
         // if (tapePhase == TAPE_PHASE_DRB || tapePhase == TAPE_PHASE_CSW)
-            tapeStart = CPU::global_tstates + CPU::tstates - tapeCurrent;
+            tapeStart = tapeClock() - tapeCurrent;
         // else
-        //     tapeStart = CPU::global_tstates + CPU::tstates;
+        //     tapeStart = tapeClock();
 
     }
 }
@@ -2168,6 +2189,75 @@ void Tape::Save() {
 // Play() would restart the block under it. Play() seeks to tapeCurBlock itself.
 static void flashPlayFallback() {
     if (Tape::tapeStatus != TAPE_LOADING) Tape::Play();
+}
+
+// ── Block-level access for a machine's own trap (Sam::tapeTrap) ───────────────
+// The TAP / TZX locating of FlashLoad below, without its Spectrum register
+// conventions. PZX/CSW/WAV: nothing block-shaped to hand out — play for real.
+bool Tape::flashBlockOpen(FlashBlk& b) {
+    b.flag = 0; b.dataLen = 0;
+    if (tapeFileName == "none") return false;
+    if (tapeFileType != TAPE_FTYPE_TAP && tapeFileType != TAPE_FTYPE_TZX) {
+        flashPlayFallback();
+        return false;
+    }
+    // A trap while the tape PLAYS: the block's trailing pause has not ended, so
+    // tapeCurBlock still names the block the ROM just read (see FlashLoad).
+    if (tapeStatus == TAPE_LOADING &&
+        (tapePhase == TAPE_PHASE_TAIL || tapePhase == TAPE_PHASE_PAUSE)) {
+        if (tapeCurBlock < tapeNumBlocks - 1) tapeCurBlock++;
+        else return false;
+    }
+    FIL* t = &Tape::tape;
+    if (tapeFileType == TAPE_FTYPE_TZX) {
+        const int savedBlock = tapeCurBlock;
+        uint8_t id = 0;
+        while (tapeCurBlock < tapeNumBlocks) {
+            CalcTZXBlockPos(tapeCurBlock);
+            id = readByteFile(t);
+            if (id == 0x10 || id == 0x11 || id == 0x14) break;
+            tapeCurBlock++;
+        }
+        if (tapeCurBlock >= tapeNumBlocks) {
+            tapeCurBlock = savedBlock;
+            flashPlayFallback();
+            return false;
+        }
+        CalcTZXBlockPos(tapeCurBlock);
+        id = readByteFile(t);
+        uint32_t len;
+        if (id == 0x10) {                       // pause(2) len(2)
+            readByteFile(t); readByteFile(t);
+            len = readByteFile(t) | (readByteFile(t) << 8);
+        } else if (id == 0x11) {                // pilot sync1 sync2 bit0 bit1 pilotlen (12) lastbits pause(2) len(3)
+            for (int i = 0; i < 15; i++) readByteFile(t);
+            len = readByteFile(t) | (readByteFile(t) << 8) | ((uint32_t)readByteFile(t) << 16);
+        } else {                                // 0x14: bit0 bit1 (4) lastbits pause(2) len(3)
+            for (int i = 0; i < 7; i++) readByteFile(t);
+            len = readByteFile(t) | (readByteFile(t) << 8) | ((uint32_t)readByteFile(t) << 16);
+        }
+        if (len == 0) { flashBlockDone(); return tapeCurBlock ? flashBlockOpen(b) : false; }
+        b.flag = readByteFile(t);
+        b.dataLen = len - 1;
+        return true;
+    }
+    if (!tape.obj.fs) {
+        string fname = FileUtils::TAP_Path + tapeFileName;
+        if (f_open(&tape, fname.c_str(), FA_READ) != FR_OK) return false;
+    }
+    CalcTapBlockPos(tapeCurBlock);
+    const uint32_t len = readByteFile(t) | (readByteFile(t) << 8);
+    if (len == 0) { flashBlockDone(); return tapeCurBlock ? flashBlockOpen(b) : false; }
+    b.flag = readByteFile(t);
+    b.dataLen = len - 1;
+    return true;
+}
+
+uint8_t Tape::flashBlockRead() { return readByteFile(&Tape::tape); }
+
+void Tape::flashBlockDone() {
+    if (tapeCurBlock < tapeNumBlocks - 1) tapeCurBlock++;
+    else { tapeCurBlock = 0; f_lseek(&Tape::tape, 0); }
 }
 
 bool Tape::FlashLoad() {
@@ -2748,7 +2838,7 @@ int Tape::JJFlashLoad() {
     // If screen animation is in progress, continue loading groups
     if (jjScreenAnimating) {
         // Throttle: wait until enough T-states have elapsed for next group
-        uint64_t now = CPU::global_tstates + CPU::tstates;
+        uint64_t now = tapeClock();
         if (now - jjScreenLastTs < JJ_TSTATES_PER_GROUP) return 1; // not yet, still in progress
 
         // Load one group
@@ -2820,7 +2910,7 @@ int Tape::JJFlashLoad() {
         jjScreenAnimating = true;
         jjScreenBlockLen = blockLen;
         jjScreenBytesRead = 0;
-        jjScreenLastTs = CPU::global_tstates + CPU::tstates;
+        jjScreenLastTs = tapeClock();
         return 1; // first call, no group loaded yet (next call will load first group)
 
     } else {
@@ -3041,7 +3131,7 @@ bool Tape::TapePortRead() {
                     loopCount = 0;
                     pzxFlashCont = false;
                     tapeStatus = TAPE_LOADING;
-                    tapeStart = CPU::global_tstates + CPU::tstates;
+                    tapeStart = tapeClock();
                     Read();
                 }
             } else { loopPC = pc; loopCount = 1; }

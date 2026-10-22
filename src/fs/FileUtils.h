@@ -184,6 +184,9 @@ public:
     static bool hasCSWextension(const string& filename);
     static bool hasMP3extension(const string& filename);
     static bool hasZIPextension(const string& filename);
+    // A ZIP by its local-header signature, whatever the name: zxart/WoS ship
+    // archives named .dsk/.tap, which the extension dispatch would mount as is.
+    static bool isZipByMagic(const string& path);
 
     static void deleteFilesWithExtension(const char *folder_path, const char *extension);
     static bool deleteDirRecursive(const char *path);

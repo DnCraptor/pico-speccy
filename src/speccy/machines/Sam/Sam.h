@@ -50,6 +50,25 @@ namespace Sam {
     void bootResume();               // setup(): pick a pending request up after a reboot
     void frameTick();                // EndFrame: drives the typing
 
+    // Tape launch (F5 "R" / Web catalog): reset and type LOAD "" + Enter once the
+    // ROM is up. With Fast load on the trap below fills the blocks from the file;
+    // off, the ROM's own #FE polling auto-starts the tape (Sam::portIn).
+    void launchTape();
+    // The ROM 3.0 tape-loader trap (SimCoupe Tape.cpp LoadTrap): called by
+    // Z80::check_trdos at PC = LDSTRT (#E678). True = the block was served and PC
+    // moved to one of the loader's exits; false = let the ROM read the tape.
+    bool tapeTrap();
+    static constexpr uint16_t TAPE_LDSTRT = 0xE678;
+
+    // Function keys (host F1-F9 -> SAM F1-F9, F10 -> F0) belong to the guest when
+    // ON, to our hotkey layer when OFF; AUTO = a program reads the F-key rows of
+    // #F9 from RAM code within the last 2 s (the ROM's own BASIC scan does not
+    // count). Same three states and the same hotkey as TS-Conf's PS/2 keys.
+    enum KeysMode : int8_t { KEYS_AUTO = -1, KEYS_OFF = 0, KEYS_ON = 1 };
+    bool     keysToGuest();
+    KeysMode cycleKeysMode();        // session only; returns the new mode
+    void     clearKeysOverride();    // a machine reset starts a new program
+
     // VIDEO::Draw / Draw_Opcode while SAM runs: contended = the access is to
     // internal RAM (ramContended, set by remap). Wait states at the access START.
     void draw(unsigned int n, bool contended);

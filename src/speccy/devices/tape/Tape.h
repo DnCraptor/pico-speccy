@@ -232,6 +232,19 @@ public:
     static void Stop();
     static void Read();
     static bool FlashLoad();
+    // Block-level file access for a machine whose ROM loader has its own register
+    // conventions and therefore its own trap (SAM Coupe: Sam::tapeTrap). Keeps the
+    // tape-format knowledge here and the ROM semantics in the machine module.
+    // flashBlockOpen: the next flash-loadable block (TAP; TZX 0x10/0x11/0x14),
+    // file positioned at its first byte AFTER the flag; dataLen = the bytes left
+    // in the block, checksum included. False when nothing can be flash-loaded —
+    // the tape is then started for real where the ROM must read it (as FlashLoad).
+    // flashBlockDone advances to the next block (wraps to block 0 at the end).
+    struct FlashBlk { uint8_t flag; uint32_t dataLen; };
+    static bool    flashBlockOpen(FlashBlk& b);
+    static uint8_t flashBlockRead();
+    static void    flashBlockDone();
+    static bool    fastLoadEnabled();    // Fast load on, tape wear off, no RZX playback
     static bool CerikopikFlashLoad();
     static int JJFlashLoad(); // 0=not applicable, 1=in progress, 2=done
     static bool jjScreenAnimating; // true while JJ screen animation in progress

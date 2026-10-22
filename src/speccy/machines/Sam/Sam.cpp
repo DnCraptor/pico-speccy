@@ -16,6 +16,8 @@
 #include "speccy/core/MemESP.h"
 #include "speccy/core/Ports.h"
 #include "speccy/z80/CPU.h"
+#include "speccy/z80/z80.h"
+#include "pico/time.h"
 #include "speccy/z80/MemGates.h"   // g_atm_ro: bit n = drop writes to CPU window n
 #include "speccy/video/Video.h"
 #include "speccy/devices/tape/Tape.h"
@@ -41,6 +43,9 @@ static uint32_t       s_intPages = 32;
 static uint32_t       s_extPages = 0;
 static uint8_t        s_ro = 0;           // windows mapped read-only (ROM, absent memory, LMPR D7)
 static uint8_t        s_cont = 0;         // windows showing internal RAM (contended)
+static uint8_t        s_romw = 0;         // windows showing ROM (the F-key AUTO test)
+static int8_t         s_keysOvr = -1;     // F-keys: -1 AUTO, 0 OFF, 1 ON (session)
+static uint32_t       s_fkPollMs = 0;     // last F-key row read from RAM code
 static uint8_t        s_inj[9] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // auto-typed keys (active low)
 static uint8_t        s_hpen = 192, s_lpen = 0;
 static bool           s_lineSeen = false;  // a LINE write since reset (bootTick waits for it)
@@ -51,9 +56,26 @@ static constexpr uint8_t HMPR_PAGE = 0x1F, HMPR_MCNTRL = 0x80;
 static constexpr uint8_t VMPR_PAGE = 0x1F, VMPR_MODE = 0x60, VMPR_MDE1 = 0x40;
 static constexpr uint8_t BORDER_SOFF = 0x80;
 
+// The tape trap's three ROM1 addresses (SimCoupe Memory.cpp rom_hooks): LDSTRT
+// `RET Z / LD B,8` at #E678, LOADFAIL `XOR H / RET NZ / LD A,C` at #E6F5,
+// LOADEXIT `LD A,L / CP 1 / RET` at #E739. Checked against the shipped image at
+// bind time — a ROM that does not carry them keeps the trap off.
+static constexpr uint16_t TAPE_LOADEXIT = 0xE739, TAPE_LOADFAIL = 0xE6F5;
+static bool s_tapeTrapOk = false;
+
+static bool romHas(const uint8_t* rom1, uint16_t addr, const uint8_t* pat, int n) {
+    return memcmp(rom1 + (addr - 0xC000), pat, n) == 0;
+}
+
 void bindRoms() {
     s_rom0 = gb_rom_sam_30;
     s_rom1 = gb_rom_sam_30 + 0x4000;
+    static const uint8_t kStrt[] = {0xC8, 0x06, 0x08}, kFail[] = {0xAC, 0xC0, 0x79},
+                         kExit[] = {0x7D, 0xFE, 0x01, 0xC9};
+    s_tapeTrapOk = romHas(s_rom1, Sam::TAPE_LDSTRT, kStrt, 3) &&
+                   romHas(s_rom1, TAPE_LOADFAIL, kFail, 3) &&
+                   romHas(s_rom1, TAPE_LOADEXIT, kExit, 4);
+    if (!s_tapeTrapOk) Debug::log("[SAM] ROM loader signatures not found: fast tape load off");
 }
 
 static void mapRo(int w, const uint8_t* p) {
@@ -89,8 +111,9 @@ static void mapExt(int w, uint8_t page) {
 void remap() {
     s_ro = 0;
     s_cont = 0;
+    s_romw = 0;
     // A
-    if (!(lmpr & LMPR_ROM0_OFF)) mapRo(0, s_rom0);
+    if (!(lmpr & LMPR_ROM0_OFF)) { mapRo(0, s_rom0); s_romw |= 1; }
     else {
         mapInt(0, lmpr & LMPR_PAGE);
         if (lmpr & LMPR_WPROT) s_ro |= 1;
@@ -102,7 +125,7 @@ void remap() {
     else                    mapInt(2, hmpr & HMPR_PAGE);
     // D
     if (hmpr & HMPR_MCNTRL)    mapExt(3, hepr);
-    else if (lmpr & LMPR_ROM1) mapRo(3, s_rom1);
+    else if (lmpr & LMPR_ROM1) { mapRo(3, s_rom1); s_romw |= 8; }
     else                       mapInt(3, (hmpr + 1) & HMPR_PAGE);
 
     // Contention (SimCoupe PageIn): internal RAM only — not ROM, external or absent memory.
@@ -114,7 +137,10 @@ void remap() {
     MemESP::pagingLock = 0;
 }
 
+static void periphReset();
+
 void reset() {
+    periphReset();
     const RomsetIdx r = Config::romSetSam;
     s_intPages = samIntPages(r);
     s_extPages = samExtPages(r);
@@ -150,35 +176,109 @@ struct BootKey { uint8_t row, bit; };
 // The first key only leaves the copyright screen and is swallowed (hw 2026-10-22:
 // "OOT" got typed), so an Enter goes first — harmless if the screen is already gone.
 static const BootKey kBootKeys[] = { {6, 0}, {7, 4}, {5, 1}, {5, 1}, {2, 4}, {6, 0} };   // Enter B O O T Enter
+// Tape launch: LOAD "" — the SAM has its own " key (row 5 bit 6, unshifted).
+static const BootKey kLoadKeys[] = { {6, 0}, {6, 1}, {5, 1}, {1, 0}, {1, 2}, {5, 6}, {5, 6}, {6, 0} };   // Enter L O A D " " Enter
 static constexpr int BOOT_START = 20, BOOT_STEP = 15, BOOT_HOLD = 5;
+static const BootKey* s_seq = kBootKeys;
+static int            s_seqN = (int)(sizeof(kBootKeys) / sizeof(kBootKeys[0]));
+static bool           s_seqDisk = true;    // the sequence needs drive 1 mounted (else a tape)
+
+static void seqArm(const BootKey* seq, int n, bool disk) {
+    s_seq = seq; s_seqN = n; s_seqDisk = disk;
+    s_boot = 0;
+    memset(s_inj, 0xFF, sizeof(s_inj));
+}
 
 void bootArm() {
     watchdog_hw->scratch[BOOT_SCRATCH] = 0;
-    s_boot = 0;
-    memset(s_inj, 0xFF, sizeof(s_inj));
+    seqArm(kBootKeys, (int)(sizeof(kBootKeys) / sizeof(kBootKeys[0])), true);
 }
 
 void bootArmAcrossReboot() { watchdog_hw->scratch[BOOT_SCRATCH] = BOOT_TAG; }
 
 void bootResume() {
+    Config::samKeepTmp = false;
     if (watchdog_hw->scratch[BOOT_SCRATCH] != BOOT_TAG) return;
     watchdog_hw->scratch[BOOT_SCRATCH] = 0;
     if (watchdog_caused_reboot() && Config::arch == A_SAM && SamFdc::mounted(0)) {
         Debug::log("[SAM] disk auto-boot armed after reboot");
-        s_boot = 0;
+        bootArm();
     }
 }
 
 void frameTick() {
     if (s_boot < 0) return;
-    if (!SamFdc::mounted(0)) { s_boot = -1; memset(s_inj, 0xFF, sizeof(s_inj)); return; }
+    const bool have = s_seqDisk ? SamFdc::mounted(0) : (Tape::tapeFileName != "none");
+    if (!have) { s_boot = -1; memset(s_inj, 0xFF, sizeof(s_inj)); return; }
     if (!s_lineSeen) return;                       // the ROM is not up yet
     const int t = s_boot++ - BOOT_START;
     memset(s_inj, 0xFF, sizeof(s_inj));
     if (t < 0) return;
     const int i = t / BOOT_STEP, ph = t % BOOT_STEP;
-    if (i >= (int)(sizeof(kBootKeys) / sizeof(kBootKeys[0]))) { s_boot = -1; return; }
-    if (ph < BOOT_HOLD) s_inj[kBootKeys[i].row] &= (uint8_t)~(1u << kBootKeys[i].bit);
+    if (i >= s_seqN) { s_boot = -1; return; }
+    if (ph < BOOT_HOLD) s_inj[s_seq[i].row] &= (uint8_t)~(1u << s_seq[i].bit);
+}
+
+void launchTape() {
+    if (Config::arch != A_SAM) return;
+    ESPectrum::resetForLoad();
+    seqArm(kLoadKeys, (int)(sizeof(kLoadKeys) / sizeof(kLoadKeys[0])), false);
+}
+
+// ---------------------------------------------------------------------------
+// Fast tape load: the ROM 3.0 loader trap (SimCoupe Tape.cpp LoadTrap)
+//
+// ROM1 #E65D is the loader: A' = the wanted block type, HL = destination, DE =
+// length bits 0-15, (#5AC8) = bits 16-23 — a SAM load may exceed 16K and the ROM
+// steps HMPR whenever HL reaches #C000 (#E707). After the BREAK test (CALL #0E69 /
+// RET Z at #E678) the pilot search starts at #E679; check_trdos sees the RET into
+// #E678 and calls here. Type 0 = a Spectrum header (17 bytes whatever DE says).
+// The block's bytes go through the ROM's own parity (L = type ^ every byte incl.
+// the checksum, so 0 on a good block) and the trap leaves through the ROM's exits:
+// LOADEXIT (LD A,L / CP 1 / RET) or LOADFAIL (XOR H / RET NZ) with A = the wanted
+// type and H = the tape's, i.e. what the ROM has there on a mismatch. A block too
+// short for the request takes LOADFAIL too, with A = ~H so RET NZ is taken.
+bool tapeTrap() {
+    if (!s_tapeTrapOk || !(s_romw & 8)) return false;      // ROM1 not in section D
+    if (Z80::getFlags() & 0x40) return false;    // BREAK: the RET Z returns
+    if (!Tape::fastLoadEnabled() || Tape::tapeFileName == "none") return false;
+    Tape::FlashBlk b;
+    if (!Tape::flashBlockOpen(b)) return false;
+    const uint8_t want = Z80::getRegAx();
+    const uint8_t type = b.flag;
+    uint32_t left = b.dataLen;
+    uint16_t dest = Z80::getRegHL();
+    uint32_t n = ((uint32_t)MemESP::readbyte(0x5AC8) << 16) | Z80::getRegDE();
+    if (type == 0) n = (n & ~0xFFu) | 17;
+    else if (type != want) {
+        Tape::flashBlockDone();
+        Z80::setRegA(want); Z80::setRegH(type);
+        Z80::setFlags(Z80::getFlags() & ~(0x40 | 0x01));
+        Z80::setRegPC(TAPE_LOADFAIL);
+        return true;
+    }
+    uint8_t par = type, last = type;
+    for (;;) {
+        if (!left) {
+            Tape::flashBlockDone();
+            Z80::setRegA((uint8_t)~last); Z80::setRegH(last); Z80::setRegL(par);
+            Z80::setFlags(Z80::getFlags() & ~(0x40 | 0x01));
+            Z80::setRegPC(TAPE_LOADFAIL);
+            return true;
+        }
+        const uint8_t v = Tape::flashBlockRead();
+        par ^= v; last = v; left--;
+        if (!n) break;                              // that was the checksum
+        if (!(s_ro & (1u << (dest >> 14)))) MemESP::writebyte(dest, v);
+        dest++; n--;
+        if (dest >= 0xC000) { hmpr = (uint8_t)(hmpr + 1); remap(); dest -= 0x4000; }
+    }
+    Z80::setRegH(last); Z80::setRegL(par);
+    Tape::flashBlockDone();
+    if (Tape::tapeStatus == TAPE_LOADING) Tape::Stop();
+    LED::touchR(LED::TAPE);
+    Z80::setRegPC(TAPE_LOADEXIT);
+    return true;
 }
 
 bool launchDisk(const std::string& path) {
@@ -186,6 +286,8 @@ bool launchDisk(const std::string& path) {
     if (!SamFdc::mounted(0)) return false;
     Config::ram_file = NO_RAM_FILE;
     Config::last_ram_file = NO_RAM_FILE;
+    // Switching machine may reboot: every save until then keeps a /tmp path.
+    Config::samKeepTmp = (Config::arch != A_SAM);
     Config::save();
     if (Config::arch != A_SAM) {
         bootArmAcrossReboot();
@@ -193,9 +295,29 @@ bool launchDisk(const std::string& path) {
     } else {
         ESPectrum::resetForLoad();
     }
+    Config::samKeepTmp = false;              // reached only without a reboot
     bootArm();
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Function keys
+
+bool keysToGuest() {
+    if (s_keysOvr >= 0) return s_keysOvr != 0;
+    return s_fkPollMs && (to_ms_since_boot(get_absolute_time()) - s_fkPollMs) < 2000;
+}
+
+KeysMode cycleKeysMode() {
+    switch (s_keysOvr) {
+        case KEYS_AUTO: s_keysOvr = keysToGuest() ? KEYS_OFF : KEYS_ON; break;   // always a change
+        case KEYS_ON:   s_keysOvr = KEYS_OFF; break;
+        default:        s_keysOvr = KEYS_AUTO; break;
+    }
+    return (KeysMode)s_keysOvr;
+}
+
+void clearKeysOverride() { s_keysOvr = -1; s_fkPollMs = 0; }
 
 // ---------------------------------------------------------------------------
 // Interrupts
@@ -255,17 +377,88 @@ static uint8_t keyRows(uint8_t hi, uint8_t mask) {
     return k;
 }
 
+// SAMVox (SimCoupe SAMVox.cpp, reverse-engineered from Modules Tracker): four
+// 8-bit DACs on #7C-#7F — 0 right, 1 left, 2 right 2, 3 left 2. Played through
+// the Covox buffers (Audio > Covox on): each side is the average of the DACs a
+// program has used on it, the SounDrive rule, so one DAC a side keeps full scale.
+static uint8_t s_vox[4] = {0x80, 0x80, 0x80, 0x80};
+static uint8_t s_voxUsed;
+static void samVox(uint8_t ch, uint8_t v) {
+    if (!ESPectrum::audioBufferCovoxL) return;
+    s_vox[ch] = v; s_voxUsed |= (uint8_t)(1u << ch);
+    const int rn = ((s_voxUsed & 1) ? 1 : 0) + ((s_voxUsed & 4) ? 1 : 0);
+    const int ln = ((s_voxUsed & 2) ? 1 : 0) + ((s_voxUsed & 8) ? 1 : 0);
+    const int r = rn ? (((s_voxUsed & 1) ? s_vox[0] : 0) + ((s_voxUsed & 4) ? s_vox[2] : 0)) / rn : 0x80;
+    const int l = ln ? (((s_voxUsed & 2) ? s_vox[1] : 0) + ((s_voxUsed & 8) ? s_vox[3] : 0)) / ln : 0x80;
+    ESPectrum::CovoxGetSample();
+    ESPectrum::lastCovoxVal = l;
+    ESPectrum::lastCovoxValR = r;
+    LED::touchW(LED::COVOX);
+}
+
+// SAM mouse (SimCoupe Mouse.cpp): reads of #FE with A15..A8 = #FF step through a
+// 9-nibble buffer — strobe, dummy, buttons (active low: bit 0 left, 1 middle,
+// 2 right), Y 256/16/1, X 256/16/1 — the movement since the last full read, Y up
+// positive. 38 us without a read resets it to the start. Only with a real USB mouse.
+static uint8_t  s_mPos;
+static uint64_t s_mLastT;
+static int32_t  s_mX, s_mY;           // ESPectrum::mouseX/Y already reported
+static uint8_t  s_mBuf[9];
+static uint8_t mouseIn() {
+    const uint64_t now = CPU::global_tstates + CPU::tstates;
+    if (now - s_mLastT > 228) s_mPos = 0;  // 38 us at 6 MHz
+    s_mLastT = now;
+    if (s_mPos == 0) { s_mBuf[0] = s_mBuf[1] = 0xFF; }
+    if (s_mPos == 2) {
+        int dx = ESPectrum::mouseX - s_mX, dy = ESPectrum::mouseY - s_mY;
+        if (dx > 127) dx = 127; else if (dx < -127) dx = -127;
+        if (dy > 127) dy = 127; else if (dy < -127) dy = -127;
+        s_mX += dx; s_mY += dy;
+        s_mBuf[2] = (uint8_t)~((ESPectrum::mouseButtonL ? 1 : 0) | (ESPectrum::mouseButtonM ? 2 : 0) |
+                               (ESPectrum::mouseButtonR ? 4 : 0));
+        s_mBuf[3] = (dy >> 8) & 0xF; s_mBuf[4] = (dy >> 4) & 0xF; s_mBuf[5] = dy & 0xF;
+        s_mBuf[6] = (dx >> 8) & 0xF; s_mBuf[7] = (dx >> 4) & 0xF; s_mBuf[8] = dx & 0xF;
+        LED::touchR(LED::KEMPMOUSE);
+    }
+    const uint8_t r = s_mBuf[s_mPos];
+    if (++s_mPos >= 9) s_mPos = 1;   // back to the data, still strobed
+    return (uint8_t)(0xF0 | r);
+}
+
+static void periphReset() {
+    s_mPos = 0; s_mX = ESPectrum::mouseX; s_mY = ESPectrum::mouseY;
+    s_voxUsed = 0; s_vox[0] = s_vox[1] = s_vox[2] = s_vox[3] = 0x80;
+}
+
 uint8_t portIn(uint16_t address) {
     if ((uint8_t)address >= 0xF8) CPU::tstates += ioWait(frameT());
     CPU::tstates += 4;
     const uint8_t lo = (uint8_t)address, hi = (uint8_t)(address >> 8);
     switch (lo) {
     case 0xFE: {
+        // The tape advances on EAR reads (Tape::Read scales the 6 MHz clock to the
+        // 3.5 MHz pulse lengths). No ROM traps: the SAM loader is not the
+        // Spectrum's. Auto-start: a stopped tape starts when one PC reads #FE 200
+        // times in a row (an edge-polling loader; the keyboard scan reads 9 rows a
+        // frame from different places) — the TapePortRead rule, so LOAD "" from
+        // a mounted tape needs no Play.
+        if (Tape::tapeStatus == TAPE_LOADING) { Tape::Read(); LED::touchR(LED::TAPE); }
+        else if (Config::tape_autostart && Tape::tapeFileType != TAPE_FTYPE_EMPTY &&
+                 Tape::tapeFileName != "none") {
+            static uint16_t s_pc; static uint16_t s_n;
+            const uint16_t pc = Z80::getRegPC();
+            if (pc != s_pc) { s_pc = pc; s_n = 0; }
+            else if (++s_n >= 200) { s_n = 0; Tape::Play(); }
+        }
         uint8_t k = (hi == 0xFF) ? (uint8_t)(keys[8] & 0x1F) : keyRows(hi, 0x1F);
+        if (hi == 0xFF && ESPectrum::mouseSeen) k &= mouseIn();
         return (uint8_t)(k | (border & BORDER_SOFF) | (Tape::tapeEarBit ? 0x40 : 0));
     }
     case 0xF9: {
         // Frame INT: bit 3 low inside the 128 T window (the same one isActiveINT raises).
+        // F-keys live in rows 0-2, bits 5-7: a RAM program scanning them wants them.
+        if ((hi & 0x07) != 0x07 && !(s_romw & (1u << (Z80::getRegPC() >> 14))))
+            s_fkPollMs = to_ms_since_boot(get_absolute_time());
         uint8_t st = status | 0x09;
         const int32_t t = (int32_t)CPU::tstates;
         if (t >= CPU::IntStart && t < CPU::IntEnd) st &= ~0x08;
@@ -349,6 +542,7 @@ void portOut(uint16_t address, uint8_t data) {
     default:
         if ((lo & 0xF8) == 0xE0)      SamFdc::out(0, address, data);
         else if ((lo & 0xF8) == 0xF0) SamFdc::out(1, address, data);
+        else if ((lo & 0xFC) == 0x7C) samVox(lo & 3, data);
         break;
     }
 }

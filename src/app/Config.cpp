@@ -187,6 +187,7 @@ bool     Config::p3WP[2] = { true, true };
 string   Config::p3DiskFile[2] = { "", "" };
 bool     Config::samWP[2] = { false, false };
 string   Config::samDiskFile[2] = { "", "" };
+bool     Config::samKeepTmp = false;
 bool     Config::p3_speedlock = true;
 bool     Config::p3_fastdisk = false;
 bool     Config::zcontroller = true;
@@ -2046,7 +2047,11 @@ void Config::writeKeys(NvsWriter& buf) {
                 // SAM Coupe drives, the same rule.
                 if (Config::arch == A_SAM)
                     samDiskFile[i] = SamFdc::fname(i);
-                persistFile("samd" + to_string(i) + ".file", samDiskFile[i]);
+                // A Web-catalog launch reaches the SAM through a reboot: the /tmp image
+                // has to come back for that one boot (Sam::launchDisk sets the flag,
+                // Sam::bootResume clears it), otherwise /tmp mounts are not remembered.
+                if (samKeepTmp) nvs_set_str(buf, ("samd" + to_string(i) + ".file").c_str(), samDiskFile[i].c_str());
+                else persistFile("samd" + to_string(i) + ".file", samDiskFile[i]);
             }
         }
     }

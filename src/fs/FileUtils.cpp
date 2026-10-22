@@ -718,6 +718,15 @@ bool FileUtils::hasZIPextension(const string& filename)
     return false;
 }
 
+bool FileUtils::isZipByMagic(const string& path) {
+    FIL* fp = fopen2(path.c_str(), FA_READ);
+    if (!fp) return false;
+    uint8_t sig[4]; UINT br = 0;
+    const bool ok = f_read(fp, sig, 4, &br) == FR_OK && br == 4;
+    fclose2(fp);
+    return ok && sig[0] == 'P' && sig[1] == 'K' && sig[2] == 3 && sig[3] == 4;
+}
+
 void FileUtils::deleteFilesWithExtension(const char *folder_path, const char *extension) {
     // Static FatFs objects + path buffer: DIR + FILINFO(LFN) + 512 B path ≈ 0.8 KB
     // is too fat for the deep call chains this runs in (Tape::LoadTape flashload /
