@@ -164,6 +164,19 @@ int main() {
         m2.gen(L2.data(), R2.data(), 44100, 0);
         double f2 = freqOf(L2.data(), 44100, 44100);
         CHECK(fabs(f2 - 551.25) < 1.5, "pitch @44.1k %.2f", f2);
+        // Half-rate synthesis (every other output sample computed, x2 lerp):
+        // same pitch, same level within the interpolation's loss at 551 Hz.
+        {
+            MoonPcm m3(g_mem.data(), g_mem.data() + MoonPcm::ROM_SIZE); m3.setRate(44100, true); m3.setNew2(true);
+            std::vector<int16_t> L3(44100), R3(44100);
+            keyTone(m3, 3, 0, 1, 0x100);
+            m3.gen(L3.data(), R3.data(), 44100, 0);
+            double f3 = freqOf(L3.data(), 44100, 44100);
+            CHECK(fabs(f3 - 551.25) < 1.5, "pitch @44.1k half-rate %.2f", f3);
+            int p2 = 0, p3 = 0;
+            for (int i = 4410; i < 44100; i++) { if (abs(L2[i]) > p2) p2 = abs(L2[i]); if (abs(L3[i]) > p3) p3 = abs(L3[i]); }
+            CHECK(p3 > p2 * 9 / 10 && p3 <= p2 + 1, "half-rate level %d vs %d", p3, p2);
+        }
         keyTone(m, 3, 0, 1, 0x100);
         std::fill(L.begin(), L.end(), 0); std::fill(R.begin(), R.end(), 0);
         m.gen(L.data(), R.data(), N, 0);

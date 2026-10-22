@@ -49,7 +49,6 @@ const uint16_t kPow[256] = {
     0x10A8, 0x10A0, 0x1094, 0x1088, 0x107C, 0x1070, 0x1064, 0x1058,
     0x1050, 0x1044, 0x1038, 0x102C, 0x1020, 0x1018, 0x100C, 0x1000,
 };
-inline int32_t attToVol(uint32_t a) { return kPow[a & 0xFF] >> (a >> 8); }
 
 // ymfm attenuation_increment: 4-bit EG step per (6-bit rate, 3-bit index).
 const uint32_t kInc[64] = {
@@ -70,7 +69,6 @@ const uint32_t kInc[64] = {
     0x44444444, 0x84448444, 0x84848484, 0x88848884,
     0x88888888, 0x88888888, 0x88888888, 0x88888888,
 };
-inline uint32_t attInc(uint32_t rate, uint32_t idx) { return (kInc[rate] >> (4 * idx)) & 0xF; }
 
 const uint8_t kLfoSteps[8] = { 1, 12, 19, 25, 31, 35, 37, 42 };
 const uint8_t kAmDepth[8]  = { 0, 0x14, 0x20, 0x28, 0x30, 0x40, 0x50, 0x80 };
@@ -99,13 +97,28 @@ inline int16_t clamp16(int32_t v) { return v > 32767 ? 32767 : v < -32768 ? -327
 } // namespace
 
 MoonPcm::MoonPcm(const uint8_t* rom, uint8_t* ram) : m_rom(rom), m_ram(ram) {
-    m_ratio = (CHIP_RATE << 16) / 31250;
+    memcpy(m_pow, kPow, sizeof(m_pow));
+    memcpy(m_inc, kInc, sizeof(m_inc));
+    setRate(31250);
     reset();
 }
 
-void MoonPcm::setRate(uint32_t outRate) {
+void MoonPcm::setRate(uint32_t outRate, bool halfRate) {
     if (!outRate) outRate = 31250;
-    m_ratio = (uint32_t)(((uint64_t)CHIP_RATE << 16) / outRate);
+    m_ratio  = (uint32_t)(((uint64_t)CHIP_RATE << 16) / outRate);
+    m_ratio2 = m_ratio * 2;
+    m_half = 0xFF;                  // force the recompute below
+    setHalfRate(halfRate);
+}
+
+void MoonPcm::setHalfRate(bool halfRate) {
+    const uint8_t h = halfRate ? 1 : 0;
+    if (m_half == h) return;
+    m_half = h;
+    m_stepRatio = m_half ? m_ratio2 : m_ratio;
+    m_halfTick = 0;
+    m_cL = m_cR = 0;
+    for (Ch& c : m_ch) c.stepOut = (uint32_t)(((uint64_t)c.step * m_stepRatio) >> 16);
 }
 
 void MoonPcm::reset() {
@@ -116,6 +129,8 @@ void MoonPcm::reset() {
     m_active = 0;
     m_envCounter = 0;
     m_acc = 0;
+    m_halfTick = 0;
+    m_cL = m_cR = 0;
     m_addr = 0;
     m_new2 = false;
     m_flashCyc = 0;
@@ -141,6 +156,7 @@ void MoonPcm::recache(int ch) {
     const uint32_t fnum = ((r20 >> 1) & 0x7F) | ((uint32_t)(r38 & 7) << 7);
     const int32_t  sh   = oct + 7;
     c.step = sh >= 0 ? ((0x400u | fnum) << sh) >> 2 : ((0x400u | fnum) >> 1) >> 2;
+    c.stepOut = (uint32_t)(((uint64_t)c.step * m_stepRatio) >> 16);
 
     c.tlTarget = (uint32_t)((m_regs[0x50 + ch] >> 1) & 0x7F) << 10;
     if (m_regs[0x50 + ch] & 1) c.tl = c.tlTarget;           // level direct
@@ -192,6 +208,21 @@ void MoonPcm::loadWave(int ch) {
     m_regs[0xC8 + ch] = memRead(h + 10);
     m_regs[0xE0 + ch] = memRead(h + 11);
     c.env = 0x3FF;
+    // Direct pointer when the whole sample sits in one flat block, so fetch()
+    // is plain loads instead of memRead's region tests per byte (nullptr =
+    // the general path: a paged ROM, or a sample crossing a block edge).
+    c.ptr = nullptr;
+    if (!m_romPages) {
+        const uint32_t n = c.endpos >> 16;
+        const uint32_t bytes = (c.format == 0 ? n : c.format == 2 ? n * 2 : (n * 3 + 1) / 2) + 2;
+        const uint32_t a = c.base & 0x3FFFFF;
+        if (a < m_romSize) {
+            if (m_rom && a + bytes <= m_romSize) c.ptr = m_rom + a;
+        } else if (m_ram) {
+            const uint32_t ra = a & (RAM_SIZE - 1);
+            if (ra + bytes <= RAM_SIZE) c.ptr = m_ram + ra;
+        }
+    }
     recache(ch);
 }
 
@@ -212,7 +243,7 @@ void MoonPcm::keyOnOff(int ch, bool on) {
 }
 
 // ymfm pcm_channel::clock_envelope.
-void MoonPcm::clockEnv(Ch& c, int ch, uint32_t counter) {
+inline void MoonPcm::clockEnv(Ch& c, int ch, uint32_t counter) {
     if (c.eg == EG_ATTACK && c.env == 0)          c.eg = EG_DECAY;
     if (c.eg == EG_DECAY && c.env >= c.sustain)   c.eg = EG_SUSTAIN;
     const uint32_t rate = c.rate[c.eg];
@@ -234,9 +265,16 @@ void MoonPcm::clockEnv(Ch& c, int ch, uint32_t counter) {
     }
 }
 
-int16_t MoonPcm::fetch(const Ch& c) const {
-    uint32_t a = c.base;
+inline int16_t MoonPcm::fetch(const Ch& c) const {
     const uint32_t p = c.pos >> 16;
+    if (const uint8_t* s = c.ptr) {
+        if (c.format == 0) return (int16_t)(s[p] << 8);
+        if (c.format == 2) { s += p * 2; return (int16_t)((s[0] << 8) | s[1]); }
+        s += (p >> 1) * 3;
+        if (!(p & 1)) return (int16_t)((s[0] << 8) | ((s[1] << 4) & 0xF0));
+        return (int16_t)((s[2] << 8) | (s[1] & 0xF0));
+    }
+    uint32_t a = c.base;
     if (c.format == 0) return (int16_t)(memRead(a + p) << 8);
     if (c.format == 2) { a += p * 2; return (int16_t)((memRead(a) << 8) | memRead(a + 1)); }
     a += (p >> 1) * 3;
@@ -312,17 +350,18 @@ uint8_t MoonPcm::read(uint8_t reg) {
     return v;
 }
 
-void MoonPcm::gen(int16_t* L, int16_t* R, int n, int off) {
-    if (!m_active && m_fmFL == 4096 && m_fmFR == 4096) return;
-    L += off; R += off;
-    for (int i = 0; i < n; i++) {
-        m_acc += m_ratio;
+// One step of `ratio` (Q16 chip samples) of chip time: the envelope / LFO /
+// level ticks it spans and the PCM pair of every active channel summed into
+// sl/sr (before the mix level). One body, one call site: see MoonPcm.h.
+inline void MoonPcm::chipStep(uint32_t ratio, int32_t& sl, int32_t& sr) {
+    {
+        m_acc += ratio;
         const uint32_t ticks = m_acc >> 16;
         m_acc &= 0xFFFF;
         const uint32_t c0 = m_envCounter;
         m_envCounter += ticks;
 
-        int32_t sl = 0, sr = 0;
+        sl = 0; sr = 0;
         uint32_t act = m_active;
         while (act) {
             const int ch = __builtin_ctz(act);
@@ -336,12 +375,13 @@ void MoonPcm::gen(int16_t* L, int16_t* R, int n, int off) {
                     else { c.tl = c.tl > c.tlTarget + 38 ? c.tl - 38 : c.tlTarget; }
                 }
             }
-            uint32_t step = c.step;
+            uint32_t inc = c.stepOut;                     // step x ratio, cached
             if (c.pmDepth) {
                 const uint32_t ls = c.lfo + (1u << 16);
                 int32_t lv = (ls >> 10) & 0x7F;
                 if (ls & (1u << 17)) lv ^= 0x7F;
-                step += ((lv - 0x40) * (int32_t)c.pmDepth) >> 7;
+                const uint32_t step = c.step + (((lv - 0x40) * (int32_t)c.pmDepth) >> 7);
+                inc = (uint32_t)(((uint64_t)step * ratio) >> 16);
             }
             if (c.env <= EG_QUIET && !c.out1) {
                 uint32_t e = c.env;
@@ -358,7 +398,7 @@ void MoonPcm::gen(int16_t* L, int16_t* R, int n, int off) {
                 sl += (attToVol(le << 2) * s) >> 15;
                 sr += (attToVol(re << 2) * s) >> 15;
             }
-            uint64_t np = (uint64_t)c.pos + (((uint64_t)step * m_ratio) >> 16);
+            uint64_t np = (uint64_t)c.pos + inc;
             if (np >= c.endpos) {
                 if (c.endpos > c.looppos) {
                     uint64_t over = np - c.endpos, len = c.endpos - c.looppos;
@@ -370,6 +410,27 @@ void MoonPcm::gen(int16_t* L, int16_t* R, int n, int off) {
             }
             c.pos = (uint32_t)np;
             if (c.eg >= EG_RELEASE && c.env >= EG_QUIET) m_active &= ~(1u << ch);
+        }
+    }
+}
+
+void MoonPcm::gen(int16_t* L, int16_t* R, int n, int off) {
+    if (!m_active && m_fmFL == 4096 && m_fmFR == 4096) return;
+    L += off; R += off;
+    for (int i = 0; i < n; i++) {
+        int32_t sl, sr;
+        // Half rate: a chip step of two output samples every other sample, the
+        // midpoint on the compute tick, the new pair held on the next (OplFm).
+        const bool compute = !m_half || (m_halfTick ^= 1);
+        if (compute) {
+            chipStep(m_half ? m_ratio2 : m_ratio, sl, sr);
+            if (m_half) {
+                const int32_t nl = sl, nr = sr;
+                sl = (m_cL + nl) >> 1; sr = (m_cR + nr) >> 1;
+                m_cL = nl; m_cR = nr;
+            }
+        } else {
+            sl = m_cL; sr = m_cR;
         }
         L[i] = clamp16((L[i] * m_fmFL + sl * m_pcmFL) >> 12);
         R[i] = clamp16((R[i] * m_fmFR + sr * m_pcmFR) >> 12);

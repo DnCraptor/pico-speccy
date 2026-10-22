@@ -16738,6 +16738,74 @@ level; PCM `>> kPcmShift` (1) — the level knob if hw disagrees. Host test
 Hw owed: MoonService detect + RAM test, MWM player (Pentagon 512K, demo-disks/*.trd),
 levels against FM, core0 cost with many channels.
 
+### VGMPLAY.WMF 0.9.04-RC1 on the card: three reports, one ours (2026-10-22, NOT hw-tested)
+
+demyanenko-d/VGMPLAY.WMF (Wild Commander, TS-Conf) drives the MoonSound through the
+same ports we emulate; our Linux build of it is `debug/WC/VGMPLAY-0.9.04-RC1-new2b.WMF`
+(recipe `build_vgmplay.sh` + SDCC 4.6.0 + node in the 2026-10-22 session scratch —
+only SDCC 4.6 fits its code into 0x8000..0xB8D0), patch for the author
+`debug/WC/VGMPLAY-0.9.04-RC1-new2b.patch` (= the earlier NEW2-before-upload fix + this).
+- **"02 Advent ~Character Select" is silent on the card by construction, and the
+  Pico-Zx-Player playing it is why**: an arcade rip (28.6 MHz, its own 4 MB sample ROM
+  in `0x84` blocks). The player builds that ROM from the file (`setRomPages`); the
+  card has only YRW801 + 1 MB SRAM, and the plugin's scheme (upload each ROM block at
+  SRAM +0x200000, patch the 128 headers' bit 21, renumber waves 384..511) reaches
+  blocks below 1 MB only — this file's data sits at 2.8-3.9 MB, and reg 3 is 6 bits
+  (`memAutoInc` masks it, MAME's bus is 22 bits), so those bytes land in the ROM
+  window and are dropped as on the chip. A plugin could compact the blocks into SRAM
+  (425 KB fit) and rewrite the header start addresses — the author's call, not ours.
+- **"OPL3 stops playing until F11" = `#F8 = 3F`**: that arcade rip mutes the FM mix
+  (both sides level 7 = mute, `kMix[7] = 0`, MAME `m_mix_level[7] = 0`), the register
+  persists, and the plugin's OPL3/OPL2 init blocks never touch the wave part. The real
+  card behaves the same; F11 is our chip reset (0x1B). Fixed in the plugin build above:
+  every init block raises NEW2, writes `F8 = 1B / F9 = 00` (the power-on values), then
+  sets NEW as before. Nothing to change here.
+- **"05 encounter" (MSX MoonDriver, 655 KB `0x87` RAM block, 24 wave + 12 FM channels)
+  stutters = MoonPcm cost.** Host profile (gprof, -fno-inline): MoonPcm::gen + clockEnv
+  + fetch + memRead + attToVol = half the render, the OplFm half the rest; on the
+  device MoonPcm.cpp was -Os with every helper OUT OF LINE (nm: `memRead` 0x30 B weak,
+  `fetch`, `clockEnv` separate, all in flash) and the 1 KB tables in flash .rodata — the
+  OplFm lesson again, 24 channels x 31250 x ~6 flash calls. Now: `-O2 -fno-unroll-loops`
+  (source-flags.cmake), `clockEnv/fetch/chipStep` always_inline, `kPow/kInc` copied into
+  the object (`m_pow/m_inc`, heap SRAM, +768 B per card), and **half-rate synthesis
+  below 450 MHz** (`setRate(rate, half)`: a chip step of two output samples every
+  other sample, midpoint + hold, the OplFm form; same rule at the three setRate sites).
+  Host render of the track byte-identical at full rate; `tools/moonpcm_test.cpp` got a
+  half-rate pitch/level check. Test ELFs `debug/DVp2-16M-moonopt-1.1.0` (plain) and
+  `-moonopt-trace-` (`OPL_PERF_TRACE`: `OPL: gen N us/fr` every ~300 frames while
+  audible — that number against the ~20500 us frame is what says whether 24 channels
+  fit; it includes MoonPcm). **First hw figure on that build (TS-Conf + WC, the "05"
+  track, clock not in the log): `OPL: gen 9049 / 8756 us/fr`** — 44% of the frame for
+  the sound alone on top of a 14 MHz guest, which is the stutter. Round 2 (NOT
+  hw-tested): the trace line splits it (`OPL: gen N us/fr (moon M)`), `fetch` reads
+  through a per-channel direct pointer cached at `loadWave` (a sample lying whole in
+  the flat ROM or the RAM; nullptr = the memRead path, e.g. the player's paged ROM),
+  and the per-sample `step * ratio` 64-bit product is cached (`Ch::stepOut`, redone
+  at recache/setRate; vibrato keeps the live product). Host render still byte-identical.
+  **Round 2 on hw: `OPL: gen 8569-10507 us/fr (moon 3394-5326)`** — the FM half ~5.2 ms
+  (OplFm at full rate, 12 keyed channels, a 504 MHz part is above the <450 MHz rule)
+  and the wave half 3.4-5.3 ms, i.e. both. **Round 3 (`moonopt3`) put BOTH halves at
+  half rate while wave channels sound — hw: "sound is bad, to put it mildly", and both
+  halves were wrong in their own way:** (a) `OplFm::setRates` re-derived freqbase but
+  not the channels' cached `fc`/`Incr` (derived at the A0/B0 write), so a rate switch
+  under held notes played them an octave off until re-keyed — fixed, setRates now
+  re-derives all 18 (the 4-op pair's second channel from the first's fc); (b) the WAVE
+  half at half rate point-decimates 44.1 kHz samples to 15.6 kHz with no low-pass:
+  host, the "05" wave part alone, half vs full render aligned to its 1.4-sample lag =
+  **-9.6 dB of in-band (0.3-7 kHz) error** (`moonhalf.cpp` + `ana2.cpp`, session
+  scratch), where the FM synth at half rate only loses what it would generate above
+  7.8 kHz. So round 4 (NOT hw-tested, `debug/DVp2-16M-moonopt4-1.1.0` / `-trace-`):
+  **the wave half always runs at full rate** (`setRate(rate)` at all three sites;
+  `setHalfRate` stays in the API, unused by the card), and **the FM half follows the
+  MEASURED cost**: `g_opl_frame_us` (an always-on `time_us_32` pair round OPLGenSound,
+  only with a card) — ten frames over 6.5 ms switch OplFm to half rate, two seconds
+  under 2.5 ms switch back, `[MOON] OPL4 FM synthesis at half/full rate` in the log;
+  the <450 MHz rule stays underneath. Expected on "05": ~6-8 ms a frame (FM ~2.6 +
+  wave 3.4-5.3); if that still stutters the wave levers are one `attToVol` per channel
+  with the pans as linear factors, the 24 sample streams' XIP line fills (~235k/s at
+  44.1 kHz — the floor), the gen loop in an overlay window, or a REAL half-rate (two
+  fetches averaged per step — keeps the fetch cost, halves the rest).
+
 ## CYW43 radio DMA starved the HDMI TMDS FIFO — vendored bus driver, CPU FIFO copy (2026-10-22, hw-confirmed DVp2w)
 
 "Web Archive over the on-chip radio blacks the monitor out" — Pimoroni Pico Plus 2 W in

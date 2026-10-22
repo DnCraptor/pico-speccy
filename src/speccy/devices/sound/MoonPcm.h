@@ -70,7 +70,15 @@ public:
     // work); ram: RAM_SIZE bytes, owned by the caller.
     MoonPcm(const uint8_t* rom, uint8_t* ram);
 
-    void setRate(uint32_t outRate);
+    // halfRate: synthesize the PCM half at outRate/2 and x2 linearly interpolate
+    // (the OplFm rule: below ~450 MHz 24 channels do not fit the frame budget at
+    // the full mixing rate; pitch and envelope times stay exact, content above
+    // outRate/4 is lost). The FM mix level still applies per output sample.
+    void setRate(uint32_t outRate, bool halfRate = false);
+    // Switch the half-rate mode alone (the per-frame policy in ESPectrum: both
+    // chip halves go half-rate while wave channels sound, whatever the clock).
+    void setHalfRate(bool halfRate);
+    bool halfRate() const { return m_half != 0; }
     // A ROM other than the card's (the Pico-Zx-Player, for a VGM that carries its own
     // sample ROM): romSize bytes (<= 4 MB) read through 4 KB pages, pages[a >> 12];
     // the RAM, if any, follows at romSize. nullptr = back to the flat rom.
@@ -78,6 +86,7 @@ public:
     void setRomPages(const uint8_t* const* pages, uint32_t romSize) {
         m_romPages = pages;
         m_romSize = pages ? romSize : ROM_SIZE;
+        for (Ch& c : m_ch) c.ptr = nullptr;   // direct pointers are per block layout
     }
     void reset();
 
@@ -113,6 +122,9 @@ private:
     struct Ch {
         uint32_t base, endpos, looppos, pos;   // pos/loop/end in .16 samples
         uint32_t step;                         // .16 per chip sample (cached)
+        uint32_t stepOut;                      // .16 per synthesis step (step x m_stepRatio)
+        const uint8_t* ptr;                    // the sample's bytes when it lies whole in
+                                               // one flat block (ROM or RAM), else nullptr
         uint32_t lfo;
         uint32_t tl, tlTarget;                 // .10
         uint16_t env, sustain;
@@ -125,8 +137,16 @@ private:
     void     recache(int ch);
     void     loadWave(int ch);
     void     keyOnOff(int ch, bool on);
-    void     clockEnv(Ch& c, int ch, uint32_t counter);
-    int16_t  fetch(const Ch& c) const;
+    // The per-sample path (gen -> chipStep -> clockEnv/fetch/memRead/attToVol) is
+    // ONE function after inlining: at -Os GCC emitted each of these out of line
+    // and the 24-channel loop made 5-6 calls into flash per channel per sample
+    // (the OplFm lesson). The tables it reads are copies inside the object (SRAM),
+    // not the flash .rodata originals.
+    inline __attribute__((always_inline)) void    clockEnv(Ch& c, int ch, uint32_t counter);
+    inline __attribute__((always_inline)) int16_t fetch(const Ch& c) const;
+    inline __attribute__((always_inline)) void    chipStep(uint32_t ratio, int32_t& sl, int32_t& sr);
+    int32_t  attToVol(uint32_t a) const { return m_pow[a & 0xFF] >> (a >> 8); }
+    uint32_t attInc(uint32_t rate, uint32_t idx) const { return (m_inc[rate] >> (4 * idx)) & 0xF; }
     uint32_t memAutoInc();
     void     flashCmd(uint32_t a, uint8_t v);
     uint8_t  flashIdByte(uint32_t a) const;
@@ -142,7 +162,14 @@ private:
     uint32_t m_envCounter;
     uint32_t m_acc;             // Q16 fraction of a chip sample
     uint32_t m_ratio;           // chip samples per output sample, Q16
+    uint32_t m_ratio2;          // ... per TWO output samples (the half-rate step)
+    uint32_t m_stepRatio;       // the one chipStep runs with (m_ratio or m_ratio2)
+    uint8_t  m_half;            // synthesizing every other output sample
+    uint8_t  m_halfTick;        // toggles: compute vs hold
+    int32_t  m_cL, m_cR;        // the last computed PCM pair (half rate)
     int32_t  m_fmFL, m_fmFR, m_pcmFL, m_pcmFR;   // mix factors, Q12 (FM 4096 = unchanged)
+    uint16_t m_pow[256];        // SRAM copies of the flash tables (MoonPcm.cpp)
+    uint32_t m_inc[64];
     uint8_t  m_addr;
     bool     m_new2;
     uint8_t  m_flashCyc;        // AM29F016 command cycle (flashCmd)

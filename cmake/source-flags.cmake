@@ -24,6 +24,10 @@ set_source_files_properties(src/speccy/devices/sound/OpnFm.cpp PROPERTIES
 # YMF262 (OPL3, VGM-player card): 36 operators at the AY sample rate.
 set_source_files_properties(src/speccy/devices/sound/OplFm.cpp PROPERTIES
     COMPILE_FLAGS "-O2")
+# YMF278B wave half (ZXM-MoonSound): 24 sample channels per output sample. At
+# -Os the per-channel helpers were out-of-line calls into flash (2026-10-22).
+set_source_files_properties(src/speccy/devices/sound/MoonPcm.cpp PROPERTIES
+    COMPILE_FLAGS "-O2 -fno-unroll-loops")
 # 2x SN76489 (VGM-player card): ~7 chip ticks per output sample.
 set_source_files_properties(src/speccy/devices/sound/SnSound.cpp PROPERTIES
     COMPILE_FLAGS "-O3 -funroll-loops")

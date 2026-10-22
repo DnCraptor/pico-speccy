@@ -907,7 +907,7 @@ static void moonSoundInit() {
   memset(ram, 0, MoonPcm::RAM_SIZE);
   moonpcm = new (std::nothrow) MoonPcm(MoonRom::get(), ram);
   if (!moonpcm) { Buffer::pfree(ram); return; }
-  moonpcm->setRate(ESPectrum::Audio_freq);
+  moonpcm->setRate(ESPectrum::Audio_freq);   // full rate: half-rate aliases samples (see the policy in loop)
   Debug::log("[MOON] ZXM-MoonSound up: ROM @%08X (%s), 1 MB SRAM @%08X",
              (unsigned)(uintptr_t)MoonRom::get(), MoonRom::builtin() ? "flash" : "SD",
              (unsigned)(uintptr_t)ram);
@@ -3504,12 +3504,19 @@ static uint8_t s_oplHiAddr = 0;   // last #C6 address byte (NEW2 = reg 0x105 bit
 // while audible. This is the number that attributed the Doom IDL<0 dips.
 #if OPL_PERF_TRACE
 static uint32_t g_opl_gen_us = 0;
+static uint32_t g_moon_gen_us = 0;   // the MoonPcm share of the above
+#endif
+#if MOONSOUND
+static uint32_t g_opl_frame_us = 0;  // this frame's OPLGenSound time (the half-rate policy)
 #endif
 
 void ESPectrum::OPLGenSound(int count, int bufpos) {
   if (!OplSubsys::enabled || !audioBufferOPL_L || !oplfm) return;
 #if OPL_PERF_TRACE
   uint32_t _t0 = time_us_32();
+#endif
+#if MOONSOUND
+  const uint32_t _f0 = time_us_32();
 #endif
   memset(audioBufferOPL_L + bufpos, 0, count * sizeof(int16_t));
   memset(audioBufferOPL_R + bufpos, 0, count * sizeof(int16_t));
@@ -3528,7 +3535,15 @@ void ESPectrum::OPLGenSound(int count, int bufpos) {
     }
     oplfm->gen(audioBufferOPL_L, audioBufferOPL_R, next - cur, cur);
     // MoonSound: the FM half is in the buffer now; the PCM half mixes onto it.
-    if (moonpcm) moonpcm->gen(audioBufferOPL_L, audioBufferOPL_R, next - cur, cur);
+    if (moonpcm) {
+#if OPL_PERF_TRACE
+      const uint32_t _m0 = time_us_32();
+#endif
+      moonpcm->gen(audioBufferOPL_L, audioBufferOPL_R, next - cur, cur);
+#if OPL_PERF_TRACE
+      g_moon_gen_us += time_us_32() - _m0;
+#endif
+    }
     cur = next;
   }
   // writes stamped exactly at `end` belong before whatever comes next
@@ -3540,6 +3555,9 @@ void ESPectrum::OPLGenSound(int count, int bufpos) {
   dcblock_run(audioBufferOPL_R + bufpos, count, s_dcOplR, nullptr);
 #if OPL_PERF_TRACE
   g_opl_gen_us += time_us_32() - _t0;
+#endif
+#if MOONSOUND
+  if (moonpcm) g_opl_frame_us += time_us_32() - _f0;
 #endif
 }
 
@@ -4087,16 +4105,49 @@ void ESPectrum::loop() {
 
     audbufcntSAA = 0;
     audbufcntPIT = 0;
+#if MOONSOUND
+    // ZXM-MoonSound budget: an OPL4 track keys the FM half AND up to 24 wave
+    // channels — measured 8.5-10.5 ms a frame at full rate (FM ~5.2, wave
+    // 3.4-5.3; hw 2026-10-22, TS-Conf + VGMPLAY.WMF, "05 encounter"), where a
+    // plain OPL3 score alone fits a 504 MHz frame. So the policy is the measured
+    // cost itself (g_opl_frame_us, an always-on timer round OPLGenSound): ten
+    // frames over 6.5 ms switch the FM half to half-rate synthesis, two seconds
+    // under 2.5 ms switch back; the <450 MHz rule stays underneath. The WAVE
+    // half stays at full rate: point-decimating 44.1 kHz samples to 15.6 kHz
+    // aliases them (host: -9 dB of in-band error against the full-rate render
+    // of the "05" track; hw: "sound is bad, to put it mildly"), where the FM
+    // synth at half rate only loses what it would have generated above 7.8 kHz.
+    // OplFm::setRates re-derives its constants AND the held notes' increments,
+    // so it is called only on a change.
+    if (moonpcm && oplfm && OplSubsys::enabled) {
+      static uint8_t over = 0, under = 0;
+      const uint32_t us = g_opl_frame_us;
+      g_opl_frame_us = 0;
+      const bool clkHalf = clock_get_hz(clk_sys) < 450000000u;
+      bool half = oplfm->halfRate();
+      if (!half) {
+        if (us > 6500) { if (++over >= 10) { half = true; over = 0; } } else over = 0;
+      } else if (!clkHalf) {
+        if (us < 2500) { if (++under >= 100) { half = false; under = 0; } } else under = 0;
+      }
+      if (half != oplfm->halfRate()) {
+        oplfm->setRates(OPL3_YMF262_CLOCK, Audio_freq, half);
+        Debug::log("[MOON] OPL4 FM synthesis at %s rate (%lu us/frame)", half ? "half" : "full", (unsigned long)us);
+      }
+    }
+#endif
 #if OPL_PERF_TRACE
     // OPL cost meter: ~us per frame averaged over 300 frames, only while the
     // chip is audible. This is the number to read against the ~20500 us frame.
     if (OplSubsys::enabled && oplfm) {
       static uint16_t oplPerfFrames = 0;
       if (++oplPerfFrames >= 300) {
-        if (oplfm->audible() && g_opl_gen_us)
-          Debug::log("OPL: gen %lu us/fr", (unsigned long)(g_opl_gen_us / oplPerfFrames));
+        if ((oplfm->audible() || g_moon_gen_us) && g_opl_gen_us)
+          Debug::log("OPL: gen %lu us/fr (moon %lu)", (unsigned long)(g_opl_gen_us / oplPerfFrames),
+                     (unsigned long)(g_moon_gen_us / oplPerfFrames));
         oplPerfFrames = 0;
         g_opl_gen_us = 0;
+        g_moon_gen_us = 0;
       }
     }
 #endif
