@@ -38,6 +38,14 @@ namespace SamFdc {
     // bytes; used to tell a SAM .dsk from a +3 one.
     bool    looksSam(const std::string& path);
 
+    // .pss (PSSF, one record per drive): the controller registers and, for a
+    // transfer in progress, the sector/track buffer. snapLoad needs the same
+    // disk mounted for the buffer; without one the transfer ends as Lost Data.
+    void    sync();                                        // write-back before a save
+    static constexpr uint32_t SNAP_MAX = 24 + 6250;
+    uint32_t snapSave(uint8_t drive, uint8_t* out);
+    bool     snapLoad(uint8_t drive, const uint8_t* in, uint32_t n);
+
     // Diagnostic: last command / status / registers of drive 1, commands so far.
     void    diag(char* out, int n);
 }

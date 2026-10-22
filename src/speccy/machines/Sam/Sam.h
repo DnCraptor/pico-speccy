@@ -57,6 +57,12 @@ namespace Sam {
     void bootResume();               // setup(): pick a pending request up after a reboot
     void frameTick();                // EndFrame: drives the typing
 
+    // .pss: the ASIC registers + CLUT + the beam latches (PSSM record, LE, versioned).
+    // snapLoad applies them and remaps; the line/row tick is re-armed by the frame loop.
+    static constexpr uint32_t SNAP_MAX = 40;
+    uint32_t snapSave(uint8_t* out);
+    bool     snapLoad(const uint8_t* in, uint32_t n);
+
     // Tape launch (F5 "R" / Web catalog): reset and type LOAD "" + Enter once the
     // ROM is up. With Fast load on the trap below fills the blocks from the file;
     // off, the ROM's own #FE polling auto-starts the tape (Sam::portIn).
@@ -84,7 +90,11 @@ namespace Sam {
     // Line interrupt window (SimCoupe: TOP_BORDER_LINES 68, CPU_CYCLES_INT_ACTIVE 128).
     static constexpr uint32_t T_PER_LINE = 384, TOP_LINES = 68, INT_LEN = 128;
     inline uint32_t lineIntStart() { return line < 192 ? ((uint32_t)line + TOP_LINES) * T_PER_LINE : 0xFFFFFFFFu; }
-    bool intLine();             // Z80Ops::isActiveINT: frame OR line window (flash)
+    bool intLine();             // Z80Ops::isActiveINT: frame, line or MIDI-out window (flash)
+    // The frame loop's slicing: is a line/MIDI window up at frame T `t`, and where the
+    // next one starts (0xFFFFFFFF = none this frame).
+    bool     intWindowUp(uint32_t t);
+    uint32_t nextIntStart(uint32_t t);
     inline bool lineIntUp(uint32_t t) { const uint32_t s = lineIntStart(); return t >= s && t < s + INT_LEN; }
     // 7-bit SAM colour -> RGB888 (SimCoupe IO::Palette, full intensity).
     uint32_t colourRgb(uint8_t v);

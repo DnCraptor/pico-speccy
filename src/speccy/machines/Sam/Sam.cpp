@@ -6,6 +6,8 @@
 
 #include "Sam.h"
 #include "SamFdc.h"
+#include "SamClock.h"
+#include "speccy/devices/sound/Midi.h"
 
 #include <string.h>
 
@@ -13,6 +15,7 @@
 #include "app/ESPectrum.h"
 #include "app/Buffer.h"
 #include "app/Debug.h"
+#include "app/SnapPack.h"
 #include "speccy/core/MemESP.h"
 #include "speccy/core/Ports.h"
 #include "speccy/z80/CPU.h"
@@ -49,7 +52,15 @@ static uint32_t       s_fkPollMs = 0;     // last F-key row read from RAM code
 static uint8_t        s_inj[9] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // auto-typed keys (active low)
 static uint8_t        s_hpen = 192, s_lpen = 0;
 static bool           s_lineSeen = false;  // a LINE write since reset (bootTick waits for it)
-static int16_t        s_boot = -1;         // auto-BOOT: -1 off, else frames since the ROM came up  // last HPEN/LPEN (held while the screen is off)
+// MIDI OUT (#FD): one byte in flight for 320 us (SimCoupe MIDI_TRANSMIT_TIME); the
+// MIDI-out interrupt (STATUS bit 4) 16 us long near its end, the LPEN TXFMST flag
+// (bit 1) for 32 us from the interrupt. Frame T, wrapped at frameEnd. 1920 T = 320 us.
+static constexpr uint32_t MIDI_TX_T = 1920, MIDI_INT_T = 96, MIDI_TXFMST_T = 192, T_NONE = 0xFFFFFFFFu;
+static uint32_t       s_midiIntT = T_NONE;   // interrupt window start
+static uint32_t       s_midiTxEnd = T_NONE;  // TXFMST clears here
+static int16_t        s_boot = -1;
+static inline bool midiIntUp(uint32_t t)  { return s_midiIntT != T_NONE && t >= s_midiIntT && t < s_midiIntT + MIDI_INT_T; }
+static inline bool midiTxBusy(uint32_t t) { return s_midiTxEnd != T_NONE && t < s_midiTxEnd; }         // auto-BOOT: -1 off, else frames since the ROM came up  // last HPEN/LPEN (held while the screen is off)
 
 static constexpr uint8_t LMPR_PAGE = 0x1F, LMPR_ROM0_OFF = 0x20, LMPR_ROM1 = 0x40, LMPR_WPROT = 0x80;
 static constexpr uint8_t HMPR_PAGE = 0x1F, HMPR_MCNTRL = 0x80;
@@ -301,6 +312,39 @@ bool launchDisk(const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
+// .pss (PSSM): v1 = lmpr hmpr vmpr lepr hepr border line status attr, clut[16],
+// hpen lpen, lineSeen. Everything the ports hold; the memory map is rebuilt from
+// it (remap), the mouse/keyboard/typing state is session-only and not saved.
+
+uint32_t snapSave(uint8_t* out) {
+    SnapOut o(out);
+    o.u8(1);
+    o.u8(lmpr); o.u8(hmpr); o.u8(vmpr); o.u8(lepr); o.u8(hepr);
+    o.u8(border); o.u8(line); o.u8(status); o.u8(attr);
+    o.raw(clut, 16);
+    o.u8(s_hpen); o.u8(s_lpen);
+    o.u8(s_lineSeen ? 1 : 0);
+    return o.n;
+}
+
+bool snapLoad(const uint8_t* in, uint32_t n) {
+    SnapIn i(in, n);
+    const uint8_t ver = i.u8();
+    if (ver < 1) return false;
+    lmpr = i.u8(); hmpr = i.u8(); vmpr = i.u8(); lepr = i.u8(); hepr = i.u8();
+    border = i.u8(); line = i.u8(); status = i.u8(); attr = i.u8();
+    i.raw(clut, 16);
+    s_hpen = i.u8(); s_lpen = i.u8();
+    s_lineSeen = i.u8() != 0;
+    if (!i.ok) { reset(); return false; }
+    for (int k = 0; k < 16; k++) clut[k] &= 0x7F;
+    s_boot = -1;                     // no typing into a restored program
+    memset(s_inj, 0xFF, sizeof(s_inj));
+    remap();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Function keys
 
 bool keysToGuest() {
@@ -326,8 +370,18 @@ __attribute__((noinline)) bool intLine() {
     uint32_t t = CPU::tstates;
     if (t >= CPU::statesInFrame) t -= CPU::statesInFrame;   // overshoot = next frame
     if (t >= (uint32_t)CPU::IntStart && t < (uint32_t)CPU::IntEnd) return true;
-    return lineIntUp(t);
+    return lineIntUp(t) || midiIntUp(t);
 }
+
+uint32_t nextIntStart(uint32_t t) {
+    uint32_t next = T_NONE;
+    const uint32_t ls = lineIntStart();
+    if (ls > t && ls < next) next = ls;
+    if (s_midiIntT != T_NONE && s_midiIntT > t && s_midiIntT < next) next = s_midiIntT;
+    return next;
+}
+
+bool intWindowUp(uint32_t t) { return lineIntUp(t) || midiIntUp(t); }
 
 // ---------------------------------------------------------------------------
 // Contention (SimCoupe Memory.cpp Init / UpdateContention, SAMIO.h WaitStates)
@@ -418,6 +472,8 @@ static uint8_t mouseIn() {
 static void periphReset() {
     s_mPos = 0; s_mX = ESPectrum::mouseX; s_mY = ESPectrum::mouseY;
     s_voxUsed = 0; s_vox[0] = s_vox[1] = s_vox[2] = s_vox[3] = 0x80;
+    s_midiIntT = s_midiTxEnd = T_NONE;
+    SamClock::reset();
 }
 
 uint8_t portIn(uint16_t address) {
@@ -453,6 +509,7 @@ uint8_t portIn(uint16_t address) {
         const int32_t t = (int32_t)CPU::tstates;
         if (t >= CPU::IntStart && t < CPU::IntEnd) st &= ~0x08;
         if (lineIntUp((uint32_t)t)) st &= ~0x01;
+        if (midiIntUp((uint32_t)t)) st &= ~0x10; else st |= 0x10;
         return (uint8_t)(keyRows(hi, 0xE0) | (st & 0x1F));
     }
     case 0xFA: return lmpr;
@@ -479,8 +536,11 @@ uint8_t portIn(uint16_t address) {
             if (scr && lc >= 128) s_lpen = (uint8_t)(((lc - 128) & 0xFC) | (border & 1));
             else                  s_lpen = (uint8_t)(border & 1);
         } else s_lpen = (uint8_t)((s_lpen & ~1) | (border & 1));
-        return s_lpen;
+        // Bit 1 = TXFMST: a MIDI byte still going out (SimCoupe LPEN_TXFMST).
+        return (uint8_t)(s_lpen | (midiTxBusy(t) ? 0x02 : 0));
     }
+    case 0xEF: return Config::rtc_enabled ? SamClock::in(address) : 0xFF;
+    case 0xFD: return 0xFF;                       // MIDI IN: nothing connected
     case 0x1F: return Config::joyLive() == JOY_KEMPSTON ? Ports::port[Config::kempstonPort] : 0;
     default:
         if ((lo & 0xF8) == 0xE0) return SamFdc::in(0, address);   // drive 1
@@ -519,6 +579,20 @@ void portOut(uint16_t address, uint8_t data) {
     case 0xFB: if (hmpr != data) { hmpr = data; remap(); } break;
     case 0xFC: vmpr = data; break;
     case 0xF8: clut[hi & 0x0F] = data & 0x7F; break;   // takes effect on the next row rendered
+    case 0xEF: if (Config::rtc_enabled) SamClock::out(address, data); break;
+    case 0xFD: {
+        // MIDI OUT: a byte is taken only while none is in flight (SimCoupe's
+        // LPEN_TXFMST gate); its interrupt lands near the end of the transmission.
+        uint32_t t = CPU::tstates;
+        if (t >= CPU::statesInFrame) t -= CPU::statesInFrame;
+        if (!midiTxBusy(t)) {
+            s_midiIntT  = t + MIDI_TX_T - 16 - 32 - MIDI_INT_T + 1;
+            s_midiTxEnd = s_midiIntT + MIDI_TXFMST_T;
+            if (Midi::enabled) { Midi::send(data); LED::touchW(LED::MIDI); }
+            if (CPU::stFrame > CPU::tstates) CPU::stFrame = CPU::tstates ? CPU::tstates : 1;   // re-slice to the new window
+        }
+        break;
+    }
     case 0x80: lepr = data; if (hmpr & HMPR_MCNTRL) remap(); break;
     case 0x81: hepr = data; if (hmpr & HMPR_MCNTRL) remap(); break;
     case 0xFF:
@@ -731,6 +805,12 @@ void frameEnd() {
     s_armed = false;
     s_row = s_yres;
     s_rowT = 0xFFFFFFFFu;
+    // MIDI timing is frame-relative: carry a transmission across the frame end.
+    const uint32_t fr = CPU::statesInFrame;
+    if (s_midiTxEnd != T_NONE) {
+        if (s_midiTxEnd <= fr) { s_midiTxEnd = T_NONE; s_midiIntT = T_NONE; }
+        else { s_midiTxEnd -= fr; s_midiIntT = (s_midiIntT >= fr) ? s_midiIntT - fr : T_NONE; }
+    }
 }
 
 void renderFrame() {

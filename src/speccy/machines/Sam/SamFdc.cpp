@@ -2,6 +2,7 @@
 // its source. FLASH code: reached from Sam::portIn/portOut only.
 
 #include "SamFdc.h"
+#include "app/SnapPack.h"
 
 #include <new>
 #include <string.h>
@@ -512,6 +513,60 @@ static void regsReset(Regs& r) {
 
 void reset() {
     for (int d = 0; d < 2; d++) regsReset(s_r[d]);
+}
+
+void sync() {
+    for (int d = 0; d < 2; d++) {
+        Media* m = s_m[d];
+        if (!m || !m->fp) continue;
+        if (m->kind == K_EDSK) dskSync(&m->dsk);
+        f_sync(m->fp);
+    }
+}
+
+// PSSF v1: u8 ver, u8 drive, the Regs fields, u16 bufLen, then bufLen buffer bytes
+// (a read in flight hands them to the guest; a write collects them). Loaded only
+// onto a drive with a disk in: the buffer is the media's.
+uint32_t snapSave(uint8_t d, uint8_t* out) {
+    SnapOut o(out);
+    const Regs& r = s_r[d & 1];
+    const Media* m = s_m[d & 1];
+    o.u8(1); o.u8(d & 1);
+    o.u8(r.command); o.u8(r.status); o.u8(r.cyl); o.u8(r.sector); o.u8(r.data);
+    o.u8(r.dirOut ? 1 : 0); o.u8(r.headCyl); o.u8(r.head); o.u8(r.state);
+    o.u8(r.dataStatus); o.u8(r.secIndex); o.u8(r.pollsWithData);
+    o.u16(r.motorOff); o.u8(r.activeFrames); o.u8(r.wrote ? 1 : 0);
+    o.u16(r.bufPos);
+    const uint16_t n = (m && m->buf && r.bufLen <= MAX_TRACK_SIZE) ? r.bufLen : 0;
+    o.u16(n);
+    if (n) o.raw(m->buf, n);
+    return o.n;
+}
+
+bool snapLoad(uint8_t d, const uint8_t* in, uint32_t n) {
+    SnapIn i(in, n);
+    if (i.u8() < 1) return false;
+    d = i.u8() & 1;
+    Regs& r = s_r[d];
+    Media* m = s_m[d];
+    regsReset(r);
+    r.command = i.u8(); r.status = i.u8(); r.cyl = i.u8(); r.sector = i.u8(); r.data = i.u8();
+    r.dirOut = i.u8() != 0; r.headCyl = i.u8(); r.head = i.u8(); r.state = i.u8();
+    r.dataStatus = i.u8(); r.secIndex = i.u8(); r.pollsWithData = i.u8();
+    r.motorOff = i.u16(); r.activeFrames = i.u8(); r.wrote = i.u8() != 0;
+    r.bufPos = i.u16();
+    const uint16_t len = i.u16();
+    if (!i.ok || len > MAX_TRACK_SIZE) { regsReset(r); return false; }
+    if (len && m && m->buf) { i.raw(m->buf, len); r.bufLen = len; }
+    else {
+        // No disk (or no buffer) for a transfer in progress: end it as the drive
+        // would after a lost transfer — the guest retries.
+        r.bufLen = 0; r.bufPos = 0;
+        if (r.status & BUSY) { r.status = (uint8_t)((r.status & ~(BUSY | DRQ)) | LOST_DATA); r.state = 0; }
+    }
+    if (r.bufPos > r.bufLen) r.bufPos = r.bufLen;
+    if (!m) r.status &= (uint8_t)~MOTOR_ON;
+    return i.ok;
 }
 
 void frameEnd() {

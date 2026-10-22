@@ -15741,6 +15741,16 @@ PSRAM ≥ 1 MB + `FlashRoms::romsUsable()`), romsets `R_SAM256/512/512_1M/2M/4M`
   auto-start = 200 #FE reads from one PC (no Play at F5 "R" on SAM); SAM mouse (9-nibble
   buffer on #FFFE, SimCoupe Mouse.cpp); SAMVox #7C-#7F into the Covox buffers. Details in
   `docs/sam-coupe-plan.md` §9.
+- **Clocks + MIDI OUT (2026-10-23, NOT hw-tested, `debug/DVp2w-sam-pss-1.1.0`)**: `SamClock`
+  (SAMBUS + Dallas DS12887 on `#EF`, SimCoupe Clock.cpp model, seeded from `RTC::now`, gated
+  on Devices > CMOS + NVRAM, session-only, `tools/samclock_test.cpp`); `#FD` writes go to
+  `Midi::send` with SimCoupe's TXFMST/STATUS-bit-4 timing (an INT source the frame loop
+  slices on: `Sam::intWindowUp/nextIntStart`); MIDI IN not connected. Details in the plan §9.
+- **.pss snapshots (2026-10-22, NOT hw-tested, `debug/DVp2w-sam-pss-1.1.0`)**: `A_SAM` in
+  `archSupported`, pages = `MEM_PG_CNT`; `PSSM` = `Sam::snapSave` (ASIC regs + CLUT + HPEN/LPEN),
+  `PSSF` per drive = `SamFdc::snapSave` (VL1772 regs + the in-flight buffer; no disk = Lost
+  Data); `samd0/1.file/.wp` in liveMedia/applyLiveMedia; `SamFdc::sync()` in flushMedia.
+  Details in the plan §9.
 - **Rows on the beam + CLUT per row (2026-10-22, hw-confirmed DVp2w: the ROM 3.0 boot screen's rainbow bars, drawn by the line INT + CLUT per line, were a black screen before; `debug/DVp2w-sam-raster-1.1.0`)**:
   the fb byte is `Sam::PAL_SLOT0 (16) + SAM colour`, the 128 colours sit in hardware slots
   16..143 for the session (`samPaletteFlush`), the CLUT is applied when a row is rendered —

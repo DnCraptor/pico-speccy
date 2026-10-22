@@ -338,6 +338,36 @@ MGT (819200 / 737280 Б, плоский), SAD (заголовок «Aley's disk 
   другого режима в pair-кадре — диагональ пары по индексу CLUT (записи 5..15 = ZX-цвета).
   Проверить на железе: BASIC/игры как прежде (Rick Dangerous, NoColor, Arkanoid 2), F8/LED/
   тост поверх картинки, mode 3, затем демо с растровыми CLUT-эффектами.
+- **Часы и MIDI** (2026-10-23, NOT hw-tested, в `debug/DVp2w-sam-pss-1.1.0` после пересборки):
+  `src/speccy/machines/Sam/SamClock.{h,cpp}` — SAMBUS (`#EF`, старший байт < `#FE`, регистр =
+  A15..A12, 16 ниблов: цифры времени/даты, 0C день недели, 0D hold) и Dallas DS12887/17887
+  (`>= #FE`, A8 = 0 выбор регистра, A8 = 1 данные; bank 1 по регистру 0A бит 4, модель/серия
+  read-only, век в 48; расширенные 8 KB RAM не подключены — чтение `#FF`). Модель SimCoupe
+  Clock.cpp: своё SAMTIME в BCD/binary (control B бит 2 у Dallas), идёт по wall-clock от
+  `to_ms_since_boot`, сидируется из `RTC::now()` при сбросе (нет RTC — 2000-01-01), записи
+  гостя в цифры держатся до следующего тика этой цифры. Гейт — Devices → CMOS + NVRAM
+  (`Config::rtc_enabled`), иначе `#EF` читает `#FF`. Регистры session-only (без файла-батарейки).
+  Хост-тест `tools/samclock_test.cpp` (рецепт в шапке; переходы суток/месяца/года/високосный,
+  день недели, binary mode). **MIDI OUT `#FD`**: байт принимается только когда предыдущий не в
+  полёте (LPEN бит 1 = TXFMST, SimCoupe), уходит в `Midi::send` (UART / ShamaZX / синтезатор /
+  GM.DLS по Audio → MIDI), прерывание MIDI-out (STATUS бит 4) через 1777 T на 96 T, TXFMST ещё
+  192 T; окно учтено в `Sam::intLine` / `intWindowUp` / `nextIntStart` (цикл кадра
+  `CPU::samFrameLoop` нарезает по нему, запись `#FD` рвёт срез). MIDI IN не подключён
+  (`#FD` читает `#FF`, VMPR бит 7 = нет данных). Проверить: MasterDOS/SAMDOS `TIME$`/`DATE$`
+  с включённым CMOS + NVRAM; MIDI-плеер SAM (E-Tracker MIDI, SAM MIDI Sequencer) с GM.DLS.
+- **Снимки `.pss`** (2026-10-22, NOT hw-tested, `debug/DVp2w-sam-pss-1.1.0`): `A_SAM` в
+  `archSupported`, страницы — `MEM_PG_CNT` (32 внутренних + внешние; sparse при > 64, т.е. с
+  внешней RAM). Записи: `PSSM` = `Sam::snapSave` (v1: LMPR/HMPR/VMPR/LEPR/HEPR, border, LINE,
+  STATUS, ATTR, CLUT[16], HPEN/LPEN, lineSeen; `snapLoad` → `remap()`), `PSSF` x2 =
+  `SamFdc::snapSave(drive)` (регистры VL1772 + буфер незавершённой передачи `bufLen` байт;
+  без диска в дисководе передача завершается как Lost Data). Носители: `samd0/1.file` + `.wp`
+  в `liveMedia`/`applyLiveMedia` (PSMD-отпечаток, монтирование при загрузке через
+  `DiskSlots` IFACE_SAM), `SamFdc::sync()` в `flushMedia` перед записью. Не сохраняется:
+  мышь, набор клавиш (`s_inj`), F-клавиши, SAA (общий — проверить, что PSAY/AY не нужен).
+  Экспорта нет (формата SAM-снимков у нас нет). Применение после PSPT, в той же ветке, где
+  Scorpion/Profi/ATM; `grmem` не трогается. Проверить: BASIC сохранить/загрузить, игра с
+  диска (Rick Dangerous) посреди уровня, смена романсета 256K <-> 512K+1M через снимок
+  (перезагрузка по `romSetSam`), снимок SAM с другой машины и обратно.
 - **Быстрая загрузка** (2026-10-22, hw-confirmed DVp2w тем же днём — владелец: «fast load работает»; `debug/DVp2w-sam-tape-1.1.0`):
   `Sam::tapeTrap()` = SimCoupe `LoadTrap` (Base/Tape.cpp + паттерны `rom_hooks` в
   Memory.cpp). Загрузчик ROM 3.0 в ROM1: вход `#E65D` (A' = тип блока, HL = адрес, DE +

@@ -967,15 +967,15 @@ __attribute__((noinline)) void CPU::samFrameLoop(uint64_t _loop_t0, bool pbbp, i
     bool halted = false;
     while (tstates < statesInFrame) {
         const uint32_t t = tstates;
-        const uint32_t ls = Sam::lineIntStart();
         const uint32_t tail = statesInFrame - IntEnd;       // the next frame's INT, by wrap
-        if (t < (uint32_t)IntEnd || t >= tail || (t >= ls && t < ls + Sam::INT_LEN)) {
+        if (t < (uint32_t)IntEnd || t >= tail || Sam::intWindowUp(t)) {
             Z80::execute();
             BREAKPOINTS
             continue;
         }
         uint32_t next = tail;
-        if (ls > t && ls < next) next = ls;
+        const uint32_t ls = Sam::nextIntStart(t);             // line INT or MIDI-out INT
+        if (ls < next) next = ls;
         if (Z80::isHalted()) {
             if (!halted) { tstates_active = tstates; halted = true; }
             haltAdvanceTo(next);
