@@ -33,17 +33,17 @@ module plugged into the carrier):
 |---|---|---|---|
 | Murmulator 1.x + Pi Pico 2 | RP2350A | `-DMURM=ON` | `m1p2-speccy-VGA-HDMI-<ver>.uf2`, `-TV-SOFT-`, `-ILI9341-`, `-ST7789-` |
 | Murmulator 2.0 + Pi Pico 2 | RP2350A | `-DMURM2=ON` | `m2p2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-`, `-TV-SOFT-`, `-ILI9341-`, `-ST7789-` |
-| Olimex RP2040-PICO-PC + Pi Pico 2 | RP2350A | `-DPICO_PC=ON` | `PCp2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Olimex RP2040-PICO-PC + Pi Pico 2 | RP2350A | `-DPICO_PC=ON` | `PCp2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-16MB-` |
 | Pimoroni Pico DV Demo Base + Pi Pico 2 / Pico Plus 2 | RP2350A / RP2350B | `-DPICO_DV=ON` | `DVp2-speccy-VGA-HDMI-<ver>.uf2` |
 | Waveshare RP2350-PiZero | RP2350B | `-DZERO2=ON` | `z0p2-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-PIOUSB-` |
-| Murmulator 1.x + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DMURM_W=ON` | `m1p2w-speccy-VGA-HDMI-<ver>.uf2` |
-| Murmulator 2.0 + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DMURM2_W=ON` | `m2p2w-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
-| Pico DV Demo Base + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DPICO_DV_W=ON` | `DVp2w-speccy-VGA-HDMI-<ver>.uf2` |
-| Olimex PICO-PC + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DPICO_PC_W=ON` | `PCp2w-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
-| Murmulator 1.x + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DMURM_WS=ON` | `m1p2ws-speccy-VGA-HDMI-<ver>.uf2` |
-| Murmulator 2.0 + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DMURM2_WS=ON` | `m2p2ws-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
-| Pico DV Demo Base + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DPICO_DV_WS=ON` | `DVp2ws-speccy-VGA-HDMI-<ver>.uf2` |
-| Olimex PICO-PC + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DPICO_PC_WS=ON` | `PCp2ws-speccy-VGA-HDMI-<ver>.uf2`, `-VGA-HDMI-HSTX-` |
+| Murmulator 1.x + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DMURM_W=ON` | `m1p2w-speccy-VGA-HDMI-16MB-<ver>.uf2` |
+| Murmulator 2.0 + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DMURM2_W=ON` | `m2p2w-speccy-VGA-HDMI-16MB-<ver>.uf2`, `-VGA-HDMI-HSTX-16MB-` |
+| Pico DV Demo Base + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DPICO_DV_W=ON` | `DVp2w-speccy-VGA-HDMI-16MB-<ver>.uf2` |
+| Olimex PICO-PC + Pimoroni Pico Plus 2 W | RP2350B + CYW43439 | `-DPICO_PC_W=ON` | `PCp2w-speccy-VGA-HDMI-16MB-<ver>.uf2`, `-VGA-HDMI-HSTX-16MB-` |
+| Murmulator 1.x + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DMURM_WS=ON` | `m1p2ws-speccy-VGA-HDMI-16MB-<ver>.uf2` |
+| Murmulator 2.0 + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DMURM2_WS=ON` | `m2p2ws-speccy-VGA-HDMI-16MB-<ver>.uf2`, `-VGA-HDMI-HSTX-16MB-` |
+| Pico DV Demo Base + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DPICO_DV_WS=ON` | `DVp2ws-speccy-VGA-HDMI-16MB-<ver>.uf2` |
+| Olimex PICO-PC + Waveshare RP2350B-Plus-W | RP2350B + CYW43439 | `-DPICO_PC_WS=ON` | `PCp2ws-speccy-VGA-HDMI-16MB-<ver>.uf2`, `-VGA-HDMI-HSTX-16MB-` |
 
 `*p2w` and `*p2ws` images are NOT interchangeable: the two W modules wire the radio,
 audio and LED to different pins. A `*p2w` image needs 16 MB of flash, so a plain 4 MB
@@ -54,7 +54,8 @@ Every board without WiFi ships in two flash types: the plain image for a 4 MB mo
 (`DVp2-speccy-VGA-HDMI-16MB-<ver>.uf2`, `-DFLASH_16MB=ON`) for a 16 MB module such
 as the Pimoroni Pico Plus 2. The 16 MB image adds the ZXM-MoonSound card (its 2 MB
 YRW801 ROM is built in) and a much bigger GM.DLS bank region. A 16 MB image does not
-fit a 4 MB module. The `*p2w` / `*p2ws` images are 16 MB only and include MoonSound.
+fit a 4 MB module. The `*p2w` / `*p2ws` images are 16 MB only (hence their `-16MB` tag)
+and include MoonSound.
 
 ## Features
 

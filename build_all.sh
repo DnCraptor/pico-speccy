@@ -114,7 +114,8 @@ HSTX_TARGETS="PICO_PC MURM2 MURM2_W PICO_PC_W MURM2_WS PICO_PC_WS"
 
 # Flash types: every board ships a 4 MB image and a 16 MB one (-DFLASH_16MB=ON,
 # "-16MB" in the file name, adds ZXM-MoonSound with its embedded ROM). The W/WS
-# boards exist as 16 MB modules only, so they get the 16 MB image alone.
+# boards exist as 16 MB modules only, so they get the 16 MB image alone (named
+# with -16MB like every other 16 MB image; their build dir keeps the plain name).
 FLASH_TYPES="${FLASH_TYPES:-4 16}"
 W_TARGETS="MURM_W MURM2_W PICO_DV_W PICO_PC_W MURM_WS MURM2_WS PICO_DV_WS PICO_PC_WS"
 
@@ -187,7 +188,7 @@ LOG_DIR="$BUILD_ROOT/logs"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
 # 4 MB images keep the historic dir names; a 16 MB one appends -16MB (the W/WS
-# boards are 16 MB only and keep their plain names).
+# boards are 16 MB only and keep their plain DIR names — the file name carries -16MB).
 build_dir_for() {
     local target="$1" display="$2" flash="$3" suffix=""
     if [ "$flash" = "16" ]; then
