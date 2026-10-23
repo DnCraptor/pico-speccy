@@ -48,6 +48,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/devices/sound/OpllFm.h"
 #include "speccy/devices/sound/MoonPcm.h"
 #include "speccy/devices/sound/MoonRom.h"
+#include "speccy/devices/sound/MoonSplit.h"
 #include "speccy/devices/sound/SnSound.h"
 #include "hardware/clocks.h"
 #include "Subsystem.h"
@@ -914,6 +915,7 @@ static void moonSoundInit() {
   Debug::log("[MOON] ZXM-MoonSound up: ROM @%08X (%s), 1 MB SRAM @%08X",
              (unsigned)(uintptr_t)MoonRom::get(), MoonRom::builtin() ? "flash" : "SD",
              (unsigned)(uintptr_t)ram);
+  MoonSplit::init();   // the wave half on core1; no block = the inline path
 }
 #endif
 
@@ -2508,10 +2510,21 @@ void ESPectrum::reset(uint8_t romInUse) {
   // Reset the OPL3 the same way (the VGM-player card sits on the ZX reset
   // line); rate can have changed with the arch, so re-derive it too.
   if (oplfm) {
+#if MOONSOUND
+    if (g_moon_c1_live) MoonSplit::hold();   // core1 may be inside gen()
+#endif
     oplfm->setRates(OPL3_YMF262_CLOCK, Audio_freq, clock_get_hz(clk_sys) < 450000000u);
     oplfm->reset();
+#if MOONSOUND
+    if (g_moon_c1_live) MoonSplit::release();
+#endif
   }
-  if (moonpcm) { moonpcm->reset(); moonpcm->setRate(Audio_freq); }   // same reset line
+#if MOONSOUND
+  if (moonpcm) {   // same reset line (under the core1 lock when the chip runs there)
+    if (g_moon_c1_live) MoonSplit::resetChip(Audio_freq);
+    else { moonpcm->reset(); moonpcm->setRate(Audio_freq); }
+  }
+#endif
   if (opllfm) {
     opllfm->setRates(OPLL_YM2413_CLOCK, Audio_freq, clock_get_hz(clk_sys) < 450000000u);
     opllfm->reset();
@@ -3592,6 +3605,9 @@ static uint32_t g_opl_frame_us = 0;  // this frame's OPLGenSound time (the half-
 
 void ESPectrum::OPLGenSound(int count, int bufpos) {
   if (!OplSubsys::enabled || !audioBufferOPL_L || !oplfm) return;
+#if MOONSOUND
+  if (g_moon_c1_live) return;   // both halves generate on core1 (MoonSplit); the frame end joins + sums
+#endif
 #if OPL_PERF_TRACE
   uint32_t _t0 = time_us_32();
 #endif
@@ -3614,8 +3630,10 @@ void ESPectrum::OPLGenSound(int count, int bufpos) {
       if (p < next) next = p;
     }
     oplfm->gen(audioBufferOPL_L, audioBufferOPL_R, next - cur, cur);
-    // MoonSound: the FM half is in the buffer now; the PCM half mixes onto it.
-    if (moonpcm) {
+    // MoonSound: the FM half is in the buffer now; the PCM half mixes onto it —
+    // here only without the core1 split (MoonSplit: the wave half is then
+    // synthesized on core1 and summed at the frame end, frameFinish).
+    if (moonpcm && !g_moon_c1_live) {
 #if OPL_PERF_TRACE
       const uint32_t _m0 = time_us_32();
 #endif
@@ -3650,6 +3668,15 @@ void ESPectrum::OPLPortWrite(uint8_t a, uint8_t v) {
     if ((a & 3) == 2) s_oplHiAddr = v;
     else if ((a & 3) == 3 && s_oplHiAddr == 0x05) moonpcm->setNew2((v & 2) != 0);
   }
+#if MOONSOUND
+  if (g_moon_c1_live) {   // the core1 chip: its ring, and a write IS a point the guest has reached
+    uint32_t pos = CPU::tstates / audioAYDivider;
+    if (multiplicator) pos >>= multiplicator;
+    MoonSplit::fmWrite(pos, (uint8_t)(a & 3), v);
+    MoonSplit::publish(pos);
+    return;
+  }
+#endif
   if (!oplWriteQueue) { oplfm->write(a, v); return; }   // no queue: degrade to direct
   if (oplQTail >= OPL_WRITE_QUEUE_LEN) OPLGetSample();  // overflow: flush (drains + resets)
   uint32_t pos = CPU::tstates / audioAYDivider;
@@ -3665,21 +3692,42 @@ void ESPectrum::OPLPortWrite(uint8_t a, uint8_t v) {
 void ESPectrum::MoonWaveData(uint8_t v) {
   if (!moonpcm || !moonpcm->new2()) return;
   const uint8_t reg = moonpcm->addr();
+  uint32_t pos = CPU::tstates / audioAYDivider;
+  if (multiplicator) pos >>= multiplicator;
+  if (g_moon_c1_live) {
+    // the core1 split: timed writes go to its ring (and publish the position —
+    // a write IS a point the guest has reached); the immediate ones apply here
+    // after the ring has been drained up to now, so they stay in order.
+    if (MoonPcm::immediate(reg)) {
+      if (reg == 2) MoonSplit::sync(pos);
+      moonpcm->write(reg, v);
+      return;
+    }
+    MoonSplit::waveWrite(pos, reg, v);
+    MoonSplit::publish(pos);
+    return;
+  }
   if (MoonPcm::immediate(reg) || !oplWriteQueue) {
     if (reg == 2) OPLGetSample();
     moonpcm->write(reg, v);
     return;
   }
   if (oplQTail >= OPL_WRITE_QUEUE_LEN) OPLGetSample();
-  uint32_t pos = CPU::tstates / audioAYDivider;
-  if (multiplicator) pos >>= multiplicator;
   oplWriteQueue[oplQTail++] = (pos & OPLQ_POS_MASK) | OPLQ_WAVE | ((uint32_t)reg << 16) | ((uint32_t)v << 24);
 }
 
 // A read sees every write before it (players read-modify-write the key register).
 uint8_t ESPectrum::MoonWaveRead() {
   if (!moonpcm) return 0xFF;
-  if (!MoonPcm::immediate(moonpcm->addr())) OPLGetSample();
+  if (!MoonPcm::immediate(moonpcm->addr())) {
+    if (g_moon_c1_live) {
+      uint32_t pos = CPU::tstates / audioAYDivider;
+      if (multiplicator) pos >>= multiplicator;
+      MoonSplit::sync(pos);
+    } else {
+      OPLGetSample();
+    }
+  }
   return moonpcm->read(moonpcm->addr());
 }
 
@@ -3691,6 +3739,9 @@ uint8_t ESPectrum::MoonWaveRead() {
 void ESPectrum::OPLGetSample() {
   uint32_t audbufpos = CPU::tstates / audioAYDivider;
   if (multiplicator) audbufpos >>= multiplicator;
+#if MOONSOUND
+  if (g_moon_c1_live) { MoonSplit::sync(audbufpos); return; }   // timers + queued writes caught up on core0
+#endif
   if (audbufpos > audbufcntOPL) {
     OPLGenSound(audbufpos - audbufcntOPL, audbufcntOPL);
     audbufcntOPL = audbufpos;
@@ -4198,8 +4249,10 @@ void ESPectrum::loop() {
     // of the "05" track; hw: "sound is bad, to put it mildly"), where the FM
     // synth at half rate only loses what it would have generated above 7.8 kHz.
     // OplFm::setRates re-derives its constants AND the held notes' increments,
-    // so it is called only on a change.
-    if (moonpcm && oplfm && OplSubsys::enabled) {
+    // so it is called only on a change. With the chip on core1 (MoonSplit)
+    // the policy is OFF: core0 pays only what core1 did not finish (the
+    // frame-end join), and that is the balancer; it remains for the inline path.
+    if (moonpcm && oplfm && OplSubsys::enabled && !g_moon_c1_live) {
       static uint8_t over = 0, under = 0;
       const uint32_t us = g_opl_frame_us;
       g_opl_frame_us = 0;
@@ -4222,9 +4275,16 @@ void ESPectrum::loop() {
     if (OplSubsys::enabled && oplfm) {
       static uint16_t oplPerfFrames = 0;
       if (++oplPerfFrames >= 300) {
-        if ((oplfm->audible() || g_moon_gen_us) && g_opl_gen_us)
-          Debug::log("OPL: gen %lu us/fr (moon %lu)", (unsigned long)(g_opl_gen_us / oplPerfFrames),
-                     (unsigned long)(g_moon_gen_us / oplPerfFrames));
+        uint32_t c1fm = 0, c1wave = 0, joinus = 0;
+#if MOONSOUND
+        if (g_moon_c1_live) MoonSplit::perfTake(c1fm, c1wave, joinus);
+#endif
+        // split: `gen` is the inline path's cost (0 with the chip on core1), `join`
+        // is what core0 pays — the frame-end tail core1 did not reach + the sum.
+        if ((oplfm->audible() || g_moon_gen_us || c1fm || c1wave) && (g_opl_gen_us || joinus))
+          Debug::log("OPL: gen %lu us/fr (moon %lu; core1 fm %lu wave %lu, join %lu)", (unsigned long)(g_opl_gen_us / oplPerfFrames),
+                     (unsigned long)(g_moon_gen_us / oplPerfFrames), (unsigned long)(c1fm / oplPerfFrames),
+                     (unsigned long)(c1wave / oplPerfFrames), (unsigned long)(joinus / oplPerfFrames));
         oplPerfFrames = 0;
         g_opl_gen_us = 0;
         g_moon_gen_us = 0;
@@ -4235,12 +4295,16 @@ void ESPectrum::loop() {
     // skipped-mix frame (maxSpeed) may leave stragglers — apply them directly
     // so no register write is ever lost, then restart the queue.
     if (oplWriteQueue && oplfm) {
-      while (oplQHead < oplQTail) {
-        uint32_t e = oplWriteQueue[oplQHead++];
-        oplfm->write((e >> 16) & 3, (uint8_t)(e >> 24));
-      }
+      while (oplQHead < oplQTail) oplQueueApply(oplWriteQueue[oplQHead++]);   // FM and (inline path) wave entries alike
     }
     oplQHead = oplQTail = 0;
+#if MOONSOUND
+    if (g_moon_c1_live) {
+      const bool fm = OplSubsys::enabled && oplfm && audioBufferOPL_L;
+      MoonSplit::frameBoundary(samplesPerFrame, fm ? oplfm : nullptr,
+                               fm ? audioBufferOPL_L : nullptr, fm ? audioBufferOPL_R : nullptr);
+    }
+#endif
     if (opllWriteQueue && opllfm) {
       while (opllQHead < opllQTail) {
         uint32_t e = opllWriteQueue[opllQHead++];
@@ -4646,6 +4710,18 @@ void ESPectrum::loop() {
         }
         if (OplSubsys::enabled && audioBufferOPL_L && faudbufcntOPL < samplesPerFrame)
             OPLGenSound(samplesPerFrame - faudbufcntOPL, faudbufcntOPL);
+#if MOONSOUND
+        // MoonSound wave half from core1: join + sum onto the FM buffer. A sounding
+        // wave half keeps the OPL mix open (the quiet gate below only ever saw FM).
+        if (g_moon_c1_live && OplSubsys::enabled && audioBufferOPL_L) {
+            const bool wave = MoonSplit::frameJoin(samplesPerFrame);
+            // the FM half's coupling-cap model + quiet gate, once over the frame (FM only)
+            dcblock_run(audioBufferOPL_L, samplesPerFrame, s_dcOplL, &s_oplOutQuiet);
+            dcblock_run(audioBufferOPL_R, samplesPerFrame, s_dcOplR, nullptr);
+            MoonSplit::frameSum(audioBufferOPL_L, audioBufferOPL_R, samplesPerFrame);
+            if (wave) s_oplOutQuiet = 0;
+        }
+#endif
         if (OpllSubsys::enabled && audioBufferOPLL && faudbufcntOPLL < samplesPerFrame)
             OPLLGenSound(samplesPerFrame - faudbufcntOPLL, faudbufcntOPLL);
         if (SnSubsys::enabled && audioBufferSN && faudbufcntSN < samplesPerFrame)

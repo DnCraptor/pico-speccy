@@ -177,6 +177,34 @@ int main() {
             for (int i = 4410; i < 44100; i++) { if (abs(L2[i]) > p2) p2 = abs(L2[i]); if (abs(L3[i]) > p3) p3 = abs(L3[i]); }
             CHECK(p3 > p2 * 9 / 10 && p3 <= p2 + 1, "half-rate level %d vs %d", p3, p2);
         }
+        // The split path (MoonSplit: the wave half generated apart with genPcm,
+        // the FM buffer scaled by fmMix* and the two added at the frame end)
+        // must equal gen()'s single expression within its own rounding, with a
+        // non-default FM/PCM mix level and FM content in the buffer.
+        {
+            MoonPcm a(g_mem.data(), g_mem.data() + MoonPcm::ROM_SIZE); a.setRate(31250); a.setNew2(true);
+            MoonPcm b(g_mem.data(), g_mem.data() + MoonPcm::ROM_SIZE); b.setRate(31250); b.setNew2(true);
+            w(a, 0xF8, 0x12); w(b, 0xF8, 0x12);          // FM -6 dB-ish, PCM -3 dB-ish
+            keyTone(a, 3, 0, 1, 0x100); keyTone(b, 3, 0, 1, 0x100);
+            std::vector<int16_t> fmL(N), fmR(N), La(N), Ra(N), wL(N), wR(N);
+            for (int i = 0; i < N; i++) { fmL[i] = (int16_t)(12000 * sin(i * 0.05)); fmR[i] = (int16_t)(-9000 * sin(i * 0.031)); }
+            La = fmL; Ra = fmR;
+            a.gen(La.data(), Ra.data(), N, 0);
+            CHECK(b.genPcm(wL.data(), wR.data(), N, 0), "genPcm: nothing sounded");
+            int worst = 0;
+            for (int i = 0; i < N; i++) {
+                int32_t l = ((fmL[i] * b.fmMixL()) >> 12) + wL[i];
+                int32_t r = ((fmR[i] * b.fmMixR()) >> 12) + wR[i];
+                l = l > 32767 ? 32767 : l < -32768 ? -32768 : l;
+                r = r > 32767 ? 32767 : r < -32768 ? -32768 : r;
+                int d = abs(l - La[i]); if (abs(r - Ra[i]) > d) d = abs(r - Ra[i]);
+                if (d > worst) worst = d;
+            }
+            CHECK(worst <= 2, "split path differs from gen by %d", worst);
+            w(b, 0x68 + 3, 0x00);
+            b.genPcm(wL.data(), wR.data(), N, 0);
+            CHECK(!b.anyActive() && wL[N - 1] == 0, "genPcm: silence after key-off");
+        }
         keyTone(m, 3, 0, 1, 0x100);
         std::fill(L.begin(), L.end(), 0); std::fill(R.begin(), R.end(), 0);
         m.gen(L.data(), R.data(), N, 0);

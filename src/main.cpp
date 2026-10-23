@@ -5,6 +5,7 @@
 #include "drivers/sound/PinSerialData_595.h"   // ay595_reclock()
 #include "speccy/devices/sound/OplFm.h"
 #include "speccy/devices/sound/OpllFm.h"
+#include "speccy/devices/sound/MoonSplit.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
@@ -1109,6 +1110,11 @@ void __not_in_flash_func(render_core)() {
         // heap on every other machine, so calling them there would be a jump into
         // heap data. The flag is only ever true while TS-Conf has the queue up.
         if (g_ts_c1_live) ts_render_core1_pump();   // TS-Conf whole-line renderer jobs posted by core0 (Video.cpp)
+#if MOONSOUND
+        // ZXM-MoonSound wave half: one bounded chunk (~32 samples) up to the
+        // position core0 has published (MoonSplit.h). Never blocks on core0.
+        if (g_moon_c1_live) MoonSplit::core1Pump();
+#endif
         // TS-Conf VDAC2: one band of the FT812 display list per call (Video.cpp).
         // The body lives in flash, not the TS overlay, so the gate is only a
         // fast exit — no jump-into-heap hazard here.

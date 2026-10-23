@@ -16985,6 +16985,67 @@ only SDCC 4.6 fits its code into 0x8000..0xB8D0), patch for the author
   with the pans as linear factors, the 24 sample streams' XIP line fills (~235k/s at
   44.1 kHz — the floor), the gen loop in an overlay window, or a REAL half-rate (two
   fetches averaged per step — keeps the fetch cost, halves the rest).
+  **Round 4 on hw (log 2026-10-22 22:36): the FM policy FLAPPED** — `[MOON] half rate
+  (8594 us)` then `full rate (1488 us)` every ~2 s, because the "leave at < 2.5 ms"
+  test measured the cost WITH the FM at half rate; each flip re-derives held notes.
+  Not fixed as a policy — made moot by the split below.
+- **Round 5, the wave half on core1 (2026-10-23, NOT hw-tested; owner's rule: "no
+  optimisations, spread the load over the cores").** `src/speccy/devices/sound/
+  MoonSplit.{h,cpp}`: core0 PUBLISHES the guest's sample position (`MOON_LINE_PUB()`
+  in Video.cpp — the five MainScreen line ends + the top of `tsDrawTick`, so every
+  renderer, and every wave write), wave register writes go into a 512-entry ring with
+  their position (`waveWrite`, lock-free), and whoever holds ONE hardware spinlock
+  generates: core1's `core1Pump()` in `render_core` (32-sample chunks up to the
+  published position, never past it — a write queued later has a position >= it by
+  program order on core0), core0's `sync()` for read-backs / the immediate reg 2, and
+  the frame end `frameFinish()`, which JOINS (generates the tail itself instead of
+  waiting for a core1 busy with a card read or a render backlog), applies the entries
+  at/past the end, scales the FM buffer by the chip's FM mix level and adds the wave
+  buffer. `frameBoundary()` resets the cursors and applies the stragglers of an
+  unmixed frame. Deviations: the FM mix level (F8/F9) applies per FRAME (the value at
+  the frame end) instead of per sample; a sounding wave half resets `s_oplOutQuiet`
+  (the OPL mix gate only sees FM now). No heap for the block (6.7 KB, the ring + two
+  640-sample buffers) = the old inline path in OPLGenSound, unchanged. The FM
+  half-rate policy's timer now measures FM only (~5 ms on "05" at full rate, under
+  the 6.5 ms entry) — inert, the flap is gone with it. The frame-boundary straggler
+  loop also stopped sending OPLQ_WAVE entries to `oplfm->write` (a latent bug of the
+  inline path on a skipped-mix frame). Host: `tools/moonpcm_test.cpp` gained a
+  genPcm + end-sum == gen check (mutation: a wrong FM factor fails it by 4968).
+  Test ELFs `debug/DVp2w-16M-moonsplit-1.1.0` (+ `-trace-`: `OPL: gen N us/fr
+  (moon M; core1 C, join J)` — N = core0 FM, C = core1 wave us/frame, J = core0's
+  frame-end join + sum; `join` near 0 = core1 keeps up, a big `join` = core1 has no
+  slack, e.g. a 576p render + GS). Hw owed: "05 encounter" under WC (core0 `gen`
+  should read ~5 ms, join ~0.1), FPS/IDL, pitch/level unchanged, a key-on burst at
+  the frame start (publish ordering), F11 mid-track, the menu over a track.
+  **Hw 2026-10-23, owner: `~/Downloads/zx/ZXMMoonSound/moonsound_14.trd` (Mick's MWM
+  player 1.4, `moonsn14` + the 94 KB module `tall`, the beam-raced Pentagon path —
+  MainScreen's MOON_LINE_PUB) — "OPL4 plays excellently."** Then the trace log
+  (`logs/devttyACM0_2026_10_23.14.41.46.098.txt`, "05" under WC, TEXT 576p): core0
+  `gen` **4.3-5.4 ms** (was 8.5-10.5), core1 wave 4.3-7.0 ms, `join` 67-75 us — core1
+  keeps up, the FM policy never fired. Owner: "в целом неплохо, но можем ещё ускорить?"
+- **Round 6, the FM half on core1 too (2026-10-23, NOT hw-tested).** Same ring, same
+  lock, same join: `MoonSplit::fmWrite` takes the `#C4-#C7` writes (`OPLPortWrite`
+  publishes the position as the wave writes do), `genTo` runs `OplFm::gen` into the OPL
+  buffer (accumulating — `frameBoundary` zeroes it and ATTACHES the current `oplfm` +
+  buffers; `OplSubsys::apply` detaches before deleting them and `fmAttach`es a fresh
+  chip, since that runs at applyPending AFTER the boundary) and `MoonPcm::genPcm` into
+  the wave buffers; `OPLGetSample` (status reads: the timers advance in gen) and the
+  wave read-back are `sync(pos)` on core0; `OPLGenSound` returns at once while the
+  split is live; the frame end = `frameJoin` (core0 generates the tail core1 did not
+  reach) + the FM DC blocker over the whole frame + `frameSum`. The FM half-rate
+  policy is OFF with the split (the join IS the balancer; the <450 MHz rule in
+  setRates stays), and `ESPectrum::reset`'s OplFm reset runs under `hold()/release()`.
+  What to expect: core0's cost = `join` = whatever core1 could not finish before the
+  frame end (plus the 640-sample sum, ~0.1 ms). At 480p core1 should take both halves
+  whole (join ~0.1 ms); at 576p TEXT (render ~6 + ISR ~6 + wave 5-7 + FM 5 ms) part of
+  the FM comes back to core0 through the join — still less than the 5 ms it costs now.
+  Trace: `OPL: gen G us/fr (moon M; core1 fm F wave W, join J)` — G/M are the inline
+  path's (0 with the split), F/W core1's halves, J core0's. Test ELFs
+  `debug/DVp2w-16M-moonsplit2-1.1.0` (+ `-trace-`). **Hw 2026-10-23, owner: "стало
+  лучше"; what remains is the PLUGIN's own speed (VGMPLAY.WMF at 14 MHz with its
+  per-write clock dips), which is not ours to fix — committed here.** Not itemised:
+  `join` at 576p/480p, the plugin's OPL3 detect (status read → sync), OPL3 off/on in
+  the menu under a playing track (attach/detach), F11 mid-track.
 
 ## CYW43 radio DMA starved the HDMI TMDS FIFO — vendored bus driver, CPU FIFO copy (2026-10-22, hw-confirmed DVp2w)
 

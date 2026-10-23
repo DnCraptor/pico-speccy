@@ -105,6 +105,13 @@ public:
     // Adds the PCM channels into L/R[off .. off+n-1], which already hold the
     // FM half's output, applying the chip's FM/PCM mix levels; saturates.
     void gen(int16_t* L, int16_t* R, int n, int off);
+    // The PCM half ALONE into L/R[off .. off+n-1] (replaces, PCM mix level
+    // applied, saturated) — the split path, where the wave half is synthesized
+    // on the other core and summed onto the FM buffer at the frame end with
+    // fmMix*() applied there (MoonSplit). Returns whether anything sounded.
+    bool genPcm(int16_t* L, int16_t* R, int n, int off);
+    int32_t fmMixL() const { return m_fmFL; }   // Q12, 4096 = FM unchanged
+    int32_t fmMixR() const { return m_fmFR; }
 
     bool anyActive() const { return m_active != 0; }
     uint8_t memRead(uint32_t a) const {
@@ -145,6 +152,7 @@ private:
     inline __attribute__((always_inline)) void    clockEnv(Ch& c, int ch, uint32_t counter);
     inline __attribute__((always_inline)) int16_t fetch(const Ch& c) const;
     inline __attribute__((always_inline)) void    chipStep(uint32_t ratio, int32_t& sl, int32_t& sr);
+    inline __attribute__((always_inline)) void    samplePair(int32_t& sl, int32_t& sr);
     int32_t  attToVol(uint32_t a) const { return m_pow[a & 0xFF] >> (a >> 8); }
     uint32_t attInc(uint32_t rate, uint32_t idx) const { return (m_inc[rate] >> (4 * idx)) & 0xF; }
     uint32_t memAutoInc();

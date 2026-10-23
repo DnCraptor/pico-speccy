@@ -65,6 +65,17 @@ static void ftTraceTick();   // defined in the VDAC2 glue section below
 #include "VidPrecalc.h"
 #include "speccy/z80/CPU.h"
 #include "app/ESPectrum.h"
+#include "speccy/devices/sound/MoonSplit.h"
+// ZXM-MoonSound wave half on core1 (MoonSplit.h): once per rendered guest
+// line, tell core1 how far the guest has got — one test and one store.
+#if MOONSOUND
+#define MOON_LINE_PUB() do { if (g_moon_c1_live) { \
+    uint32_t _p = CPU::tstates / ESPectrum::audioAYDivider; \
+    if (ESPectrum::multiplicator) _p >>= ESPectrum::multiplicator; \
+    MoonSplit::publish(_p); } } while (0)
+#else
+#define MOON_LINE_PUB() do {} while (0)
+#endif
 #include "speccy/core/MemESP.h"
 #include "app/Config.h"
 #include "ui/OSDMain.h"
@@ -6230,6 +6241,7 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
 
     if (coldraw_cnt >= 32) {
         tstateDraw += tStatesPerLine;
+        MOON_LINE_PUB();
         if (++linedraw_cnt == lin_end2) {
             Draw = &Blank;
             Draw_Opcode = &Blank_Opcode;
@@ -6530,6 +6542,7 @@ IRAM_ATTR void VIDEO::MainScreen_NoPaper(unsigned int statestoadd, bool contende
 
     if (coldraw_cnt >= 32) {
         tstateDraw += tStatesPerLine;
+        MOON_LINE_PUB();
         if (++linedraw_cnt == lin_end2) {
             Draw = &Blank;
             Draw_Opcode = &Blank_Opcode;
@@ -6553,6 +6566,7 @@ IRAM_ATTR void VIDEO::MainScreen_OSD(unsigned int statestoadd, bool contended) {
 
     if (coldraw_cnt >= 32) {
         tstateDraw += tStatesPerLine;
+        MOON_LINE_PUB();
         if (++linedraw_cnt == lin_end2) {
             Draw = &Blank;
             Draw_Opcode = &Blank_Opcode;
@@ -6590,6 +6604,7 @@ IRAM_ATTR void VIDEO::MainScreen_Snow(unsigned int statestoadd, bool contended) 
 
     if (coldraw_cnt >= 128) {
         tstateDraw += tStatesPerLine;
+        MOON_LINE_PUB();
         if (++linedraw_cnt == lin_end2) {
             Draw = &Blank_Snow;
             Draw_Opcode = &Blank_Snow_Opcode;
@@ -6683,6 +6698,7 @@ IRAM_ATTR void VIDEO::MainScreen_Snow_Opcode(bool contended) {
 
     if (coldraw_cnt >= 128) {
         tstateDraw += tStatesPerLine;
+        MOON_LINE_PUB();
         if (++linedraw_cnt == lin_end2) {
             Draw =&Blank_Snow;
             Draw_Opcode = &Blank_Snow_Opcode;
@@ -7528,6 +7544,7 @@ void VIDEO::tsBandReplay() {
 }
 
 IRAM_ATTR void VIDEO::tsDrawTick() {
+    MOON_LINE_PUB();   // every whole-line clock (TS-Conf, ATM/Evo, 16col, Next) passes here once a line
     if (Z80Ops::isNext) { NEXTVID::lineTick(); return; }   // TsFastMem.h: the Next shares the fast path
     // ATM-Turbo / ZX-Evo whole-line modes share this clock (atmDrawTick, flash):
     // one test per rendered line, not per access. Pentagon 16col likewise.

@@ -414,27 +414,44 @@ inline void MoonPcm::chipStep(uint32_t ratio, int32_t& sl, int32_t& sr) {
     }
 }
 
+// One output sample of the PCM sum (before the mix level). Half rate: a chip
+// step of two output samples every other sample, the midpoint on the compute
+// tick, the new pair held on the next (OplFm).
+inline void MoonPcm::samplePair(int32_t& sl, int32_t& sr) {
+    const bool compute = !m_half || (m_halfTick ^= 1);
+    if (compute) {
+        chipStep(m_half ? m_ratio2 : m_ratio, sl, sr);
+        if (m_half) {
+            const int32_t nl = sl, nr = sr;
+            sl = (m_cL + nl) >> 1; sr = (m_cR + nr) >> 1;
+            m_cL = nl; m_cR = nr;
+        }
+    } else {
+        sl = m_cL; sr = m_cR;
+    }
+}
+
 void MoonPcm::gen(int16_t* L, int16_t* R, int n, int off) {
     if (!m_active && m_fmFL == 4096 && m_fmFR == 4096) return;
     L += off; R += off;
     for (int i = 0; i < n; i++) {
         int32_t sl, sr;
-        // Half rate: a chip step of two output samples every other sample, the
-        // midpoint on the compute tick, the new pair held on the next (OplFm).
-        const bool compute = !m_half || (m_halfTick ^= 1);
-        if (compute) {
-            chipStep(m_half ? m_ratio2 : m_ratio, sl, sr);
-            if (m_half) {
-                const int32_t nl = sl, nr = sr;
-                sl = (m_cL + nl) >> 1; sr = (m_cR + nr) >> 1;
-                m_cL = nl; m_cR = nr;
-            }
-        } else {
-            sl = m_cL; sr = m_cR;
-        }
+        samplePair(sl, sr);
         L[i] = clamp16((L[i] * m_fmFL + sl * m_pcmFL) >> 12);
         R[i] = clamp16((R[i] * m_fmFR + sr * m_pcmFR) >> 12);
     }
+}
+
+bool MoonPcm::genPcm(int16_t* L, int16_t* R, int n, int off) {
+    L += off; R += off;
+    if (!m_active) { memset(L, 0, n * sizeof(int16_t)); memset(R, 0, n * sizeof(int16_t)); return false; }
+    for (int i = 0; i < n; i++) {
+        int32_t sl, sr;
+        samplePair(sl, sr);
+        L[i] = clamp16((sl * m_pcmFL) >> 12);
+        R[i] = clamp16((sr * m_pcmFR) >> 12);
+    }
+    return true;
 }
 
 #endif // MOONSOUND
