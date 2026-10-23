@@ -43,6 +43,10 @@
 #include "app/ESPectrum.h"
 #include "speccy/video/Video.h"
 #include "speccy/devices/disk/wd1793.h"
+#include "speccy/machines/Sam/SamFdc.h"
+#include "speccy/z80/z80.h"              // must precede z80operations.h (RegisterPair)
+#include "speccy/z80/z80operations.h"   // Z80Ops::isSam (F9 = New MGT)
+#include "speccy/z80/CPU.h"
 #include "drivers/sound/PinSerialData_595.h"
 #include "app/Debug.h"
 #include "fs/SortedFiles.h"
@@ -480,7 +484,7 @@ static void drawInfo() {
         { "F6", "Rename",   mng && !up },
         { "F7", "New dir",  mng },
         { "F8", "Delete",   mng && !up },
-        { "F9", "New TRD",  all },
+        { "F9", Z80Ops::isSam ? "New MGT" : "New TRD",  all },
     };
     for (const auto& vb : verbs) {
         if (!vb.on) continue;
@@ -1219,6 +1223,18 @@ static string runLoop() {
                         f_unlink((s_dir + name).c_str());
                         s_goto = name;
                     }
+                    break;
+                }
+                continue;
+            }
+            if (all && k.vk == fabgl::VK_F9 && Z80Ops::isSam) {         // new MGT (SAM Coupe)
+                OSD::clickNoPause();
+                string nn;
+                if (footerAsk("New MGT:", nn)) {
+                    if (nn.size() < 4 || nn.substr(nn.size() - 4) != ".mgt") nn += ".mgt";
+                    status("Creating MGT...", -1);
+                    SamFdc::createEmpty(s_dir + nn);
+                    s_goto = nn;
                     break;
                 }
                 continue;

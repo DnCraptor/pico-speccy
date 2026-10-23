@@ -8,6 +8,7 @@
 #include "SamFdc.h"
 #include "SamClock.h"
 #include "speccy/devices/sound/Midi.h"
+#include "speccy/devices/storage/IDE.h"
 
 #include <string.h>
 
@@ -59,6 +60,16 @@ static constexpr uint32_t MIDI_TX_T = 1920, MIDI_INT_T = 96, MIDI_TXFMST_T = 192
 static uint32_t       s_midiIntT = T_NONE;   // interrupt window start
 static uint32_t       s_midiTxEnd = T_NONE;  // TXFMST clears here
 static int16_t        s_boot = -1;
+// Video state shared by the ports and the renderer (the renderer sits below the ports).
+static int      s_xres, s_yres, s_left, s_top;
+static bool     s_pair, s_flash;
+static int      s_row = 0;                  // next fb row to render
+static uint32_t s_rowT = 0xFFFFFFFFu;       // frame T at which it is rendered (MAX = done / disarmed)
+static bool     s_armed = false;            // frameStart ran for the frame in progress
+static uint8_t  s_nchg = 0;                 // mid-row changes recorded for the next row (s_chg)
+static bool     s_pairLive = false;         // mode-3 pair frame in progress (the sticky pair table)
+static void chgNote(uint8_t kind, uint8_t idx, uint8_t old);   // video: a mid-row port change
+static void pairReset();                                          // video: the mode-3 pair table
 static inline bool midiIntUp(uint32_t t)  { return s_midiIntT != T_NONE && t >= s_midiIntT && t < s_midiIntT + MIDI_INT_T; }
 static inline bool midiTxBusy(uint32_t t) { return s_midiTxEnd != T_NONE && t < s_midiTxEnd; }         // auto-BOOT: -1 off, else frames since the ROM came up  // last HPEN/LPEN (held while the screen is off)
 
@@ -469,10 +480,47 @@ static uint8_t mouseIn() {
     return (uint8_t)(0xF0 | r);
 }
 
+// Atom Lite IDE on drive 2's ports (#F0-#F7, SimCoupe AtomLite.cpp): (port & 7) =
+// 5 the address latch, 6/7 the data port. Latch 0x1D = the card's own Dallas
+// clock (shared with the #EF one here: one DS12887 model), latch bit 4 set + bit 3
+// clear = the ATA command block (A0-A2 = the register), bit 3 set + bit 4 clear
+// with A2-A0 = 6 = the control block (device control / alternate status). An
+// 8-bit card: one byte per data access, i.e. the engine's plain stride, and the
+// driver's SET FEATURES 0x01 (8-bit transfers) is accepted (IDE.cpp).
+static uint8_t s_atomLatch = 0;
+
+static inline bool atomLite() { return IDE::portScheme == IDE::ATOMLITE; }
+
+static uint8_t atomIn(uint8_t lo) {
+    if ((lo & 7) < 6) return 0xFF;
+    const uint8_t a = s_atomLatch & 0x1F;
+    if (a == 0x1D) return SamClock::in((uint16_t)(((0xFEu | (lo & 1)) << 8) | 0xEF));
+    if ((a & 0x18) == 0x10) return IDE::read8(a & 7);
+    if (a == 0x0E) return IDE::read8(8);                      // alternate status
+    return 0xFF;
+}
+
+static void atomOut(uint8_t lo, uint8_t v) {
+    switch (lo & 7) {
+    case 5: s_atomLatch = v & 0x1F; break;
+    case 6: case 7: {
+        const uint8_t a = s_atomLatch & 0x1F;
+        if (a == 0x1D) SamClock::out((uint16_t)(((0xFEu | (lo & 1)) << 8) | 0xEF), v);
+        else if ((a & 0x18) == 0x10) IDE::write8(a & 7, v);
+        else if (a == 0x0E) IDE::write8(8, v);                // device control
+        break;
+    }
+    default: break;
+    }
+}
+
 static void periphReset() {
     s_mPos = 0; s_mX = ESPectrum::mouseX; s_mY = ESPectrum::mouseY;
     s_voxUsed = 0; s_vox[0] = s_vox[1] = s_vox[2] = s_vox[3] = 0x80;
     s_midiIntT = s_midiTxEnd = T_NONE;
+    s_nchg = 0;
+    pairReset(); s_pairLive = false;
+    s_atomLatch = 0;
     SamClock::reset();
 }
 
@@ -498,6 +546,28 @@ uint8_t portIn(uint16_t address) {
         }
         uint8_t k = (hi == 0xFF) ? (uint8_t)(keys[8] & 0x1F) : keyRows(hi, 0x1F);
         if (hi == 0xFF && ESPectrum::mouseSeen) k &= mouseIn();
+        // The ROM's edge loop (ROM0 #2051 IN A,(#FE) / #2053 INC C / RET Z / XOR B /
+        // AND #40 / LD A,B / JR Z: 48 T a pass) polls until the EAR bit differs from
+        // B. With Fast load on, the passes until the tape's next edge are skipped in
+        // one step (SimCoupe turbotape): C, R and T advance as if they had run,
+        // bounded by the slice, the frame tail, the row tick and C reaching #FF.
+        if (Tape::tapeStatus == TAPE_LOADING && (s_romw & 1) && Z80::getRegPC() == 0x2053 &&
+            Tape::fastLoadEnabled() && !((Z80::getRegB() ^ (Tape::tapeEarBit ? 0x40 : 0)) & 0x40)) {
+            uint32_t lim = Tape::samEdgeWaitT();
+            const uint32_t t = CPU::tstates;
+            if (CPU::stFrame > t) { if (CPU::stFrame - t < lim) lim = CPU::stFrame - t; } else lim = 0;
+            const uint32_t tail = CPU::statesInFrame - CPU::IntEnd;
+            if (t < tail && tail - t < lim) lim = tail - t;
+            if (s_rowT != 0xFFFFFFFFu && s_rowT > t && s_rowT - t < lim) lim = s_rowT - t;
+            uint32_t n = lim / 48;
+            const uint32_t cmax = 0xFEu - Z80::getRegC();
+            if (n > cmax) n = cmax;
+            if (n) {
+                Z80::setRegC((uint8_t)(Z80::getRegC() + n));
+                Z80::incRegR(7 * n);
+                CPU::tstates += 48 * n;
+            }
+        }
         return (uint8_t)(k | (border & BORDER_SOFF) | (Tape::tapeEarBit ? 0x40 : 0));
     }
     case 0xF9: {
@@ -544,7 +614,7 @@ uint8_t portIn(uint16_t address) {
     case 0x1F: return Config::joyLive() == JOY_KEMPSTON ? Ports::port[Config::kempstonPort] : 0;
     default:
         if ((lo & 0xF8) == 0xE0) return SamFdc::in(0, address);   // drive 1
-        if ((lo & 0xF8) == 0xF0) return SamFdc::in(1, address);   // drive 2
+        if ((lo & 0xF8) == 0xF0) return atomLite() ? atomIn(lo) : SamFdc::in(1, address);   // drive 2 / Atom Lite
         return 0xFF;
     }
 }
@@ -555,6 +625,7 @@ void portOut(uint16_t address, uint8_t data) {
     const uint8_t lo = (uint8_t)address, hi = (uint8_t)(address >> 8);
     switch (lo) {
     case 0xFE: {
+        if ((data ^ border) & 0xA7) chgNote(0, 0, border);   // colour or SOFF
         border = data;
         // Beeper: D4 (BEEP), D3 (MIC) — the speaker_values index the ULA path uses.
         const int a = Ports::speaker_values[((data >> 2) & 0x04) | (Tape::tapeEarBit << 1) |
@@ -576,9 +647,13 @@ void portOut(uint16_t address, uint8_t data) {
         }
         break;
     case 0xFA: if (lmpr != data) { lmpr = data; remap(); } break;
-    case 0xFB: if (hmpr != data) { hmpr = data; remap(); } break;
-    case 0xFC: vmpr = data; break;
-    case 0xF8: clut[hi & 0x0F] = data & 0x7F; break;   // takes effect on the next row rendered
+    case 0xFB: if (hmpr != data) { if ((hmpr ^ data) & 0x60) chgNote(3, 0, hmpr); hmpr = data; remap(); } break;
+    case 0xFC: if (vmpr != data) { chgNote(2, 0, vmpr); vmpr = data; } break;
+    case 0xF8: {
+        const uint8_t i = hi & 0x0F, c = data & 0x7F;
+        if (clut[i] != c) { chgNote(1, i, clut[i]); clut[i] = c; }   // effective at the beam
+        break;
+    }
     case 0xEF: if (Config::rtc_enabled) SamClock::out(address, data); break;
     case 0xFD: {
         // MIDI OUT: a byte is taken only while none is in flight (SimCoupe's
@@ -605,8 +680,15 @@ void portOut(uint16_t address, uint8_t data) {
         break;
     default:
         if ((lo & 0xF8) == 0xE0)      SamFdc::out(0, address, data);
-        else if ((lo & 0xF8) == 0xF0) SamFdc::out(1, address, data);
+        else if ((lo & 0xF8) == 0xF0) { if (atomLite()) atomOut(lo, data); else SamFdc::out(1, address, data); }
         else if ((lo & 0xFC) == 0x7C) samVox(lo & 3, data);
+        else if ((lo & 0xFE) == 0x60) {
+            // Paula (SimCoupe Paula.cpp, Modules Tracker): a nibble per channel —
+            // low nibble left, high nibble right; the odd port is the second pair.
+            // Same DACs as the SAMVox (0 right, 1 left, 2 right-2, 3 left-2).
+            const uint8_t l = (uint8_t)(data << 4), r = (uint8_t)(data & 0xF0);
+            if (lo & 1) { samVox(3, l); samVox(2, r); } else { samVox(1, l); samVox(0, r); }
+        }
         break;
     }
 }
@@ -639,32 +721,228 @@ static inline void px(uint8_t* row, int x, uint8_t c) { row[x ^ 2] = c; }
 // rendered and costs no slot programming — raster bars, per-line palette splits
 // and the line-INT screen splits (VMPR / border / SOFF per line) all come out as
 // on the machine. Each fb row y shows raster line y - top + TOP_LINES and is
-// rendered when the beam leaves its paper: the tick in draw()/drawOpcode()
+// rendered when the beam leaves its RIGHT border: the tick in draw()/drawOpcode()
 // (every memory access charges T there) compares CPU::tstates with s_rowT.
-// Changes INSIDE a line land on the whole line (no mid-line segments).
 // Mode 3 (512 px) goes through the packed-pair driver with a 16-colour pair
 // palette decided once per frame (frameStart): CLUT changes inside a mode-3
 // frame are not shown, and a mode 1/2/4 row inside a pair frame renders its
 // CLUT index as a pair diagonal (entries 5..15 are the ZX colours).
-static int      s_xres, s_yres, s_left, s_top;
-static bool     s_pair, s_flash;
-static int      s_row = 0;                  // next fb row to render
-static uint32_t s_rowT = 0xFFFFFFFFu;       // frame T at which it is rendered (MAX = done / disarmed)
-static bool     s_armed = false;            // frameStart ran for the frame in progress
+//
+// Raster position (SimCoupe Frame::GetRasterPos, SAM.h CPU_CYCLES_ASIC_TO_FRAME_
+// OFFSET): the ASIC's line starts one side border = 64 T AFTER the frame clock's,
+// so raster line L is frame T [L*384 + 64, L*384 + 448): 64 T of left border,
+// 256 of paper, 64 of right border, one lores pixel per T. The line interrupt
+// ((line + 68) * 384) and the HPEN step (update_hpen: frame_cycles / 384) are on
+// the FRAME clock, i.e. 64 T before the left border = at the start of the previous
+// line's right border. CONT_OFFSET (+4) belongs to the contention table alone
+// (SimCoupe Memory.cpp), NOT to the raster.
+//
+// Horizontal blanking (chgNote): PAL displays ~52 of the 64 us of a line = ~312 of
+// the 384 px, so ~72 border px around the sync are never shown — the last ~40 of
+// the right border and the first ~36 of the left (SimCoupe's default view keeps
+// 16 of the 64 border px a side). Our 576p window shows 52 a side, i.e. exactly
+// that zone on both sides. A change inside it is drawn as made BEFORE the row
+// (left) or AFTER it (right), the way a display shows it. The ROM 3.0 boot
+// stripes are the case: its line-INT handler (D4EF) spins on HPEN until the beam
+// has left line D, i.e. until the start of D's right border, and writes the CLUT
+// 60..100 T later with the contention phase — the write lands in D's last right-
+// border px or a few px into D+1's left border, line by line, which is what
+// flickered at the left edge of every stripe boundary (hw 2026-10-23, 720x576,
+// video: 1-6 fb columns of the old colour on the first row of a stripe).
+static constexpr uint32_t ASIC_OFFSET = 64;
+static constexpr uint32_t HBLANK_LEFT_PX  = 36;   // left-border px 0..35 inside blanking
+static constexpr uint32_t HBLANK_RIGHT_PX = 40;   // right-border px 24..63 inside blanking
 
 static inline uint32_t rowEndT(int y) {
-    return (uint32_t)(y - s_top + (int)TOP_LINES + 1) * T_PER_LINE - CONT_OFFSET;
+    return (uint32_t)(y - s_top + (int)TOP_LINES + 1) * T_PER_LINE + ASIC_OFFSET;
+}
+
+// The video state a row is rendered from: the ports as they stood when the beam
+// left the row — or, for the columns before a change INSIDE the row, as they stood
+// before it. portOut records every change of border / CLUT / VMPR / HMPR made
+// while the beam is inside the row being rendered next (s_chg, column + old
+// value); renderRow draws the row from the end state and then, walking the ring
+// backwards, redraws the columns before each change with the old value — so a
+// border or CLUT written mid-line splits that line at the right pixel.
+struct Vs { uint8_t border, vmpr, hmpr; uint8_t clut[16]; };
+static inline Vs vsNow() { Vs v; v.border = border; v.vmpr = vmpr; v.hmpr = hmpr; memcpy(v.clut, clut, 16); return v; }
+
+struct Chg { int16_t x; uint8_t kind, idx, old; };   // kind: 0 border, 1 clut[idx], 2 vmpr, 3 hmpr
+static constexpr int CHG_MAX = 24;
+static Chg    s_chg[CHG_MAX];
+
+static inline void rowsTick(uint32_t t);
+
+static void chgNote(uint8_t kind, uint8_t idx, uint8_t old) {
+    if (!s_armed || s_rowT == 0xFFFFFFFFu) return;
+    // Render the rows the beam has left FIRST: the row tick runs on memory
+    // accesses (draw/drawOpcode), and a port write 64..73 T into a line follows the
+    // previous row's end (+64) with no memory access in between — s_row still
+    // named that row, the change was refused as "not the beam's row" and the
+    // previous row was then rendered from the NEW state (every stripe boundary of
+    // the ROM 3.0 boot screen jittered, hw 2026-10-23).
+    if (CPU::tstates >= s_rowT) rowsTick(CPU::tstates);
+    if (s_rowT == 0xFFFFFFFFu || s_nchg >= CHG_MAX) return;
+    const uint32_t t = CPU::tstates;
+    if (t < ASIC_OFFSET || t >= CPU::statesInFrame) return;     // the tail: next frame
+    const uint32_t a = t - ASIC_OFFSET;                         // ASIC raster clock
+    const uint32_t ln = a / T_PER_LINE, lc = a % T_PER_LINE;    // lc: 0 = left border px 0
+    if (ln != (uint32_t)(s_row - s_top + (int)TOP_LINES)) return;   // not the beam's row
+    // Horizontal blanking (see above): left -> as made before the row (nothing
+    // recorded, the row takes the new state), right -> after it (x = xres, the
+    // whole row keeps the old state).
+    if (lc < HBLANK_LEFT_PX) return;
+    int x = (int)lc - 64 + s_left;                              // fb column under the beam
+    if (lc >= T_PER_LINE - HBLANK_RIGHT_PX) x = s_xres;
+    if (x <= 0) return;                                         // nothing of this row before it
+    if (x > s_xres) x = s_xres;                                 // past the visible row: all of it is "before"
+    s_chg[s_nchg++] = { (int16_t)x, kind, idx, old };
+}
+
+// Mode 3 (512 px) through the packed-pair driver: 16 pair-palette entries, 12 of
+// them allocated to the CLUT colours the rows actually use (sticky, like the
+// TS-Conf ts256 map — a new colour takes a free entry, a full table gives the
+// nearest), pushed to the driver at the next frameStart; entries 12..15 stay the
+// ZX colours the overlays draw with. A colour first seen mid-frame is right from
+// the next frame on.
+static constexpr int PAIR_DYN = 12;
+static uint8_t s_pairCol[PAIR_DYN];     // SAM colour per entry, 0xFF = free
+
+static void pairReset() { memset(s_pairCol, 0xFF, sizeof(s_pairCol)); }
+
+static uint8_t pairEntry(uint8_t c) {
+    c &= 0x7F;
+    int freeAt = -1;
+    for (int i = 0; i < PAIR_DYN; i++) {
+        if (s_pairCol[i] == c) return (uint8_t)i;
+        if (freeAt < 0 && s_pairCol[i] == 0xFF) freeAt = i;
+    }
+    if (freeAt >= 0) { s_pairCol[freeAt] = c; return (uint8_t)freeAt; }
+    // Full: the nearest colour (RGB888 distance).
+    const uint32_t want = colourRgb(c);
+    const int wr = (want >> 16) & 255, wg = (want >> 8) & 255, wb = want & 255;
+    int best = 0; uint32_t bd = 0xFFFFFFFFu;
+    for (int i = 0; i < PAIR_DYN; i++) {
+        const uint32_t h = colourRgb(s_pairCol[i]);
+        const int dr = ((h >> 16) & 255) - wr, dg = ((h >> 8) & 255) - wg, db = (h & 255) - wb;
+        const uint32_t d = (uint32_t)(dr * dr + dg * dg + db * db);
+        if (d < bd) { bd = d; best = i; }
+    }
+    return (uint8_t)best;
+}
+
+// Columns [x0, x1) of fb row y from the state v. A full row takes the fast loops;
+// a partial span (the columns before a mid-row change) goes pixel by pixel, since
+// the fb keeps pixel x at byte x ^ 2 and a byte memset only lines up on multiples
+// of 4.
+static void renderSpan(uint8_t* row, int y, int x0, int x1, const Vs& v) {
+    const int xres = s_xres, left = s_left;
+    const uint8_t brdIdx = (uint8_t)(((v.border & 0x20) >> 2) | (v.border & 7));
+    const int mode = (v.vmpr & VMPR_MODE) >> 5;           // 0 = mode 1 .. 3 = mode 4
+    const bool off = (v.border & BORDER_SOFF) && (v.vmpr & VMPR_MDE1);
+    const uint8_t (*pl)[16] = VIDEO::profi_pair_lookup;
+    const bool full = (x0 == 0 && x1 == xres);
+    uint8_t brd;
+    if (s_pair) { const uint8_t e = pairEntry(v.clut[brdIdx]); brd = pl[e][e]; }
+    else brd = (uint8_t)(PAL_SLOT0 + v.clut[brdIdx]);
+    const int sl = y - s_top;
+    const uint8_t pg = (mode >= 2) ? (v.vmpr & (VMPR_PAGE & ~1)) : (v.vmpr & VMPR_PAGE);
+    const uint8_t* p0 = pagePtr(pg);
+    if (sl < 0 || sl >= 192 || off || !p0) {
+        if (full) memset(row, brd, xres);
+        else for (int x = x0; x < x1; x++) px(row, x, brd);
+        return;
+    }
+    if (full) {
+        memset(row, brd, left);
+        memset(row + left + 256, brd, xres - left - 256);
+    } else {
+        for (int x = x0; x < x1 && x < left; x++) px(row, x, brd);
+        for (int x = (x0 > left + 256 ? x0 : left + 256); x < x1; x++) px(row, x, brd);
+    }
+    const int px0 = (x0 > left ? x0 : left) - left, px1 = (x1 < left + 256 ? x1 : left + 256) - left;
+    if (px1 <= px0) return;
+    uint8_t* o = row + left;
+    uint8_t m3[4] = {0, 0, 0, 0};
+    if (mode == 2) {
+        const uint8_t b = (v.hmpr & 0x60) >> 3;
+        m3[0] = b | 0; m3[1] = b | 2; m3[2] = b | 1; m3[3] = b | 3;   // entries 1/2 swapped
+    }
+    // CLUT index -> fb byte for this row.
+    uint8_t cl[16];
+    for (int i = 0; i < 16; i++) {
+        if (s_pair) { const uint8_t e = pairEntry(v.clut[i]); cl[i] = pl[e][e]; }
+        else cl[i] = (uint8_t)(PAL_SLOT0 + v.clut[i]);
+    }
+    switch (mode) {
+    case 0:
+    case 1: {
+        const uint8_t* d;
+        const uint8_t* a;
+        if (mode == 0) {
+            d = p0 + (((sl & 0xC0) << 5) | ((sl & 0x07) << 8) | ((sl & 0x38) << 2));
+            a = p0 + 6144 + ((sl & 0xF8) << 2);
+        } else {
+            d = p0 + (sl << 5);
+            a = d + 0x2000;
+        }
+        if (full) {
+            for (int c = 0; c < 32; c++) {
+                const uint8_t at = a[c], bits = d[c];
+                uint8_t ink = (uint8_t)(((at >> 3) & 8) | (at & 7));
+                uint8_t pap = (uint8_t)((at >> 3) & 0xF);
+                if (s_flash && (at & 0x80)) { const uint8_t t = ink; ink = pap; pap = t; }
+                const uint8_t ci = cl[ink], cp = cl[pap];
+                for (int b = 0; b < 8; b++)
+                    px(o, c * 8 + b, (bits & (0x80 >> b)) ? ci : cp);
+            }
+        } else {
+            for (int x = px0; x < px1; x++) {
+                const int c = x >> 3;
+                const uint8_t at = a[c];
+                uint8_t ink = (uint8_t)(((at >> 3) & 8) | (at & 7));
+                uint8_t pap = (uint8_t)((at >> 3) & 0xF);
+                if (s_flash && (at & 0x80)) { const uint8_t t = ink; ink = pap; pap = t; }
+                px(o, x, (d[c] & (0x80 >> (x & 7))) ? cl[ink] : cl[pap]);
+            }
+        }
+        break;
+    }
+    case 2:
+    case 3: {
+        const uint32_t off128 = (uint32_t)sl << 7;
+        const uint8_t* p1 = pagePtr((uint8_t)(pg + 1));
+        const uint8_t* d = (off128 < 0x4000) ? p0 + off128 : (p1 ? p1 + (off128 - 0x4000) : nullptr);
+        if (!d) { for (int x = px0; x < px1; x++) px(o, x, brd); break; }
+        if (s_pair && mode == 2) {
+            // 512 px: two pixels per fb byte, each pixel = a pair-palette entry.
+            uint8_t e[4];
+            for (int k = 0; k < 4; k++) e[k] = pairEntry(v.clut[m3[k]]);
+            for (int x = px0; x < px1; x++) {
+                const uint8_t b = d[x >> 1];
+                px(o, x, (x & 1) ? pl[e[(b >> 2) & 3]][e[b & 3]] : pl[e[b >> 6]][e[(b >> 4) & 3]]);
+            }
+        } else if (mode == 3) {
+            for (int x = px0; x < px1; x++) {
+                const uint8_t b = d[x >> 1];
+                px(o, x, cl[(x & 1) ? (b & 0x0F) : (b >> 4)]);
+            }
+        } else {
+            // 512 px at 2 bpp, shown at half width: the left pixel of each pair.
+            for (int x = px0; x < px1; x++) {
+                const uint8_t b = d[x >> 1];
+                px(o, x, cl[m3[(x & 1) ? ((b >> 2) & 3) : (b >> 6)]]);
+            }
+        }
+        break;
+    }
+    }
 }
 
 static void renderRow(int y) {
     uint8_t* row = VIDEO::vga.frameBuffer[y];
-    if (!row) return;
-    const int xres = s_xres, left = s_left;
-    const uint8_t brdIdx = (uint8_t)(((border & 0x20) >> 2) | (border & 7));
-    const int mode = (vmpr & VMPR_MODE) >> 5;           // 0 = mode 1 .. 3 = mode 4
-    const bool off = (border & BORDER_SOFF) && (vmpr & VMPR_MDE1);
-    const uint8_t (*pl)[16] = VIDEO::profi_pair_lookup;
-    const uint8_t brd = s_pair ? pl[4][4] : (uint8_t)(PAL_SLOT0 + clut[brdIdx]);
+    if (!row) { s_nchg = 0; return; }
+    const int xres = s_xres;
     // Overlays drawn after EndFrame (F8 stats / volume box, LED panel, notify
     // banner) own their rects: keep those bytes, or every frame erases them.
     int cx[8][2];
@@ -677,77 +955,21 @@ static void renderRow(int y) {
         if (x1 > x0 && kn + (x1 - x0) <= (int)sizeof(keep)) { memcpy(keep + kn, row + x0, x1 - x0); kn += x1 - x0; }
         else cx[i][1] = cx[i][0];
     }
-    const int sl = y - s_top;
-    // Modes 3/4 span 24K: the even page of the pair and the one after it.
-    const uint8_t pg = (mode >= 2) ? (vmpr & (VMPR_PAGE & ~1)) : (vmpr & VMPR_PAGE);
-    const uint8_t* p0 = pagePtr(pg);
-    if (sl < 0 || sl >= 192 || off || !p0) {
-        memset(row, brd, xres);
-    } else {
-        // side borders (left is a multiple of 4, so the swizzle stays inside them)
-        memset(row, brd, left);
-        memset(row + left + 256, brd, xres - left - 256);
-        uint8_t* o = row + left;
-        uint8_t m3[4] = {0, 0, 0, 0};
-        if (mode == 2) {
-            const uint8_t b = (hmpr & 0x60) >> 3;
-            m3[0] = b | 0; m3[1] = b | 2; m3[2] = b | 1; m3[3] = b | 3;   // entries 1/2 swapped
+    Vs v = vsNow();
+    renderSpan(row, y, 0, xres, v);
+    // Changes the beam saw inside this row: the columns before each one keep the
+    // value from before it (latest change first, the state rolling back).
+    for (int i = (int)s_nchg - 1; i >= 0; i--) {
+        const Chg& c = s_chg[i];
+        switch (c.kind) {
+        case 0: v.border = c.old; break;
+        case 1: v.clut[c.idx & 15] = c.old; break;
+        case 2: v.vmpr = c.old; break;
+        default: v.hmpr = c.old; break;
         }
-        // CLUT index -> fb byte for this row.
-        uint8_t cl[16];
-        for (int i = 0; i < 16; i++) cl[i] = s_pair ? pl[i][i] : (uint8_t)(PAL_SLOT0 + clut[i]);
-        switch (mode) {
-        case 0:
-        case 1: {
-            const uint8_t* d;
-            const uint8_t* a;
-            if (mode == 0) {
-                d = p0 + (((sl & 0xC0) << 5) | ((sl & 0x07) << 8) | ((sl & 0x38) << 2));
-                a = p0 + 6144 + ((sl & 0xF8) << 2);
-            } else {
-                d = p0 + (sl << 5);
-                a = d + 0x2000;
-            }
-            for (int c = 0; c < 32; c++) {
-                const uint8_t at = a[c], bits = d[c];
-                uint8_t ink = (uint8_t)(((at >> 3) & 8) | (at & 7));
-                uint8_t pap = (uint8_t)((at >> 3) & 0xF);
-                if (s_flash && (at & 0x80)) { const uint8_t t = ink; ink = pap; pap = t; }
-                const uint8_t ci = cl[ink], cp = cl[pap];
-                for (int b = 0; b < 8; b++)
-                    px(o, c * 8 + b, (bits & (0x80 >> b)) ? ci : cp);
-            }
-            break;
-        }
-        case 2:
-        case 3: {
-            const uint32_t off128 = (uint32_t)sl << 7;
-            const uint8_t* p1 = pagePtr((uint8_t)(pg + 1));
-            const uint8_t* d = (off128 < 0x4000) ? p0 + off128 : (p1 ? p1 + (off128 - 0x4000) : nullptr);
-            if (!d) { memset(o, brd, 256); break; }
-            if (s_pair && mode == 2) {
-                // 512 px: two pixels per fb byte.
-                for (int i = 0; i < 128; i++) {
-                    const uint8_t v = d[i];
-                    px(o, i * 2,     pl[v >> 6][(v >> 4) & 3]);
-                    px(o, i * 2 + 1, pl[(v >> 2) & 3][v & 3]);
-                }
-            } else if (mode == 3) {
-                for (int i = 0; i < 128; i++) {
-                    px(o, i * 2,     cl[d[i] >> 4]);
-                    px(o, i * 2 + 1, cl[d[i] & 0x0F]);
-                }
-            } else {
-                // 512 px at 2 bpp, shown at half width: the left pixel of each pair.
-                for (int i = 0; i < 128; i++) {
-                    px(o, i * 2,     cl[m3[d[i] >> 6]]);
-                    px(o, i * 2 + 1, cl[m3[(d[i] >> 2) & 3]]);
-                }
-            }
-            break;
-        }
-        }
+        renderSpan(row, y, 0, c.x, v);
     }
+    s_nchg = 0;
     kn = 0;
     for (int i = 0; i < nc; i++) {
         const int x0 = cx[i][0] < 0 ? 0 : cx[i][0];
@@ -771,12 +993,18 @@ static bool frameSetup() {
         const uint8_t b = (hmpr & 0x60) >> 3;
         m3[0] = b | 0; m3[1] = b | 2; m3[2] = b | 1; m3[3] = b | 3;
     }
-    // Mode 3 at its real 512 px: the packed-pair driver, pair index = pixel value
-    // 0..3, 4 = the border. Every other mode hands the driver back (no-op when off).
-    uint32_t rgb5[5];
-    for (int k = 0; k < 4; k++) rgb5[k] = colourRgb(clut[m3[k]]);
-    rgb5[4] = colourRgb(clut[brdIdx]);
-    s_pair = VIDEO::samPairSync(mode == 2, rgb5);
+    // Mode 3 at its real 512 px: the packed-pair driver with the sticky 12-entry
+    // pair palette (pairEntry). Every other mode hands the driver back (no-op when off).
+    const bool want = (mode == 2);
+    if (want && !s_pairLive) pairReset();
+    if (want) {
+        pairEntry(clut[brdIdx]);
+        for (int k = 0; k < 4; k++) pairEntry(clut[m3[k]]);
+    }
+    uint32_t rgb[PAIR_DYN];
+    for (int i = 0; i < PAIR_DYN; i++) rgb[i] = colourRgb(s_pairCol[i] == 0xFF ? 0 : s_pairCol[i]);
+    s_pair = VIDEO::samPairSync(want, rgb);
+    s_pairLive = s_pair;
     return true;
 }
 

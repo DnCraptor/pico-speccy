@@ -993,6 +993,11 @@ static bool stagedIsPlus3e() {
     if (m >= 0) return isPlus3eRomset((RomsetIdx)(m & 0xFF));
     return Config::isPlus3e();
 }
+static bool stagedIsSam() {
+    const int32_t m = staged(SET_MACHINE);
+    if (m >= 0) return (ArchIdx)(m >> 8) == A_SAM;
+    return Config::arch == A_SAM;
+}
 static bool stagedIsPlus3Div() {
     const int32_t m = staged(SET_MACHINE);
     if (m >= 0) return isPlus3DivRomset((RomsetIdx)(m & 0xFF));
@@ -1165,6 +1170,14 @@ static void resolveConstraints(CommitReport& rep) {
                 changed |= force(SET_ZIFI_NIC, 0, rep, "ZiFi NIC off: it shares #xxEF with the +3e IDE");
         } else if (staged(SET_IDE_SCHEME) == IDE::PLUS3E) {
             changed |= force(SET_IDE_SCHEME, IDE::OFF, rep, "IDE off: the +3e interface needs the +3e ROM");
+        }
+        // SAM Coupe: the Atom Lite is its card (drive 2's ports); the other schemes
+        // decode ports the SAM does not have, and it decodes nothing elsewhere.
+        if (stagedIsSam()) {
+            if (staged(SET_IDE_SCHEME) != IDE::OFF && staged(SET_IDE_SCHEME) != IDE::ATOMLITE)
+                changed |= force(SET_IDE_SCHEME, IDE::ATOMLITE, rep, "IDE set to the Atom Lite");
+        } else if (staged(SET_IDE_SCHEME) == IDE::ATOMLITE) {
+            changed |= force(SET_IDE_SCHEME, IDE::OFF, rep, "IDE off: the Atom Lite is a SAM Coupe card");
         }
 
         // The +3 (divIDE) romset is the same story one interface over: its ROM drives a

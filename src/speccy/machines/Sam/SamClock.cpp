@@ -3,6 +3,8 @@
 #include <string.h>
 #include "pico/time.h"
 #include "speccy/devices/storage/RTC.h"
+#include "fs/FileUtils.h"
+#include "app/Debug.h"
 
 namespace SamClock {
 
@@ -137,9 +139,57 @@ static constexpr int BANK1 = 0x40;
 static Clock   s_ds;
 static uint8_t s_dsSel = 0;
 static uint8_t s_dsReg[14 + 114 + 64];   // bank 0 regs, user RAM, bank 1 regs
+// The battery: bank 0 user RAM (0x0E..0x7F) + the bank 1 registers, in
+// CONFIG_DIR/nvram_sam.bin (SimCoupe's SaveState minus the extended RAM). Read
+// once per session, written at most every 1.5 s after a change.
+#define DALLAS_FILE CONFIG_DIR "/nvram_sam.bin"
+static constexpr uint32_t DS_FILE_BYTES = 114 + 64;
+static bool     s_dsLoaded = false, s_dsDirty = false;
+static uint32_t s_dsFlushMs = 0;
+
+static void dallasLoad() {
+    s_dsLoaded = true;
+    FIL* f = fopen2(DALLAS_FILE, FA_READ);
+    if (!f) return;
+    uint8_t b[DS_FILE_BYTES]; UINT br = 0;
+    if (f_read(f, b, sizeof(b), &br) == FR_OK && br == sizeof(b)) {
+        memcpy(s_dsReg + 0x0E, b, 114);
+        memcpy(s_dsReg + 14 + 114, b + 114, 64);
+        // Model / serial / CRC stay the chip's own.
+        s_dsReg[0x40 + BANK1] = 0x78;
+        memcpy(s_dsReg + 0x41 + BANK1, "\x11\x22\x33\x44\x55\x66", 6);
+        s_dsReg[0x47 + BANK1] = 0x1E;
+        Debug::log("[SAM] Dallas NVRAM loaded");
+    }
+    fclose2(f);
+}
+
+void flush() {
+    if (!s_dsDirty) return;
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - s_dsFlushMs < 1500) return;
+    s_dsFlushMs = now;
+    s_dsDirty = false;
+    FIL* f = fopen2(DALLAS_FILE, FA_WRITE | FA_CREATE_ALWAYS);
+    if (!f) {
+        FileUtils::mkdirParents(CONFIG_DIR);
+        f = fopen2(DALLAS_FILE, FA_WRITE | FA_CREATE_ALWAYS);
+        if (!f) return;
+    }
+    uint8_t b[DS_FILE_BYTES]; UINT bw = 0;
+    memcpy(b, s_dsReg + 0x0E, 114);
+    memcpy(b + 114, s_dsReg + 14 + 114, 64);
+    f_write(f, b, sizeof(b), &bw);
+    fclose2(f);
+}
 
 static void dallasInit() {
+    uint8_t keep[DS_FILE_BYTES];
+    memcpy(keep, s_dsReg + 0x0E, 114);
+    memcpy(keep + 114, s_dsReg + 14 + 114, 64);
     memset(s_dsReg, 0, sizeof(s_dsReg));
+    memcpy(s_dsReg + 0x0E, keep, 114);                // battery-backed: survives a reset
+    memcpy(s_dsReg + 14 + 114, keep + 114, 64);
     s_dsReg[0x0A] = 0x20;                 // oscillator on, bank 0
     s_dsReg[0x0B] = 0x02;                 // updates on, BCD, 24 h
     s_dsReg[0x0D] = 0x80;                 // valid RAM and time
@@ -185,6 +235,7 @@ static void dallasOut(uint8_t hi, uint8_t v) {
     if (r >= 0x40 + BANK1 && r <= 0x47 + BANK1) return;   // model / serial
     if (r == 0x53 + BANK1) return;                // extended RAM: not fitted
     if (r == 0x0A) v &= 0x7F;
+    if (s_dsReg[r] != v && (r >= 0x0E)) s_dsDirty = true;   // user RAM / bank 1: battery-backed
     s_dsReg[r] = v;
     switch (r) {
     case 0x00: s_ds.st.sec = v;   break;
@@ -205,7 +256,8 @@ void reset() {
     s_sb.bcd = true;
     s_sb.seed();
     sambusFill();                                 // readable at once, not at the next tick
-    dallasInit();
+    dallasInit();                                 // keeps the battery-backed bytes
+    if (!s_dsLoaded) dallasLoad();
     s_ds.seed();
     s_dsSel = 0;
     dallasFill();

@@ -487,6 +487,11 @@ void CPU::reset() {
     } else if (Config::ide_scheme == IDE::PLUS3E) {
         Config::ide_scheme = IDE::OFF;
     }
+    if (Config::arch == A_SAM) {   // the Atom Lite is the SAM's card and nobody else's
+        if (Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATOMLITE) Config::ide_scheme = IDE::ATOMLITE;
+    } else if (Config::ide_scheme == IDE::ATOMLITE) {
+        Config::ide_scheme = IDE::OFF;
+    }
     // ...and the same for the +3 (divIDE): its ROM drives the divIDE taskfile, and that
     // scheme must not survive onto another machine — its decode is ahead of General
     // Sound's #B3/#BB in Ports.cpp.

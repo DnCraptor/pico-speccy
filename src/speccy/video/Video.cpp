@@ -7246,12 +7246,12 @@ static void samPairOff() {
     Debug::log("[SAM] mode 3: 512 px pair mode off");
 }
 
-bool VIDEO::samPairSync(bool want, const uint32_t rgb5[5]) {
+bool VIDEO::samPairSync(bool want, const uint32_t rgb12[12]) {
     if (!want) { s_samPairRefused = false; samPairOff(); return false; }
     if (s_samPairRefused) return false;
     uint32_t pal[16];
-    for (int i = 0; i < 5; i++) pal[i] = rgb5[i] & 0x00FFFFFF;
-    for (int i = 5; i < 16; i++) pal[i] = paletteTransform(spectrum_rgb888[i]) & 0x00FFFFFF;
+    for (int i = 0; i < 12; i++) pal[i] = rgb12[i] & 0x00FFFFFF;   // Sam.cpp's sticky entries
+    for (int i = 12; i < 16; i++) pal[i] = paletteTransform(spectrum_rgb888[i]) & 0x00FFFFFF;
     if (sam_pair_live) {
         // A full-screen menu owns the pair palette: leave it alone until it hands back.
         if (profi_palette_ui_saved_valid) return true;

@@ -37,6 +37,9 @@ namespace SamFdc {
     // geometry is 80 cylinders x 2 sides of 10 x 512 B sectors). Reads a few hundred
     // bytes; used to tell a SAM .dsk from a +3 one.
     bool    looksSam(const std::string& path);
+    // A blank, unformatted MGT image (819200 zero bytes): SAMDOS/MasterDOS FORMAT
+    // lays the tracks down, or sees an empty directory as it is.
+    bool    createEmpty(const std::string& path);
 
     // .pss (PSSF, one record per drive): the controller registers and, for a
     // transfer in progress, the sector/track buffer. snapLoad needs the same

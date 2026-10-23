@@ -388,6 +388,15 @@ bool Tape::flashloadAvailable() {
 
 bool Tape::fastLoadEnabled() { return fastLoadOn(); }
 
+uint32_t Tape::samEdgeWaitT() {
+    if (tapeStatus != TAPE_LOADING || tapeFileType == TAPE_FTYPE_WAV || tapeFileType == TAPE_FTYPE_MP3 ||
+        tapeFileType == TAPE_FTYPE_EMPTY) return 0;
+    const uint64_t cur = tapeClock() - tapeStart;
+    if (cur >= tapeNext) return 0;
+    const uint64_t left = ((uint64_t)tapeNext - cur) * 12 / 7;
+    return left > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)left;
+}
+
 bool Tape::autoRunAvailable() {
     // Tape wear ignores the in-ROM TRAP but must NOT disable the AUTO-RUN, and the
     // loader snapshot itself says why: it resumes at 0x0038 with HL=0x053F (the

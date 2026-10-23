@@ -245,6 +245,9 @@ public:
     static uint8_t flashBlockRead();
     static void    flashBlockDone();
     static bool    fastLoadEnabled();    // Fast load on, tape wear off, no RZX playback
+    // SAM Coupe T-states (6 MHz) until the playing tape's next edge, 0 when not
+    // playing / unknown (WAV, MP3). Sam::portIn's ROM edge-loop skip.
+    static uint32_t samEdgeWaitT();
     static bool CerikopikFlashLoad();
     static int JJFlashLoad(); // 0=not applicable, 1=in progress, 2=done
     static bool jjScreenAnimating; // true while JJ screen animation in progress

@@ -698,6 +698,21 @@ bool looksSam(const std::string& path) {
     return cyls >= 80 && sides == 2 && !memcmp(tib, "Track-Info", 10) && tib[0x15] == 10 && tib[0x14] == 2;
 }
 
+bool createEmpty(const std::string& path) {
+    FIL* f = fopen2(path.c_str(), FA_WRITE | FA_CREATE_ALWAYS);
+    if (!f) return false;
+    uint8_t z[1024]; memset(z, 0, sizeof(z));
+    bool ok = true;
+    for (uint32_t off = 0; ok && off < 819200u; off += sizeof(z)) {
+        UINT bw = 0;
+        ok = f_write(f, z, sizeof(z), &bw) == FR_OK && bw == sizeof(z);
+    }
+    if (ok) ok = f_sync(f) == FR_OK;
+    fclose2(f);
+    if (!ok) f_unlink(path.c_str());
+    return ok;
+}
+
 void diag(char* out, int n) {
     const Regs& r = s_r[0];
     snprintf(out, n, "fdc cmd=%02X st=%02X trk=%u head=%u sec=%u side=%u buf=%u/%u cmds=%lu",

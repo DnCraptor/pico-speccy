@@ -15769,6 +15769,49 @@ PSRAM ≥ 1 MB + `FlashRoms::romsUsable()`), romsets `R_SAM256/512/512_1M/2M/4M`
   a ZIP under an image name (zxart `defenders_of_the_earth.dsk` = a ZIP holding the EDSK)
   is detected by signature (`FileUtils::isZipByMagic`) in the F5 dispatch and the web launch
   and goes through `ZipExtract::extract` first — it used to be mounted as a +3 disk.
+- **Raster position + notify banner (2026-10-23, hw-confirmed DVp2w on `debug/DVp2w-sam-leftcol4-1.1.0`, owner: "теперь отлично" — boot stripes clean at 576p, and the F-keys toast shows in Rick Dangerous)**:
+  (1) "the left column jitters" on the boot screen = the leftmost fb column of every stripe
+  held the previous stripe's colour: `chgNote` added CONT_OFFSET (+4) to the VIDEO position
+  — SimCoupe applies it to the contention table only (`Memory.cpp`), its raster is
+  `frame_cycles - 64` (`GetRasterPos`, `CPU_CYCLES_ASIC_TO_FRAME_OFFSET`: raster line L =
+  frame T [L*384+64, L*384+448), 64 border / 256 paper / 64 border) — so the ROM's line-INT
+  CLUT write at ~9 px into the left border (invisible: SimCoupe's default view shows 16 of 64
+  border px) landed at fb x 1. `ASIC_OFFSET`, `x = lc - 64 + s_left`, rows rendered at
+  `(L+1)*384 + 64` (after their right border), a change past the visible right edge recorded
+  at `x = xres`. **The first cut made every stripe boundary jitter** (hw, `-leftcol-`): the row
+  tick runs on memory accesses only, and the ROM's CLUT OUT at +73 follows the previous row's
+  end (+64) with no access between them — `s_row` still named that row, the change was refused
+  and the row rendered from the new state. `chgNote` now runs `rowsTick` first (`-leftcol2-`).
+  **Rule: anything that attributes a port write to the beam's row must catch the row tick up
+  first; a port access is not a memory access.** With that in, 1-6 fb columns at the left of
+  the FIRST row of a stripe still flickered (hw video, `-leftcol2-`/`-leftcol3-`) — and the
+  "interrupt latency" reading was WRONG: the boot stripes are CLUT[0] rewrites by the line-INT
+  handler at `D4EF`, which **spins on HPEN until the beam has left line D** (`tools/sam_sim.c`
+  port log + a disassembly of D440-D510; the sim's own log cannot show the chain — see below),
+  and HPEN steps on the FRAME clock (SimCoupe `update_hpen`: `frame_cycles / 384`, ours the
+  same) = at the start of D's RIGHT border, 64 px before D+1's left border. The write lands
+  60..100 T later with the contention phase: D's last right-border px or a few px into D+1's
+  left border — the horizontal-blanking zone a TV never shows (PAL ~312 of 384 px visible,
+  SimCoupe's default view 16 of 64 border px) and exactly what our 52-px window exposes on
+  both sides. `HBLANK_LEFT_PX` 36 / `HBLANK_RIGHT_PX` 40 in `chgNote`: a change there is drawn
+  as made before the row (left) or after it (right, `x = xres`), `-leftcol4-`. **Trap: the
+  host sim's line-INT chain stops after one line** (one extra CLUT write a frame, no stripes
+  in its PPM) — its STATUS line-INT bit is up for the 128-T window only while the ROM polls
+  it much more slowly; do not read the ROM's per-line timing off that log. (2) `OSD::notify` was invisible in Rick Dangerous but fine in BASIC: SAM has
+  no border machine, `Sam::renderRow` keeps only `rowCarves` rects, and `notifyPaint` took the
+  standard `setNoticeBand` branch — the banner painted at EndFrame lived until the next row
+  tick reached rows 6-17 (a busy ROM: ~1.5 ms into the frame, after the display scanned
+  them; a HALT-synced game: at once via `haltAdvanceTo`). Now an `isSam` branch =
+  `setNoticeCarve` (4-snapped), `cancelNotify` already clears it.
+- **Last batch (2026-10-23, NOT hw-tested, `debug/DVp2w-sam-all-1.1.0`)**: mid-row port changes
+  (border/CLUT/VMPR/HMPR mode-3 set) recorded per tick row in `s_chg` (24) and replayed
+  backwards by `renderRow`/`renderSpan`; mode 3 = sticky 12-entry pair table (`pairEntry`,
+  `samPairSync(want, rgb12)`, 12..15 ZX); EDGLP skip in the `#FE` read at PC #2053 with
+  `Tape::samEdgeWaitT()` (48 T/pass, C/R/tstates advanced); Atom Lite = `IDE::ATOMLITE` (7) on
+  drive-2 ports (latch #1D = Dallas, bit4/!bit3 = ATA reg, #0E = control; SET FEATURES no-op;
+  forced on SAM / off elsewhere); Paula `#60/#61` → Covox; `SamClock::flush()` →
+  `CONFIG_DIR/nvram_sam.bin` (Dallas 114 B + bank-1 regs); F9 "New MGT" in the browser.
+  Details in `docs/sam-coupe-plan.md` §9.
 
 ## Nemo KAY 256 Turbo / 1024 / 1024 v2010-v2018 + ZXM-Phoenix 2 MB (2026-09-26, NOT hw-tested)
 

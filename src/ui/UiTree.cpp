@@ -1126,6 +1126,7 @@ static const Option opt_ide_scheme[] = {
     { "IDEDOS", 4 },  // IDE::PLUS3E — numbering follows IDE::Scheme, not this list
     { "DivIDE", 5 },  // IDE::DIVIDE — the +3 (divIDE) romset's card, same rule
     { "ATM",    6 },  // IDE::ATM — the ATM-Turbo 2+ on-board controller, same rule
+    { "Atom Lite", 7 },   // IDE::ATOMLITE — the SAM Coupe card on drive 2's ports
 };
 
 

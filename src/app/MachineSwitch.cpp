@@ -292,6 +292,20 @@ bool commit(ArchIdx arch, RomsetIdx romset) {
                 IDE::init();
                 OSD::osdCenteredMsg("IDE disabled", LEVEL_WARN, 1500);
             }
+            // SAM Coupe: a foreign scheme becomes the Atom Lite, and the Atom Lite
+            // does not leave the SAM. An explicit Off stays Off.
+            {
+                const bool isSam = (arch == A_SAM), wasSam = (Config::arch == A_SAM);
+                if (isSam && !wasSam && Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATOMLITE) {
+                    Config::ide_scheme = IDE::ATOMLITE;
+                    IDE::init();
+                    OSD::osdCenteredMsg("IDE: Atom Lite", LEVEL_WARN, 1500);
+                } else if (!isSam && Config::ide_scheme == IDE::ATOMLITE) {
+                    Config::ide_scheme = IDE::OFF;
+                    IDE::init();
+                    OSD::osdCenteredMsg("IDE disabled", LEVEL_WARN, 1500);
+                }
+            }
             if (isP3e && Config::ide_scheme == IDE::PLUS3E && Config::zifi_enabled) {
                 Config::zifi_enabled = 0;
                 ZiFi::deinit();

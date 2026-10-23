@@ -17,6 +17,7 @@
 
 namespace SamClock {
     void    reset();                       // seed both clocks from the RTC
+    void    flush();                       // ESPectrum::loop: the Dallas user RAM to its file, debounced
     uint8_t in(uint16_t address);
     void    out(uint16_t address, uint8_t v);
 }

@@ -32,6 +32,7 @@ visit https://zxespectrum.speccy.org/contacto
 */
 
 #include "speccy/machines/Sam/Sam.h"
+#include "speccy/machines/Sam/SamClock.h"
 #include "speccy/machines/Sam/SamFdc.h"
 #include "app/DramPattern.h"
 #include "speccy/core/Pss.h"
@@ -1142,6 +1143,12 @@ void ESPectrum::setup() {
       }
     } else if (Config::ide_scheme == IDE::PLUS3E) {
       Config::ide_scheme = IDE::OFF;   // the +3e interface without the +3e ROM
+    }
+    // SAM Coupe: only the Atom Lite (its card); the Atom Lite only on the SAM.
+    if (Config::arch == A_SAM) {
+      if (Config::ide_scheme != IDE::OFF && Config::ide_scheme != IDE::ATOMLITE) Config::ide_scheme = IDE::ATOMLITE;
+    } else if (Config::ide_scheme == IDE::ATOMLITE) {
+      Config::ide_scheme = IDE::OFF;
     }
     // The +3 (divIDE) romset's own interface, same rule. No ZiFi clause: divIDE lives
     // on #A3..#BF, nowhere near the NIC's #xxEF — what it does share is General Sound's
@@ -4256,6 +4263,7 @@ void ESPectrum::loop() {
     wf_bg_mark(2);
 #endif
     Nvram24::flush();  // ...and the SMUC card's own 24LC16, same contract
+    if (Z80Ops::isSam) SamClock::flush();   // the Dallas clock's user RAM, same contract
 #if NEXT_TRACE
     wf_bg_mark(3);
 #endif

@@ -1786,6 +1786,22 @@ static bool notifyPaint(const char* text, uint8_t level, bool nmUi, bool left) {
         if (px1 > (int)VIDEO::vga.xres) px1 = (int)VIDEO::vga.xres;
         if (px1 - px0 < textw) return false;
         VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
+    } else if (Z80Ops::isSam) {
+        // SAM Coupe: the standard band geometry, but no border machine — every fb
+        // row (border included) is rendered on the beam by Sam::renderRow, which
+        // keeps only the rects VIDEO::rowCarves names. Without the carve the banner
+        // painted at EndFrame lived until the next frame's row tick reached rows
+        // 6-17: a busy-looping ROM (BASIC, a game menu) rendered them ~1.5 ms into
+        // the frame, after the display had scanned them, so the banner showed; a
+        // HALT-synced game renders them at once (haltAdvanceTo) and erased it
+        // before the display ever saw it (Rick Dangerous, hw 2026-10-23). Snap to 4:
+        // the fb is in the ISR's x^2 order and renderRow saves/restores row bytes.
+        px0 &= ~3;
+        px1 = (px1 + 3) & ~3;
+        if (px0 < 0) px0 = 0;
+        if (px1 > (int)VIDEO::vga.xres) px1 = (int)VIDEO::vga.xres;
+        if (px1 - px0 < textw) return false;
+        VIDEO::setNoticeCarve(px0, y, px1, y + NOTIFY_BAND_H);
     } else {
         VIDEO::setNoticeBand(y, y + NOTIFY_BAND_H - 1, px0, px1);
         if (px1 - px0 < textw) return false;
@@ -7130,7 +7146,7 @@ static void buildEmulatorInfoText() {
 
         // IDE/HDD (NEMO/PROFI/SMUC/IDEDOS/DivIDE) — indexed by IDE::Scheme
         if (Config::ide_scheme != 0) {
-            static const char* idesc[] = { "Off", "NEMO", "PROFI", "SMUC", "IDEDOS", "DivIDE", "ATM" };
+            static const char* idesc[] = { "Off", "NEMO", "PROFI", "SMUC", "IDEDOS", "DivIDE", "ATM", "Atom Lite" };
             int si = Config::ide_scheme;
             if (si >= (int)(sizeof(idesc) / sizeof(idesc[0]))) si = 0;
             pos += infoAppend(buf, pos, bufsz, " IDE/HDD        : %s\n", idesc[si]);
