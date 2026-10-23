@@ -119,6 +119,7 @@ class XmpDecoder : public Decoder {
 public:
     ~XmpDecoder() override { close(); }
     bool open(const char* path) override;
+    bool openMemory(const uint8_t* data, uint32_t size) override;
     int  render(int16_t* lr, int n) override;
     int  channels() const override { return nch_; }
     const char* chanName(int i) const override {
@@ -143,6 +144,7 @@ private:
     uint32_t outFrames_ = 0, lenMs_ = 0;
     bool     ended_ = false;
     void close();
+    bool loadImage(const uint8_t* data, uint32_t sz);   // the part after the file is in memory
 };
 
 bool XmpDecoder::open(const char* path) {
@@ -174,11 +176,21 @@ bool XmpDecoder::open(const char* path) {
     if (bounce) free(bounce);
     if (f) free(f);
     if (!ok) { if (data) Buffer::pfree(data); return false; }
-
-    ctx_ = xmp_create_context();
-    if (!ctx_) { Buffer::pfree(data); err = "Out of memory"; return false; }
-    const int r = xmp_load_module_from_memory(ctx_, data, (long)sz);
+    const bool loaded = loadImage(data, sz);
     Buffer::pfree(data);                         // libxmp keeps its own copy of everything
+    return loaded;
+}
+
+bool XmpDecoder::openMemory(const uint8_t* data, uint32_t sz) {
+    pp_xmp_release_all();
+    if (sz < 64 || sz > MAX_FILE) { err = sz < 64 ? "File too short" : "File too big"; return false; }
+    return loadImage(data, sz);
+}
+
+bool XmpDecoder::loadImage(const uint8_t* data, uint32_t sz) {
+    ctx_ = xmp_create_context();
+    if (!ctx_) { err = "Out of memory"; return false; }
+    const int r = xmp_load_module_from_memory(ctx_, data, (long)sz);
     if (r != 0) {
         err = r == -XMP_ERROR_FORMAT ? "Unsupported module format"
             : r == -XMP_ERROR_SYSTEM ? "Out of memory loading module" : "Cannot load module";

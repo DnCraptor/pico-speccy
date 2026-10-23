@@ -1367,6 +1367,8 @@ static bool p_gsAvail() { return Buffer::gsPsramAvailable(); }
 // ZXM-MoonSound: its 1 MB SRAM (and on the 4 MB firmware its 2 MB ROM, read from
 // /pico-speccy/roms/yrw801.rom) live in QSPI (butter) PSRAM.
 static bool p_moonAvail() { return MOONSOUND && butter_psram_size() != 0; }
+// PI-CARD MUSICA: plays through the Pico-Zx-Player's decoders, so the same board rule.
+static bool p_pimusAvail() { return pp::available(); }
 // The children read the STAGED mode so they light up as soon as the mode is switched.
 // Clock is classic-GS only (NeoGS firmware picks its own clock via GSCFG0 CKSEL);
 // the RAM pick is NeoGS only (classic GS stays on its 2 MB default).
@@ -1494,6 +1496,7 @@ static const Node kAudio[] = {
 
     NM_SUB  (TXT_AUD_VGM,        kVgmChips,        nullptr),
     NM_BOOL (TXT_AUD_MOONSOUND,  SET_MOONSOUND,    p_moonAvail),
+    NM_BOOL (TXT_AUD_PIMUSICA,   SET_PIMUSICA,     p_pimusAvail),
     NM_RADIO(TXT_AUD_COVOX,      SET_COVOX,        opt_covox,      nullptr),
     NM_RADIO(TXT_AUD_SOUNDRIVE,  SET_SOUNDRIVE,    opt_soundrive,  nullptr),
     NM_RADIO   (TXT_AUD_MIDI,           SET_MIDI_MODE,   opt_midi_mode,   nullptr),

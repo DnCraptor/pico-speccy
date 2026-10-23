@@ -47,6 +47,7 @@ bool g_brd_first_set = false;
 #include "speccy/devices/sound/OplFm.h"
 #include "speccy/devices/sound/OpllFm.h"
 #include "speccy/devices/sound/MoonPcm.h"
+#include "speccy/devices/sound/PiMusica.h"
 #include "speccy/devices/sound/SnSound.h"
 #include "speccy/devices/sound/SAASound.h"
 #include "speccy/z80/CPU.h"
@@ -1124,6 +1125,15 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     const uint8_t v = Z80DMA::readPort();
     if (Z80DMA::nxPending) NextPorts::dmaPollSkip();   // the poll loop itself: skip to the next byte
     return v;
+  }
+
+  // PI-CARD MUSICA (#63 command/status, #67 argument frame), low-byte decode.
+  // Before the Beta alias switch, which takes #63/#67 for the WD1793 DATA
+  // register in DOS context; not on Profi (the VV55 sits there on real hardware
+  // too). One byte test here, the protocol in flash (PiMusica.cpp).
+  if (!PROFI && g_pimus_on && (address & 0xFB) == 0x63) {
+    uint8_t v;
+    if (PiMusica::portRead((uint8_t)address, v)) { ioContentionLate(MemESP::ramContended[rambank]); return v; }
   }
 
   if (MEM_PG_CNT > 64 && !Z80Ops::isTsconf && address == 0xAFF7) {
@@ -3237,6 +3247,14 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
   // even #7FFD paging (OUT (#C4),#04 = #04C4); emulating that would flash the
   // border and corrupt paging mid-tune. oplfm is non-null only while
   // OplSubsys is up (Config::opl3), so nothing changes while the card is off.
+  // PI-CARD MUSICA — the read side's twin: #63 = one byte of the host's 8-byte
+  // command, #67 = file data for the card's read request.
+  if (!PROFI && g_pimus_on && (address & 0xFB) == 0x63) {
+    LED::touchW(LED::AY);
+    PiMusica::portWrite((uint8_t)address, data);
+    ioContentionLate(MemESP::ramContended[rambank]);
+    return;
+  }
   if (oplfm && (address & 0x00FC) == 0x00C4) {
     // Queued, not applied: generating the elapsed samples inside every OUT
     // re-faulted gen()'s flash code through the XIP cache hundreds of times

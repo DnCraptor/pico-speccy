@@ -6,6 +6,7 @@
 #include "speccy/devices/sound/OplFm.h"
 #include "speccy/devices/sound/OpllFm.h"
 #include "speccy/devices/sound/MoonSplit.h"
+#include "speccy/devices/sound/PiMusica.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
@@ -1115,6 +1116,9 @@ void __not_in_flash_func(render_core)() {
         // position core0 has published (MoonSplit.h). Never blocks on core0.
         if (g_moon_c1_live) MoonSplit::core1Pump();
 #endif
+        // PI-CARD MUSICA: one render chunk of a tracker module into the card ring
+        // (flash body, the flag is the fast exit; the lock is taken only with room).
+        if (g_pimus_c1_live) PiMusica::core1Pump();
         // TS-Conf VDAC2: one band of the FT812 display list per call (Video.cpp).
         // The body lives in flash, not the TS overlay, so the gate is only a
         // fast exit — no jump-into-heap hazard here.

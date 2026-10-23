@@ -387,6 +387,8 @@ static void    put_tsconfVdac2Adapt(int32_t v) { Config::tsconf_vdac2_adapt = v 
 static bool    hook_tsconfVdac2Adapt(int32_t, int32_t) { VIDEO::ftPaletteProgram(); return true; }   // cube back in, or the adaptive one rebuilt
 static int32_t get_moonsound()          { return Config::moonsound ? 1 : 0; }
 static void    put_moonsound(int32_t v) { Config::moonsound = v != 0; }
+static int32_t get_pimusica()           { return Config::pimusica ? 1 : 0; }
+static void    put_pimusica(int32_t v)  { Config::pimusica = v != 0; }
 static int32_t get_screenTop()          { return (int32_t)Config::screen_top; }
 static void    put_screenTop(int32_t v) { Config::screen_top = (uint8_t)(v >= 0 && v <= 2 ? v : 0); }
 static bool    hook_screenTop(int32_t, int32_t) { VIDEO::screenTopApply(); return true; }

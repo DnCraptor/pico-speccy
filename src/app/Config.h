@@ -415,6 +415,11 @@ public:
     // TR-DOS. Its 2 MB YRW801 ROM (from SD) + 1 MB SRAM live in butter PSRAM,
     // claimed once in setup(), so the switch is reboot-class.
     static bool     moonsound;
+    // PI-CARD MUSICA (HRDY) emulation on #63/#67: the esxDOS "Tracker player" /
+    // WC plugins hand MOD/S3M/XM/IT/MID files to it over the bus and the
+    // Pico-Zx-Player's decoders play them beside the machine. Reboot-class (the
+    // ring is claimed in setup()), QSPI PSRAM only.
+    static bool     pimusica;
     // Creative Music System (2x SAA1099 @7.159 MHz, #FF family / A9 select)
     // and 2x SN76489 (#C9/#CD) — the same VGM-player card family.
     static uint8_t  cms;

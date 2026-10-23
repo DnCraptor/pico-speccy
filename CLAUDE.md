@@ -17090,3 +17090,48 @@ TMDS FIFO (~160 ns) running dry; a strict sink loses lock on that.
 - Owed: Pentagon and 640x480 on the same build (the "only Next" claim is pre-fix), the
   other W boards (`m1p2ws`/`m2p2ws`: radio ≥ GPIO32, the pio0 preference falls back to
   the SDK search when pio0 is VGA's), and a long download for throughput.
+
+## PI-CARD MUSICA emulation (#63/#67) — the esxDOS "Tracker player" plugin (2026-10-23; hw-confirmed DVp2w on `debug/DVp2w-pimusica2-1.1.0`, owner: IT, MID, MOD, S3M and XM all play)
+
+AlexZor's `Tracker player 0.2` (five identical 3356-byte plugins in `/BIN/BPLUGINS`,
+named MOD/XM/S3M/IT/MID) decodes nothing: it hands the file over the bus to a
+**PI-CARD with the PI-MUSICA firmware** (demyanenko-d/PICARD-MUSICA, RP2350B), which
+plays MOD/S3M/XM/IT (libxmp) and .mid (SoundFont) itself. `src/speccy/devices/sound/
+PiMusica.{h,cpp}` is that card: the protocol (`docs/protocol.md` of the firmware,
+summarised in the .cpp header — the BOARD leads: command code on #63, byte-serial
+argument frame on #67 with a mod-256 checksum, the host serves 4 KB read windows into
+#67 and acknowledges with an 8-byte command into #63), a file buffer in butter PSRAM,
+and the Pico-Zx-Player's own decoders (`Decoder::openMemory`, new on XmpDecoder and
+MidiDecoder) rendering into `pcm_card_ring` — a second ring in pwm_audio that is
+ADDED to the ZX + GS mix at the master volume (the player's ring REPLACES the output).
+Tracker modules render on core1 (`PiMusica::core1Pump` in render_core, one spinlock,
+a core0 top-up at the frame end when the ring falls under 1024 frames); a .mid renders
+on core0 only (`midi_wt` is one engine — `MidiSynth::gen_sound` steps aside while
+`PiMusica::ownsMidiSynth()`). Audio > "PI-CARD MUSICA" (`Config::pimusica`, NVS
+`pimusica`, AC_REBOOT: the 16 KB ring + lock are claimed in setup(); `pp::available()`
+= QSPI PSRAM only). Ports: one byte test (`g_pimus_on`) + a flash call in both RAM
+port paths, BEFORE the Beta alias switch (`address & 0xE3` takes #63/#67 for the
+WD1793 DATA register in DOS context); not on Profi (VV55 there, on real hardware too).
+Deviations: the whole file is pulled sequentially and the decoder opens once it is
+complete (the firmware reads samples in play order); commands are handled at the OUT
+(the board needs ~1 ms); the seek bit is set for every open track (forward = silent
+render in 15 ms slices, back = reopen from the image); 0x17/0x18 are never sent (nor
+by the real firmware). A read of a frame past its end wraps to byte 0 (re-reads
+without a NAK); a decoder failure or 3 NAKs end the session as "finished" (0x16
+state 2). `[PIMUS]` log lines: reset / session / open / short window / track ended.
+Hardware Info row `PI-CARD MUSICA`. **`tools/pimusica_test.cpp`** (recipe in its
+header, stubs in `tools/pimusica_stub/`) drives the shipped .cpp with the plugin's
+bus sequence — it found the two bugs of the first cut (0x14 never armed, no wrap);
+re-run after any change. **The first build (`pimusica`) blacked the screen and hung the
+board on the first module**: core1 faulted inside libxmp's render (`<signal handler
+called>` on core1 in the debugger) while holding the spinlock, core0 waited for it in
+`frameTick` for ever — the VDAC2 mip2 shape, libxmp's call chain + the HDMI ISR's frames
+over core1's 2 KB stack (the player ran it on core0's 8 KB). `pimusica2`: core1 renders
+on an 8 KB heap stack (`c1CallOnStack`, the zipCallOnStack MSP/MSPLIM switch), no stack
+= core0 renders everything, and an overflow there is a STKOF dump. **Rule: anything the
+player's decoders run on core1 goes through that stack.** XM confirmed the same day. No IT module on hand: `tools/mkit_test.py` writes a minimal
+one (4 channels, one looped sine, an arpeggio; `debug/pimusica/PICOTEST.IT`, loads and
+renders through the vendored libxmp on the host — the same loader as the firmware).
+The .mid (GM.DLS, rendered on core0) and the IT test module play too (owner, same day).
+Not itemised: FPS/IDL with libxmp on core1 (unmeasured), P/F keys, Q/Space back to the
+browser, F11 mid-track.

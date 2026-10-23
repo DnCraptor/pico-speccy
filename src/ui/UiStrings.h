@@ -92,6 +92,7 @@
 #define TXT_VGM_ALL         "All"
 #define TXT_AUD_OPL3        "YMF262 (OPL3)"
 #define TXT_AUD_MOONSOUND   "ZXM-MoonSound (OPL4)"
+#define TXT_AUD_PIMUSICA    "PI-CARD MUSICA"
 #define TXT_AUD_OPLL        "YM2413 (OPLL)"
 #define TXT_AUD_CMS         "2x SAA1099 (CMS)"
 #define TXT_AUD_SN          "2x SN76489"

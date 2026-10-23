@@ -91,6 +91,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "OSDNewMenu.h"
 #include "UiModel.h"
 #include "player/PicoPlayer.h"  // pp::available / playableExt (F5 -> Pico-Zx-Player)
+#include "speccy/devices/sound/PiMusica.h"
 #include "UiBrowser.h"
 #include "UiDialog.h"
 #include "UiGfx.h"
@@ -7021,6 +7022,8 @@ static void buildEmulatorInfoText() {
             !Config::moonsound ? "Off" : moonpcm ? (MoonRom::builtin() ? "On (#C4-#C7, #7E/#7F)" : "On, ROM from SD")
             : MoonRom::builtin() || MoonRom::filePresent() ? "No PSRAM" : "No yrw801.rom");
 #endif
+
+        pos += infoAppend(buf, pos, bufsz, " PI-CARD MUSICA : %s\n", PiMusica::status());
 
         // General Sound — configured vs actually running: GS::init needs PSRAM
         // for its sample RAM, so "enabled but not up" is a real state (same

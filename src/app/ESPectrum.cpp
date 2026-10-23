@@ -49,6 +49,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/devices/sound/MoonPcm.h"
 #include "speccy/devices/sound/MoonRom.h"
 #include "speccy/devices/sound/MoonSplit.h"
+#include "speccy/devices/sound/PiMusica.h"
 #include "speccy/devices/sound/SnSound.h"
 #include "hardware/clocks.h"
 #include "Subsystem.h"
@@ -1585,6 +1586,13 @@ void ESPectrum::setup() {
 #if MOONSOUND
   if (Config::moonsound) moonSoundInit();
 #endif
+  // PI-CARD MUSICA: its ring (SRAM) and lock; the file buffers come per session.
+  if (Config::pimusica) {
+    if (const char* why = PiMusica::init()) {
+      Debug::log("[PIMUS] off: %s", why);
+      OSD::bootNotice("PI-CARD MUSICA off: needs QSPI PSRAM");
+    }
+  }
 
   // GM.DLS MIDI bank: load into butter PSRAM (preferred) or provision the flash
   // partition from SD. MUST be here — AFTER initPools() (the PSRAM arena is now
@@ -2347,6 +2355,8 @@ void ESPectrum::reset(uint8_t romInUse) {
     }
     else GS::reset();
   }
+  // PI-CARD MUSICA: the plugin driving it is gone with the reset.
+  if (g_pimus_on) PiMusica::reset();
   // The ATA device: only IDE::init() used to reset it, so a COLD boot handed the
   // guest a clean register file and F11 handed it whatever the last session had
   // left — a half-consumed sector transfer with DRQ still up, most of the time.
@@ -4478,6 +4488,7 @@ void ESPectrum::loop() {
 
     netBackgroundTick();      // radio poll + the boot join/SNTP FSM (also pumped
                               // from the OSD idle loops — see nm::uiIdle)
+    if (g_pimus_on) PiMusica::frameTick();   // telemetry, file open, .mid render, ring top-up
 #if NEXT_TRACE
     wf_bg_mark(5);
 #endif
@@ -4748,8 +4759,13 @@ void ESPectrum::loop() {
         }
         if (MidiSubsys::enabled && audioBufferMIDI_L && audioBufferMIDI_R)
         {
-          if (Midi::enabled == 4)
-            MidiSynth::gen_sound(audioBufferMIDI_L, audioBufferMIDI_R, samplesPerFrame);
+          if (Midi::enabled == 4) {
+            // A PI-CARD MUSICA .mid owns midi_wt (its render goes to the card
+            // ring); rendering it here too would advance every voice twice.
+            if (!(g_pimus_on && PiMusica::ownsMidiSynth()))
+              MidiSynth::gen_sound(audioBufferMIDI_L, audioBufferMIDI_R, samplesPerFrame);
+            else { memset(audioBufferMIDI_L, 0, samplesPerFrame); memset(audioBufferMIDI_R, 0, samplesPerFrame); }
+          }
         }
         // Hoist frame-invariant source flags outside the mix loop
         bool mix_chip0 = AY_emu && (Config::twoAyChips() || AySound::selected_chip == 0);
