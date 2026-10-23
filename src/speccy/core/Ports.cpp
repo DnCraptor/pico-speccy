@@ -46,6 +46,7 @@ bool g_brd_first_set = false;
 #include "speccy/devices/sound/OpnFm.h"
 #include "speccy/devices/sound/OplFm.h"
 #include "speccy/devices/sound/OpllFm.h"
+#include "speccy/devices/sound/MoonPcm.h"
 #include "speccy/devices/sound/SnSound.h"
 #include "speccy/devices/sound/SAASound.h"
 #include "speccy/z80/CPU.h"
@@ -1212,6 +1213,15 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       return oplfm->status();
     }
     return 0x00;
+  }
+  // ZXM-MoonSound wavetable ports #7E (address) / #7F (data), low-byte decode
+  // (the card's CPLD: CA7..CA1 = 0111111) and switched off while the DOS signal
+  // is up — #7F is the WD1793 data register under TR-DOS. Before the ULA branch:
+  // #7E is even, and the card's IORQG keeps it off the rest of the bus. A read
+  // of #7E answers the FM status, as the chip's status port does.
+  if (moonpcm && (address & 0xFE) == 0x7E && !ESPectrum::trdos) {
+    if (Tape::tapeStatus != TAPE_LOADING) ESPectrum::OPLGetSample();
+    return (address & 1) ? ESPectrum::MoonWaveRead() : (oplfm ? oplfm->status() : 0x00);
   }
   // Scorpion GMX register read-backs — cold flash dispatch, see gmxPortRead.
   if (g_scorp_gmx) {
@@ -3234,6 +3244,15 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     // at the exact sample positions, so timing is unchanged.
     LED::touchW(LED::AY); // music-note glyph: VGM playback = a stream of writes
     ESPectrum::OPLPortWrite(address & 3, data);
+    ioContentionLate(MemESP::ramContended[rambank]);
+    return;
+  }
+  // ZXM-MoonSound wavetable ports #7E/#7F — see the read side. The address
+  // write is a latch; data writes go through the OPL queue (MoonWaveData).
+  if (moonpcm && (address & 0xFE) == 0x7E && !ESPectrum::trdos) {
+    LED::touchW(LED::AY);
+    if (address & 1) ESPectrum::MoonWaveData(data);
+    else             moonpcm->writeAddr(data);
     ioContentionLate(MemESP::ramContended[rambank]);
     return;
   }

@@ -21,6 +21,7 @@ extern "C" size_t getLargestAllocatable(void);  // largest block malloc() can re
 #include "speccy/devices/sound/SAASound.h"
 #include "speccy/devices/sound/OpnFm.h"
 #include "speccy/devices/sound/OplFm.h"
+#include "speccy/devices/sound/MoonPcm.h"
 #include "speccy/devices/sound/OpllFm.h"
 #include "speccy/devices/sound/SnSound.h"
 #include "hardware/clocks.h"
@@ -445,6 +446,7 @@ bool OplSubsys::apply() {
         oplfm->setRates(OPL3_YMF262_CLOCK, ESPectrum::Audio_freq,
                         clock_get_hz(clk_sys) < 450000000u);
         oplfm->reset();
+        if (moonpcm) { moonpcm->reset(); moonpcm->setRate(ESPectrum::Audio_freq); }
         enabled = true;
     } else {
         enabled = false;

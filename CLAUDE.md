@@ -16734,6 +16734,26 @@ and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card 
   -> Debug::log tail call the first time, DivMMC::applyMapping the second). Gone after the owner
   reset the settings to defaults; which setting armed it is unknown. If it returns: the plain
   build vs sdcut7-prof in the same scenario, and a GDB capture of the ARM stack ABOVE SP.
+  **It returned 2026-10-22 on a PLAIN build (DVp2w, CYW43 radio up, the Web catalog's
+  `nexload _RUN.NEX`)**: CFSR 00020000 (INVSTATE), PC = LR = 0x20037708 = `&VIDEO::ts_line_t`
+  this time (addr2line names a veneer there — a stale match, it is the variable), the
+  frame above SP = `&CPU::stFrame &CPU::tstates &MemESP::ramCurrent <ret into decodeED
+  right after bl Ports::output> &Z80::regA 0x56 0xDAF1 <ret into exec_nocheck_next>`, i.e.
+  the section-anchor registers `exec_nocheck_next` keeps in r4-r11. So an `OUT (C),r` from
+  the Next's ED dispatch, and `Ports::output` (or a callee) popped with SP 4 words low —
+  a callee-saved anchor landed in PC. Not a pointer table (none builds one), not the
+  `.dmaovl` classic loop (`executeTransfer`/`transferOneByte` are unreachable on the Next:
+  `doEnable` is under `isNext`, the other site is inside `executeTransfer`, the third is
+  MB-02). Since this run the fault dump prints r4-r11 (the trampoline pushes them) and 32
+  words of the caller frames.
+  **RESOLVED the same day — it is VOLTAGE MARGIN, not software** (owner: the fault went
+  away with Overclock > Core voltage = 1.65 V from the menu; it was 1.60 V at 504 MHz). A popped-register skew with no
+  code path that could produce it is what a core running past its margin looks like
+  (the m1p2 NeoGS core1 SIGBUS was the same class), and the Next at 504 MHz is the
+  heaviest load this firmware has. The "which setting armed it" question of 2026-10-21
+  is answered the same way: settings that changed the load. If this shape — PC = the
+  address of a RAM variable, SP a few words off, `Ports::output`/`exec_nocheck_next` on
+  the stack — comes back, ask for the VREG setting and the clock before reading code.
 - **Pogie: parallax bands at the wrong scroll for one frame every ~0.5 s = a long CMD18 had no
   prefetch (2026-10-21, hw-confirmed DVp2 on `debug/DVp2-next-sdstream-ldiag-1.1.0`, owner: "фиксед").**
   Pogie's LoRes background is a line-IRQ chain (ULA INT off, NR 22=06, 14 MHz): lines 46/78/96/131
@@ -16752,3 +16772,197 @@ and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card 
   1500 pulses. `iff=0` = a handler still running (lost on the board too unless our timing is
   longer), `iff=1` + large `seen` = we ran past the pulse. Read it first on any "raster split /
   parallax glitches every N frames" report on the Next.
+
+## Two flash types per board: 4 MB and 16 MB (2026-10-21, NOT hw-tested)
+
+`-DFLASH_16MB=ON` (cmake/options.cmake; the W/WS boards force it, they are 16 MB only)
+= `FLASH_SIZE 16384` + `PICO_FLASH_SIZE_BYTES` set before the SDK reads the board header
+(the SDK passes it to C itself — do NOT add a second compile definition, the two spellings
+"redefine" each other), name `<board>-speccy-<display>[-variant]-16MB-<ver>` /
+`+16MB` on screen for non-W boards, same BOARD_TAG (same NVS dir). It sets
+`YRW801_BUILTIN=1` (the MoonSound ROM in flash; 4 MB reads it from SD). build_all.sh / .ps1 build
+every (target, display) pair in both types (`FLASH_TYPES="4 16"` / `-FlashTypes`), dirs
+`build-all/<dir>-16MB`, logs `<target>-<display>-16MB.log`; W targets only 16. check-release.sh
+lists the 16 MB VGA_HDMI images as `<BOARD>-16M`; tools/release_downloads.py strips a
+`-16MB` display suffix into the link label. DVp2: 4 MB 3.51 MB used, 16 MB 5.61 MB with a
+~10.7 MB GM.DLS region. Rule: anything that does not fit 4 MB goes behind `MOONSOUND`-style
+16 MB guards, never into the 4 MB image.
+**Built-in GM.DLS bank on 16 MB** (`GM_BANK_BUILTIN`, cmake/board.cmake = the 16 MB flag;
+NOT hw-tested, `debug/DVp2-gmbuiltin-1.1.0`): `src/speccy/roms/gmbank/gm_bank.bin` (owner's
+file, GMWB v5, 1 668 026 B = the stock converted gm.dls) is `.incbin`'d by gm_bank.S as
+`gb_gm_bank_builtin` and played straight from XIP. An EMPTY `Config::midi_bank` means it
+(the picker's first row "Built-in GM.DLS", tag -1, shown without an SD card); an explicit SD
+pick loads into PSRAM as before, and a pick that is gone from the card falls back to the
+built-in bank (the default gm_bank.bin paths on the card are not consulted there).
+`bankFixedPtr()` (MidiSynth.cpp) replaces the flash partition as the no-SD binding;
+Memory Info says `built-in`. 4 MB images byte-identical in size.
+**Pico-Zx-Player plays YMF278B (OPL4) VGMs on 16 MB** (2026-10-22, NOT hw-tested,
+`debug/DVp2-16M-opl4vgm3-1.1.0`): `VgmDecoder::openOpl4` (PlayerVgm.cpp, all behind
+`MOONSOUND` — MoonPcm.cpp is not in the 4 MB image, a reference there is a link error).
+FM half = the OPL3 core at clock * 8 / 19 (ymfm's OPL4 prescale 19: 33.8688 MHz ->
+49 516 Hz), wave half = a private MoonPcm at clock / 768 (`setRate` is given RATE x
+33868800 / clock). Wave memory: the FILE's ROM when it has 0x84 blocks — arcade rips
+(Psikyo, The Fallen Angels: 4 MB ROM, 28.6 MHz, no RAM) carry their sample ROM, and
+playing YRW801 for them was the "does not play" report — mapped at open as 4 KB
+pages (`loadRomBlocks`: a page one block covers whole points INTO the loaded file, only
+block-edge pages are copied, the rest read a zero page — a few KB a track; output
+byte-identical to a full copy; `MoonPcm::setRomPages`, the emulator keeps its flat ROM).
+The whole .vgm is inflated into PSRAM, so a big track needs the butter arena the emulator
+leaves: on ZX Evolution (TS-Conf, 4 MB of pages) only the smallest fit — "File too big
+for PSRAM (N KB, M KB free)" names both figures. No 0x84
+block = the built-in YRW801. A 1 MB PSRAM RAM after the ROM when the ROM is < 4 MB.
+`D0 pp aa dd`: port 0/1 = FM banks, 2 = wave regs; data block 0x87 = RAM image
+(size, RAM-relative start, bytes). Checked against libvgm's vgm2wav on two Fallen
+Angels tracks: waveform correlation 0.98, envelope 0.997, our level half of libvgm's
+(the emulator's own mix scale). NEW2 is forced
+on (a rip that starts after the chip init would drop every wave write). Meter 18 FM + 24
+wave = 42 bars, so `pp::MAX_CH` 40 -> 48. A YMF262 beside it is listed unsupported. Host
+test `tools/opl4vgm_test.cpp` (recipe in its header; with a file argument it renders a
+real VGM to WAV). Octave 0 plays at HALF rate (+1 =
+native), which a test expectation got wrong once.
+
+## ZXM-MoonSound (YMF278B / OPL4) — 2026-10-21, NOT hw-tested
+
+Audio > "ZXM-MoonSound (OPL4)" (`Config::moonsound`, NVS `moonsound`, `SET_MOONSOUND`
+AC_REBOOT, row only with butter PSRAM). Every image has the card (`MOONSOUND=1`); the
+YRW801 ROM is embedded only on 16 MB (`YRW801_BUILTIN`). The 4 MB image reads
+`/pico-speccy/roms/yrw801.rom` (exactly 2 MB) into butter PSRAM at boot
+(`src/speccy/devices/sound/MoonRom.{h,cpp}`, 4 KB SRAM bounce — no DMA into the cached
+alias; `Buffer::pageBudget` reserves the 2 MB only when the file is there); no file =
+bootNotice "MoonSound off: no /pico-speccy/roms/yrw801.rom", Hardware Info "No
+yrw801.rom". The Pico-Zx-Player takes `MoonRom::get()` (the card's copy) or reads its
+own copy for the track (freed at close; none = ROM tones silent). 2026-10-22, NOT hw-tested. Mick's card (micklab.ru; sources archived at
+github.com/alfishe/zxm-moonsound — CPLD, MoonService, MWM player). FM half = our OplFm
+on #C4-#C7 (MoonSound turns the OPL3 subsystem on by itself); wave half =
+`src/speccy/devices/sound/MoonPcm.{h,cpp}`, a port of ymfm's pcm_engine (BSD), 24 channels,
+wave registers on #7E (address) / #7F (data), DO2 output only, run at our output rate
+(Q16 chip-sample count, pitch/envelope exact). NEW2 (FM reg 0x105 bit 1) gates wave data
+writes; reg 2 reads back device id 0x20. Memory: the YRW801 ROM (2 MB, CRC32 2A9D8D43 = MAME
+yrw801.rom) is EMBEDDED in flash — `src/speccy/roms/moonsound/yrw801.{rom,S}`, `.incbin`
+(path + OBJECT_DEPENDS in cmake/source-flags.cmake), symbol `gb_rom_yrw801` — and read in
+place through XIP; only the 1 MB SRAM (0x200000, mirrored at 0x300000) is a butter palloc
+taken in setup() (`moonSoundInit`, reserved by `Buffer::pageBudget` as `RAM_SIZE`).
+`MoonPcm(rom, ram)`; the SD ROM file loader is gone. The ROM answers AM29F016 commands for
+AUTOSELECT only (`MoonPcm::flashCmd`, owner's call 2026-10-21: no reflashing): AA@555
+55@2AA 90@555 -> reads via reg 6 give 01h / ADh / 00h at A1:A0 = 0/1/2 until F0, so
+MoonService v0.3 prints AM29F016; program/erase are accepted and dropped (an update
+with the shipped moonsnd.rom verifies, any other file fails its verify). The embedded
+ROM matches MoonService v0.2's per-16 KB CRC8 table in all 128 segments. Timed wave writes ride the OPL write queue (bit 15 = wave flag, position mask 0x7FFF);
+regs 2-6 (memory access) apply at once after an OPLGetSample catch-up; wave reads catch
+up first. Mix: regs 0xF8/0xF9 normalised so FM at the power-on mix is the plain OPL3
+level; PCM `>> kPcmShift` (1) — the level knob if hw disagrees. Host test
+`tools/moonpcm_test.cpp` (recipe in its header; 7 mutations fail it). Code in flash.
+Hw owed: MoonService detect + RAM test, MWM player (Pentagon 512K, demo-disks/*.trd),
+levels against FM, core0 cost with many channels.
+
+### VGMPLAY.WMF 0.9.04-RC1 on the card: three reports, one ours (2026-10-22, NOT hw-tested)
+
+demyanenko-d/VGMPLAY.WMF (Wild Commander, TS-Conf) drives the MoonSound through the
+same ports we emulate; our Linux build of it is `debug/WC/VGMPLAY-0.9.04-RC1-new2b.WMF`
+(recipe `build_vgmplay.sh` + SDCC 4.6.0 + node in the 2026-10-22 session scratch —
+only SDCC 4.6 fits its code into 0x8000..0xB8D0), patch for the author
+`debug/WC/VGMPLAY-0.9.04-RC1-new2b.patch` (= the earlier NEW2-before-upload fix + this).
+- **"02 Advent ~Character Select" is silent on the card by construction, and the
+  Pico-Zx-Player playing it is why**: an arcade rip (28.6 MHz, its own 4 MB sample ROM
+  in `0x84` blocks). The player builds that ROM from the file (`setRomPages`); the
+  card has only YRW801 + 1 MB SRAM, and the plugin's scheme (upload each ROM block at
+  SRAM +0x200000, patch the 128 headers' bit 21, renumber waves 384..511) reaches
+  blocks below 1 MB only — this file's data sits at 2.8-3.9 MB, and reg 3 is 6 bits
+  (`memAutoInc` masks it, MAME's bus is 22 bits), so those bytes land in the ROM
+  window and are dropped as on the chip. A plugin could compact the blocks into SRAM
+  (425 KB fit) and rewrite the header start addresses — the author's call, not ours.
+- **"OPL3 stops playing until F11" = `#F8 = 3F`**: that arcade rip mutes the FM mix
+  (both sides level 7 = mute, `kMix[7] = 0`, MAME `m_mix_level[7] = 0`), the register
+  persists, and the plugin's OPL3/OPL2 init blocks never touch the wave part. The real
+  card behaves the same; F11 is our chip reset (0x1B). Fixed in the plugin build above:
+  every init block raises NEW2, writes `F8 = 1B / F9 = 00` (the power-on values), then
+  sets NEW as before. Nothing to change here.
+- **"05 encounter" (MSX MoonDriver, 655 KB `0x87` RAM block, 24 wave + 12 FM channels)
+  stutters = MoonPcm cost.** Host profile (gprof, -fno-inline): MoonPcm::gen + clockEnv
+  + fetch + memRead + attToVol = half the render, the OplFm half the rest; on the
+  device MoonPcm.cpp was -Os with every helper OUT OF LINE (nm: `memRead` 0x30 B weak,
+  `fetch`, `clockEnv` separate, all in flash) and the 1 KB tables in flash .rodata — the
+  OplFm lesson again, 24 channels x 31250 x ~6 flash calls. Now: `-O2 -fno-unroll-loops`
+  (source-flags.cmake), `clockEnv/fetch/chipStep` always_inline, `kPow/kInc` copied into
+  the object (`m_pow/m_inc`, heap SRAM, +768 B per card), and **half-rate synthesis
+  below 450 MHz** (`setRate(rate, half)`: a chip step of two output samples every
+  other sample, midpoint + hold, the OplFm form; same rule at the three setRate sites).
+  Host render of the track byte-identical at full rate; `tools/moonpcm_test.cpp` got a
+  half-rate pitch/level check. Test ELFs `debug/DVp2-16M-moonopt-1.1.0` (plain) and
+  `-moonopt-trace-` (`OPL_PERF_TRACE`: `OPL: gen N us/fr` every ~300 frames while
+  audible — that number against the ~20500 us frame is what says whether 24 channels
+  fit; it includes MoonPcm). **First hw figure on that build (TS-Conf + WC, the "05"
+  track, clock not in the log): `OPL: gen 9049 / 8756 us/fr`** — 44% of the frame for
+  the sound alone on top of a 14 MHz guest, which is the stutter. Round 2 (NOT
+  hw-tested): the trace line splits it (`OPL: gen N us/fr (moon M)`), `fetch` reads
+  through a per-channel direct pointer cached at `loadWave` (a sample lying whole in
+  the flat ROM or the RAM; nullptr = the memRead path, e.g. the player's paged ROM),
+  and the per-sample `step * ratio` 64-bit product is cached (`Ch::stepOut`, redone
+  at recache/setRate; vibrato keeps the live product). Host render still byte-identical.
+  **Round 2 on hw: `OPL: gen 8569-10507 us/fr (moon 3394-5326)`** — the FM half ~5.2 ms
+  (OplFm at full rate, 12 keyed channels, a 504 MHz part is above the <450 MHz rule)
+  and the wave half 3.4-5.3 ms, i.e. both. **Round 3 (`moonopt3`) put BOTH halves at
+  half rate while wave channels sound — hw: "sound is bad, to put it mildly", and both
+  halves were wrong in their own way:** (a) `OplFm::setRates` re-derived freqbase but
+  not the channels' cached `fc`/`Incr` (derived at the A0/B0 write), so a rate switch
+  under held notes played them an octave off until re-keyed — fixed, setRates now
+  re-derives all 18 (the 4-op pair's second channel from the first's fc); (b) the WAVE
+  half at half rate point-decimates 44.1 kHz samples to 15.6 kHz with no low-pass:
+  host, the "05" wave part alone, half vs full render aligned to its 1.4-sample lag =
+  **-9.6 dB of in-band (0.3-7 kHz) error** (`moonhalf.cpp` + `ana2.cpp`, session
+  scratch), where the FM synth at half rate only loses what it would generate above
+  7.8 kHz. So round 4 (NOT hw-tested, `debug/DVp2-16M-moonopt4-1.1.0` / `-trace-`):
+  **the wave half always runs at full rate** (`setRate(rate)` at all three sites;
+  `setHalfRate` stays in the API, unused by the card), and **the FM half follows the
+  MEASURED cost**: `g_opl_frame_us` (an always-on `time_us_32` pair round OPLGenSound,
+  only with a card) — ten frames over 6.5 ms switch OplFm to half rate, two seconds
+  under 2.5 ms switch back, `[MOON] OPL4 FM synthesis at half/full rate` in the log;
+  the <450 MHz rule stays underneath. Expected on "05": ~6-8 ms a frame (FM ~2.6 +
+  wave 3.4-5.3); if that still stutters the wave levers are one `attToVol` per channel
+  with the pans as linear factors, the 24 sample streams' XIP line fills (~235k/s at
+  44.1 kHz — the floor), the gen loop in an overlay window, or a REAL half-rate (two
+  fetches averaged per step — keeps the fetch cost, halves the rest).
+
+## CYW43 radio DMA starved the HDMI TMDS FIFO — vendored bus driver, CPU FIFO copy (2026-10-22, hw-confirmed DVp2w)
+
+"Web Archive over the on-chip radio blacks the monitor out" — Pimoroni Pico Plus 2 W in
+a Pico DV base, Next at 720x576, 504 MHz; ESP-01 on GP0/1 fine, 640x480 fine, Pentagon
+reported fine. `hdmi: TMDS FIFO underrun in N of M frames` 1-9 a second whenever the OSD
+was open with the radio up (the catalog's index reads from SD made it worst) — the 8-word
+TMDS FIFO (~160 ns) running dry; a strict sink loses lock on that.
+
+- **Fix**: `src/net/cyw43_bus_pio_spi_speccy.c` = the SDK 2.3.1 `cyw43_bus_pio_spi.c`
+  compiled INSTEAD of the SDK's (cmake/wifi.cmake strips it from `cyw43_driver_picow`;
+  the file is an empty TU on non-W boards), with the gSPI words fed to / drained from
+  the PIO FIFOs by core0 (`CYW43_SPI_CPU_COPY`, bswap per 32-bit word as the DMA did).
+  No DMA channels for the radio at all. core0 only ever busy-waited for them, so nothing
+  is slower; hw: zero underruns in the same session, download speed unchanged. The DMA
+  path stays under `CYW43_SPI_CPU_COPY=0`. Also in the file, kept but measured NOT to be
+  the cause: busy-polls paced every 256 cycles by a NOP pause, `dma_channel_abort` only
+  for a busy channel, the radio preferring pio0 over the SDK's first-fit (which put it in
+  pio2 with the HDMI SMs). Boot log: `cyw43 bus: pico-speccy driver (CPU FIFO copy, …)`
+  and `cyw43 bus: pioN smN, dma A/B`.
+- **The mechanism inside the DMA engine was NOT established** — only that triggering and
+  running two low-priority channels beside the four high-priority HDMI feeders does it.
+  `bus_ctrl` priority was set, no DMA touched XIP, the line ISR was on time (gap 34 us,
+  dur 23 us) throughout.
+- **Why "only Next / only 576p / only with the menu"**: with the machine running,
+  `WifiNet::poll` runs from `ESPectrum::loop` at one raster phase per frame; from
+  `uiIdle` it runs at random phases, 95 % of them in active video. The other two are
+  most likely degree, not mechanism — not re-checked after the fix.
+- **How it was found, in order (each a build + a hardware run)**: ISR gap/dur in the
+  underrun line (ISR exonerated); BUSCTRL counters (FASTPERI contested went 3k → 900k
+  with core0's polling — a red herring: throttling the SD and radio polls cut it to
+  150k and the underruns stayed); per-master activity counters (radio xfers tracked the
+  underruns); stall raster lines (random → not structural); then the one that worked:
+  **core0 tags its code sections in a byte, idle core1 polls the video SM's TXSTALL
+  flag every ~200 cycles and buckets each hit by the tag** — 100 % inside
+  `cyw43_spi_transfer`; splitting that tag put the densest cluster at the DMA trigger.
+  The diagnostics were removed again; `hdmi_tmds_stall_log` keeps ISR gap/dur and the
+  four BUSCTRL counters in the underrun line (`fastperi cont/dn/up`, `xip stall`,
+  `prio`), cheap and enough to separate "the bridge is busy" from "nothing on the bus
+  explains this". The probe pattern is the thing to rebuild first on the next
+  "DMA feeder starves" report; counters alone cost five rounds here.
+- Owed: Pentagon and 640x480 on the same build (the "only Next" claim is pre-fix), the
+  other W boards (`m1p2ws`/`m2p2ws`: radio ≥ GPIO32, the pio0 preference falls back to
+  the SDK search when pio0 is VGA's), and a long download for throughput.
