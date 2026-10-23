@@ -16226,6 +16226,69 @@ log of what the renderer actually did rather than by reasoning about it:
 Still owed: a game that flips #7FFD bit 3 once a frame (no attribute copy must engage);
 Timex hi-colour + a flip; a 28 MHz title flipping screens (the ring's T are turbo-scaled).
 
+## Next: the attribute row is captured at the BEAM, not at the row's post — Shock multicolour (2026-10-23, hw-confirmed DVp2w on `debug/DVp2w-next-mcattr3-1.1.0` — owner: Shock, Insult and other demos right in the 128K and Pentagon personalities; `mcattr2` had confirmed the attribute half, the scroller still twitched)
+
+Shock (ESI 1992; `Shock (1992-06)(ESI).tap` / `.trd` in the 128K personality, `SHOCKPEN.SCL`
+in the Pentagon one): the "multicolor" part's 8x1 attribute picture came out as stripes in
+the wrong colours — paper only, border right, both personalities, and right on the plain
+128K / Pentagon machines (owner's screenshot + report). A row is POSTED at the end of its
+raster line and core1 reads its 32 attribute bytes from RAM later still; an 8x1 writer
+rewrites the same 32 bytes every line, so every row showed a later line's colours. The
+Pentagon's MainScreen reads per column and never had this; the Insult fix of 10-20 (page at
+mid-paper, attribute copy gated on page flips) did not reach a writer that never flips.
+- **The Next line clock has MORE THAN ONE boundary per line** (`s_capPhase`,
+  `NEXTVID::nxLineArm`, flash): phase 0 = the paper start of line L (`s_pStartT` =
+  `s_bcol` + (xres-256)/4 T into the line, set beside `s_bcol`; 48K/128K: ~4 T — on those
+  rasters the paper is at the START of the INT-anchored line and the left border at its
+  end — Pentagon: 67), where the flash `nxPaperStart()` copies the row's 32 attribute
+  bytes (`s_capAttr`, the page in `s_capGrmem`); while a racing writer is on, phases
+  1..15 follow 8 T apart and each re-copies the two cells the beam is about to read
+  (`NX_CAP_GROUPS`); the last phase = the line end, the old `ScanlineWork` body.
+  `contendWait` takes the line start from `lineIdx * tpl` now (it was `nextLineTstate -
+  tpl`); `onClockChange`, `Reset`, `EndFrame`'s restart and `snapLineSync` go through
+  `nxLineArm`. The DMA batch and `idleAdvanceTo`/`haltAdvanceTo` just stop at more
+  boundaries. `.nxovl` 51 640 of 51 712 (AUTO term +128 for this).
+- **The BITMAP line travels the same way while the writer is on** (`mcattr3`): the owner
+  saw the multicolour right but the scroller TWITCHING on the Pentagon personality, smooth
+  on a Pentagon. The sim says why: the scroller's 14 bitmap lines (paper 167-180) are
+  rewritten at T≈63k, i.e. AFTER the beam passed them, for the next frame — a row core1
+  read after that rewrite showed the next frame's position, and when it read it varied.
+  So in racing mode phase 0 also copies the line's 32 bitmap bytes into a per-line
+  PSRAM shadow (`s_bmpSh`, 192 x 32 B, `Buffer::palloc` on first use, one attempt per
+  frame), the groups refine it 2 B at a time like the attributes, `st.bmpOvr` (a former
+  `_pad6A` byte) tells the renderer to read `s_bmpSh + y*32` (both `bmp` sites, `sy == y`
+  only — no NR 0x27 scroll). Single-buffered on purpose: row y is rewritten a frame
+  later and core1 never lags a frame (the 64 state slots cap it at 63 rows). And the
+  adaptive frame skip is off while `s_mcActive` (the `coherent` test, with Gigascreen and
+  the flips): a dropped frame of a per-frame effect reads as a twitch.
+- **`nxAttrBeam` (replaces `nxAttrSnap`) hands the row that copy** (`st.attr`, `attOvr`)
+  while a writer is RACING the beam: the capture differs from RAM at the row's post
+  (written inside this line's paper), or two paper-start captures of adjacent lines of the
+  same cell row differ (`s_mcSeen`, `s_mcActive` = the rest of the frame + two more), or the
+  screen flips inside the frame (Insult's case as before — the page on show at the paper
+  start is the one the old post-time snapshot resolved at mid-paper). Still gated, because
+  every copied row is a new queue state (64 in flight instead of 320); the 16 extra
+  boundaries a line are paid only while it is on.
+- **Why 16 points: Shock's writer was MEASURED, not guessed.** `shock_sim.c` (session
+  scratch; the `z80dma_sim` shape: 48K ROM + the TAP part at 0x639C, `CALL 0x639C` =
+  the depacker, then the master loader's table entry — FA00 F61C F744 FA00 E8A4 9F00 9C40
+  F618 for parts 1-8; part 2 is the multicolour one, ~2950 attribute writes + 1160 border
+  OUTs a frame) logs every attribute write with its T and PC. The writer is a PUSH racer
+  going RIGHT TO LEFT (cells 31→16 on one line, 15→0 on the next) that also writes the
+  NEXT cell row ahead of the beam, so within one line some cells land before the beam
+  and some after. Against exact beam sampling (cell k of line y = the last write before
+  paper + 224y + 4k) on the 48K raster: one point per line 2.6 % of cells wrong (147 a
+  frame, scattered), 4 points 0.6 %, 16 points 0.01 %; on the Pentagon raster even one
+  point is 0.0 % (the TAP's writes all fall behind the later paper there — the Pentagon
+  SCL version has its own timing and was not simulated). So a screenshot of the
+  Pentagon personality that is grossly wrong on this build is not this mechanism.
+- Hw 2026-10-23 (DVp2w): `mcattr2` — 128K personality works, Pentagon multicolour right,
+  scroller twitching; `mcattr3` — Shock (both personalities), Insult and the other demos
+  the owner has all right (not itemised). Still not separately exercised: a plain ULA
+  game's cost (`NEXT` trace: queue states must NOT climb), Timex hi-colour (excluded from
+  the copy — other bytes), the 48K personality (contention on, `contendWait`'s new line
+  start), a title scrolling the ULA with NR 0x27 (the copies are skipped there).
+
 ## Next: tilemap map rows are copied at POST time — International Karate+ menu (2026-10-20, hw-confirmed DVp2 on `debug/DVp2-next-mapsnap-1.0.10`, owner: "фиксед")
 
 The menu (tilemap 40x32 + Layer 2 320x256, ULA off) showed only its title. The main loop
