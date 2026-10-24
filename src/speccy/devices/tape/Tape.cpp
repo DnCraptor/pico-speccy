@@ -1305,6 +1305,8 @@ string Tape::tapeBlockReadData(int Blocknum) {
     return buf;
 }
 
+static int s_tapContBlock = -1;   // block TAP_ContinueFrom is playing, -1 none
+
 void Tape::Play() {
 
     if (tapeFileType != TAPE_FTYPE_MP3 && !tape.obj.fs) {
@@ -1314,6 +1316,8 @@ void Tape::Play() {
 
     if (VIDEO::OSD) VIDEO::OSD = 1;
     pzxFlashCont = false;
+    tapFlashCont = false;
+    s_tapContBlock = -1;
 
     if (tapeFileType == TAPE_FTYPE_CSW) {
         // One pulse stream: resume where Stop() left it (rewinds after the end).
@@ -1350,7 +1354,13 @@ void Tape::Play() {
     }
 
     // Init tape vars
-    tapeEarBit = 1;
+    // TAP carries no polarity, so it takes Fuse's / PZX's: the level is LOW in a
+    // pause and during the first pilot pulse, i.e. the data of a standard block
+    // (odd pilot count) starts HIGH — what a PZX made from the same tape says.
+    // It used to start HIGH, which only worked because the Issue-2 MIC feedback
+    // inverted the tape on read; with that gone (Ports.cpp), polarity-sensitive
+    // loaders (Wizball) need the real thing. TZX keeps its own levels.
+    tapeEarBit = (tapeFileType == TAPE_FTYPE_TAP) ? 0 : 1;
     tapeBitMask = 0x80;
     tapeLastByteUsedBits = 8;
     tapeEndBitMask = 0x80;
@@ -1409,9 +1419,73 @@ void Tape::Stop() {
     tapePhase = TAPE_PHASE_STOPPED;
     tapeAutoPlay = false;
     pzxFlashCont = false;
+    tapFlashCont = false;
+    s_tapContBlock = -1;
+    // A JJ screen animation cut short (F11, a new tape) must not outlive the tape
+    // it belonged to: the flag disables the ROM trap and the auto-start, and only
+    // the animation's own end used to clear it — after an F11 mid-animation no
+    // tape fast-loaded or auto-started again until F12.
+    jjScreenAnimating = false;
     if (VIDEO::OSD) {
         VIDEO::OSD = 2;
     }
+}
+
+bool Tape::tapFlashCont = false;
+
+// The ROM has just taken its share of a TAP block that carries more (Wizball: a
+// 155-byte BASIC over a 35384-byte block, the rest read on by a loader through the
+// ROM's LD-EDGE). On a real deck the tape simply runs on, so play the block from
+// byte byteIdx (0 = flag), right where the ROM stopped reading.
+void Tape::TAP_ContinueFrom(int block, uint32_t byteIdx) {
+    tapeCurBlock = block;
+    tapePlayOffset = CalcTapBlockPos(block);
+    GetBlock = &TAP_GetBlock;
+    tapeEarBit = 0;                       // pilot starts LOW (see Play)
+    tapeBitMask = 0x80;
+    tapeLastByteUsedBits = 8;
+    tapeEndBitMask = 0x80;
+    tapeBlockLen = 0;
+    tapebufByteCount = 0;
+    GDBEnd = false;
+    pzxFlashCont = false;
+    tapeCurByte = readByteFile(&tape);
+    TAP_GetBlock();                       // tapeCurByte = flag, tapebufByteCount = 2
+    for (uint32_t i = 0; i < byteIdx; i++) {
+        tapeCurByte = readByteFile(&tape);
+        tapebufByteCount++;
+    }
+    tapeEarBit ^= 1;                      // as SYNC2 -> DATA1
+    tapePhase = TAPE_PHASE_DATA1;
+    tapeNext = tapeCurByte & tapeBitMask ? tapeBit1PulseLen : tapeBit0PulseLen;
+    tapeStatus = TAPE_LOADING;
+    tapeStart = tapeClock();
+    wearReset();
+    tapFlashCont = true;
+    s_tapContBlock = block;
+}
+
+// A flash loader that takes whole blocks (Cerikopik, JJ) while the tape PLAYS: if
+// the deck is past the pilot of the current block (its data, tail or pause — e.g.
+// the rest of a TAP block TAP_ContinueFrom left running), that block is not the
+// one the loader is waiting for.
+static bool flashSkipPlayingBlock() {
+    if (Tape::tapeStatus != TAPE_LOADING) return true;
+    bool past;
+    switch (Tape::tapePhase) {
+        case TAPE_PHASE_TAIL: case TAPE_PHASE_PAUSE:
+            past = true; break;
+        case TAPE_PHASE_SYNC1: case TAPE_PHASE_SYNC2: case TAPE_PHASE_DRB:
+        case TAPE_PHASE_DATA1: case TAPE_PHASE_DATA2:
+            past = (Tape::tapeCurBlock == s_tapContBlock); break;
+        default:
+            past = false; break;
+    }
+    if (!past) return true;
+    s_tapContBlock = -1;
+    if (Tape::tapeCurBlock >= Tape::tapeNumBlocks - 1) return false;
+    Tape::tapeCurBlock++;
+    return true;
 }
 
 // ── .pss (PSTP) ────────────────────────────────────────────────────────────────
@@ -2135,7 +2209,8 @@ IRAM_ATTR void Tape::Read() {
                 tapeNext=tapeBlkPauseLen;
                 break;
             case TAPE_PHASE_PAUSE:
-                tapeEarBit = 1;
+                // TAP: the pause level runs on into the pilot (see Play).
+                tapeEarBit = (tapeFileType == TAPE_FTYPE_TAP) ? 0 : 1;
                 tapeCurBlock++;
                 GetBlock();
             } 
@@ -2272,6 +2347,18 @@ void Tape::flashBlockDone() {
 bool Tape::FlashLoad() {
     if (Z80Ops::isALF) { // unsupported now
         return false;
+    }
+    tapFlashCont = false;
+    // The rest of a block TAP_ContinueFrom left playing is not what the ROM is
+    // asking for now, wherever the deck is inside it.
+    if (tapeStatus == TAPE_LOADING &&
+        (tapeFileType == TAPE_FTYPE_TAP || tapeFileType == TAPE_FTYPE_PZX) &&
+        s_tapContBlock >= 0 && tapeCurBlock == s_tapContBlock) {
+        s_tapContBlock = -1;
+        if (tapeCurBlock < tapeNumBlocks - 1) tapeCurBlock++;
+        else return false;
+        tapeStatus = TAPE_STOPPED;
+        tapePhase = TAPE_PHASE_STOPPED;
     }
 
     // The trap may fire while the tape is PLAYING in real time: a .pss saved mid-load
@@ -2474,19 +2561,15 @@ bool Tape::FlashLoad() {
 
         int nBytes = Z80::getRegDE();
 
-        // If DATA block has more data than ROM requested, the extra data
-        // is for a custom loader. Don't flash-load — let the whole block
-        // play in real mode so ROM and custom loader read seamlessly.
-        if (blockLen - 1 > nBytes + 1) {
-            tapeCurBlock = savedBlock;
-            f_lseek(tape, savedPos);
-            // Start tape in real mode so ROM LD-BYTES can read edges.
-            // Can't return false (tape stays stopped, ROM at pc<0x4000
-            // won't trigger auto-start). Instead, start playing and
-            // let ROM trap fall through to normal LD-BYTES execution.
-            Play();
-            return false;
-        }
+        // The DATA block carries more than the ROM asked for (Wizball: a 155-byte
+        // BASIC over a 35384-byte block, the rest read on by a loader through the
+        // ROM's LD-EDGE right away). The ROM's share is flash-loaded and the rest
+        // PLAYS at once from where the ROM stopped — the continuation below,
+        // started immediately instead of waiting for 200 polls of a RAM loader
+        // (Wizball's polls run in ROM and give up long before that). The whole
+        // block used to be Play()ed from its pilot instead, same as TAP until
+        // 2026-10-24.
+        const bool contNow = blockLen - 1 > nBytes + 1;
 
         Z80::setRegA(tapeFlag);
 
@@ -2569,6 +2652,9 @@ bool Tape::FlashLoad() {
             pzxS1[0] = s1; pzxS1[1] = s1b;
             pzxP0 = 2; pzxP1 = 2;
             pzxTailLen = tailLen;
+            // Read() calls GetBlock at the end of this block; nothing has Play()ed
+            // this tape yet, so the pointer may still be another tape's.
+            GetBlock = &PZX_GetBlock;
             tapeBit0PulseLen = s0;
             tapeBit1PulseLen = s1;
             tapeBit0PulseLen2 = s0b;
@@ -2585,7 +2671,16 @@ bool Tape::FlashLoad() {
             tapeEarBit = (count_field >> 31) & 1;
             tapePhase = TAPE_PHASE_DATA1;
             tapeNext = tapeCurByte & tapeBitMask ? tapeBit1PulseLen : tapeBit0PulseLen;
-            pzxFlashCont = true; // auto-start will activate without calling Play()
+            if (contNow) {
+                pzxFlashCont = false;
+                tapFlashCont = true;          // the traps keep it playing
+                s_tapContBlock = tapeCurBlock;
+                tapeStatus = TAPE_LOADING;
+                tapeStart = tapeClock();
+                wearReset();
+            } else {
+                pzxFlashCont = true; // auto-start will activate without calling Play()
+            }
 
         } else {
             // Full block consumed
@@ -2629,15 +2724,14 @@ bool Tape::FlashLoad() {
 
     int nBytes = Z80::getRegDE();  // Lenght
 
-    // The block carries more than the ROM asked for: the rest is for a custom loader
-    // that goes on reading the SAME block in real time once the ROM has its share
-    // (Wizball: a 155-byte BASIC header over a 35384-byte block). Flash-loading would
-    // skip the tail and leave that loader polling a stopped tape. Play the block for
-    // real instead, like the PZX branch does — the ROM reads it from the pilot.
-    if (blockLen - 2 > nBytes) {
-        Play();
-        return false;
-    }
+    // The block carries more than the ROM asked for (blockLen - 2 > nBytes). The rest
+    // may be for a custom loader that goes on reading the SAME block in real time
+    // (Wizball: a 155-byte BASIC over a 35384-byte block), or plain junk nobody reads
+    // (Byte's "Buran": 1544 of a 2169-byte BASIC block). The ROM's share is
+    // flash-loaded either way and the rest PLAYS from where the ROM stopped, as on
+    // a real deck (TAP_ContinueFrom below). It used to Play() the whole block from
+    // its pilot, which made every such block load in real time (hw 2026-10-24).
+    const bool contRest = blockLen - 2 > nBytes;
 
     // La paridad incluye el byte de flag
     Z80::setRegA(tapeFlag);
@@ -2719,7 +2813,16 @@ bool Tape::FlashLoad() {
         Z80::Cp(0x01);
     }
 
-    if (tapeCurBlock < (tapeNumBlocks - 1)) {        
+    if (contRest) {
+        // Flag (0), nBytes of data and the byte LD-BYTES took as parity are gone;
+        // the deck runs on from the next one.
+        Z80::setRegIX(addr);
+        Z80::setRegDE(0);
+        TAP_ContinueFrom(tapeCurBlock, (uint32_t)nBytes + 2);
+        return true;
+    }
+
+    if (tapeCurBlock < (tapeNumBlocks - 1)) {
         tapeCurBlock++;
         if (nBytes != (blockLen -2)) CalcTapBlockPos(tapeCurBlock);
     } else {
@@ -2743,6 +2846,7 @@ bool Tape::FlashLoad() {
 bool Tape::CerikopikFlashLoad() {
 
     FIL* tp = &Tape::tape;
+    if (!flashSkipPlayingBlock()) return false;
     uint16_t blockLen;
     uint8_t tapeFlag;
 
@@ -2887,6 +2991,7 @@ int Tape::JJFlashLoad() {
 
     uint16_t jpTarget = MemESP::readbyte(0xFE66) | (MemESP::readbyte(0xFE67) << 8);
     if (jpTarget != 0xFE68 && jpTarget != 0xFEC5) return 0;
+    if (!flashSkipPlayingBlock()) return 0;
 
     // Find next Pure Data (0x14) or Standard (0x10) block, skip metadata
     uint8_t foundId = 0;

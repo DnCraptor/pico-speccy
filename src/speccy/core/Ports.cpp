@@ -1318,10 +1318,14 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
     }
     if (Tape::tapeStatus == TAPE_LOADING) LED::touchR(LED::TAPE);
     if (Tape::TapePortRead()) return data;
-    // Turbo loaders at 0xFE00+ write to port254 to set border colors, which
-    // on Issue2 hardware feeds bit3 back into EAR input (bit6), inverting
-    // the tape signal. Bypass port254 feedback for turbo loaders.
-    if (Tape::tapeStatus == TAPE_LOADING && Z80::getRegPC() >= 0xFE00) {
+    // A PLAYING tape drives EAR (bit 6) by itself: the port-254 feedback (Issue 2
+    // MIC bit 3, the speaker bit 4, the Pentagon's idle-high input) only decides
+    // the level with no signal. XORing it in inverted the tape whenever the
+    // loader's border OUT has MIC set — the ROM's LD-EDGE always writes OR 8 —
+    // which a polarity-sensitive loader cannot survive: Wizball (PZX, and TAP
+    // played in real time) reset ~5200 bytes in on a 48K with Issue 2 (hw +
+    // host sim 2026-10-24). This used to apply to loaders at 0xFE00+ only.
+    if (Tape::tapeStatus == TAPE_LOADING) {
       if (Tape::tapeEarBit)
         data |= 0x40;
     } else {

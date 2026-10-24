@@ -294,6 +294,10 @@ public:
     static void CSW_RewindTo0();
     static void CSW_Close();
     static bool pzxFlashCont;         // FlashLoad partial -> real-mode continuation pending
+    // TAP FlashLoad filled the ROM's share of a longer block and left the rest
+    // PLAYING (TAP_ContinueFrom). The traps' "stop an auto-started tape" must keep it.
+    static bool tapFlashCont;
+    static void TAP_ContinueFrom(int block, uint32_t byteIdx);
 
     // .pss (PSTP block): where the tape is and whether it plays. A TAP/TZX/PZX
     // that was playing a plain-pulse phase resumes mid-block, at the pulse; a CSW

@@ -14202,6 +14202,31 @@ damage offset** (Black Raven: ±10 in 2-byte compare units = ±20 bytes).
   must be 12..249 and within ±10 of the table value. The crack NOP'd those three
   branches.
 
+## Tape polarity, long blocks, the JJ flag (2026-10-24, hw-confirmed DVp2w: Wizball TAP+PZX, Buran, La Formica, assorted TAP/TZX/PZX on several machines)
+
+- **A playing tape drives EAR alone** (Ports.cpp): bit 6 = `tapeEarBit` while
+  `TAPE_LOADING`; the #FE feedback (Issue 2 MIC bit 3, bit 4, Pentagon idle-high)
+  only applies with no signal. The old XOR inverted the tape whenever the border
+  OUT had MIC set — the ROM's LD-EDGE always writes OR 8 — so Wizball (polarity-
+  sensitive) reset ~5200 bytes in. Was the rule for loaders at 0xFE00+ only.
+- **TAP pilot starts LOW** (Fuse / PZX convention: pause low, first pilot pulse low,
+  data of a standard block starts high). It started high and only worked through
+  the inversion above. TZX keeps its own levels (untouched; a polarity-sensitive
+  TZX would still read inverted).
+- **A block longer than the ROM asks for** (TAP and PZX): the ROM's share is
+  flash-loaded and the rest PLAYS at once from where the ROM stopped
+  (`TAP_ContinueFrom`, PZX via the pzxFlashCont setup started immediately;
+  `tapFlashCont` keeps the traps from stopping it). It used to Play() the whole
+  block from its pilot — Byte's Buran (2169-byte BASIC, 1544 requested) then
+  loaded in real time (regression of 687622ce, 2026-10-13). Cerikopik/JJ skip a
+  block still being played (`flashSkipPlayingBlock`).
+- **`jjScreenAnimating` is cleared by `Tape::Stop()` and `ESPectrum::reset()`**:
+  an F11 during a JJ animated screen load kept it up for good, disabling the ROM
+  trap and the auto-start until F12 (La Formica).
+- Diagnosis tool: a host sim (redcode, 48K ROM, real pulse list from TAP/PZX with
+  per-pulse levels, keys typed for LOAD "") settled the polarity in one run —
+  rebuild it in session scratch before guessing at a tape-loader report.
+
 ## Tape wear — "the recorder is chewing the tape" (2026-09-20; hw-confirmed, after three rounds)
 
 `Config::tape_wear` (Storage > Tape > Tape wear: Off / Light / Medium / Heavy)

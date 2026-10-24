@@ -2375,6 +2375,12 @@ void ESPectrum::reset(uint8_t romInUse) {
   Tape::CSW_Close();   // a .csw decoder (~45 KB) goes with the file; LoadRemembered re-opens it
   Tape::tapeStatus = TAPE_STOPPED;
   Tape::tapePhase = TAPE_PHASE_STOPPED;
+  // A JJ screen animation cut by F11 kept its flag for good: no ROM fast load and
+  // no auto-start until F12 (hw 2026-10-24, La Formica). Same for the two
+  // continuation flags — they describe the tape this reset just closed.
+  Tape::jjScreenAnimating = false;
+  Tape::pzxFlashCont = false;
+  Tape::tapFlashCont = false;
   Tape::SaveStatus = SAVE_STOPPED;
   Tape::romLoading = false;
 

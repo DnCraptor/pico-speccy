@@ -1487,7 +1487,7 @@ IRAM_ATTR void Z80::execute() {
     // CPU::prev_tstates = CPU::tstates;
 
     // // if (!(CPU::tstates & 0xf)) {
-    //     if (Tape::tapeStatus == TAPE_LOADING) {
+    //     if (Tape::tapeStatus == TAPE_LOADING && !Tape::tapFlashCont) {
     //     // if (Tape::tapePhase == TAPE_PHASE_DATA) {
     //         Tape::Read();
     //     }
@@ -2428,7 +2428,7 @@ void Z80::decodeOpcode76()
                     // Stop tape if it was auto-started.
                     // Preserve tapePhase if pzxFlashCont is set (partial PZX load
                     // set up DATA1 phase for real-mode continuation by auto-start).
-                    if (Tape::tapeStatus == TAPE_LOADING) {
+                    if (Tape::tapeStatus == TAPE_LOADING && !Tape::tapFlashCont) {
                         Tape::tapeStatus = TAPE_STOPPED;
                         if (!Tape::pzxFlashCont)
                             Tape::tapePhase = TAPE_PHASE_STOPPED;
@@ -2732,7 +2732,7 @@ Z80_COLD bool Z80::evo_tape_trap() {
     REG_C = regA;            // LD C,A
     cp(regA);                // CP A
     if (Tape::FlashLoad()) {
-        if (Tape::tapeStatus == TAPE_LOADING) {
+        if (Tape::tapeStatus == TAPE_LOADING && !Tape::tapFlashCont) {
             Tape::tapeStatus = TAPE_STOPPED;
             if (!Tape::pzxFlashCont) Tape::tapePhase = TAPE_PHASE_STOPPED;
         }
@@ -2763,7 +2763,7 @@ Z80_COLD bool Z80::next_os_tape_decline() {
           (Tape::tapeFileType == TAPE_FTYPE_TAP || Tape::tapeFileType == TAPE_FTYPE_TZX ||
            Tape::tapeFileType == TAPE_FTYPE_PZX) && Tape::tapeFileName != "none")) return false;
     if (!Tape::FlashLoad()) return false;
-    if (Tape::tapeStatus == TAPE_LOADING) {
+    if (Tape::tapeStatus == TAPE_LOADING && !Tape::tapFlashCont) {
         Tape::tapeStatus = TAPE_STOPPED;
         if (!Tape::pzxFlashCont) Tape::tapePhase = TAPE_PHASE_STOPPED;
     }
@@ -2788,7 +2788,7 @@ Z80_COLD bool Z80::byte_tape_trap() {
     // FlashLoad loads the full block (it uses min(DE, blockLen)).
     uint16_t origDE = getRegDE();
     if (Tape::FlashLoad()) {
-        if (Tape::tapeStatus == TAPE_LOADING) {
+        if (Tape::tapeStatus == TAPE_LOADING && !Tape::tapFlashCont) {
             Tape::tapeStatus = TAPE_STOPPED;
             if (!Tape::pzxFlashCont)
                 Tape::tapePhase = TAPE_PHASE_STOPPED;
