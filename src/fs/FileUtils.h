@@ -193,8 +193,10 @@ public:
 
     // UTF-8 → CP1251 (Cyrillic) for OSD display with the Font6x8Cyr face. ASCII
     // passes through; Russian letters map to their CP1251 byte; other codepoints
-    // become '?'; invalid sequences pass through unchanged.
-    static string utf8ToCp1251(const string& s);
+    // become '?'; invalid sequences pass through unchanged. `ui` = the string is
+    // only drawn with the nm:: UI font: U+00E9 then maps to its 0x87 glyph
+    // ("SAM Coupé"). Never for names written to FAT.
+    static string utf8ToCp1251(const string& s, bool ui = false);
     // CP866 (DOS Cyrillic) → CP1251 — ZIP entry names from DOS/Windows packers.
     // Pseudographics, which a file name cannot display anyway, become '_'.
     static string cp866ToCp1251(const string& s);

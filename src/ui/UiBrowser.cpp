@@ -834,8 +834,8 @@ static void viewTextFile(const string& path, const string& name) {
                     else u = '.';
                 }
                 else if (te != ENC_CP1251) u = '.';
-                // 0x80-0x86 are the UI's own symbols in this font.
-                if (u >= 0x80 && u <= 0x86) u = '.';
+                // 0x80-0x87 are the UI's own glyphs in this font.
+                if (u >= 0x80 && u <= UI_FONT_LAST) u = '.';
             }
             // A file that turned out not to be text stays readable as a shape
             // instead of painting control codes through the font.
@@ -1303,7 +1303,7 @@ void uiProgressStatus(const char* title, const char* msg, int percent, int actio
         if (!m.empty()) m += "  ";
         m += msg;
     }
-    if (cyrillic) m = FileUtils::utf8ToCp1251(m);
+    if (cyrillic) m = FileUtils::utf8ToCp1251(m, true);
 
     const int bw = L.iw / 3;
     const int bx = L.ix + L.iw - L.pad - bw;
@@ -1487,7 +1487,7 @@ int browseIndexNav(const string& title, const string& subtitle, int side,
     // Display form of a record: strip markers, transcode UTF-8 catalog names.
     auto disp = [&](const string& rec) -> string {
         string nm_ = isUpRec(rec) ? ".." : plainName(rec);
-        return utf8 ? FileUtils::utf8ToCp1251(nm_) : nm_;
+        return utf8 ? FileUtils::utf8ToCp1251(nm_, true) : nm_;
     };
 
     auto drawRowN = [&](int visRow) {
@@ -1578,7 +1578,7 @@ int browseIndexNav(const string& title, const string& subtitle, int side,
         const int py = L.iy + L.hdr_h;
         fill(L.ix, py, L.iw, L.path_h, C_PANEL_ALT);
         {
-            const string p = utf8 ? FileUtils::utf8ToCp1251(subtitle) : subtitle;
+            const string p = utf8 ? FileUtils::utf8ToCp1251(subtitle, true) : subtitle;
             const int fits = (L.iw - 2 * L.pad) / glyphW();
             if ((int)p.size() > fits && fits > 2)
                 text(L.ix + L.pad, py + 2, (".." + p.substr(p.size() - fits + 2)).c_str(), C_TEXT);

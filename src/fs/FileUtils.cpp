@@ -111,7 +111,7 @@ string FileUtils::getLCaseExt(const string& filename) {
     return toLower( extension );
 }
 
-string FileUtils::utf8ToCp1251(const string& s) {
+string FileUtils::utf8ToCp1251(const string& s, bool ui) {
     string out; out.reserve(s.size());
     size_t i = 0, n = s.size();
     while (i < n) {
@@ -124,6 +124,7 @@ string FileUtils::utf8ToCp1251(const string& s) {
             else if (cp >= 0x0430 && cp <= 0x044F) m = (char)(0xE0 + (cp - 0x0430)); // а-я
             else if (cp == 0x0401)                 m = (char)0xA8;                    // Ё
             else if (cp == 0x0451)                 m = (char)0xB8;                    // ё
+            else if (cp == 0x00E9 && ui)           m = (char)0x87;                    // é (UI font)
             out += m ? m : '?';
             i += 2; continue;
         }
