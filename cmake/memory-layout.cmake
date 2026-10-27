@@ -262,7 +262,9 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
     # core0 waiting for the SD read-ahead — +128 B (content 51 488 B).
     # 2026-10-23: the ULA bitmap line captured at the beam (Shock's scroller):
     # two `bmpOvr` selects in the row renderer — +128 B.
-    set(NXOVL_WIN_SIZE_EFFECTIVE 51712)
+    # 2026-10-27: ScanlineWork arms the next line inline when no writer races the
+    # beam (one flash call less per raster line) — +128 B (content 51 744 B).
+    set(NXOVL_WIN_SIZE_EFFECTIVE 51840)
     # NEXT_TRACE adds timing forks inside NextVideo.cpp, i.e. inside this window
     # (NextReg.cpp's trace lives in .text), so a trace build needs its own term —
     # same rule as the .ngsovl one above.
@@ -277,7 +279,8 @@ if (NXOVL_WIN_SIZE STREQUAL "AUTO")
         # RenderSpritesLine to -O2 no-unroll (4308 -> 1208 B): content 47 248,
         # trace 47 608 — ~3.5 KB under the terms again. Terms unchanged.
         # 2026-10-23: +128 B with the plain term (the bitmap-line capture).
-        set(NXOVL_WIN_SIZE_EFFECTIVE 51840)
+        # 2026-10-27: +128 B with the plain term (the inline line arm).
+        set(NXOVL_WIN_SIZE_EFFECTIVE 51968)
     endif()
 else()
     set(NXOVL_WIN_SIZE_EFFECTIVE ${NXOVL_WIN_SIZE})

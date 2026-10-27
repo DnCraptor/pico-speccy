@@ -493,14 +493,15 @@ static void nxScreenFlipRow(NextLineState& st, int row, int fvLine) {
 // right, and the mid-paper point the flip ring uses would get half wrong.
 //
 // Gated, because a copy makes every row a new queue state (nxSameState), i.e.
-// 64 rows in flight instead of 320: the copy is used while attributes CHANGE
-// within a character row (two paper-start captures of adjacent lines of the
-// same cell row differ, or the capture differs from RAM at the row's post),
-// for the rest of that frame and the next two, and whenever the screen flips
-// inside the frame (Insult: PUSHes into the off-screen page, the old
-// post-time snapshot's case — the page on show at the paper start is the same
-// page). A game that writes attributes once a frame trips it only when that
-// write lands while the beam is inside the cell row, one frame at a time.
+// 64 rows in flight instead of 320, and the racing mode turns the adaptive
+// frame skip off: the paper-start boundary exists only while nxRacing() — a
+// writer that changes cell rows on line after line (nxMcEvent, judged at each
+// row's post) for the rest of that frame and the next two — and whenever the
+// screen flips inside the frame (Insult: PUSHes into the off-screen page, the
+// old post-time snapshot's case — the page on show at the paper start is the
+// same page). Until then the line clock has its one boundary per line, armed
+// inline, exactly as before the capture existed; the first racing frame is
+// captured from the line the verdict came on.
 //
 // Once a racing writer is detected the capture is PER CELL GROUP: 16 boundaries
 // across the paper, 8 T apart, each copying the two cells the beam is about to
@@ -509,7 +510,7 @@ static void nxScreenFlipRow(NextLineState& st, int row, int fvLine) {
 // are written before the beam reaches them and others after: measured on the
 // host against exact beam sampling, one point per line is 2.6 % of cells wrong
 // on the 48K raster, 16 points 0.01 % (`shock_sim`, session scratch 2026-10-23).
-// Idle titles pay one extra boundary per line and a 32-byte copy.
+// A title that is not racing pays a 32-byte compare and copy at each row's post.
 //
 // The BITMAP line travels the same way while the writer is on, through a
 // per-line shadow (`s_bmpSh`, 192 x 32 B, PSRAM, taken on first use) rather
@@ -527,9 +528,45 @@ static uint8_t* s_bmpSh = nullptr;      // [192][32] bitmap lines as the beam re
 static int16_t  s_bmpCapY = -1;         // paper row whose bitmap line was captured this line
 static uint8_t  s_bmpShTried = 0;       // one palloc attempt per frame
 static uint8_t  s_capPhase = 0;         // next boundary: g < NX_CAP_GROUPS = capture point g of this line, else its end
-static uint8_t  s_mcSeen = 0;           // attributes changed within a cell row this frame
-static uint8_t  s_mcActive = 0;         // frames the copy stays on after the last such change
+static uint8_t  s_mcSeen = 0;           // a writer races the beam this frame (nxMcEvent's verdict)
+static uint8_t  s_mcActive = 0;         // frames the copy stays on after the last such frame
 static int16_t  s_pStartT = 64;         // T into a raster line where the paper begins (beside s_bcol)
+// The racing verdict, taken at the row's POST (nxAttrBeam), so a title that is
+// not racing pays nothing at the paper start: the row's live attributes against
+// the previous line's post copy of the same cell row. A game that writes its
+// attributes once a frame changes a cell row at most once, and only where the
+// write meets the beam; an 8x1/8x2 multicolour writer changes the same row on
+// line after line, an 8x4 one changes every row. So: 2 rows changed on at least
+// two of their lines, or 12 rows changed at all, in one frame. hw 2026-10-27:
+// the one-change rule of 2026-10-23 tripped on ordinary games, turned the
+// adaptive frame skip off and put 16 flash calls on every paper line.
+#define NX_MC_ROWS2 2
+#define NX_MC_ROWS1 12
+static uint8_t  s_postAttr[32];         // the last posted row's attributes (post time)
+static const uint8_t* s_postGr = nullptr;
+static int16_t  s_postY = -1;
+static int16_t  s_mcLastY = -1;         // paper row of the last change event (one per line)
+static int8_t   s_mcRowCur = -1;        // cell row being counted
+static uint8_t  s_mcRowHits = 0, s_mcRows1 = 0, s_mcRows2 = 0;
+
+static inline __attribute__((always_inline)) bool nxRacing() {
+    return s_mcSeen || s_mcActive || s_flipFrame >= 2 || s_flipPrev >= 2;
+}
+
+static void nxMcFrameReset() {
+    s_mcRowCur = -1; s_mcRowHits = 0; s_mcRows1 = s_mcRows2 = 0;
+    s_mcLastY = -1; s_postY = -1;
+}
+
+static void nxMcEvent(int y) {
+    if (y == s_mcLastY) return;
+    s_mcLastY = (int16_t)y;
+    const int8_t cr = (int8_t)(y >> 3);
+    if (cr != s_mcRowCur) { s_mcRowCur = cr; s_mcRowHits = 0; }
+    if (++s_mcRowHits == 1) s_mcRows1++;
+    else if (s_mcRowHits == 2) s_mcRows2++;
+    if (s_mcRows2 >= NX_MC_ROWS2 || s_mcRows1 >= NX_MC_ROWS1) s_mcSeen = 1;
+}
 
 static inline __attribute__((always_inline)) bool nxWords8Differ(const uint8_t* a, const uint8_t* b) {
     const uint32_t* x = (const uint32_t*)a; const uint32_t* y = (const uint32_t*)b;
@@ -558,15 +595,15 @@ __attribute__((noinline)) void NEXTVID::nxPaperStart() {
         if (y < 0 || y >= 192 || (r[0x69] & 0x07) || (r[0x68] & 0x80) || !VIDEO::grmem) {
             s_capY = -1; s_capPhase = NX_CAP_GROUPS; nxLineArm(); return;
         }
+        // Armed only while nxRacing() (ScanlineWork): the row at the paper start,
+        // the groups refine it.
         const uint8_t* src = VIDEO::grmem + VIDEO::offAtt[y];
-        if ((y & 7) && s_capY == y - 1 && s_capGrmem == VIDEO::grmem && nxWords8Differ(src, s_capAttr))
-            s_mcSeen = 1;                // the same 32 bytes changed between two lines of one cell row
         uint32_t* d = (uint32_t*)s_capAttr; const uint32_t* s = (const uint32_t*)src;
-        for (int i = 0; i < 8; i++) d[i] = s[i];   // the row at the paper start; groups refine it
+        for (int i = 0; i < 8; i++) d[i] = s[i];
         s_capY = (int16_t)y;
         s_capGrmem = VIDEO::grmem;
         s_bmpCapY = -1;
-        const bool racing = s_mcSeen || s_mcActive || s_flipFrame >= 2 || s_flipPrev >= 2;
+        const bool racing = nxRacing();
         if (racing) {
             if (!s_bmpSh && !s_bmpShTried) {
                 s_bmpShTried = 1;
@@ -595,20 +632,25 @@ __attribute__((noinline)) void NEXTVID::nxPaperStart() {
 
 // At the row's post: the attribute bytes the beam read, when a writer is racing it.
 static void nxAttrBeam(NextLineState& st, int row, int paperTop) {
-    if (st.attOvr || (st.r69 & 0x07)) return;   // DMA shadow first; Timex modes: other bytes
+    if (st.attOvr || (st.r69 & 0x07)) { s_postY = -1; return; }   // DMA shadow first; Timex modes: other bytes
     const int y = row - paperTop;
     if (y < 0 || y >= 192) return;
     const uint8_t* live = st.grmem + VIDEO::offAtt[y];
-    const bool mc = s_mcSeen || s_mcActive || s_flipFrame >= 2 || s_flipPrev >= 2;
+    // The racing test: this row against the previous line's post copy of the same cell row.
+    bool ev = (y & 7) && s_postY == y - 1 && s_postGr == st.grmem && nxWords8Differ(s_postAttr, live);
+    { uint32_t* d = (uint32_t*)s_postAttr; const uint32_t* s = (const uint32_t*)live;
+      for (int i = 0; i < 8; i++) d[i] = s[i]; }
+    s_postY = (int16_t)y; s_postGr = st.grmem;
     if (s_capY == y && s_capGrmem == st.grmem) {
-        const bool moved = nxWords8Differ(s_capAttr, live);   // written inside this line's paper
-        if (moved) s_mcSeen = 1;
-        if (!(mc || moved)) return;
+        // captured at this line's paper start (racing was on there)
+        if (nxWords8Differ(s_capAttr, live)) ev = true;   // written inside this line's paper
+        if (ev) nxMcEvent(y);
         const uint32_t* s = (const uint32_t*)s_capAttr; uint32_t* d = (uint32_t*)st.attr;
         for (int i = 0; i < 8; i++) d[i] = s[i];
         if (s_bmpCapY == y) st.bmpOvr = 1;   // the bitmap line as the beam read it (s_bmpSh)
     } else {
-        if (!mc) return;                 // no capture for this row (page flipped mid-paper): the post-time bytes
+        if (ev) nxMcEvent(y);
+        if (!nxRacing()) return;         // no capture for this row (racing began mid-row, or the page flipped): the post-time bytes
         memcpy(st.attr, live, sizeof st.attr);
     }
     st.attOvr = 1;
@@ -2252,7 +2294,9 @@ void NEXTVID::Reset() {
     computeGeometry();
     xPaperOff = ((int)VIDEO::vga.xres - 256) / 2;
     lineIdx = 0;
-    s_capPhase = 0; s_capY = -1; s_mcSeen = s_mcActive = 0;
+    s_capY = -1; s_mcSeen = s_mcActive = 0;
+    nxMcFrameReset();
+    s_capPhase = NX_CAP_GROUPS;   // not racing after a reset
     nxLineArm();
     skipFrame = false;
     framePacing.reset(time_us_32());
@@ -2450,6 +2494,7 @@ void NEXTVID::EndFrame() {
     // The attribute copy stays on for two frames after the last in-row change.
     s_mcActive = s_mcSeen ? 2 : (s_mcActive ? (uint8_t)(s_mcActive - 1) : 0);
     s_mcSeen = 0;
+    nxMcFrameReset();
     s_bmpShTried = 0;
     // The machine timing (nextreg 0x03) and 50/60 Hz (0x05) change the whole
     // frame: apply at the frame boundary, after core1 has drawn every row of
@@ -2502,7 +2547,7 @@ void NEXTVID::EndFrame() {
     }
     lineIdx = 0;
     totalLines = (CPU::statesInFrame >> ESPectrum::multiplicator) / VIDEO::tStatesPerLine;
-    s_capPhase = 0; s_capY = -1;
+    s_capPhase = nxRacing() ? 0 : NX_CAP_GROUPS; s_capY = -1;
     nxLineArm();
     gigsFrame();
 }
@@ -2629,8 +2674,15 @@ __attribute__((noinline)) IRAM_ATTR void NEXTVID::ScanlineWork() {
             emitRow(row);
         }
         lineIdx++;
-        s_capPhase = 0;
-        nxLineArm();   // the next line's paper start (or the frame-tail sentinel)
+        s_capY = -1;   // this line's capture was used by its post
+        if (__builtin_expect(nxRacing(), 0)) {
+            s_capPhase = 0;
+            nxLineArm();   // the next line's paper start (or the frame-tail sentinel)
+        } else {           // one boundary per line, armed here (no flash call)
+            s_capPhase = NX_CAP_GROUPS;
+            nextLineTstate = lineIdx < totalLines
+                ? (lineIdx + 1) * ((uint32_t)VIDEO::tStatesPerLine << m) : 0xFFFFFFFFu;
+        }
     } else {
         // frame over-run (turbo tail) — wait for EndFrame to restart
         nextLineTstate = 0xFFFFFFFF;
@@ -4793,7 +4845,7 @@ void NEXTVID::snapLineSync() {
     lineIdx = CPU::tstates / tl;
     if (lineIdx > totalLines) lineIdx = totalLines;
     // Inside the line: past its paper start = the line-end boundary is next.
-    s_capPhase = (CPU::tstates - lineIdx * tl) >= ((uint32_t)s_pStartT << ESPectrum::multiplicator) ? NX_CAP_GROUPS : 0;
+    s_capPhase = (!nxRacing() || (CPU::tstates - lineIdx * tl) >= ((uint32_t)s_pStartT << ESPectrum::multiplicator)) ? NX_CAP_GROUPS : 0;
     s_capY = -1;
     nxLineArm();
 }
