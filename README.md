@@ -52,14 +52,14 @@ Raspberry Pi Pico 2 W is not supported.
 Every board without WiFi ships in two flash types: the plain image for a 4 MB module
 (Raspberry Pi Pico 2, Waveshare RP2350-PiZero...) and a `-16MB` one
 (`DVp2-speccy-VGA-HDMI-16MB-<ver>.uf2`, `-DFLASH_16MB=ON`) for a 16 MB module such
-as the Pimoroni Pico Plus 2. The 16 MB image adds the ZXM-MoonSound card (its 2 MB
-YRW801 ROM is built in) and a much bigger GM.DLS bank region. A 16 MB image does not
-fit a 4 MB module. The `*p2w` / `*p2ws` images are 16 MB only (hence their `-16MB` tag)
-and include MoonSound.
+as the Pimoroni Pico Plus 2. The 16 MB image has the ZXM-MoonSound card's 2 MB
+YRW801 ROM built in (the 4 MB image reads it from `/pico-speccy/roms/yrw801.rom` on
+the SD card) and a much bigger GM.DLS bank region. A 16 MB image does not fit a 4 MB
+module. The `*p2w` / `*p2ws` images are 16 MB only (hence their `-16MB` tag).
 
 ## Features
 
-- ZX Spectrum 48K, 128K, +3 / +3e, Timex TC2048/TC2068, Pentagon 128k/512k/1024k, Profi 1024K, Scorpion ZS-256/ZS-1024/GMX/ProfROM, ZX Evolution (BaseConf, TS-Conf and the ScorpEvo configuration), ATM-Turbo 1 / 2 / 2+ / 3, Nemo KAY 256/1024, ZXM-Phoenix, ZX Spectrum Next, Byte and ALF TV Game. 100% cycle accurate emulation.
+- ZX Spectrum 48K, 128K, +3 / +3e, Timex TC2048/TC2068, Pentagon 128k/512k/1024k, Profi 1024K, Scorpion ZS-256/ZS-1024/GMX/ProfROM, ZX Evolution (BaseConf, TS-Conf and the ScorpEvo configuration), ATM-Turbo 1 / 2 / 2+ / 3, Nemo KAY 256/1024, ZXM-Phoenix, ZX Spectrum Next, MGT SAM Coupé, Byte and ALF TV Game. 100% cycle accurate emulation.
 - State of the art Z80 emulation (Authored by [José Luis Sánchez](https://github.com/jsanchezv/z80cpp))
 - Selectable Sinclair 48K, Sinclair 128K and Amstrad +2 english and spanish ROMs. Byte and ALF TV Game - russian ROMs, + Pentagons with Gluck services ROMs & selectable TR-DOS ROM (5.04T by default, 5.03 / 5.04TM / 5.05D / 6.11e / custom). Profi 1024K with selectable Karabas-Pro ROM sets (Original, ROMain boot menu, PQDOS, Flash Tool, FDImage).
 - Possibility of using custom ROM with easy flashing procedure from SD card.
@@ -113,6 +113,8 @@ and include MoonSound.
 - OPL3 (YMF262) sound-card emulation on ports #C4-#C7 (Audio → VGM chips → "YMF262 (OPL3)") — together with AY and TSFM this covers the [VGM player plugin for the ESXDOS NMI browser](https://github.com/Alex-Zor/VGM-Plugin-for-DivMMC): copy the plugin to `/BIN/BPLUGINS` on the SD card and .vgm files (AY / YM2203 / OPL2 / OPL3) play from the NMI browser.
 - YM2413 (OPLL) emulation — the SMS-FM/MSX-MUSIC chip, 15 ROM patches + user patch + 5 drums — on the same card family (address #C0 / data #C1, VGM command 0x51), Audio → VGM chips → "YM2413 (OPLL)".
 - CMS / Game Blaster (2x SAA1099 at 7.159 MHz) and 2x SN76489 (Sega arcade pair) emulation for the same VGM-card family — Audio → VGM chips → "2x SAA1099 (CMS)" / "2x SN76489". Port map: CMS on the classic SAA #FF family with A9 as the chip select — chip 1 data/register on #00FF/#01FF (the same ports as the single-SAA card), chip 2 on #02FF/#03FF (the VGM-plugin map); SN76489 #1 on #C3 (VGM command 0x50; #C9 from an older plugin build is accepted as an alias) and #2 on #C2 (command 0x30), write-only, Sega/VGM-default noise (16-bit LFSR, feedback bit0^bit3), master clock selectable in the menu (3.58/2/4 MHz — the dual-chip arcade rips are 2 or 4 MHz). With both SAA features enabled the CMS pair owns the #FF ports (one card at a time, as on real hardware).
+- ZXM-MoonSound (YMF278B / OPL4) emulation (Audio → "ZXM-MoonSound (OPL4)"): the OPL3 FM half on #C4-#C7 plus the 24-channel wavetable half on #7E/#7F, with the YRW801 sample ROM and 1 MB of sample RAM; both halves are synthesized on the second core. Runs MoonService and Mick's MWM player. Needs a board with QSPI (butter) PSRAM.
+- PI-CARD MUSICA emulation (Audio → "PI-CARD MUSICA", ports #63/#67): AlexZor's esxDOS "Tracker player" plugin hands MOD / S3M / XM / IT / MID files to the card, which plays them mixed into the machine's own sound. Needs a board with QSPI (butter) PSRAM.
 - SAA1099 sound chip emulation (https://en.wikipedia.org/wiki/Philips_SAA1099).
 - Covox 8-bit DAC emulation: selectable port (#FB or #DD) from the Audio menu.
 - SounDrive 8-bit stereo DAC emulation: left channel on ports #0F/#1F/#3F, right on #4F/#5F, both on #FB. Own Audio-menu item (Off/On/Auto; Auto enables it on Profi only, where CP/M games stream PCM there).
@@ -351,7 +353,7 @@ Your filesystem tree must be look like:
 | `-DPICO_PC=ON` | Build for Olimex RP2040-PICO-PC carrier board |
 | `-DPICO_DV=ON` | Build for Pimoroni Pico DV Demo Base |
 | `-DZERO2=ON` | Build for Waveshare RP2350-PiZero |
-| `-DFLASH_16MB=ON` | 16 MB flash type of the board (`-16MB` in the file name): adds ZXM-MoonSound with its embedded YRW801 ROM. Default OFF = the 4 MB image; the W/WS boards turn it on themselves. |
+| `-DFLASH_16MB=ON` | 16 MB flash type of the board (`-16MB` in the file name): embeds the ZXM-MoonSound YRW801 ROM (the 4 MB image reads it from SD). Default OFF = the 4 MB image; the W/WS boards turn it on themselves. |
 | `-DMURM_W=ON` / `-DMURM2_W=ON` / `-DPICO_DV_W=ON` / `-DPICO_PC_W=ON` | Build for the same carrier + Pimoroni Pico Plus 2 W (m1p2w / m2p2w / DVp2w / PCp2w, on-chip CYW43439 WiFi on GP23/24/25/29, 16 MB flash, 8 MB PSRAM on GPIO47). Every carrier pin stays where it is on the plain board; the LED is on the radio and the GP29 AY clock output is dropped. A 4 MB Raspberry Pi Pico 2 W has the same pins but these images do not fit its flash. |
 | `-DMURM_WS=ON` | Build for Murmulator 1.x + Waveshare RP2350B-Plus-W (m1p2ws, on-chip CYW43439 WiFi). Same carrier as `-DMURM=ON`; the module moves audio to GPIO40/41/42, the LED to GPIO23 and PSRAM to GPIO47, and the carrier's PIO SPI PSRAM is dropped so the radio fits on pio0. |
 | `-DMURM2_WS=ON` | Build for Murmulator 2.0 + Waveshare RP2350B-Plus-W (m2p2ws). Same carrier as `-DMURM2=ON`; audio is unchanged, the gamepad data pins move to GPIO40/41, the LED to GPIO23 and PSRAM to GPIO47. |
