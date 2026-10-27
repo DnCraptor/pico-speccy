@@ -21,14 +21,19 @@ ELSEIF(HDMI_HSTX_ON)
     SET(DISPLAY_TAG "${DISPLAY_TAG}${VARIANT_TAG}")
 ENDIF()
 
-# 16 MB flash type: DVp2-speccy-VGA-HDMI-16MB-<version>, "+16MB" on screen. The W/WS
+# Flash type: DVp2-speccy-VGA-HDMI-16MB-<version>, "+16MB" on screen. The W/WS
 # boards are 16 MB only (board.cmake forces FLASH_16MB on for them) and carry the tag
 # as well — DVp2w-speccy-VGA-HDMI-16MB-<version> — so every 16 MB image is named
 # alike (owner, 2026-10-23; they were tagless before).
+# The 4 MB image says so in the FILE name too (DVp2-speccy-VGA-HDMI-4MB-<version>,
+# owner 2026-10-27) so the two flash types cannot be confused on disk; on screen it
+# stays untagged (Hardware Info's short name has no room to spare).
 IF(FLASH_16MB OR PICOSPECCY_WIFI)
     SET(BUILD_NAME "${BUILD_NAME}-16MB")
     SET(VARIANT_TAG "${VARIANT_TAG}+16MB")
     SET(DISPLAY_TAG "${DISPLAY_TAG}+16MB")
+ELSE()
+    SET(BUILD_NAME "${BUILD_NAME}-4MB")
 ENDIF()
 
 SET(BUILD_NAME "${BUILD_NAME}-${PORT_VERSION}")

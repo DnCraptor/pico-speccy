@@ -4,8 +4,10 @@
 Usage: release_downloads.py REPO TAG FILE.uf2 [FILE.uf2 ...]
 
 Rows are carrier boards, columns are video outputs, each cell lists the
-module variants that were built (m1p2 / m1p2-16MB / m1p2w / m1p2ws) as direct links to
-the release assets. Only the files passed in appear; an empty cell is "—".
+module variants that were built (m1p2 / m1p2w / m1p2ws) as direct links to
+the release assets. A column that has both 4 MB and 16 MB images is split in
+two ("... 4 MB" / "... 16 MB"); the W modules are 16 MB boards. Only the files
+passed in appear; an empty cell is "—".
 A board tag or display missing from the tables below still gets a row or
 column of its own, named after the raw token.
 """
@@ -61,27 +63,48 @@ def main():
             continue
         board, module = split_tag(m.group("tag"))
         disp, flash = m.group("disp"), ""
-        if disp.endswith("-16MB"):          # the 16 MB flash type of a 4 MB board
+        if disp.endswith("-16MB"):          # the 16 MB flash type
             disp, flash = disp[:-5], "-16MB"
+        elif disp.endswith("-4MB"):         # the 4 MB flash type
+            disp = disp[:-4]
         col, suffix = DISPLAYS.get(disp, (disp, ""))
         if board not in rows:
             rows.append(board)
         if col not in cols:
             cols.append(col)
-        key = (1 if suffix else 0, 1 if flash else 0, MODULE_ORDER.get(module, 9), module)
-        cells.setdefault((board, col), []).append(
-            (key, f"[{m.group('tag')}{suffix}{flash}]({base}{name})"))
+        big = 16 if (flash or module) else 4    # W / WS modules are 16 MB only
+        if not flash and module:
+            flash = "-16MB"
+        key = (1 if suffix else 0, MODULE_ORDER.get(module, 9), module)
+        cells.setdefault((board, col, big), []).append(
+            (key, m.group("tag") + suffix, flash, f"{base}{name}"))
 
-    rows = [r for r in rows if any((r, c) in cells for c in cols)]
-    cols = [c for c in cols if any((r, c) in cells for r in rows)]
+    def used(c, f=None):
+        return any(k[1] == c and (f is None or k[2] == f) for k in cells)
+
+    cols = [c for c in cols if used(c)]
+    split = {c for c in cols if used(c, 4) and used(c, 16)}
+    heads, keys = [], []
+    for c in cols:
+        if c in split:
+            heads += [f"{c} 4 MB", f"{c} 16 MB"]
+            keys += [(c, 4), (c, 16)]
+        else:
+            heads.append(c)
+            keys.append((c, None))
+    rows = [r for r in rows if any(k[0] == r for k in cells)]
 
     out = ["## Downloads", "",
-           "| Board | " + " | ".join(cols) + " |",
-           "|---|" + "---|" * len(cols)]
+           "| Board | " + " | ".join(heads) + " |",
+           "|---|" + "---|" * len(heads)]
     for r in rows:
         line = [labels.get(r, r)]
-        for c in cols:
-            links = [l for _, l in sorted(cells.get((r, c), []))]
+        for c, f in keys:
+            items = []
+            for big in ((f,) if f else (4, 16)):
+                items += cells.get((r, c, big), [])
+            # the -16MB tag is redundant under a "16 MB" header
+            links = [f"[{lbl}{'' if f else fl}]({url})" for _, lbl, fl, url in sorted(items)]
             line.append(" / ".join(links) if links else "—")
         out.append("| " + " | ".join(line) + " |")
     out += ["",
@@ -89,8 +112,8 @@ def main():
             "`*p2w` — Pimoroni Pico Plus 2 W, "
             "`*p2ws` — Waveshare RP2350B-Plus-W. "
             "`*p2w` and `*p2ws` firmwares are not interchangeable. "
-            "`-16MB` — the same board with a 16 MB flash module (adds ZXM-MoonSound); "
-            "the plain images are for 4 MB modules.",
+            "**16 MB** columns — images for a 16 MB flash module (built-in YRW801 "
+            "MoonSound ROM and GM.DLS bank); **4 MB** — for 4 MB modules.",
             ""]
     print("\n".join(out))
 

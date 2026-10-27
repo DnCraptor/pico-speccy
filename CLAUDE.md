@@ -16866,7 +16866,7 @@ and `-sdcut2-perf-` (PERF_TRACE, PERF_HIST OFF: [SD] line). Can damage the card 
 `-DFLASH_16MB=ON` (cmake/options.cmake; the W/WS boards force it, they are 16 MB only)
 = `FLASH_SIZE 16384` + `PICO_FLASH_SIZE_BYTES` set before the SDK reads the board header
 (the SDK passes it to C itself — do NOT add a second compile definition, the two spellings
-"redefine" each other), name `<board>-speccy-<display>[-variant]-16MB-<ver>` /
+"redefine" each other), name `<board>-speccy-<display>[-variant]-16MB-<ver>` (4 MB: `-4MB-`, file name only, since 2026-10-27) /
 `+16MB` on screen for non-W boards, same BOARD_TAG (same NVS dir). It sets
 `YRW801_BUILTIN=1` (the MoonSound ROM in flash; 4 MB reads it from SD). build_all.sh / .ps1 build
 every (target, display) pair in both types (`FLASH_TYPES="4 16"` / `-FlashTypes`), dirs

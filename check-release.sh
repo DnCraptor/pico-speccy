@@ -47,11 +47,11 @@ RAM_BASE=536870912  # 0x20000000
 # RP2350/RP2350B: 520KB (532480B) — same figure for the A and B package, they
 # differ in GPIO count/pins, not SRAM.
 BOARDS=(
-    "MURM|build-all/MURM/bin/MinSizeRel/m1p2-speccy-VGA-HDMI-*.elf|532480|RP2350"
-    "MURM2|build-all/MURM2/bin/MinSizeRel/m2p2-speccy-VGA-HDMI-*.elf|532480|RP2350"
-    "PICO_PC|build-all/PICO_PC/bin/MinSizeRel/PCp2-speccy-VGA-HDMI-*.elf|532480|RP2350"
-    "PICO_DV|build-all/PICO_DV/bin/MinSizeRel/DVp2-speccy-VGA-HDMI-*.elf|532480|RP2350"
-    "ZERO2|build-all/ZERO2/bin/MinSizeRel/z0p2-speccy-VGA-HDMI-*.elf|532480|RP2350"
+    "MURM|build-all/MURM/bin/MinSizeRel/m1p2-speccy-VGA-HDMI-4MB-*.elf|532480|RP2350"
+    "MURM2|build-all/MURM2/bin/MinSizeRel/m2p2-speccy-VGA-HDMI-4MB-*.elf|532480|RP2350"
+    "PICO_PC|build-all/PICO_PC/bin/MinSizeRel/PCp2-speccy-VGA-HDMI-4MB-*.elf|532480|RP2350"
+    "PICO_DV|build-all/PICO_DV/bin/MinSizeRel/DVp2-speccy-VGA-HDMI-4MB-*.elf|532480|RP2350"
+    "ZERO2|build-all/ZERO2/bin/MinSizeRel/z0p2-speccy-VGA-HDMI-4MB-*.elf|532480|RP2350"
     "MURM-16M|build-all/MURM-16MB/bin/MinSizeRel/m1p2-speccy-VGA-HDMI-16MB-*.elf|532480|RP2350"
     "MURM2-16M|build-all/MURM2-16MB/bin/MinSizeRel/m2p2-speccy-VGA-HDMI-16MB-*.elf|532480|RP2350"
     "PICO_PC-16M|build-all/PICO_PC-16MB/bin/MinSizeRel/PCp2-speccy-VGA-HDMI-16MB-*.elf|532480|RP2350"
