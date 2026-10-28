@@ -1295,6 +1295,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
         if ((portHigh & mask) != 0)
           data &= port[row];
       }
+      data &= g_len_kbmask;   // Leningrad-2: DD40/DD42 put GND on D5 and D7
       // Profi extended keyboard: bit 5 of each standard row.
       // portHigh bit i set → row i is selected → AND extPort[i] with bit 5 only.
       // (other bits of extPort are kept 1 so they don't affect bits 0-4 of data)
@@ -2028,7 +2029,7 @@ template<bool PROFI> __attribute__((always_inline)) inline uint8_t Ports::inputI
       if (((p8 & 0x20) == 0) || (p8 == Config::kempstonPort)) {
         LED::touchR(LED::KEMPJOY);
         return ia ? (port[Config::kempstonPort] ^ 0xA0)
-                  : port[Config::kempstonPort];
+                  : (uint8_t)(port[Config::kempstonPort] | g_len_kemp_hi);   // Leningrad-1: D5-D7 float
       }
     }
 
@@ -3430,6 +3431,10 @@ template<bool PROFI> __attribute__((always_inline)) inline void Ports::outputImp
     }
     VIDEO::Draw(3, g_ula_io_contend); // I/O Contention (Late)
   } else {
+    // Leningrad-1/-2: the board's #FE latch is clocked by odd ports too (L1: every
+    // one, L2: A5=0), on top of whatever card the port also reaches (Leningrad.h).
+    if (__builtin_expect(g_len_fe != 0, 0) && (g_len_fe == 1 || !(address & 0x20)) && !PROFI)
+      leningradFe(data);
     // ZX Next ports (machines/Next/NextPorts.cpp, flash)
     if (Z80Ops::isNext && NextPorts::output(address, data)) {
       ioContentionLate(false);
@@ -4480,6 +4485,7 @@ IRAM_ATTR void Ports::pitGenSound(uint8_t *buf, int bufsize) {
 bool g_ula_io_contend = true;
 void Ports::ulaIoContendRecalc() {
     g_ula_io_contend = !(Z80Ops::isPentagon || Z80Ops::isProfi || Z80Ops::isScorpion ||
+                         Config::isLeningrad() ||
                          Z80Ops::isTsconf || (Z80Ops::isAtm && !g_evo_contend) ||
                          (Z80Ops::isNext && !(NEXTVID::contend & 2)));
 }

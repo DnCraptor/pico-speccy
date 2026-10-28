@@ -66,6 +66,7 @@ static void ftTraceTick();   // defined in the VDAC2 glue section below
 #include "speccy/z80/CPU.h"
 #include "app/ESPectrum.h"
 #include "speccy/devices/sound/MoonSplit.h"
+#include "speccy/machines/Leningrad.h"   // Leningrad raster anchors + bottom-border flush
 // ZXM-MoonSound wave half on core1 (MoonSplit.h): once per rendered guest
 // line, tell core1 how far the guest has got — one test and one store.
 #if MOONSOUND
@@ -5450,6 +5451,14 @@ void VIDEO::Reset() {
             tStatesScreen = TS_SCREEN_48;
             tStatesBorder = isFullBorder ? (isFullBorder240 ? TS_BORDER_360x240 : TS_BORDER_360x288)
                           : TS_BORDER_320x240;
+            // Leningrad: the 48K raster, the paper at its own distance from the INT
+            // (machines/Leningrad.h); paper and border move together, as for KAY.
+            if (isLeningradRomset(Config::romSet48)) {
+                const int d = isLeningrad1Romset(Config::romSet48) ? Leningrad::kPaperDelta1
+                                                                   : Leningrad::kPaperDelta2;
+                tStatesScreen += d;
+                tStatesBorder += d;
+            }
         }
         VsyncFinetune[0] = 0;
         VsyncFinetune[1] = 0;
@@ -9283,6 +9292,9 @@ IRAM_ATTR void VIDEO::EndFrame() {
         framecnt++;
         return;
     }
+
+    // Leningrad-1: its bottom border is drawn after the INT (Leningrad.h).
+    if (__builtin_expect(g_len_wrap, 0)) Leningrad::frameEndFlush();
 
     linedraw_cnt = lin_end;
 

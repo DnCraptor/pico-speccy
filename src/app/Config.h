@@ -447,6 +447,8 @@ public:
     static bool isTc2068() { return arch == A_48K && isTc2068Romset(romSet); }
     // ...either Timex, i.e. "the SCLD is this machine's ULA".
     static bool isTimex() { return arch == A_48K && isTimexRomset(romSet); }
+    // Leningrad-1 / Leningrad-2 (ArchRom.h isLeningradRomset, machines/Leningrad.h).
+    static bool isLeningrad() { return arch == A_48K && isLeningradRomset(romSet); }
     static bool trdosBaseOwnedByMachine();
     static bool isAtm1()  { return arch == A_ATM && isAtm1Romset(romSetAtm); }
     // ZX Evolution BaseConf: the ATM arch on the Pentagon raster (71680 T, 48.83 Hz).

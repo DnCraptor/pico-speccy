@@ -6009,6 +6009,54 @@ at 0x153E where Sinclair's says `1982 Sinclair Research Ltd`.
   poll on an unattached `#5F`).
 
 
+## Leningrad-1 / Leningrad-2 — two 48K romsets with their own timing (2026-10-28, NOT hw-tested)
+
+`R_48K_LEN1` ("48Klen1") and `R_48K_LEN2` ("48Klen2"), Machine → **Leningrad**, both on
+the stock Sinclair 48K ROM (Config.cpp's default case binds it). Appended at the END of
+`NM_ROMSET_TABLE` because `Pss.cpp` writes the romset INDEX. Leningrad-2 is a 48K too
+(eight 565RU5, two 2764, no #7FFD) — there is no "Leningrad 128K" in these drawings.
+Everything that differs lives in `src/speccy/machines/Leningrad.{h,cpp}` (flash) behind
+byte globals in CPU.h set by `Leningrad::apply()` from CPU::reset AND
+updateStatesInFrame (turbo turns the /WAIT alignment off).
+
+Numbers are from the schematics, not from an emulator: micklab.ru's P-CAD files
+(binary P-CAD 2002 .sch — a TLV stream with a stray 1-3 byte marker every ~32 KB; nets
+are in section 0x258, parts/pins in 0x320, each pin record's LAST tag-2 carries the
+net id) cross-checked against the 1988 scan (L1) and Prusak's E3 drawing (L2). Two
+redraw errors found that way: L1 DD4 D0 is drawn to GND (a 232 T line — not PAL; the
+scan has it open = 1, 224 T), L2 DD6.2 D is drawn unconnected (two INTs a frame; the
+E3 has it on DD9.1 /Q).
+
+- **Frame**: 14 MHz / 2 = 7 MHz pixel clock, CPU 3.5 MHz, 448 px = 224 T, 312 lines =
+  69888 T — the 48K numbers, so `statesInFrame`/`tStatesPerLine` are the 48K ones.
+- **INT**: L1 at the start of the BOTTOM border (DD8.2 toggles when the frame counter
+  hits 192), paper 120 lines later, pulse ~15 T (C1 10n into R2 470R, analog);
+  L2 64 lines + the 96 T border phase before the paper (its V counter steps at the
+  start of the border phase), 32 T (DD9.2 reset by H6). Applied as a paper/border
+  shift over the 48K anchors (`kPaperDelta1` 12548, `kPaperDelta2` 100 — ~4 T of
+  that is the shift-register pipeline, tune against a real board).
+- **L1's bottom border is past the frame end**: `Leningrad::frameEndFlush()` from
+  VIDEO::EndFrame draws the remaining lines at the frame end (the FlushOnHalt idiom,
+  CPU clock restored). Border changes made in the first ~40 lines after an INT are
+  therefore not shown in the bottom border.
+- **No contention, no floating bus**: CPU and video alternate DRAM slots every T (H1);
+  slot 1 is plugged uncontended in ESPectrum setup/reset, `g_ula_io_contend` off.
+- **/WAIT**: the CPU reads RAM through an IR22 latch loaded by WRBUF = H0·/H1, and
+  /WAIT holds a read whose T2 misses that strobe: one extra T. L1 (DD9.1, D = /M1):
+  opcode fetches from 0x4000+ only, T1 EVEN waits. L2 (DD22.1, D = RAM-read select,
+  clocked by TI): every RAM read, T1 ODD waits (its CLK is the inverse of L1's). Tested
+  in fetchOpcode, in exec_nocheck's generic fetch (the Scorpion even-M1 is only in
+  fetchOpcode — exec_nocheck runs most of the frame, check that one separately) and in
+  peek8/peek16_generic. The phase rests on gate delays (which CLK edge is "T 0") — the
+  first thing to flip if a timing test disagrees.
+- **Ports**: L1 latches #FE on EVERY OUT, reads every odd port as its Kempston with
+  D5-D7 = 1; L2 latches #FE when A0=0 or A5=0, reads keyboard with D5 = D7 = 0 and odd
+  A5=1 ports as #FF. `Ports::leningradFe` repeats the border/beeper half of the ULA
+  write for the odd-port case, so a card on the same port still gets its write.
+- Hw check owed: everything. First: a border-stripe timing test (INT position), a
+  48K multicolour (paper delta), LDIR-heavy code speed (the /WAIT rule), Kempston
+  idle byte on L1.
+
 ## Z80 core speed-up (ported from ccr-05d4d17f d2c05088 via drew-zx-next, 2026-10-13, NOT hw-tested)
 
 Taken WITHOUT that branch's TS-Conf "28 MHz (turbo)" CPU cap (owner, on drew-zx-next:

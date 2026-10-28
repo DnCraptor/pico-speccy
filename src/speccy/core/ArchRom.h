@@ -88,7 +88,9 @@
     X(R_SAM512,         "SAM512",           "512K")      \
     X(R_SAM512_1M,      "SAM512_1M",        "512K + 1 MB") \
     X(R_SAM512_2M,      "SAM512_2M",        "512K + 2 MB") \
-    X(R_SAM512_4M,      "SAM512_4M",        "512K + 4 MB")
+    X(R_SAM512_4M,      "SAM512_4M",        "512K + 4 MB") \
+    X(R_48K_LEN1,       "48Klen1",          "Leningrad-1")  \
+    X(R_48K_LEN2,       "48Klen2",          "Leningrad-2")
 
 #define NM_X_IDX(id, str) id,
 #define NM_XR_IDX(id, str, ui) id,
@@ -204,6 +206,17 @@ inline bool isTimexRomset(RomsetIdx r) { return r == R_TC2048 || r == R_TC2068; 
 // printer ports #1F/#5F, or the Gama's 80 KB of RAM) would have to ask, and a literal
 // spread over five files is how the +3e's IDE scheme went wrong.
 inline bool isDidaktikRomset(RomsetIdx r) { return r == R_48K_DG89; }
+
+// Leningrad (ZS Research, S. Zonov, 1988) and Leningrad-2: Soviet 48K clones on the
+// stock Sinclair 48K ROM, so ROMSETS of A_48K (appended at the END of the table:
+// Pss writes the romset index). Same 224 T x 312-line frame as the 48K, but none of
+// the Ferranti ULA's behaviour: no contention, no floating bus, partial port decode,
+// and a /WAIT that aligns RAM reads to the 2 T memory slot. Everything that differs
+// is in src/speccy/machines/Leningrad.{h,cpp}; the numbers come from the boards'
+// schematics (micklab.ru) — see the header there.
+inline bool isLeningrad1Romset(RomsetIdx r) { return r == R_48K_LEN1; }
+inline bool isLeningrad2Romset(RomsetIdx r) { return r == R_48K_LEN2; }
+inline bool isLeningradRomset(RomsetIdx r)  { return r == R_48K_LEN1 || r == R_48K_LEN2; }
 
 // "Is the GMX firmware live?" — one romset today (ProfRom GMX v5.44), but the question
 // is asked from a dozen places (CPU::reset's g_scorp_gmx, the butter/traded fallbacks

@@ -1721,6 +1721,10 @@ IRAM_ATTR void Z80::exec_nocheck() {
             opCode = MemESP::ramCurrent[pg][REG_PC & 0x1fff];
             if (divmmc) DivMMC::postOpcFetch();
         } else {
+        // Leningrad /WAIT (machines/Leningrad.h): this is the fetch that runs most of
+        // the frame, so the alignment has to be here as well as in fetchOpcode().
+        if (__builtin_expect(g_len_m1 != 0, 0) && (REG_PC & 0xC000) && (CPU::tstates & 1) == (uint32_t)(g_len_m1 - 1))
+            VIDEO::Draw(1, false);
         VIDEO::Draw_Opcode(MemESP::ramContended[pg]);
         if (__builtin_expect(g_ts_memcyc != 0, 0) && !tsMemNoDram(REG_PC)) {   // TS-Conf DRAM model (TsConf.cpp)
             const uint32_t w = TsConf::cpuMemMiss(REG_PC, true);
@@ -4711,7 +4715,7 @@ Z80_COLD void Z80::zcInirBatch() {
         if (!z80_in_nocheck || Config::numPcBP > 0 || Config::numPortReadBP > 0 ||
             Config::numMemWriteBP > 0 || Rzx::mode) break;
         if (!DivMMC::cardSelected() || Z80Ops::isProfi || Z80Ops::isNext) break;
-        if (g_ts_memcyc || g_scorp_even_m1 || g_timex_mmu || (g_tsconf_wr & 0x10)) break;
+        if (g_ts_memcyc || g_scorp_even_m1 || g_len_m1 || g_timex_mmu || (g_tsconf_wr & 0x10)) break;
         bool cont = false;
         for (int i = 0; i < 8; i++) cont |= MemESP::ramContended[i];
         if (cont) break;

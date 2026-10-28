@@ -55,6 +55,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include "speccy/machines/Timex.h"      // g_timex_mmu + Timex::rd/wr (TC2068 SCLD horizontal MMU)
 #include "speccy/machines/Atm.h"        // g_atm_ro (ATM-Turbo ROM windows) + Atm::reset/intEnabled
 #include "speccy/machines/EvoBase.h"    // ZX-Evo font RAM, INT ack
+#include "speccy/machines/Leningrad.h"  // Leningrad-1/-2 frame INT, /WAIT alignment
 #include "speccy/machines/TsConf/TsFastMem.h"
 #include "app/CodeOverlay.h" // TS_OVL_CODE (CPU::tsFrameLoop)
 #include "speccy/core/Rzx.h"
@@ -117,6 +118,8 @@ bool Z80Ops::is1024 = false;
 bool Z80Ops::isProfi = false;
 bool Z80Ops::isScorpion = false;
 bool g_scorp_even_m1 = false;
+uint8_t g_len_m1 = 0, g_len_rd = 0, g_len_fe = 0, g_len_kemp_hi = 0, g_len_kbmask = 0xFF;
+bool g_len_wrap = false;
 bool g_scorp_gmx = false;
 bool g_scorp_prof = false;
 bool g_scorp_banked = false;
@@ -154,6 +157,12 @@ void CPU::updateStatesInFrame() {
             statesInFrame = TSTATES_PER_FRAME_BYTE;
             IntStart = INT_START48;
             IntEnd = INT_END_BYTE48;
+        }
+        // Leningrad: the 48K frame, its own INT pulse (Leningrad.h) — no Early/Late
+        // ULA variants, the board has no ULA.
+        if (isLeningradRomset(Config::romSet48)) {
+            IntStart = 0;
+            IntEnd = isLeningrad1Romset(Config::romSet48) ? Leningrad::kIntLen1 : Leningrad::kIntLen2;
         }
     } else if (Config::arch == A_128K || Z80Ops::isALF) {
         // The +2A/+3 (romset R_P3) keeps the 128K frame (70908 T, 228 T/line, screen
@@ -244,6 +253,7 @@ void CPU::updateStatesInFrame() {
     // TS-Conf: the FRAME INT window is programmable (HSINT/VSINT) — override
     // the Pentagon IntStart/IntEnd just set above with the guest's position.
     if (Z80Ops::isTsconf) TsConf::frameIntRecalc();
+    Leningrad::apply();       // its /WAIT alignment is off under turbo
     TsConf::memcycRecalc();   // the 14 MHz wait-state gate follows EVERY clock change (Alt+F2 too), 0 off TS-Conf
 }
 
@@ -310,7 +320,11 @@ void CPU::reset() {
         ESPectrum::target = MICROS_PER_FRAME_128;
     } else if (Config::arch == A_48K) {
         Z80Ops::isByte = (Config::romSet48 == R_48K_BY);
-        Ports::getFloatBusData = &Ports::getFloatBusData48;
+        // Leningrad: no ULA, so no floating bus — L1 answers every odd port with its
+        // Kempston, L2's data bus has pull-ups (machines/Leningrad.h).
+        Ports::getFloatBusData = isLeningrad1Romset(Config::romSet48) ? &Ports::getFloatBusDataLen1
+                               : isLeningrad2Romset(Config::romSet48) ? &Ports::getFloatBusDataNone
+                                                                      : &Ports::getFloatBusData48;
         Z80Ops::is48 = true;
         Z80Ops::is128 = false;
         Z80Ops::isPentagon = false;
@@ -452,6 +466,7 @@ void CPU::reset() {
         ESPectrum::target = MICROS_PER_FRAME_PENTAGON;
     }
 
+    Leningrad::apply();
     Ports::ulaIoContendRecalc();
 
     // 16col is Pentagon-only — auto-disable when switching to non-Pentagon arch.
@@ -1360,6 +1375,9 @@ IRAM_ATTR uint8_t Z80Ops::peek8(uint16_t address) {
     return peek8_generic(address);
 }
 static IRAM_ATTR __attribute__((noinline)) uint8_t peek8_generic(uint16_t address) {
+    // Leningrad-2 /WAIT on a RAM data read (Leningrad.h).
+    if (__builtin_expect(g_len_rd != 0, 0) && (address & 0xC000) && (CPU::tstates & 1) == (uint32_t)(g_len_rd - 1))
+        VIDEO::Draw(1, false);
     VIDEO::Draw(3, MemESP::ramContended[address >> 13]);
     if (__builtin_expect(g_ts_memcyc != 0, 0)) {              // TS-Conf DRAM model (TsConf.cpp)
         const uint32_t w = TsConf::cpuMemRead(address, false);
@@ -1420,6 +1438,9 @@ IRAM_ATTR uint8_t Z80Ops::fetchOpcode() {
     // cycle fetching from 0x4000+ that would start on an odd T-state gets one
     // wait T first. Draw(1) so the renderer accounts the extra tact too.
     if (g_scorp_even_m1 && (pc & 0xC000) && (CPU::tstates & 1))
+        VIDEO::Draw(1, false);
+    // Leningrad /WAIT (Leningrad.h): same shape, its own phase.
+    if (__builtin_expect(g_len_m1 != 0, 0) && (pc & 0xC000) && (CPU::tstates & 1) == (uint32_t)(g_len_m1 - 1))
         VIDEO::Draw(1, false);
     // The M1 half of the same tap (ZXMAK2 and MAME both hook fetch and read).
     // ProfROM uses it for cross-plane jumps — plane 1 bank 3 does JP #010E at
@@ -1643,7 +1664,8 @@ static IRAM_ATTR __attribute__((noinline)) uint16_t peek16_generic(uint16_t addr
 
     uint8_t page = address >> 13;
 
-    if (page == ((address + 1) >> 13)) {    // Check if address is between two different pages
+    // Leningrad-2: each half is its own read cycle with its own /WAIT phase.
+    if (page == ((address + 1) >> 13) && __builtin_expect(g_len_rd == 0, 1)) {    // Check if address is between two different pages
 
         if (MemESP::ramContended[page]) {
             VIDEO::Draw(3, true);

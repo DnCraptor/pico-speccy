@@ -705,6 +705,12 @@ static const Option opt_mach_timex[] = {
 static const Option opt_mach_didaktik[] = {
     { TXT_ROM_DG89,       NM_MACH(A_48K, R_48K_DG89), TXT_ROM_DG89_S },
 };
+// Leningrad-1 and Leningrad-2 — 48K clones on the stock ROM whose frame INT, /WAIT
+// and port decode are their own (machines/Leningrad.h), so they read as machines.
+static const Option opt_mach_leningrad[] = {
+    { TXT_ROM_LEN1,       NM_MACH(A_48K, R_48K_LEN1), TXT_ROM_LEN1_S },
+    { TXT_ROM_LEN2,       NM_MACH(A_48K, R_48K_LEN2), TXT_ROM_LEN2_S },
+};
 // Pentagon is built at runtime, not static: 512K/1024K need extended-RAM backing
 // and that gate used to live on their rows. Rebuilt on every call (NOT cached like
 // mach_scorpOpts) because p_extRam() includes FileUtils::fsMount — a card inserted
@@ -917,6 +923,7 @@ static const Node kMachine[] = {
     NM_RADIO  (TXT_MACH_TIMEX,    SET_MACHINE, opt_mach_timex,    nullptr),
     NM_SUB    (NM_IND TXT_MACH_TIMEX_CART, kTimexCart, p_tc2068Active),
     NM_RADIO  (TXT_MACH_DIDAKTIK, SET_MACHINE, opt_mach_didaktik, nullptr),
+    NM_RADIO  (TXT_MACH_LENINGRAD, SET_MACHINE, opt_mach_leningrad, nullptr),
     NM_RADIO_D(TXT_MACH_PENTAGON, SET_MACHINE, mach_pentOpts,     nullptr),
     // Machine-dependent options sit right under their machine, indented so the
     // grouping reads at a glance (they also only show while that machine is

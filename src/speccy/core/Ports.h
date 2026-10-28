@@ -67,6 +67,12 @@ public:
     // +2A/+3: the ULA does not put the screen byte on an unattached port — reads
     // return idle bus. Fuse models this as spectrum_unattached_port_none.
     static uint8_t getFloatBusDataNone();
+    // Leningrad-1: every odd port is the on-board Kempston (DD37/DD38, A0=1),
+    // whose unused inputs D5-D7 float high (machines/Leningrad.cpp).
+    static uint8_t getFloatBusDataLen1();
+    // Leningrad-1/-2: the #FE latch (DD39 / DD36) clocked by an OUT that the 48K
+    // ULA would not see — the board's partial decode (machines/Leningrad.cpp).
+    static void leningradFe(uint8_t data);
     static uint8_t getFloatBusDataNext();
 
     static void FDDStep(bool force);

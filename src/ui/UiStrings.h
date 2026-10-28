@@ -321,6 +321,13 @@
 #define TXT_MACH_DIDAKTIK    "Didaktik"
 #define TXT_ROM_DG89         "48K (Gama 89)"
 #define TXT_ROM_DG89_S       "Gama 89"
+// Leningrad-1 / Leningrad-2 (ZS Research) — Soviet 48K clones with their own timing,
+// their own Machine row like Didaktik (ArchRom.h isLeningradRomset).
+#define TXT_MACH_LENINGRAD   "Leningrad"
+#define TXT_ROM_LEN1         "Leningrad-1 (48K)"
+#define TXT_ROM_LEN1_S       "Leningrad-1"
+#define TXT_ROM_LEN2         "Leningrad-2 (48K)"
+#define TXT_ROM_LEN2_S       "Leningrad-2"
 #define TXT_ROM_CUSTOM      "Custom"
 // Two DIFFERENT flash images (Devices > Replace ROM slots "48K" and "128K"),
 // so they cannot share one row. Pentagon reuses the 128K image and keeps the

@@ -1488,7 +1488,8 @@ void ESPectrum::setup() {
   MemESP::plug16(1, MemESP::ram[5].direct(),
                  !(Config::arch == A_P1024 || Config::arch == A_P512 ||
                    Config::arch == A_PENT || Config::arch == A_PROFI ||
-                   Config::arch == A_SCORP || Config::arch == A_ATM));
+                   Config::arch == A_SCORP || Config::arch == A_ATM ||
+                   Config::isLeningrad()));   // no ULA: CPU and video share slots, no wait
   MemESP::plug16(2, MemESP::ram[2].sync(2), false);
   MemESP::plug16(3, MemESP::ram[MemESP::bankLatch].sync(3), false);
 
@@ -2263,7 +2264,8 @@ void ESPectrum::reset(uint8_t romInUse) {
   MemESP::plug16(1, MemESP::ram[5].direct(),
                  !(Config::arch == A_P1024 || Config::arch == A_P512 ||
                    Config::arch == A_PENT || Config::arch == A_PROFI ||
-                   Config::arch == A_SCORP || Config::arch == A_ATM));
+                   Config::arch == A_SCORP || Config::arch == A_ATM ||
+                   Config::isLeningrad()));   // no ULA: CPU and video share slots, no wait
   MemESP::plug16(2, MemESP::ram[2].sync(2), false);
   MemESP::plug16(3, MemESP::ram[0].sync(3), false);
 

@@ -112,6 +112,17 @@ visit https://zxespectrum.speccy.org/contacto
 // A plain global tested once per opcode fetch (the g_ngs_zxdma pattern) — set in
 // CPU::reset only, so it can never be stale mid-frame.
 extern bool g_scorp_even_m1;
+// Leningrad-1 / -2 (machines/Leningrad.h), all derived in Leningrad::apply() from
+// CPU::reset and CPU::updateStatesInFrame, zero on every other machine:
+//  g_len_m1 / g_len_rd — /WAIT alignment of an opcode fetch / a data read from RAM
+//      (0x4000+): one extra T when (T1 & 1) == value - 1;
+//  g_len_fe — OUT to an ODD port also clocks the #FE latch (1 = any odd port,
+//      2 = odd ports with A5 = 0);
+//  g_len_kemp_hi — OR-ed into a Kempston read (L1: D5-D7 float high);
+//  g_len_kbmask — AND-ed into a keyboard read (L2: D5 and D7 are grounded);
+//  g_len_wrap — the bottom border lies past the frame end (VIDEO::EndFrame).
+extern uint8_t g_len_m1, g_len_rd, g_len_fe, g_len_kemp_hi, g_len_kbmask;
+extern bool g_len_wrap;
 // A GMX romset live (isScorpGmxRomset) — set in CPU::reset, gates the GMX port
 // family, the 2 MB page composition and the ProfROM plane arithmetic.
 extern bool g_scorp_gmx;
