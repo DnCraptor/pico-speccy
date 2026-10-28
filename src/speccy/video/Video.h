@@ -295,6 +295,11 @@ public:
 
   // Unified border functions (all models, all resolutions)
   static void TopBorder_Blank();
+  // Leningrad-1 (machines/Leningrad.h): its bottom band is the first ~48 lines of
+  // the next frame, so at EndFrame the border machine is not parked but either
+  // continued across the frame wrap (walked = EndFrame's DrawBorder() ran) or
+  // re-armed at the band's start. Flash.
+  static void lenBorderRearm(bool walked);
   static void TopBorder();
   static void MiddleBorder();
   static void BottomBorder();
@@ -514,6 +519,11 @@ public:
   // hi-res / TS-Conf whole-line modes keep their own geometry. Decided per frame
   // in EndFrame (blRecalc), so the menu hook only has to write Config.
   static bool bl_live;
+  // Leningrad-1 shift register glitch (machines/Leningrad.h glitchRow): the
+  // standard renderer's line-completion block raises bl_line_done with it, and
+  // blExpandLine patches the finished line before any scaling. Set by
+  // Leningrad::apply(), zero on every other machine.
+  static bool len_glitch;
   // TS-Conf VDAC2 (FT812): VConfig b2 hands the whole framebuffer to the chip's
   // display list. ft_live = that mode is on: the beam renderer and the border
   // machine are parked, core1 renders the swapped list band by band into the fb

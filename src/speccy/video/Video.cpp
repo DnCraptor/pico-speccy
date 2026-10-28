@@ -5394,9 +5394,12 @@ void VIDEO::nextRasterSet() {
 // re-pointed Draw at the standard ULA renderer on the Next / TS-Conf / ATM,
 // whose own renderers own Draw (2026-10-07).
 bool VIDEO::snowAllowed() {
+    // Leningrad: no ULA, the video address counter never sees the Z80's refresh
+    // address — no snow (machines/Leningrad.h).
     return Config::arch != A_P1024 && Config::arch != A_P512 && Config::arch != A_PENT &&
            Config::arch != A_PROFI && Config::arch != A_SCORP && Config::arch != A_TSCONF &&
-           Config::arch != A_ATM && Config::arch != A_NEXT && !Config::isPlus3();
+           Config::arch != A_ATM && Config::arch != A_NEXT && !Config::isPlus3() &&
+           !Config::isLeningrad();
 }
 
 void VIDEO::Reset() {
@@ -5911,6 +5914,7 @@ void VIDEO::InitPrevBuffer() {
 // blExpandLine() scales it into the framebuffer when the line completes. Heap,
 // allocated only while the mode is live (blRecalc).
 bool VIDEO::bl_live = false;
+bool VIDEO::len_glitch = false;
 bool VIDEO::ft_live = false;
 static void ftModeSwitch(bool on);      // VDAC2 glue, end of this file
 static bool ftGlueEnsure();
@@ -6259,7 +6263,8 @@ IRAM_ATTR void VIDEO::MainScreen(unsigned int statestoadd, bool contended) {
             Draw_Opcode = &MainScreen_Blank_Opcode;
         }
         loopCount -= coldraw_cnt - 32;
-        bl_line_done = bl_live | ov_staging;
+        // len_glitch: the Leningrad-1 line-end pass rides the same flush (blExpandLine).
+        bl_line_done = bl_live | ov_staging | len_glitch;
     }
 
     if (__builtin_expect(ts_render_live != 0, 0)) {
@@ -7507,8 +7512,33 @@ void VIDEO::ovRecalc() {
     ov_y0 = y0; ov_y1 = y1;
 }
 
+// Leningrad-1 shift register glitch (machines/Leningrad.h): patch pixel 7 of every
+// cell of the line just finished, in whichever buffer the renderer wrote it —
+// the borderless stage, the big-mode stage or the fb row. Only the plain
+// beam-raced paper qualifies: the other branches of MainScreen lay the row out
+// differently (pairs, planes, whole-line modes) and the Gigascreen branch has
+// already blended it with the previous frame.
+static void lenGlitchLine(uint32_t line) {
+    if (line >= 192 || VIDEO::gigascreen_enabled || VIDEO::timex_hires_live || VIDEO::gmx_ext_live ||
+        VIDEO::ts_render_live || VIDEO::mode16col_enabled || (Config::timex_video && VIDEO::timex_mode != 0) ||
+        (Config::arch == A_PROFI && (Ports::portDFFD & 0x80)))
+        return;
+    uint32_t* row;
+    if (VIDEO::bl_live) { if (!bl) return; row = bl->stage; }
+    else if (ov_staging) { if (!ov_stage) return; row = ov_stage; }
+    else {
+        const uint32_t frow = line + (uint32_t)lin_end;
+        if (!VIDEO::vga.frameBuffer || frow >= (uint32_t)VIDEO::vga.yres) return;
+        row = (uint32_t*)VIDEO::vga.frameBuffer[frow] + lineptr_offset;
+    }
+    const uint8_t* att = dma_attr_override ? dma_attr_override : VIDEO::grmem + VIDEO::offAtt[line];
+    Leningrad::glitchRow(row, VIDEO::grmem + VIDEO::offBmp[line], att, VIDEO::flashing, AluByte);
+}
+
 __attribute__((noinline, optimize("O2", "no-unroll-loops", "no-tree-loop-distribute-patterns"))) void VIDEO::blExpandLine(uint32_t line) {
-    if (!bl_live) { ovPutRow((int)(line + lin_end)); return; }
+    if (__builtin_expect(len_glitch, 0)) lenGlitchLine(line);
+    // ov_staging: bl_line_done is raised by len_glitch too, for lines no stage holds.
+    if (!bl_live) { if (ov_staging) ovPutRow((int)(line + lin_end)); return; }
     if (!bl || line >= 192 || !vga.frameBuffer) return;
     const uint8_t* src = (const uint8_t*)bl->stage;
     uint32_t* o = bl->out;
@@ -9996,14 +10026,17 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         lastBrdTstate = tStatesBorder;
         brdChange = false;
     } else {
+    bool brdWalked = false;     // DrawBorder() ran this frame end (lenBorderRearm)
     if (!skipFrame) {
         if (brdChange || brdGigascreenChange) {
             DrawBorder();
+            brdWalked = true;
             brdnextframe = true;
             brdGigascreenChange = false;
         } else {
             if (brdnextframe) {
                 DrawBorder();
+                brdWalked = true;
                 brdnextframe = false;
             }
         }
@@ -10011,12 +10044,17 @@ extern uint16_t g_brd_col_v[], g_brd_col_n[]; extern uint8_t g_brd_col_used;
         brdGigascreenChange = false;
     }
 
-    // Restart border drawing (single TopBorder_Blank for all models)
-    if (skipFrame)
+    // Restart border drawing (single TopBorder_Blank for all models — the
+    // Leningrad-1 keeps its machine running into the next frame, see lenBorderRearm)
+    if (skipFrame) {
         DrawBorder = &Border_Blank;
-    else
+        lastBrdTstate = tStatesBorder;
+    } else if (__builtin_expect(g_len_wrap, 0)) {
+        lenBorderRearm(brdWalked);
+    } else {
         DrawBorder = &TopBorder_Blank;
-    lastBrdTstate = tStatesBorder;
+        lastBrdTstate = tStatesBorder;
+    }
     brdChange = false;
     }
 
@@ -10177,7 +10215,8 @@ void VIDEO::RedrawPausedFrame() {
         gmx_border_dirty = true;
         gmxBorderFrame(false);
     } else {
-    CPU::tstates = CPU::statesInFrame;
+    // Leningrad-1: the bottom band lies past the frame end (machines/Leningrad.h).
+    CPU::tstates = CPU::statesInFrame + Leningrad::borderExtraT();
     lastBrdTstate = tStatesBorder;
     DrawBorder = &TopBorder_Blank;
     DrawBorder();
@@ -10614,6 +10653,61 @@ IRAM_ATTR void VIDEO::MiddleBorder() {
     }
 }
 
+// The bottom band is done. Every machine parks the border machine here — except
+// the Leningrad-1 (machines/Leningrad.h), whose band is the first ~48 lines of the
+// NEXT frame: there the machine is cyclic and goes on to wait for the top band.
+static inline __attribute__((always_inline)) void borderBandDone() {
+    if (__builtin_expect(g_len_wrap, 0)) {
+        // The band of THIS frame (its T before the frame end): the catch-up goes on
+        // into the top border — otherwise a walk that started at the band stops
+        // here and the top and side borders keep whatever was on screen (hw
+        // 2026-10-28: the menu stayed in them). A band painted past the frame end
+        // (RedrawPausedFrame's extended walk) just parks: continuing would start
+        // the top border of the SAME frame again and never end.
+        // UNSCALED frame: under turbo CPU::tstates/statesInFrame are scaled while the
+        // border constants are not, so the whole cycle fits the first half of a turbo
+        // frame — testing the scaled length would restart the top border for ever.
+        const bool thisFrame = VIDEO::lastBrdTstate <
+                               ((uint32_t)CPU::statesInFrame >> ESPectrum::multiplicator);
+        VIDEO::lastBrdTstate = VIDEO::tStatesBorder;
+        VIDEO::DrawBorder = &VIDEO::TopBorder_Blank;
+        if (thisFrame) VIDEO::DrawBorder();
+    } else {
+        VIDEO::DrawBorder = &VIDEO::Border_Blank;
+    }
+}
+
+// Leningrad-1 twin of EndFrame's "restart border drawing": the machine is either
+// mid-band (it was walked to the frame end this frame — keep its state, wrap its
+// clock) or stale (nothing changed this frame — re-arm it at the band's start, i.e.
+// at T ≈ 0 of the new frame: tStatesBorder + lin_end2 lines − the frame).
+__attribute__((noinline)) void VIDEO::lenBorderRearm(bool walked) {
+    // A one-off repaint (brdnextframe: reset, menu exit, notify expiry) walks ONE
+    // frame — from wherever the machine stood, often the top border (VIDEO::Reset
+    // arms TopBorder_Blank). The band is the start of the NEXT frame, so that walk
+    // ends right as the band begins; ask for one more walk, once (hw 2026-10-28:
+    // after F11 the band stayed black). The chained walk does not chain again.
+    static bool chained = false;
+    if (walked && !brdnextframe) {
+        if (!chained) { brdnextframe = true; chained = true; }
+        else chained = false;
+    }
+    if (walked && DrawBorder != &Border_Blank && lastBrdTstate >= (uint32_t)CPU::statesInFrame) {
+        lastBrdTstate -= (uint32_t)CPU::statesInFrame;
+        return;
+    }
+    if (!vga.frameBuffer || lin_end2 >= vga.yres) { DrawBorder = &Border_Blank; lastBrdTstate = tStatesBorder; return; }
+    Select_Update_Border();
+    brdlin_cnt = (int)lin_end2;
+    brdcol_cnt = brdcol_start;
+    brdptr16 = (uint16_t *)(vga.frameBuffer[lin_end2]);
+    prevBrdptr8 = vga.prevFrameBuffer ? prevRowBorder((int)lin_end2) : (uint8_t *)brdptr16;
+    DrawBorder = osd_led_w ? &BottomBorder_OSD : Draw_OSD43;
+    const int32_t t = (int32_t)tStatesBorder + (int32_t)lin_end2 * (int32_t)tStatesPerLine
+                    - (int32_t)CPU::statesInFrame;
+    lastBrdTstate = t > 0 ? (uint32_t)t : 0u;
+}
+
 IRAM_ATTR void VIDEO::BottomBorder() {
     while (lastBrdTstate <= CPU::tstates) {
         if (brdcol_cnt < brdcol_retrace) {
@@ -10638,7 +10732,7 @@ IRAM_ATTR void VIDEO::BottomBorder() {
             brdcol_cnt = brdcol_start;
             lastBrdTstate += tStatesPerLine - brdcol_end;
             if (brdlin_cnt == (int)vga.yres) {
-                DrawBorder = &Border_Blank;
+                borderBandDone();
                 return;
             }
             brdptr16 = (uint16_t *)(vga.frameBuffer[brdlin_cnt]);
@@ -10680,7 +10774,7 @@ IRAM_ATTR void VIDEO::BottomBorder_OSD() {
             brdcol_cnt = brdcol_start;
             lastBrdTstate += tStatesPerLine - brdcol_end;
             if (brdlin_cnt == (int)vga.yres) {
-                DrawBorder = &Border_Blank;
+                borderBandDone();
                 return;
             }
             brdptr16 = (uint16_t *)(vga.frameBuffer[brdlin_cnt]);

@@ -6056,6 +6056,77 @@ E3 has it on DD9.1 /Q).
 - Hw check owed: everything. First: a border-stripe timing test (INT position), a
   48K multicolour (paper delta), LDIR-heavy code speed (the /WAIT rule), Kempston
   idle byte on L1.
+- **Leningrad-1 "shift register glitch" (2026-10-28, NOT hw-tested, `debug/DVp2w-len-glitch-1.1.1`):**
+  zxbyte.org/leningrad_video_out.htm §5 ("искажение прорисовки окружностей") — owner:
+  "глюк не повторяется". Read off its video frame by frame: a CIRCLE breaks at every
+  byte boundary, a gap where the LAST pixel of a cell should be and a 2-px-wide pixel
+  one column EARLY where the next cell starts (gap above the block on a down-right
+  arc = the early rule, not the late one). Cause per the page: /SCR, the parallel-load
+  strobe of DD33 (K555IR9 = 74LS166), reaches it before the clock edge that should shift
+  out pixel 7, so that edge loads the next byte — pixel 7 of cell N = bit 7 of cell N+1
+  through cell N's attribute (and its FLASH). 6-px-wide text (cols 1..6) is untouched,
+  which is why the page says "characters AND lines". Modelled as `Leningrad::glitchRow`
+  (flash): a line-end pass over the fb row the beam renderer just wrote — the standard
+  MainScreen branch ORs `VIDEO::len_glitch` into `bl_line_done` (+12 B of RAM code, the
+  only shared-path cost) and `blExpandLine` patches the low-nibble word of cells 0..30
+  from the line's bitmap/attribute bytes BEFORE any borderless/big-mode staging copy
+  (`ovPutRow` is now called only for a line that really went to `ov_stage`). Cell 31
+  keeps its last pixel (no 33rd load). Skipped under Gigascreen (the row is already
+  blended), Timex modes, 16col, DS80/GMX/TS whole-line modes. **No setting — owner's
+  rule ("Leningrad-1 должен работать с этой ошибкой"): `VIDEO::len_glitch` is simply
+  `Leningrad-1 running`**; a `Config::len1_glitch` row was built and removed the same
+  hour. Leningrad-2 untouched (different video circuit, the page is about L1). Same
+  build: **no snow on either Leningrad** (`snowAllowed`) — no ULA, the video counter
+  never sees the Z80's refresh address. Hw check: `CIRCLE 125,85,85` in 48 BASIC
+  shows the breaks of the page's video; text, the © banner and the menu unchanged.
+- **Leningrad-1 had NO bottom border (owner's screenshot 2026-10-28: the menu's footer
+  stayed in the band for ever; same build as above, NOT hw-tested).** `frameEndFlush`
+  drove only `Draw` (the paper), but the bottom band is painted by the BORDER state
+  machine (`MiddleBorder` -> `BottomBorder` -> `Border_Blank`), clocked by
+  `lastBrdTstate` against `CPU::tstates` — and with the paper ending at the frame end
+  those rows are at virtual T past `statesInFrame`, which EndFrame's `DrawBorder()`
+  (catch-up to the frame end, only on `brdChange || brdGigascreenChange ||
+  brdnextframe`) never reaches. A first cut walked the machine past the frame end
+  inside `frameEndFlush` — the band then came out FLAT (one colour, the frame-end one)
+  while a loader's stripes ran through the top and side borders (owner's second
+  screenshot: "не всё пофикшено"). **Now the border machine is CYCLIC on L1**: the
+  band is painted at its real time, the first ~48 lines of the NEXT frame.
+  `borderBandDone()` (the `brdlin_cnt == yres` exit of `BottomBorder` /
+  `BottomBorder_OSD`, one `g_len_wrap` test) arms `TopBorder_Blank` with
+  `lastBrdTstate = tStatesBorder` instead of parking in `Border_Blank`; EndFrame's
+  "restart border drawing" calls `VIDEO::lenBorderRearm(walked)` (flash) instead of
+  the reset: machine walked this frame end → keep its state (mid-band or the last
+  middle row) and wrap `lastBrdTstate -= statesInFrame`; not walked (nothing changed)
+  → re-arm at the band start (`brdlin_cnt = lin_end2`, `DrawBorder` = the bottom
+  machine, `lastBrdTstate = tStatesBorder + lin_end2 lines − frame`, clamped ≥ 0 — it
+  is ~−8 T, i.e. the band starts at the INT). `RedrawPausedFrame`'s whole-frame walk
+  runs `Leningrad::borderExtraT()` (= (yres − screenTopRows() − 192 + 1) lines) past
+  the frame end, so a paused redraw paints the band too. The old deviation ("border
+  changes in the first ~40 lines after the INT are not shown in the band") is gone.
+  **Trap in `lastBrdTstate`: it is uint32 and compared `<= CPU::tstates`, so a
+  negative re-arm value would park the machine for ever — hence the clamp.**
+  Second hw round (after F11 the band stayed BLACK with stale blocks): a one-off
+  repaint (`brdnextframe` — VIDEO::Reset, menu exit, notify expiry) walks ONE frame
+  from wherever the machine stands, and Reset arms the TOP border, so that walk ends
+  exactly where the band begins. `lenBorderRearm` chains one more walk after a
+  brdnextframe-only walk (a static `chained` flag stops it chaining again); a border
+  change already gets two (the change frame + brdnextframe), now three.
+  Third round (menu exit left the menu in the TOP and SIDE borders): the band-done
+  exit returned, so a walk that started at the band painted only the band and
+  stopped. `borderBandDone` now continues the same catch-up into `TopBorder_Blank`
+  when the band was this frame's (`lastBrdTstate < statesInFrame` before the reset);
+  a band painted past the frame end (RedrawPausedFrame's extended walk) only parks —
+  continuing would restart the same frame's top border and never terminate. **The
+  test is against the UNSCALED frame** (`statesInFrame >> multiplicator`): under
+  turbo the border constants are not scaled, the whole cycle fits the first half of
+  the turbo frame, and the scaled test made Alt+F2 an endless loop (found by review
+  before hw). Audited the same day, no other hole found: skipFrame (re-arms at the
+  band one frame late, as everywhere), Render border = No (machine parked, separate
+  EndFrame branch), F8/LED carve (`Draw_OSD43` / `BottomBorder_OSD`), a machine switch
+  off L1 (`g_len_wrap` drops, the standard reset runs). Known, not fixed: a debugger
+  stop mid-frame runs EndFrame with tstates < statesInFrame, so the machine re-arms at
+  the band early — one frame of stale border, the standard machines have the same
+  class of glitch there.
 
 ## Z80 core speed-up (ported from ccr-05d4d17f d2c05088 via drew-zx-next, 2026-10-13, NOT hw-tested)
 

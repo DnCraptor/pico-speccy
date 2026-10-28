@@ -50,7 +50,29 @@ constexpr int kIntLen2 = 32;
 // running machine. Clears them all off a Leningrad.
 void apply();
 
-// VIDEO::EndFrame, Leningrad-1 only: render the lines that fall past the frame end.
+// VIDEO::EndFrame, Leningrad-1 only: render the paper's last line, which ends a
+// few T past the frame end. The bottom border band is painted during the first
+// ~48 lines of the NEXT frame by the cyclic border machine (VIDEO::lenBorderRearm).
 void frameEndFlush();
+// T-states a whole-frame border walk (RedrawPausedFrame) must run PAST the frame
+// end to reach the bottom border rows on a Leningrad-1 (0 elsewhere).
+uint32_t borderExtraT();
+
+// Leningrad-1 "shift register glitch" — always on, it IS the board (owner's rule:
+// no setting). /SCR — the parallel-load strobe of the pixel shift register
+// DD33 (K555IR9 = 74LS166) — arrives before the pixel clock edge that should
+// shift out the last pixel of a byte, so that edge LOADS the next byte instead:
+// pixel 7 of every cell shows bit 7 of the NEXT cell (through this cell's ink/
+// paper), i.e. the last pixel of a byte is lost and the first pixel of the next
+// one is two wide and one pixel early. zxbyte.org/leningrad_video_out.htm §5
+// ("искажение прорисовки окружностей"): a circle breaks at every byte boundary,
+// 6-pixel-wide text is untouched. The factory fix is an RC on /SCR, often not
+// fitted. Applied as a line-end pass over the fb row the beam renderer has just
+// written (VIDEO::blExpandLine): row = 64 words of one paper line in the fb's
+// x^2 order, bmp/att = the line's 32 bitmap and attribute bytes, alu = the
+// AluByte LUT, flashing = VIDEO::flashing. Cell 31 keeps its last pixel (there is
+// no 33rd load); only the LOW nibble word of a cell is rewritten.
+void glitchRow(uint32_t* row, const uint8_t* bmp, const uint8_t* att, uint8_t flashing,
+               unsigned int* const* alu);
 
 }

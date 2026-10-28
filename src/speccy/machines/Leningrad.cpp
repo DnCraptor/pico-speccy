@@ -33,13 +33,41 @@ void Leningrad::apply() {
     g_len_kemp_hi = l1 ? 0xE0 : 0;
     g_len_kbmask = l2 ? 0x5F : 0xFF;
     g_len_wrap = l1;
+    VIDEO::len_glitch = l1;     // the DD33 early-/SCR glitch is the board, not an option
+}
+
+void Leningrad::glitchRow(uint32_t* row, const uint8_t* bmp, const uint8_t* att, uint8_t flashing,
+                          unsigned int* const* alu) {
+    // The FLASH inversion sits after the shift register (the attribute mux), so the
+    // borrowed bit takes THIS cell's inversion, as its own pixels do.
+    for (int n = 0; n < 31; n++) {
+        const uint8_t a  = att[n];
+        const uint8_t fl = (uint8_t)(-((a & flashing) >> 7));
+        const uint8_t g  = (uint8_t)(((bmp[n] & 0xFE) | (bmp[n + 1] >> 7)) ^ fl);
+        row[2 * n + 1] = alu[g & 0x0F][a];     // pixels 4..7 of cell n
+    }
 }
 
 // Leningrad-1: the bottom border (and the 16 VSYNC lines) follow the INT, i.e. they
 // belong to the next emulated frame. Draw them now, from where the renderer stopped
 // to its end-of-field state, without moving the CPU clock — the FlushOnHalt idiom.
+uint32_t Leningrad::borderExtraT() {
+    if (!g_len_wrap) return 0;
+    // The fb rows below the paper, plus one line so the machine reaches its
+    // end-of-field state (Border_Blank) inside the walk. Unscaled T: the border
+    // machine's clock is unscaled too (the "turbo does not rescale the raster"
+    // deviation), and CPU::tstates at the frame end is at least that.
+    const int rows = (int)VIDEO::vga.yres - VIDEO::screenTopRows() - 192;   // = yres - lin_end2
+    return rows > 0 ? (uint32_t)(rows + 1) * VIDEO::tStatesPerLine : 0;
+}
+
 void Leningrad::frameEndFlush() {
     const uint32_t pre = CPU::tstates;
+    // The paper's last line ends ~4 T past the frame end (kPaperDelta1's pipeline).
+    // The bottom border is NOT flushed here: on this board it is the first ~48
+    // lines of the next frame, and the border machine is cyclic for it
+    // (VIDEO::lenBorderRearm, borderBandDone), so the loader stripes run through
+    // the bottom band at their own time like everywhere else.
     for (int i = 0; i < 512 && VIDEO::Draw != &VIDEO::Blank; i++)
         VIDEO::Draw(VIDEO::tStatesPerLine, false);
     CPU::tstates = pre;
