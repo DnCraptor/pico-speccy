@@ -535,14 +535,19 @@ uint8_t portIn(uint16_t address) {
         // Spectrum's. Auto-start: a stopped tape starts when one PC reads #FE 200
         // times in a row (an edge-polling loader; the keyboard scan reads 9 rows a
         // frame from different places) — the TapePortRead rule, so LOAD "" from
-        // a mounted tape needs no Play.
+        // a mounted tape needs no Play. The reads must also be CLOSE together: an
+        // edge loop reads every ~50 T, while a program that checks one key once a
+        // frame (LYRA 3's IN A,(#7FFE) at 02E5) reads from one PC too — counting
+        // those started the tape after 4 s and muted the SAA with it.
         if (Tape::tapeStatus == TAPE_LOADING) { Tape::Read(); LED::touchR(LED::TAPE); }
         else if (Config::tape_autostart && Tape::tapeFileType != TAPE_FTYPE_EMPTY &&
                  Tape::tapeFileName != "none") {
-            static uint16_t s_pc; static uint16_t s_n;
+            static uint16_t s_pc; static uint16_t s_n; static uint64_t s_t;
             const uint16_t pc = Z80::getRegPC();
-            if (pc != s_pc) { s_pc = pc; s_n = 0; }
+            const uint64_t now = CPU::global_tstates + CPU::tstates;
+            if (pc != s_pc || now - s_t > 2000) { s_pc = pc; s_n = 0; }
             else if (++s_n >= 200) { s_n = 0; Tape::Play(); }
+            s_t = now;
         }
         uint8_t k = (hi == 0xFF) ? (uint8_t)(keys[8] & 0x1F) : keyRows(hi, 0x1F);
         if (hi == 0xFF && ESPectrum::mouseSeen) k &= mouseIn();

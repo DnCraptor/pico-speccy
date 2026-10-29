@@ -2926,6 +2926,20 @@ void OSD::do_OSD(fabgl::VirtualKey KeytoESP, bool ALT, bool CTRL) {
                 // ZIP archive — extract and replace fname/ext/mFile. Also an archive
                 // under an image name (defenders_of_the_earth.dsk from zxart = a
                 // ZIP holding the .dsk): mounting the archive itself as a +3 disk.
+                // A gzip-wrapped image (LYRA3.dsk = gzip of a SAM MGT): unwrap to
+                // /tmp and go on with the inner file. .vgz/.vgm stay the player's.
+                if (ext != "vgz" && ext != "vgm" && FileUtils::isGzipByMagic(fname)) {
+                    string gzFname = ZipExtract::gunzipToTemp(fname);
+                    if (gzFname.empty()) {
+                        OSD::osdCenteredMsg(ZipExtract::errMsg(), LEVEL_WARN);
+                        if (VIDEO::OSD) OSD::drawStats();
+                        return;
+                    }
+                    fname = gzFname;
+                    ext = FileUtils::getLCaseExt(fname);
+                    mFile = mFile.substr(0, 1) + fname.substr(fname.rfind('/') + 1);
+                    fromZip = true;
+                }
                 if (ext != "zip" && FileUtils::isZipByMagic(fname)) ext = "zip";
                 if (ext == "zip") {
                     // (The Gigascreen prevFB lease that used to be taken here now

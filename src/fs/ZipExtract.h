@@ -48,7 +48,17 @@ public:
     // Unwrap a single-member gzip file (a .vgz is a gzip-wrapped .vgm — the
     // format vgmrips.net serves tracks in) into outPath. Returns outPath, or
     // "" on error (errMsg() then says why); the input file is left untouched.
-    static string gunzip(const string& gzPath, const string& outPath);
+    // origName (optional) receives the gzip header's FNAME, "" when absent.
+    static string gunzip(const string& gzPath, const string& outPath, string* origName = nullptr);
+
+    // A gzip-wrapped image to launch (LYRA3.dsk from a SAM archive = gzip of an
+    // MGT): unwrap to /tmp/.zip_extract.<ext>, the same fixed temp path and owner
+    // release extract() uses. <ext> comes from the header's FNAME, else from the
+    // outer name with a trailing .gz dropped. Returns the path, "" on error.
+    // base (optional): write <base>.<ext> instead — F1 Info's private copy, which
+    // must not release a mounted disk; origName receives the inner file's name.
+    static string gunzipToTemp(const string& gzPath, const char* base = nullptr,
+                               string* origName = nullptr);
 
     // Show ZIP file info (name, size, file list) in OSD dialog
     static void viewInfo(const string& zipPath);

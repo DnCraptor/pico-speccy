@@ -10,6 +10,7 @@ using namespace std;
 #include "speccy/core/Pss.h"
 #include "speccy/core/Rzx.h"
 #include "speccy/machines/If2.h"
+#include "ZipExtract.h"
 
 
 #include "FileUtils.h"
@@ -884,7 +885,65 @@ static void viewSZX(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
 // Deliberately parses the header here rather than going through DskImage: this runs on
 // a file the user has merely highlighted in the browser, so it must never allocate a
 // sector window or leave a FIL open.
+// ---- SAM Coupe MGT (flat 80 x 2 x 10 x 512, side-interleaved) ----
+// The SAMDOS/MasterDOS directory: tracks 0-3 of side 0, two 256-byte entries a
+// sector = 80 entries. Byte 0 = type (bits 5..0, 0 = free; bit 7 hidden), 1..10 =
+// name, 11..12 = sectors used (big-endian).
+static void viewMGT(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
+    if (fileSize != 819200) return;
+    info += "SAM Coupe MGT (80x2x10x512)\n"; lines++;
+    ScopedHeap sh(512);
+    if (!sh) return;
+    uint8_t* sec = sh.as<uint8_t>();
+    UINT br = 0;
+    // The ROM boots track 4 sector 1 when bytes 256..259 read "BOOT" (bit 7 ignored).
+    if (f_lseek(f, (FSIZE_t)(4 * 2 * 10) * 512) == FR_OK &&
+        f_read(f, sec, 512, &br) == FR_OK && br == 512) {
+        static const char kB[] = "BOOT";
+        bool boot = true;
+        for (int i = 0; i < 4; i++) boot &= ((sec[256 + i] & 0x5F) == kB[i]);
+        info += boot ? "Bootable (T4S1)\n" : "Not bootable\n"; lines++;
+    }
+    // A raw demo disk keeps code where SAMDOS keeps its directory: every used
+    // entry must carry a known type and a printable name, or nothing is listed.
+    string list;
+    int files = 0, nlines = 0;
+    unsigned used = 0;
+    bool sane = true;
+    char line[48];
+    for (int t = 0; t < 4 && sane; t++)
+        for (int sc = 0; sc < 10 && sane; sc++) {
+            if (f_lseek(f, (FSIZE_t)(t * 2 * 10 + sc) * 512) != FR_OK ||
+                f_read(f, sec, 512, &br) != FR_OK || br != 512) return;
+            for (int h = 0; h < 2; h++) {
+                const uint8_t* e = sec + h * 256;
+                const uint8_t type = e[0] & 0x3F;
+                if (!type) continue;
+                const char* tn = type == 16 ? "BASIC" : type == 17 ? "NUM" : type == 18 ? "STR" :
+                                 type == 19 ? "CODE" : type == 20 ? "SCREEN" : type == 5 ? "ZX SNP" :
+                                 (type >= 1 && type <= 7) ? "ZX" : nullptr;
+                char name[11];
+                for (int i = 0; i < 10; i++) {
+                    if (e[1 + i] < 32 || e[1 + i] > 126) { tn = nullptr; break; }
+                    name[i] = (char)e[1 + i];
+                }
+                if (!tn) { sane = false; break; }
+                name[10] = 0;
+                const unsigned secs = (e[11] << 8) | e[12];
+                snprintf(line, sizeof(line), "%s %-6s %4uK%s", name, tn, (secs + 1) / 2,
+                         (e[0] & 0x80) ? " h" : "");
+                list += line; list += "\n"; nlines++;
+                files++; used += secs;
+            }
+        }
+    if (!sane) { info += "No SAMDOS directory\n"; lines++; return; }
+    info += list; lines += nlines;
+    snprintf(line, sizeof(line), "%d file(s), %uK used", files, (used + 1) / 2);
+    info += line; info += "\n"; lines++;
+}
+
 static void viewDSK(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
+    if (fileSize == 819200) { viewMGT(f, fileSize, info, lines); return; }
     if (fileSize < 0x100) return;
     uint8_t hdr[0x100];
     UINT br;
@@ -1152,7 +1211,28 @@ static void viewVHD(FIL* f, FSIZE_t fileSize, string& info, int& lines) {
 }
 
 // ---- Main dispatcher ----
+static void viewInfoAs(const string& path, const string& title, const string& note);
+
 void FileInfo::viewInfo(const string& path) {
+    // A gzip-wrapped image (LYRA3.dsk): describe what is inside. Unwrapped into a
+    // private /tmp copy, not the launch temp path a mounted disk may be using.
+    const string ext = FileUtils::getLCaseExt(path);
+    if (ext != "vgz" && ext != "vgm" && FileUtils::isGzipByMagic(path)) {
+        static const char* kBase = "/tmp/.gz_info";
+        string inner;
+        const string tmp = ZipExtract::gunzipToTemp(path, kBase, &inner);
+        if (tmp.empty()) {
+            OSD::osdCenteredMsg(ZipExtract::errMsg(), LEVEL_WARN);
+            return;
+        }
+        viewInfoAs(tmp, getBaseName(path.c_str()), "gzip: " + inner);
+        f_unlink(tmp.c_str());
+        return;
+    }
+    viewInfoAs(path, getBaseName(path.c_str()), "");
+}
+
+static void viewInfoAs(const string& path, const string& title, const string& note) {
     ScopedHeap fsh(sizeof(FIL));          // off the stack AND off .bss (was a static FIL)
     if (!fsh) return;
     FIL& f = *fsh.as<FIL>();
@@ -1160,14 +1240,15 @@ void FileInfo::viewInfo(const string& path) {
         return;
 
     FSIZE_t fileSize = f_size(&f);
-    const char* baseName = getBaseName(path.c_str());
     string ext = FileUtils::getLCaseExt(path);
 
     char sizeBuf[16];
     formatSize(sizeBuf, sizeof(sizeBuf), fileSize);
 
-    string info = string(baseName) + " (" + sizeBuf + ")\n";
+    string info = title + " (" + sizeBuf + ")\n";
     int lines = 1; // title line
+    if (!note.empty()) { info += note + "\n"; lines++; }
+    const int base = lines;
 
     if (ext == "tap") viewTAP(&f, fileSize, info, lines);
     else if (ext == "tzx") viewTZX(&f, fileSize, info, lines);
@@ -1183,6 +1264,7 @@ void FileInfo::viewInfo(const string& path) {
     else if (ext == "rzx") Rzx::describe(path, info, lines);
     else if (ext == "fdi") viewFDI(&f, fileSize, info, lines);
     else if (ext == "dsk") viewDSK(&f, fileSize, info, lines);
+    else if (ext == "mgt") viewMGT(&f, fileSize, info, lines);
     else if (ext == "udi") viewUDI(&f, fileSize, info, lines);
     else if (ext == "hdf") viewHDF(&f, fileSize, info, lines);
     else if (ext == "pro") viewPRO(&f, fileSize, info, lines);
@@ -1195,7 +1277,7 @@ void FileInfo::viewInfo(const string& path) {
 
     f_close(&f);
 
-    if (lines < 2 && ext != "mmc") return; // Nothing to show beyond title
+    if (lines <= base && ext != "mmc" && note.empty()) return; // nothing beyond the title
 
     showInfoBox(info, lines);
 }

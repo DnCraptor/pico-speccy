@@ -187,6 +187,7 @@ public:
     // A ZIP by its local-header signature, whatever the name: zxart/WoS ship
     // archives named .dsk/.tap, which the extension dispatch would mount as is.
     static bool isZipByMagic(const string& path);
+    static bool isGzipByMagic(const string& path);   // 1F 8B (a gzip-wrapped image)
 
     static void deleteFilesWithExtension(const char *folder_path, const char *extension);
     static bool deleteDirRecursive(const char *path);

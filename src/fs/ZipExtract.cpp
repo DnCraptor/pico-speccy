@@ -516,8 +516,9 @@ bool ZipExtract::extractNamed(const string& zipPath, const char* baseName, const
     return ok;
 }
 
-string ZipExtract::gunzip(const string& gzPath, const string& outPath) {
+string ZipExtract::gunzip(const string& gzPath, const string& outPath, string* origName) {
     s_zip_err = nullptr;
+    if (origName) origName->clear();
 
     // Same memory posture as extract(): the emulator is paused behind the OSD,
     // so the lent Gigascreen prev-FB can back the inflate state, LZ dict and
@@ -544,7 +545,11 @@ string ZipExtract::gunzip(const string& gzPath, const string& outPath) {
     for (uint8_t fbit = 0x08; ok && fbit <= 0x10; fbit <<= 1) {  // FNAME, FCOMMENT
         if (!(flg & fbit)) continue;
         uint8_t ch;                                   // NUL-terminated strings
-        do { ok = f_read(&in, &ch, 1, &br) == FR_OK && br == 1; } while (ok && ch);
+        do {
+            ok = f_read(&in, &ch, 1, &br) == FR_OK && br == 1;
+            if (ok && ch && fbit == 0x08 && origName && origName->size() < 255)
+                origName->push_back((char)ch);
+        } while (ok && ch);
     }
     if (ok && (flg & 0x02))                           // FHCRC: 2-byte header CRC
         ok = f_lseek(&in, f_tell(&in) + 2) == FR_OK;
@@ -559,6 +564,41 @@ string ZipExtract::gunzip(const string& gzPath, const string& outPath) {
     f_close(&in);
     if (!ok) { f_unlink(outPath.c_str()); return ""; }
     return outPath;
+}
+
+string ZipExtract::gunzipToTemp(const string& gzPath, const char* base, string* origName) {
+    const char* tmp = base ? base : TEMP_FILE;
+    if (!base) cleanup();
+    string name;
+    if (gunzip(gzPath, tmp, &name).empty()) return "";
+    if (name.empty()) {                               // no FNAME: the outer name
+        const size_t sl = gzPath.find_last_of('/');
+        name = sl == string::npos ? gzPath : gzPath.substr(sl + 1);
+        const size_t n = name.size();
+        if (n > 3 && strcasecmp(name.c_str() + n - 3, ".gz") == 0) name.resize(n - 3);
+    }
+    char extBuf[8];
+    const char* rawExt = getExtFromName(name.c_str());
+    int elen = strlen(rawExt);
+    if (elen > 6) elen = 6;
+    for (int i = 0; i < elen; i++) extBuf[i] = tolower(rawExt[i]);
+    extBuf[elen] = 0;
+
+    if (origName) *origName = name;
+    const string finalPath = string(tmp) + "." + extBuf;
+    if (base) {                                       // a private copy: no owners, no aliases
+        f_unlink(finalPath.c_str());
+        return f_rename(tmp, finalPath.c_str()) == FR_OK ? finalPath : string();
+    }
+    releaseTempOwners(finalPath.c_str());             // see extract(): same fixed name
+    f_unlink(finalPath.c_str());
+    f_rename(TEMP_FILE, finalPath.c_str());
+    Debug::log("GZ: %s -> %s (%s)", gzPath.c_str(), finalPath.c_str(), name.c_str());
+    LastRun::alias(finalPath, name.c_str());
+    s_lastZip.clear();                                // not a zip: no siblings to reach
+    s_lastOut = finalPath;
+    s_lastMember = name;
+    return finalPath;
 }
 
 bool ZipExtract::hasMatchingExtension(const string& filename, uint8_t fileType) {

@@ -15913,6 +15913,16 @@ PSRAM ≥ 1 MB + `FlashRoms::romsUsable()`), romsets `R_SAM256/512/512_1M/2M/4M`
   a ZIP under an image name (zxart `defenders_of_the_earth.dsk` = a ZIP holding the EDSK)
   is detected by signature (`FileUtils::isZipByMagic`) in the F5 dispatch and the web launch
   and goes through `ZipExtract::extract` first — it used to be mounted as a +3 disk.
+- **gzip images, MGT Info, tape auto-start time bound (2026-10-29, hw-confirmed DVp2w on
+  `debug/DVp2w-sam-autostart-1.1.1`)**: LYRA3.dsk (old SAM archive) is a GZIP of a flat
+  MGT, not a ZIP. Launch (F5 + Web catalog) unwraps any 1F 8B file but .vgz/.vgm via
+  `ZipExtract::gunzipToTemp` (`/tmp/.zip_extract.<ext>`, ext from the gzip FNAME, same
+  owner release as extract()); F1 unwraps into a private `/tmp/.gz_info.<ext>` and
+  describes the inner file; an 819200-byte .dsk / .mgt shows BOOT at T4S1 and the
+  SAMDOS directory, or "No SAMDOS directory" when an entry has an unknown type or
+  unprintable name (raw demo disks keep code there). The `#FE` tape auto-start now
+  needs reads <= 2000 T apart: LYRA 3 checks SPACE once a frame from one PC, which
+  started the tape after 200 frames — and a playing tape MUTES the SAA in the mixer.
 - **Raster position + notify banner (2026-10-23, hw-confirmed DVp2w on `debug/DVp2w-sam-leftcol4-1.1.0`, owner: "теперь отлично" — boot stripes clean at 576p, and the F-keys toast shows in Rick Dangerous)**:
   (1) "the left column jitters" on the boot screen = the leftmost fb column of every stripe
   held the previous stripe's colour: `chgNote` added CONT_OFFSET (+4) to the VIDEO position

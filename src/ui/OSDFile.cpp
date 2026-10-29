@@ -479,6 +479,16 @@ static bool rfd_launch_tmp(string path) {
 
     // Downloaded archive: unpack to /tmp and launch the first usable inner file.
     // A ZIP named like an image (zxart's defenders_of_the_earth.dsk) counts too.
+    // A gzip-wrapped image (LYRA3.dsk = gzip of a SAM MGT) is unwrapped the same way.
+    if (ext != "vgm" && FileUtils::isGzipByMagic(path)) {
+        string inner = ZipExtract::gunzipToTemp(path);
+        if (inner.empty()) {
+            OSD::osdCenteredMsg(ZipExtract::errMsg(), LEVEL_WARN);
+            return false;
+        }
+        path = inner;
+        ext  = FileUtils::getLCaseExt(path);
+    }
     if (ext != "zip" && ext != "vgz" && FileUtils::isZipByMagic(path)) ext = "zip";
     if (ext == "zip") {
         string inner = ZipExtract::extract(path, DISK_ALLFILE); // → /tmp/...
